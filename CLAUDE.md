@@ -46,7 +46,7 @@ oxide-code              # Start an interactive session
 
 ### String Literals
 
-- Prefer raw strings (`r#"..."#`) when the string contains characters that would need escaping (e.g., `"`, `\`). Avoid unnecessary backslash escapes.
+- Prefer raw strings (`r"..."`) when the string contains characters that would need escaping. Always use the minimum delimiter level needed (`r"..."` → `r#"..."#` → `r##"..."##`).
 
 ### Enum String Mappings
 
