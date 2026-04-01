@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "file=\"$CLAUDE_FILE_PATH\"; [ \"${file##*.}\" = \"rs\" ] && rustfmt --edition 2024 \"$file\" 2>/dev/null; true"
+          }
+        ]
+      }
+    ]
+  }
+}
