@@ -1,0 +1,12 @@
+clippy
+codex
+dtolnay
+hakula
+impls
+indoc
+println
+ratatui
+serde
+swatinem
+tokio
+tracing
