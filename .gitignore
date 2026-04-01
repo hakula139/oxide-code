@@ -1,0 +1,13 @@
+# Build output
+/target/
+
+# OS files
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+.claude/plans/
+.claude/settings.local.json
