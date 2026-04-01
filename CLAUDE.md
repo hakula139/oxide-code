@@ -7,7 +7,7 @@ oxide-code is a terminal-based AI coding assistant written in Rust, inspired by 
 ### CLI
 
 ```bash
-oxide-code            # Start an interactive session
+oxide-code              # Start an interactive session
 ```
 
 ### Project Layout
@@ -22,7 +22,7 @@ oxide-code            # Start an interactive session
 
 ```text
 .
-└── main.rs  # CLI entry point
+└── main.rs             # CLI entry point
 ```
 
 ## Coding Conventions
@@ -89,7 +89,7 @@ Run after implementation and before review:
 
 ```bash
 cargo build
-cargo clippy --all-targets -- -D warnings         # zero warnings (pedantic lints)
+cargo clippy --all-targets -- -D warnings          # zero warnings (pedantic lints)
 cargo test
 cargo llvm-cov --ignore-filename-regex 'main\.rs'  # check test coverage
 ```
