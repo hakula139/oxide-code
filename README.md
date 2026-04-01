@@ -16,7 +16,7 @@ Early development. See [`docs/roadmap.md`](docs/roadmap.md) for the current road
 ## Usage
 
 ```bash
-oxide-code
+ox
 ```
 
 ## Building from Source
@@ -27,7 +27,7 @@ Requires [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024).
 cargo build --release
 ```
 
-The binary will be at `target/release/oxide-code`.
+The binary will be at `target/release/ox`.
 
 ## Development
 

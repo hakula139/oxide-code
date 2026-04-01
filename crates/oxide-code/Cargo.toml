@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "ox"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 

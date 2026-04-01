@@ -7,7 +7,7 @@ oxide-code is a terminal-based AI coding assistant written in Rust, inspired by 
 ### CLI
 
 ```bash
-oxide-code              # Start an interactive session
+ox                      # Start an interactive session
 ```
 
 ### Project Layout

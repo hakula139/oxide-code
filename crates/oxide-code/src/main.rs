@@ -14,11 +14,7 @@ use config::Config;
 use message::Message;
 
 #[derive(Parser)]
-#[command(
-    name = "oxide-code",
-    version,
-    about = "A terminal-based AI coding assistant"
-)]
+#[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
 struct Cli {}
 
 #[tokio::main]
