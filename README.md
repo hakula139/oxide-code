@@ -11,7 +11,7 @@ oxide-code is a Rust reimplementation of Claude Code — an interactive CLI agen
 
 ## Status
 
-Early development. See the [implementation plan](.claude/plans/) for the roadmap.
+Early development. See [`docs/roadmap.md`](docs/roadmap.md) for the current roadmap.
 
 ## Usage
 

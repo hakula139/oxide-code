@@ -80,6 +80,7 @@ oxide-code            # Start an interactive session
 ### Documentation Maintenance
 
 - Keep `README.md` user-facing. It should describe value, supported features, and usage, not internal progress tracking.
+- Keep `docs/roadmap.md` as the canonical in-repo roadmap / status summary. Update it when shipped capability areas or planned priorities change.
 - Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically; directories sort alongside their parent `.rs` file.
 
 ## Verification
