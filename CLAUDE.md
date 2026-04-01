@@ -89,7 +89,7 @@ Run after implementation and before review:
 
 ```bash
 cargo build
-cargo clippy --all-targets -- -D warnings  # zero warnings (pedantic lints)
+cargo clippy --all-targets -- -D warnings         # zero warnings (pedantic lints)
 cargo test
 cargo llvm-cov --ignore-filename-regex 'main\.rs'  # check test coverage
 ```
