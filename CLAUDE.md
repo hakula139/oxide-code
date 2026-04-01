@@ -22,7 +22,12 @@ oxide-code              # Start an interactive session
 
 ```text
 .
-└── main.rs             # CLI entry point
+├── client.rs           # Client module root
+├── client/
+│   └── anthropic.rs    # Anthropic Messages API streaming client
+├── config.rs           # Configuration and auth (API key / OAuth)
+├── main.rs             # CLI entry point, async REPL
+└── message.rs          # Conversation message types
 ```
 
 ## Coding Conventions

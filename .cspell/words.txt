@@ -1,11 +1,14 @@
 clippy
 codex
+deserialize
 dtolnay
 hakula
 impls
 indoc
 println
 ratatui
+reqwest
+rustls
 serde
 swatinem
 tokio
