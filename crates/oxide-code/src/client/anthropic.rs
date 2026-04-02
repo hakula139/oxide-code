@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -8,6 +8,7 @@ use crate::config::{Auth, Config};
 use crate::message::Message;
 
 const API_VERSION: &str = "2023-06-01";
+const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
 // ── Request types ──
 
@@ -55,7 +56,10 @@ pub enum StreamEvent {
     },
 }
 
-#[expect(dead_code, reason = "fields populated by serde, used in PR 1.2")]
+#[expect(
+    dead_code,
+    reason = "fields populated by serde, consumed by agent loop"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageResponse {
     pub id: String,
@@ -63,7 +67,10 @@ pub struct MessageResponse {
     pub usage: Option<Usage>,
 }
 
-#[expect(dead_code, reason = "fields populated by serde, used in PR 1.2")]
+#[expect(
+    dead_code,
+    reason = "fields populated by serde, consumed by agent loop"
+)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
@@ -71,7 +78,7 @@ pub enum ContentBlockInfo {
     ToolUse { id: String, name: String },
 }
 
-#[expect(dead_code, reason = "InputJsonDelta used in PR 1.2")]
+#[expect(dead_code, reason = "InputJsonDelta consumed by agent loop")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
@@ -79,13 +86,19 @@ pub enum Delta {
     InputJsonDelta { partial_json: String },
 }
 
-#[expect(dead_code, reason = "fields populated by serde, used in PR 1.2")]
+#[expect(
+    dead_code,
+    reason = "fields populated by serde, consumed by agent loop"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageDeltaBody {
     pub stop_reason: Option<String>,
 }
 
-#[expect(dead_code, reason = "fields populated by serde, used in PR 1.2")]
+#[expect(
+    dead_code,
+    reason = "fields populated by serde, consumed by agent loop"
+)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -111,10 +124,23 @@ pub struct Client {
 impl Client {
     pub fn new(config: Config) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        let key = match &config.auth {
-            Auth::ApiKey(key) | Auth::OAuth(key) => key,
-        };
-        headers.insert("x-api-key", HeaderValue::from_str(key)?);
+
+        match &config.auth {
+            Auth::ApiKey(key) => {
+                headers.insert("x-api-key", HeaderValue::from_str(key)?);
+            }
+            Auth::OAuth(token) => {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {token}"))?,
+                );
+                headers.insert(
+                    "anthropic-beta",
+                    HeaderValue::from_static(OAUTH_BETA_HEADER),
+                );
+            }
+        }
+
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -226,7 +252,7 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 mod tests {
     use super::*;
 
-    // -- parse_sse_frame --
+    // ── parse_sse_frame ──
 
     #[test]
     fn parse_sse_frame_text_delta() {
