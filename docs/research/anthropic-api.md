@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [`claude-code`](https://github.com/anthropics/claude-code) (v2.1.87) and testing against the production API.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.88) and testing against the production API.
 
 ## Authentication Methods
 
@@ -17,10 +17,8 @@ Claude Code stores OAuth tokens at `~/.claude/.credentials.json` (plaintext on L
   "claudeAiOauth": {
     "accessToken": "...",
     "refreshToken": "...",
-    "expiresAt": 1775125304790,
-    "scopes": ["user:inference", "user:profile", "..."],
-    "subscriptionType": "team",
-    "rateLimitTier": "default_raven"
+    "expiresAt": 1234567890000,
+    "scopes": ["user:inference", "user:profile", "..."]
   }
 }
 ```
@@ -42,14 +40,14 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                   |
-| --------------------------------- | ------------------------- |
-| `interleaved-thinking-2025-05-14` | Extended thinking support |
-| `context-1m-2025-08-07`           | 1M context window         |
-| `context-management-2025-06-27`   | Context management        |
-| `prompt-caching-scope-2026-01-05` | Prompt caching            |
-| `advanced-tool-use-2025-11-20`    | Tool search (1P)          |
-| `effort-2025-11-24`               | Effort control            |
+| Header                            | Purpose                        |
+| --------------------------------- | ------------------------------ |
+| `interleaved-thinking-2025-05-14` | Extended thinking support      |
+| `context-1m-2025-08-07`           | 1M context window              |
+| `context-management-2025-06-27`   | Context management             |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                 |
+| `effort-2025-11-24`               | Effort control                 |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only) |
 
 ### 2. System prompt prefix
 
@@ -69,9 +67,9 @@ x-app: cli
 
 | Missing                | Haiku 4.5 | Sonnet / Opus |
 | ---------------------- | --------- | ------------- |
-| System prompt prefix   | 200       | 429           |
 | `claude-code-20250219` | 200       | 429           |
 | `oauth-2025-04-20`     | 401       | 401           |
+| System prompt prefix   | 200       | 429           |
 
 ## API Version
 
@@ -94,9 +92,9 @@ For raw HTTP (as in oxide-code), replicate the headers manually. The `?beta=true
 
 ## Token Refresh
 
-OAuth tokens expire (check `expiresAt` in milliseconds). Claude Code refreshes them automatically with a 5-minute buffer before expiry, using a `POST` to `console.anthropic.com/v1/oauth/token` with the `refresh_token`. Cross-process safety is handled via file-based locking.
+OAuth tokens expire (check `expiresAt` in milliseconds). Claude Code refreshes them automatically with a 5-minute buffer before expiry, using a `POST` to `platform.claude.com/v1/oauth/token` with the `refresh_token`. Cross-process safety is handled via directory-based locking (`proper-lockfile` creates a `~/.claude.lock/` directory).
 
-oxide-code currently does not implement token refresh — if the token expires, the user must run `claude` to refresh it.
+oxide-code implements the same refresh flow: proactive refresh with the 5-minute buffer, directory-based locking compatible with Claude Code, and credential write-back preserving unknown fields.
 
 ## Sources
 
@@ -105,4 +103,6 @@ oxide-code currently does not implement token refresh — if the token expires, 
 - `claude-code/src/constants/system.ts` — system prompt prefix
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts` — credential file I/O
 - `claude-code/src/utils/auth.ts` — OAuth token retrieval and refresh
+- `claude-code/src/services/oauth/client.ts` — token refresh endpoint and request format
+- `claude-code/src/constants/oauth.ts` — OAuth client ID, token URL, scopes
 - `claude-code/src/constants/betas.ts` — beta header constants
