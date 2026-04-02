@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
+oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](http://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
 
 ### CLI
 
@@ -36,10 +36,12 @@ ox                      # Start an interactive session
 
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
 - Library error types: `thiserror::Error` derive for errors that callers need to match on.
+- Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
 
 ### Lint Suppression
 
 - Use `#[expect(lint)]` instead of `#[allow(lint)]`. `#[expect]` warns when the suppressed lint is no longer triggered, preventing stale suppressions from accumulating.
+- `#[expect]` reason strings must describe the current state, not future plans.
 
 ### Section Dividers
 
@@ -51,8 +53,18 @@ ox                      # Start an interactive session
 - New-style module paths: `foo.rs` alongside `foo/` directory, not `foo/mod.rs`.
 - Keep files focused: one primary type or concern per file.
 - Place functions and types in the module that reflects their conceptual domain — import paths should not mislead about what the item does. Create new modules when needed for clean organization.
-- Avoid deep `pub use` re-export chains that obscure where items are defined.
-- Order helper functions by their caller.
+- Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
+- Order helper functions after their caller (top-down reading order).
+
+### Visibility
+
+- Default to the smallest visibility needed: private → `pub(crate)` → `pub`.
+- `pub` items form the crate's API surface. Use `pub(crate)` for items shared across modules but not intended for external use.
+
+### Imports
+
+- Group `use` statements in three blocks separated by blank lines: std → external crates → internal modules.
+- Within each block, sort alphabetically.
 
 ### String Literals
 
@@ -82,10 +94,8 @@ ox                      # Start an interactive session
 
 - Unit tests in the same file as the code they test (`#[cfg(test)]` module).
 - Integration tests in `tests/` directory for cross-module behavior.
-- Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → error cases.
-- Test name prefixes should match the section's function name (or a clear shortening).
-- Error-case test names use a return-type suffix: `_returns_error` (`Result`), `_returns_none` (`Option`), `_returns_false` (`bool`).
-- Use `indoc!` for multi-line test inputs whenever possible.
+- Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
+- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`).
 
 ### Documentation Maintenance
 
@@ -106,7 +116,7 @@ cargo llvm-cov --ignore-filename-regex 'main\.rs'  # check test coverage
 
 ## Code Review
 
-After verification passes, run a dual review using both a reviewer subagent and a Codex MCP reviewer in parallel. Focus on:
+After verification passes, review for:
 
 - Correctness and edge cases
 - Adherence to project conventions (this file)
