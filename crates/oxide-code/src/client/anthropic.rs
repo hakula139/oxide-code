@@ -8,8 +8,15 @@ use crate::config::{Auth, Config};
 use crate::message::Message;
 
 const API_VERSION: &str = "2023-06-01";
+const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
+const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
+
+/// System prompt prefix required for OAuth authentication. The API uses this to
+/// identify requests as coming from a Claude Code client and apply the correct
+/// rate limits.
+const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Request types ──
 
@@ -126,7 +133,11 @@ impl Client {
     pub fn new(config: Config) -> Result<Self> {
         let mut headers = HeaderMap::new();
 
-        let mut betas = vec![CONTEXT_1M_BETA_HEADER];
+        let mut betas = vec![
+            CLAUDE_CODE_BETA_HEADER,
+            INTERLEAVED_THINKING_BETA_HEADER,
+            CONTEXT_1M_BETA_HEADER,
+        ];
 
         match &config.auth {
             Auth::ApiKey(key) => {
@@ -144,6 +155,7 @@ impl Client {
         headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert("x-app", HeaderValue::from_static("cli"));
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
@@ -162,12 +174,17 @@ impl Client {
         messages: &[Message],
         system: Option<&str>,
     ) -> mpsc::Receiver<Result<StreamEvent>> {
+        let system_prompt = match system {
+            Some(s) => format!("{SYSTEM_PROMPT_PREFIX}\n{s}"),
+            None => SYSTEM_PROMPT_PREFIX.to_owned(),
+        };
+
         let url = format!("{}/v1/messages", self.config.base_url);
         let body = serde_json::to_value(CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
             messages,
-            system,
+            system: Some(&system_prompt),
             stream: true,
         })
         .expect("request serialization should not fail");
