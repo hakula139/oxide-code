@@ -10,8 +10,8 @@ use crate::message::Message;
 const API_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
-const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
+const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
 /// System prompt prefix that identifies the client to the Anthropic API. Required
 /// for OAuth tokens — without it, non-Haiku models return 429. Always sent
@@ -245,6 +245,7 @@ async fn stream_sse(
 /// Parse a single SSE frame into a [`StreamEvent`].
 ///
 /// SSE format:
+///
 /// ```text
 /// event: content_block_delta
 /// data: {"type":"content_block_delta", ...}
