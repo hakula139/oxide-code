@@ -29,7 +29,7 @@ impl Config {
     /// Auth priority: `ANTHROPIC_API_KEY` env var > Claude Code OAuth
     /// credentials at `~/.claude/.credentials.json`.
     pub fn load() -> Result<Self> {
-        let auth = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY") {
             Auth::ApiKey(key)
         } else {
             let token = load_claude_oauth()
@@ -37,13 +37,12 @@ impl Config {
             Auth::OAuth(token)
         };
 
-        let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        let model = non_empty_env("ANTHROPIC_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
         let base_url =
-            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+            non_empty_env("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
-        let max_tokens = std::env::var("ANTHROPIC_MAX_TOKENS")
-            .ok()
+        let max_tokens = non_empty_env("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -54,6 +53,10 @@ impl Config {
             max_tokens,
         })
     }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 // ── Claude Code OAuth ──
