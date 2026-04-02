@@ -37,43 +37,47 @@ struct OAuthCredential {
     expires_at: i64,
 }
 
+impl OAuthCredential {
+    fn expires_at_ms(&self) -> u64 {
+        u64::try_from(self.expires_at).unwrap_or(0)
+    }
+}
+
 // ── Token Loading ──
 
 /// Load an OAuth access token from Claude Code's credentials file, refreshing
 /// proactively if the token is within 5 minutes of expiry.
 pub async fn load_token() -> Result<String> {
     let path = credentials_path().context("could not determine home directory")?;
-    let creds = read_credentials(&path)?;
-
-    let expires_at_ms = u64::try_from(creds.claude_ai_oauth.expires_at).unwrap_or(0);
+    let oauth = read_credentials(&path)?.claude_ai_oauth;
+    let expires_at_ms = oauth.expires_at_ms();
 
     // Token is valid and not near-expiry
     if !is_near_expiry(expires_at_ms) {
-        return Ok(creds.claude_ai_oauth.access_token);
+        return Ok(oauth.access_token);
     }
 
     // No refresh token — use as-is if not yet expired
-    if creds.claude_ai_oauth.refresh_token.is_none() {
+    if oauth.refresh_token.is_none() {
         if is_expired(expires_at_ms) {
             bail!("Claude Code OAuth token has expired — run `claude` to refresh");
         }
         warn!("OAuth token expires soon but no refresh token available");
-        return Ok(creds.claude_ai_oauth.access_token);
+        return Ok(oauth.access_token);
     }
 
     // Acquire lock and re-read (another process may have refreshed)
     let lock_path = lock_path().context("could not determine home directory")?;
     let _lock = acquire_lock(&lock_path).await?;
 
-    let creds = read_credentials(&path)?;
-    let expires_at_ms = u64::try_from(creds.claude_ai_oauth.expires_at).unwrap_or(0);
+    let oauth = read_credentials(&path)?.claude_ai_oauth;
+    let expires_at_ms = oauth.expires_at_ms();
 
     if !is_near_expiry(expires_at_ms) {
-        return Ok(creds.claude_ai_oauth.access_token);
+        return Ok(oauth.access_token);
     }
 
-    let refresh_token = creds
-        .claude_ai_oauth
+    let refresh_token = oauth
         .refresh_token
         .as_deref()
         .context("refresh token missing after re-read")?;
@@ -88,7 +92,7 @@ pub async fn load_token() -> Result<String> {
         }
         Err(e) => {
             warn!("failed to refresh OAuth token, using existing: {e:#}");
-            Ok(creds.claude_ai_oauth.access_token)
+            Ok(oauth.access_token)
         }
     }
 }
