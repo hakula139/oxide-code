@@ -8,11 +8,11 @@ use tracing::warn;
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const OAUTH_SCOPES: &[&str] = &[
-    "user:profile",
-    "user:inference",
-    "user:sessions:claude_code",
-    "user:mcp_servers",
     "user:file_upload",
+    "user:inference",
+    "user:mcp_servers",
+    "user:profile",
+    "user:sessions:claude_code",
 ];
 const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,6 +33,7 @@ struct CredentialsFile {
 #[serde(rename_all = "camelCase")]
 struct OAuthCredential {
     access_token: String,
+    #[serde(default)]
     refresh_token: Option<String>,
     expires_at: i64,
 }
@@ -160,6 +161,9 @@ struct RefreshResponse {
     scope: Option<String>,
 }
 
+/// Write refreshed tokens back to the credentials file, preserving unknown fields.
+///
+/// Must be called while holding the [`LockGuard`] from [`acquire_lock`].
 fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
     let mut json: serde_json::Value =
@@ -171,6 +175,9 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
 
     oauth["accessToken"] = serde_json::Value::String(response.access_token.clone());
     oauth["refreshToken"] = serde_json::Value::String(response.refresh_token.clone());
+    // Computed from local clock — will be wrong if the machine clock is skewed,
+    // but the refresh endpoint only returns a relative `expires_in`, not an
+    // absolute timestamp.
     oauth["expiresAt"] = serde_json::json!(now_millis() + response.expires_in * 1000);
 
     if let Some(scope) = &response.scope {
@@ -265,6 +272,122 @@ fn lock_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    // ── OAuthCredential::expires_at_ms ──
+
+    #[test]
+    fn expires_at_ms_positive_value() {
+        let cred = OAuthCredential {
+            access_token: String::new(),
+            refresh_token: None,
+            expires_at: 1_700_000_000_000,
+        };
+        assert_eq!(cred.expires_at_ms(), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn expires_at_ms_negative_clamps_to_zero() {
+        let cred = OAuthCredential {
+            access_token: String::new(),
+            refresh_token: None,
+            expires_at: -1,
+        };
+        assert_eq!(cred.expires_at_ms(), 0);
+    }
+
+    // ── read_credentials ──
+
+    #[test]
+    fn read_credentials_valid_with_refresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+
+        std::fs::write(
+            &path,
+            indoc::indoc! {r#"
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "tok",
+                        "refreshToken": "ref",
+                        "expiresAt": 9999999999999
+                    }
+                }
+            "#},
+        )
+        .unwrap();
+
+        let creds = read_credentials(&path).unwrap();
+        assert_eq!(creds.claude_ai_oauth.access_token, "tok");
+        assert_eq!(creds.claude_ai_oauth.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(creds.claude_ai_oauth.expires_at, 9_999_999_999_999);
+    }
+
+    #[test]
+    fn read_credentials_missing_refresh_token_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+
+        std::fs::write(
+            &path,
+            indoc::indoc! {r#"
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "tok",
+                        "expiresAt": 9999999999999
+                    }
+                }
+            "#},
+        )
+        .unwrap();
+
+        let creds = read_credentials(&path).unwrap();
+        assert!(creds.claude_ai_oauth.refresh_token.is_none());
+    }
+
+    #[test]
+    fn read_credentials_missing_file() {
+        assert!(read_credentials(Path::new("/nonexistent/creds.json")).is_err());
+    }
+
+    #[test]
+    fn read_credentials_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(read_credentials(&path).is_err());
+    }
+
+    #[test]
+    fn read_credentials_missing_oauth_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        std::fs::write(&path, r#"{"other": "data"}"#).unwrap();
+        assert!(read_credentials(&path).is_err());
+    }
+
+    // ── is_near_expiry ──
+
+    #[test]
+    fn is_near_expiry_far_future() {
+        assert!(!is_near_expiry(u64::MAX));
+    }
+
+    #[test]
+    fn is_near_expiry_zero_is_expired() {
+        assert!(is_near_expiry(0));
+    }
+
+    // ── is_expired ──
+
+    #[test]
+    fn is_expired_far_future() {
+        assert!(!is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn is_expired_zero() {
+        assert!(is_expired(0));
+    }
+
     // ── write_refreshed_credentials ──
 
     #[test]
@@ -349,5 +472,19 @@ mod tests {
 
         // Original scopes preserved when refresh response has no scope
         assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));
+    }
+
+    // ── acquire_lock ──
+
+    #[tokio::test]
+    async fn acquire_lock_creates_and_drop_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+
+        let guard = acquire_lock(&lock_path).await.unwrap();
+        assert!(lock_path.exists());
+
+        drop(guard);
+        assert!(!lock_path.exists());
     }
 }

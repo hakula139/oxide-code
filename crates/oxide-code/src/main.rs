@@ -58,7 +58,7 @@ async fn repl(client: &Client) -> Result<()> {
 }
 
 async fn send_and_print(client: &Client, messages: &[Message]) -> Result<String> {
-    let mut rx = client.stream_message(messages, None);
+    let mut rx = client.stream_message(messages, None)?;
     let mut full_text = String::new();
     let mut stdout = std::io::stdout();
 

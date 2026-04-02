@@ -175,7 +175,7 @@ impl Client {
         &self,
         messages: &[Message],
         system: Option<&str>,
-    ) -> mpsc::Receiver<Result<StreamEvent>> {
+    ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         let system_prompt = match system {
             Some(s) => format!("{SYSTEM_PROMPT_PREFIX}\n{s}"),
             None => SYSTEM_PROMPT_PREFIX.to_owned(),
@@ -189,7 +189,7 @@ impl Client {
             system: &system_prompt,
             stream: true,
         })
-        .expect("request serialization should not fail");
+        .context("failed to serialize request")?;
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
@@ -201,7 +201,7 @@ impl Client {
             }
         });
 
-        rx
+        Ok(rx)
     }
 }
 
@@ -328,5 +328,17 @@ mod tests {
         let frame = ": comment line";
         let event = parse_sse_frame(frame).unwrap();
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn parse_sse_frame_empty() {
+        let event = parse_sse_frame("").unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn parse_sse_frame_invalid_json() {
+        let frame = "data: {not valid json}";
+        assert!(parse_sse_frame(frame).is_err());
     }
 }
