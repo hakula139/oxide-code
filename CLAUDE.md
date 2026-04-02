@@ -85,12 +85,25 @@ ox                      # Start an interactive session
 
 ### Git Conventions
 
-- Commit messages: `type(scope): description`
+#### Commits
+
+- Messages: `type(scope): description`
   - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`, `perf`
-  - Scope: crate or module name (e.g., `oxide-code`, `cli`, `agent`)
-- Feature branches: `feat/<feature-name>`
+  - Scope: the most specific area changed — module (e.g., `client`, `config`, `oauth`), doc target (e.g., `CLAUDE`, `research`), or crate name only for cross-module changes.
 - Keep commits atomic — one logical change per commit.
-- PRs: assign to `hakula139`, label `enhancement` for `feat`, `bug` for `fix`. Do not request review from the PR author (GitHub rejects it).
+
+#### Branches
+
+- Feature branches: `feat/<feature-name>`
+
+#### Pull Requests
+
+- Assign to `hakula139`. Label `enhancement` for `feat`, `bug` for `fix`.
+- Do not request review from the PR author (GitHub rejects it).
+- Descriptions follow `.github/pull_request_template.md`:
+  - Prose intro summarizing what and why.
+  - Per-file Changes table (for non-trivial PRs).
+  - Test plan checklist.
 
 ### Testing
 

@@ -1,14 +1,19 @@
+<!-- markdownlint-disable-next-line first-line-heading -->
 ## Summary
 
-<!-- One bullet per logical change. Group by: features, refactors, tests, docs. -->
+<!-- Prose intro: what this PR does and why, in 1-3 sentences. -->
+
+<!-- Then one bullet per logical change. -->
 
 -
 
-## Follow-ups
+## Changes
 
-<!-- Items deferred from this PR. Remove section if none. -->
+<!-- Per-file breakdown. Remove for trivial PRs. -->
 
--
+| File | Description |
+| ---- | ----------- |
+|      |             |
 
 ## Test plan
 
