@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use client::Client;
-use client::anthropic::{Delta, StreamEvent};
+use client::anthropic::{Client, Delta, StreamEvent};
 use config::Config;
 use message::Message;
 
