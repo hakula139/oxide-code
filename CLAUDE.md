@@ -41,6 +41,11 @@ ox                      # Start an interactive session
 
 - Use `#[expect(lint)]` instead of `#[allow(lint)]`. `#[expect]` warns when the suppressed lint is no longer triggered, preventing stale suppressions from accumulating.
 
+### Section Dividers
+
+- Use `// ── Section Name ──` for section dividers in code (box-drawing character `─`, U+2500).
+- In tests, use `// ── function_name ──` as section headers grouping tests by the function they cover.
+
 ### Module Organization
 
 - New-style module paths: `foo.rs` alongside `foo/` directory, not `foo/mod.rs`.
@@ -77,7 +82,7 @@ ox                      # Start an interactive session
 
 - Unit tests in the same file as the code they test (`#[cfg(test)]` module).
 - Integration tests in `tests/` directory for cross-module behavior.
-- Group tests by function under `// -- function_name --` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → error cases.
+- Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → error cases.
 - Test name prefixes should match the section's function name (or a clear shortening).
 - Error-case test names use a return-type suffix: `_returns_error` (`Result`), `_returns_none` (`Option`), `_returns_false` (`bool`).
 - Use `indoc!` for multi-line test inputs whenever possible.
