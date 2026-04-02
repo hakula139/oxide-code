@@ -1,3 +1,4 @@
+anyhow
 clippy
 codex
 deserialize
@@ -10,6 +11,8 @@ ratatui
 reqwest
 rustls
 serde
+strum
 swatinem
+thiserror
 tokio
 tracing
