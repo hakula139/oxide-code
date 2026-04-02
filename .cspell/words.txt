@@ -1,3 +1,4 @@
+anthropic
 anyhow
 clippy
 codex
@@ -16,3 +17,4 @@ swatinem
 thiserror
 tokio
 tracing
+venv
