@@ -10,7 +10,10 @@ The project direction is simple:
 
 ## Working Today
 
-Nothing yet — the project has just been scaffolded with CI, conventions, and a CLI skeleton.
+- Async REPL that reads user input and streams responses from the Anthropic Messages API.
+- OAuth authentication via Claude Code credentials (`~/.claude/.credentials.json`).
+- API key authentication via `ANTHROPIC_API_KEY` environment variable.
+- Configurable model, base URL, and max tokens via environment variables.
 
 ## Current Focus
 
