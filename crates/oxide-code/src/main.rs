@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config = Config::load()?;
+    let config = Config::load().await?;
     let client = Client::new(config)?;
 
     repl(&client).await

@@ -25,7 +25,9 @@ ox                      # Start an interactive session
 ├── client.rs           # Client module root
 ├── client/
 │   └── anthropic.rs    # Anthropic Messages API streaming client
-├── config.rs           # Configuration and auth (API key / OAuth)
+├── config.rs           # Configuration loading (env vars, model, base URL)
+├── config/
+│   └── oauth.rs        # Claude Code OAuth credentials, token refresh, file locking
 ├── main.rs             # CLI entry point, async REPL
 └── message.rs          # Conversation message types
 ```

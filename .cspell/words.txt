@@ -2,12 +2,14 @@ anthropic
 anyhow
 clippy
 codex
+creds
 deserialize
 dtolnay
 hakula
 impls
 indoc
 println
+RAII
 ratatui
 reqwest
 rustls

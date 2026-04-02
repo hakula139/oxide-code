@@ -1,7 +1,6 @@
-use std::path::PathBuf;
+mod oauth;
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -28,11 +27,12 @@ impl Config {
     ///
     /// Auth priority: `ANTHROPIC_API_KEY` env var > Claude Code OAuth
     /// credentials at `~/.claude/.credentials.json`.
-    pub fn load() -> Result<Self> {
+    pub async fn load() -> Result<Self> {
         let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY") {
             Auth::ApiKey(key)
         } else {
-            let token = load_claude_oauth()
+            let token = oauth::load_token()
+                .await
                 .context("ANTHROPIC_API_KEY not set and Claude Code credentials not found")?;
             Auth::OAuth(token)
         };
@@ -57,48 +57,4 @@ impl Config {
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-// ── Claude Code OAuth ──
-
-#[derive(Deserialize)]
-struct CredentialsFile {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: OAuthCredential,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OAuthCredential {
-    access_token: String,
-    expires_at: i64,
-}
-
-fn load_claude_oauth() -> Result<String> {
-    let path = credentials_path().context("could not determine home directory")?;
-
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-
-    let creds: CredentialsFile =
-        serde_json::from_str(&content).context("failed to parse Claude Code credentials")?;
-
-    let now_ms = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_millis(),
-    )
-    .expect("current time fits in u64");
-
-    let expires_at = u64::try_from(creds.claude_ai_oauth.expires_at).unwrap_or(0);
-    if expires_at <= now_ms {
-        bail!("Claude Code OAuth token has expired — run `claude` to refresh");
-    }
-
-    Ok(creds.claude_ai_oauth.access_token)
-}
-
-fn credentials_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
 }
