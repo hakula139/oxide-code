@@ -98,11 +98,10 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 
 ## Sources
 
-- `claude-code/src/services/api/client.ts` — SDK client construction
-- `claude-code/src/utils/betas.ts` — beta header assembly
-- `claude-code/src/constants/system.ts` — system prompt prefix
-- `claude-code/src/utils/secureStorage/plainTextStorage.ts` — credential file I/O
-- `claude-code/src/utils/auth.ts` — OAuth token retrieval and refresh
-- `claude-code/src/services/oauth/client.ts` — token refresh endpoint and request format
-- `claude-code/src/constants/oauth.ts` — OAuth client ID, token URL, scopes
 - `claude-code/src/constants/betas.ts` — beta header constants
+- `claude-code/src/constants/oauth.ts` — OAuth client ID, token URL, scopes
+- `claude-code/src/constants/system.ts` — system prompt prefix
+- `claude-code/src/services/api/client.ts` — SDK client construction
+- `claude-code/src/services/oauth/client.ts` — token refresh endpoint and request format
+- `claude-code/src/utils/auth.ts` — OAuth token retrieval and refresh
+- `claude-code/src/utils/secureStorage/plainTextStorage.ts` — credential file I/O
