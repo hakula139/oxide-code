@@ -9,6 +9,7 @@ use crate::message::Message;
 
 const API_VERSION: &str = "2023-06-01";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 
 // ── Request types ──
 
@@ -125,6 +126,8 @@ impl Client {
     pub fn new(config: Config) -> Result<Self> {
         let mut headers = HeaderMap::new();
 
+        let mut betas = vec![CONTEXT_1M_BETA_HEADER];
+
         match &config.auth {
             Auth::ApiKey(key) => {
                 headers.insert("x-api-key", HeaderValue::from_str(key)?);
@@ -134,13 +137,11 @@ impl Client {
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {token}"))?,
                 );
-                headers.insert(
-                    "anthropic-beta",
-                    HeaderValue::from_static(OAUTH_BETA_HEADER),
-                );
+                betas.push(OAUTH_BETA_HEADER);
             }
         }
 
+        headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
