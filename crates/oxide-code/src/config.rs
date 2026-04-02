@@ -74,10 +74,6 @@ struct OAuthCredential {
     expires_at: i64,
 }
 
-fn credentials_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
-}
-
 fn load_claude_oauth() -> Result<String> {
     let path = credentials_path().context("could not determine home directory")?;
 
@@ -101,4 +97,8 @@ fn load_claude_oauth() -> Result<String> {
     }
 
     Ok(creds.claude_ai_oauth.access_token)
+}
+
+fn credentials_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join(".credentials.json"))
 }
