@@ -25,6 +25,8 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(default)]
+        is_error: bool,
     },
 }
 
@@ -42,6 +44,7 @@ impl Message {
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "called only in tests for now"))]
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -72,5 +75,38 @@ mod tests {
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.content.len(), 1);
         assert!(matches!(&msg.content[0], ContentBlock::Text { text } if text == "hi"));
+    }
+
+    // ── ContentBlock::ToolResult ──
+
+    #[test]
+    fn tool_result_serializes_is_error() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "id".to_owned(),
+            content: "error msg".to_owned(),
+            is_error: true,
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "tool_result");
+        assert_eq!(json["tool_use_id"], "id");
+        assert_eq!(json["content"], "error msg");
+        assert_eq!(json["is_error"], true);
+    }
+
+    #[test]
+    fn tool_result_deserializes_missing_is_error_as_false() {
+        let json = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "id",
+            "content": "ok"
+        });
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            block,
+            ContentBlock::ToolResult {
+                is_error: false,
+                ..
+            }
+        ));
     }
 }

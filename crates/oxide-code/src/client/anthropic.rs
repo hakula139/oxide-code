@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{Auth, Config};
 use crate::message::Message;
+use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
@@ -27,6 +28,8 @@ struct CreateMessageRequest<'a> {
     messages: &'a [Message],
     system: &'a str,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ToolDefinition]>,
 }
 
 // ── SSE response types ──
@@ -74,10 +77,6 @@ pub struct MessageResponse {
     pub usage: Option<Usage>,
 }
 
-#[expect(
-    dead_code,
-    reason = "fields populated by serde, defined for full SSE protocol coverage"
-)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
@@ -85,10 +84,6 @@ pub enum ContentBlockInfo {
     ToolUse { id: String, name: String },
 }
 
-#[expect(
-    dead_code,
-    reason = "InputJsonDelta defined for full SSE protocol coverage"
-)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
@@ -175,6 +170,7 @@ impl Client {
         &self,
         messages: &[Message],
         system: Option<&str>,
+        tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         let system_prompt = match system {
             Some(s) => format!("{SYSTEM_PROMPT_PREFIX}\n{s}"),
@@ -188,6 +184,7 @@ impl Client {
             messages,
             system: &system_prompt,
             stream: true,
+            tools: if tools.is_empty() { None } else { Some(tools) },
         })
         .context("failed to serialize request")?;
 
