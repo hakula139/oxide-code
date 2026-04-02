@@ -13,9 +13,9 @@ const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14"
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 
-/// System prompt prefix required for OAuth authentication. The API uses this to
-/// identify requests as coming from a Claude Code client and apply the correct
-/// rate limits.
+/// System prompt prefix that identifies the client to the Anthropic API. Required
+/// for OAuth tokens — without it, non-Haiku models return 429. Always sent
+/// regardless of auth method for simplicity.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Request types ──
@@ -25,8 +25,7 @@ struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: &'a [Message],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
+    system: &'a str,
     stream: bool,
 }
 
@@ -66,7 +65,7 @@ pub enum StreamEvent {
 
 #[expect(
     dead_code,
-    reason = "fields populated by serde, consumed by agent loop"
+    reason = "fields populated by serde, defined for full SSE protocol coverage"
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageResponse {
@@ -77,7 +76,7 @@ pub struct MessageResponse {
 
 #[expect(
     dead_code,
-    reason = "fields populated by serde, consumed by agent loop"
+    reason = "fields populated by serde, defined for full SSE protocol coverage"
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,7 +85,10 @@ pub enum ContentBlockInfo {
     ToolUse { id: String, name: String },
 }
 
-#[expect(dead_code, reason = "InputJsonDelta consumed by agent loop")]
+#[expect(
+    dead_code,
+    reason = "InputJsonDelta defined for full SSE protocol coverage"
+)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
@@ -96,7 +98,7 @@ pub enum Delta {
 
 #[expect(
     dead_code,
-    reason = "fields populated by serde, consumed by agent loop"
+    reason = "fields populated by serde, defined for full SSE protocol coverage"
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageDeltaBody {
@@ -105,7 +107,7 @@ pub struct MessageDeltaBody {
 
 #[expect(
     dead_code,
-    reason = "fields populated by serde, consumed by agent loop"
+    reason = "fields populated by serde, defined for full SSE protocol coverage"
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
@@ -184,7 +186,7 @@ impl Client {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
             messages,
-            system: Some(&system_prompt),
+            system: &system_prompt,
             stream: true,
         })
         .expect("request serialization should not fail");
@@ -274,7 +276,8 @@ mod tests {
 
     #[test]
     fn parse_sse_frame_text_delta() {
-        let frame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}";
+        let frame = r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(
             event,
@@ -287,16 +290,10 @@ mod tests {
 
     #[test]
     fn parse_sse_frame_ping() {
-        let frame = "event: ping\ndata: {\"type\":\"ping\"}";
+        let frame = r#"event: ping
+data: {"type":"ping"}"#;
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Ping));
-    }
-
-    #[test]
-    fn parse_sse_frame_no_data() {
-        let frame = ": comment line";
-        let event = parse_sse_frame(frame).unwrap();
-        assert!(event.is_none());
     }
 
     #[test]
@@ -308,10 +305,17 @@ data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":
     }
 
     #[test]
-    fn parse_sse_frame_error() {
+    fn parse_sse_frame_error_event() {
         let frame = r#"event: error
 data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#;
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Error { .. }));
+    }
+
+    #[test]
+    fn parse_sse_frame_comment_only() {
+        let frame = ": comment line";
+        let event = parse_sse_frame(frame).unwrap();
+        assert!(event.is_none());
     }
 }
