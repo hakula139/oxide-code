@@ -271,14 +271,18 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     // ── parse_sse_frame ──
 
     #[test]
     fn parse_sse_frame_text_delta() {
-        let frame = r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let frame = indoc! {r#"
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+        "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(
             event,
@@ -291,24 +295,30 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 
     #[test]
     fn parse_sse_frame_ping() {
-        let frame = r#"event: ping
-data: {"type":"ping"}"#;
+        let frame = indoc! {r#"
+            event: ping
+            data: {"type":"ping"}
+        "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Ping));
     }
 
     #[test]
     fn parse_sse_frame_message_start() {
-        let frame = r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}"#;
+        let frame = indoc! {r#"
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+        "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::MessageStart { .. }));
     }
 
     #[test]
     fn parse_sse_frame_error_event() {
-        let frame = r#"event: error
-data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}"#;
+        let frame = indoc! {r#"
+            event: error
+            data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
+        "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Error { .. }));
     }

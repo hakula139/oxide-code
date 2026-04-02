@@ -96,6 +96,7 @@ ox                      # Start an interactive session
 - Integration tests in `tests/` directory for cross-module behavior.
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
 - Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`).
+- Use `indoc!` for multi-line string literals in tests.
 
 ### Documentation Maintenance
 
