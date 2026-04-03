@@ -105,10 +105,10 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Resolution ──
 
-pub(crate) fn resolve_base_dir(path: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
-    Ok(path.map_or(cwd, PathBuf::from))
+    Ok(search_path.map_or(cwd, PathBuf::from))
 }
 
 // ── Binary Detection ──
@@ -137,7 +137,8 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
-        .map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH))
+        .ok()
+        .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
@@ -150,12 +151,18 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
     }
-    let boundary = line.floor_char_boundary(MAX_LINE_LENGTH);
-    Cow::Owned(format!(
-        "{}... [{} chars]",
-        &line[..boundary],
-        line.chars().count(),
-    ))
+
+    // Single pass: find both the truncation boundary and the total char count.
+    let mut boundary = 0;
+    let mut total_chars = 0;
+    for (i, (byte_idx, _)) in line.char_indices().enumerate() {
+        if i == MAX_LINE_LENGTH {
+            boundary = byte_idx;
+        }
+        total_chars = i + 1;
+    }
+
+    Cow::Owned(format!("{}... [{total_chars} chars]", &line[..boundary]))
 }
 
 #[cfg(test)]

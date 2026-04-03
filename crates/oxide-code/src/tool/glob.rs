@@ -72,8 +72,8 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     }
 }
 
-fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String> {
-    let base = super::resolve_base_dir(search_dir)?;
+fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String> {
+    let base = super::resolve_base_dir(search_path)?;
 
     if !base.is_dir() {
         return Err(format!("Directory does not exist: {}", base.display()));
