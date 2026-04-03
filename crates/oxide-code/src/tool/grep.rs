@@ -133,7 +133,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     }
 }
 
-// ── Parameters ──
+// ── Search ──
 
 struct GrepParams<'a> {
     pattern: &'a str,
@@ -145,15 +145,11 @@ struct GrepParams<'a> {
     head_limit: Option<usize>,
 }
 
-// ── Search ──
-
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
-    let pattern = if params.case_insensitive {
-        format!("(?i){}", params.pattern)
-    } else {
-        params.pattern.to_owned()
-    };
-    let re = regex::Regex::new(&pattern).map_err(|e| format!("Invalid regex: {e}"))?;
+    let re = regex::RegexBuilder::new(params.pattern)
+        .case_insensitive(params.case_insensitive)
+        .build()
+        .map_err(|e| format!("Invalid regex: {e}"))?;
 
     let base = super::resolve_base_dir(params.search_path)?;
 
@@ -366,7 +362,11 @@ fn search_with_context(
             if output_lines.len() >= head_limit {
                 return;
             }
-            let sep = if match_indices.contains(&i) { ':' } else { '-' };
+            let sep = if match_indices.binary_search(&i).is_ok() {
+                ':'
+            } else {
+                '-'
+            };
             let mut entry = String::new();
             _ = write!(entry, "{display_path}:{}{sep}", i + 1);
             entry.push_str(&super::truncate_line(line));
