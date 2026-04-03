@@ -133,6 +133,7 @@ ox                      # Start an interactive session
 Run after implementation and before review:
 
 ```bash
+cargo fmt --all --check                            # formatting
 cargo build
 cargo clippy --all-targets -- -D warnings          # zero warnings (pedantic lints)
 cargo test
