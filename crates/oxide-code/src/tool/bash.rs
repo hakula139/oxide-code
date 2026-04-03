@@ -9,7 +9,6 @@ use tokio::process::Command;
 use super::{Tool, ToolOutput};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
 pub(crate) struct BashTool;
 
@@ -122,15 +121,15 @@ async fn execute(command: &str) -> ToolOutput {
     }
 }
 
-/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`], keeping the first and
+/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES), keeping the first and
 /// last halves so the LLM sees both the beginning of the output and the end
 /// (where error messages and summaries usually appear).
 fn truncate_output(content: &mut String) {
-    if content.len() <= MAX_OUTPUT_BYTES {
+    if content.len() <= super::MAX_OUTPUT_BYTES {
         return;
     }
 
-    let half = MAX_OUTPUT_BYTES / 2;
+    let half = super::MAX_OUTPUT_BYTES / 2;
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.floor_char_boundary(content.len() - half);
 
@@ -143,7 +142,7 @@ fn truncate_output(content: &mut String) {
 
     let omitted_lines = omitted.lines().count();
 
-    let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + 64);
+    let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + 64);
     truncated.push_str(&content[..head_end]);
     _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
     truncated.push_str(&content[tail_start..]);
@@ -155,6 +154,7 @@ fn truncate_output(content: &mut String) {
 mod tests {
     use indoc::indoc;
 
+    use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
     // ── run ──

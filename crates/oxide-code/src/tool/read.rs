@@ -8,9 +8,6 @@ use super::{Tool, ToolOutput};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
-/// Cap on the formatted output size. Prevents a single minified line from
-/// flooding the context window. Roughly 32K tokens at ~4 chars / token.
-const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 pub(crate) struct ReadTool;
 
@@ -146,7 +143,7 @@ async fn read_file(
 
         // separator + line_number + tab + content
         let entry_len = 1 + width + 1 + truncated.len();
-        if !output.is_empty() && output.len() + entry_len > MAX_OUTPUT_BYTES {
+        if !output.is_empty() && output.len() + entry_len > super::MAX_OUTPUT_BYTES {
             truncated_by_bytes = true;
             break;
         }
@@ -179,6 +176,7 @@ fn strip_bom(text: &str) -> &str {
 mod tests {
     use indoc::indoc;
 
+    use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
     // ── run ──

@@ -144,6 +144,10 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
+/// Cap on tool output size. Prevents flooding the LLM context window.
+/// Roughly 32K tokens at ~4 chars / token.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
+
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
 /// Returns a borrowed slice when no truncation is needed.
