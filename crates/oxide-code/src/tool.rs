@@ -92,17 +92,11 @@ mod tests {
     // ── ToolRegistry::definitions ──
 
     #[test]
-    fn definitions_includes_all_tools() {
+    fn definitions_returns_tool_with_valid_schema() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let defs = registry.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "bash");
-    }
-
-    #[test]
-    fn definitions_serializes_input_schema() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
-        let defs = registry.definitions();
         let schema = &defs[0].input_schema;
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
