@@ -89,13 +89,15 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Resolution ──
 
-const BINARY_CHECK_SIZE: usize = 8192;
-
 pub(crate) fn resolve_base_dir(path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
     Ok(path.map_or(cwd, PathBuf::from))
 }
+
+// ── Binary Detection ──
+
+const BINARY_CHECK_SIZE: usize = 8192;
 
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
