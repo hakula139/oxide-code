@@ -16,14 +16,16 @@ The project direction is simple:
 - Configurable model, base URL, and max tokens via environment variables.
 - Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
 - Bash tool — execute shell commands with timeout and head+tail output truncation.
+- File tools — read (line-numbered output, pagination, byte budget), write (with directory creation), edit (exact string replacement with CRLF handling).
+- Search tools — glob-based file pattern matching, regex content search with output modes (content / files / count), context lines, and head limit.
 - Tool definitions sent via the Anthropic `tools` API parameter.
 
 ## Current Focus
 
-### Basic File Tools
+### Streaming Robustness
 
-- Read, write, and edit files.
-- Glob-based file search and regex content search.
+- Handle unknown content block types (`thinking`, `redacted_thinking`, `signature_delta`, etc.) gracefully instead of crashing on deserialization.
+- Required before enabling extended thinking support.
 
 ### System Prompt
 
