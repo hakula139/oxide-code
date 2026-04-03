@@ -139,7 +139,14 @@ fn truncate_output(content: &mut String) {
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.floor_char_boundary(content.len() - half);
 
-    let omitted_lines = content[head_end..tail_start].lines().count();
+    // The separator line is ~35 bytes. Only truncate if the omitted region
+    // is large enough that removing it actually saves space.
+    let omitted = &content[head_end..tail_start];
+    if omitted.len() < 50 {
+        return;
+    }
+
+    let omitted_lines = omitted.lines().count();
 
     let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + 64);
     truncated.push_str(&content[..head_end]);
@@ -254,5 +261,14 @@ mod tests {
         assert!(content.starts_with("x\n"));
         assert!(content.ends_with("x\n"));
         assert!(content.contains("lines truncated"));
+    }
+
+    #[test]
+    fn truncate_output_barely_over_limit_unchanged() {
+        let mut content = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let original_len = content.len();
+        truncate_output(&mut content);
+        // Head and tail overlap — truncation would make it longer, so skip.
+        assert_eq!(content.len(), original_len);
     }
 }

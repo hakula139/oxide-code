@@ -120,24 +120,6 @@ async fn agent_turn(
     bail!("exceeded {MAX_TOOL_ROUNDS} tool rounds")
 }
 
-fn display_tool_call(name: &str, input: &serde_json::Value) {
-    if name == "bash"
-        && let Some(cmd) = input.get("command").and_then(serde_json::Value::as_str)
-    {
-        eprintln!("⟡ {name}: {cmd}");
-        return;
-    }
-    eprintln!("⟡ {name}");
-}
-
-fn display_tool_output(content: &str) {
-    let trimmed = content.trim();
-    if !trimmed.is_empty() {
-        eprintln!("{trimmed}");
-    }
-    eprintln!();
-}
-
 // ── Stream Processing ──
 
 enum BlockAccumulator {
@@ -238,4 +220,24 @@ async fn stream_response(
         .flatten()
         .map(BlockAccumulator::into_content_block)
         .collect())
+}
+
+// ── Display ──
+
+fn display_tool_call(name: &str, input: &serde_json::Value) {
+    if name == "bash"
+        && let Some(cmd) = input.get("command").and_then(serde_json::Value::as_str)
+    {
+        eprintln!("⟡ {name}: {cmd}");
+        return;
+    }
+    eprintln!("⟡ {name}");
+}
+
+fn display_tool_output(content: &str) {
+    let trimmed = content.trim();
+    if !trimmed.is_empty() {
+        eprintln!("{trimmed}");
+    }
+    eprintln!();
 }
