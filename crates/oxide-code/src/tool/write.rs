@@ -75,9 +75,9 @@ async fn write_file(path: &str, content: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to write file: {e}"))?;
 
     if is_new {
-        Ok(format!("File created successfully at: {path}"))
+        Ok(format!("Successfully created {path}."))
     } else {
-        Ok(format!("File {path} has been updated successfully."))
+        Ok(format!("Successfully updated {path}."))
     }
 }
 
