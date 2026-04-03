@@ -113,10 +113,10 @@ async fn execute(command: &str) -> ToolOutput {
             content.push('\n');
         }
         let code = output.status.code().unwrap_or(-1);
-        let _ = write!(content, "Exit code: {code}");
+        let _ = writeln!(content, "Exit code: {code}");
     }
     if content.is_empty() {
-        content.push_str("(no output)");
+        content.push_str("(no output)\n");
     }
 
     truncate_output(&mut content);
@@ -158,6 +158,8 @@ fn truncate_output(content: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     // ── run ──
@@ -200,14 +202,20 @@ mod tests {
     async fn execute_failing_command() {
         let output = execute("false").await;
         assert!(output.is_error);
-        assert!(output.content.contains("Exit code: 1"));
+        assert_eq!(output.content, "Exit code: 1\n");
     }
 
     #[tokio::test]
     async fn execute_stderr_output() {
         let output = execute("echo err >&2").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "STDERR:\nerr\n");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                STDERR:
+                err
+            "}
+        );
     }
 
     #[tokio::test]
@@ -215,21 +223,36 @@ mod tests {
         let output = execute("echo out && echo err >&2").await;
         assert!(!output.is_error);
         // stdout comes first, then separator + STDERR section
-        assert_eq!(output.content, "out\n\nSTDERR:\nerr\n");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                out
+
+                STDERR:
+                err
+            "}
+        );
     }
 
     #[tokio::test]
     async fn execute_output_with_nonzero_exit() {
         let output = execute("echo partial; false").await;
         assert!(output.is_error);
-        assert_eq!(output.content, "partial\n\nExit code: 1");
+        assert_eq!(
+            output.content,
+            indoc! {"
+                partial
+
+                Exit code: 1
+            "}
+        );
     }
 
     #[tokio::test]
     async fn execute_no_output() {
         let output = execute("true").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "(no output)");
+        assert_eq!(output.content, "(no output)\n");
     }
 
     #[tokio::test]
