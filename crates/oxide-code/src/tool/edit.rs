@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -99,19 +98,10 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    // Adapt search/replace strings to the file's line ending style instead of
-    // normalizing the entire file. This preserves original line endings exactly,
-    // even in files with mixed \n and \r\n.
-    let (old, new): (Cow<'_, str>, Cow<'_, str>) = if content.contains("\r\n") {
-        (
-            Cow::Owned(old_string.replace('\n', "\r\n")),
-            Cow::Owned(new_string.replace('\n', "\r\n")),
-        )
-    } else {
-        (Cow::Borrowed(old_string), Cow::Borrowed(new_string))
-    };
+    let eol = dominant_eol(&content);
+    let content = normalize_eol(content);
 
-    let match_count = content.matches(old.as_ref()).count();
+    let match_count = content.matches(old_string).count();
 
     if match_count == 0 {
         return Err(format!(
@@ -129,10 +119,11 @@ async fn edit_file(
     }
 
     let updated = if replace_all {
-        content.replace(old.as_ref(), new.as_ref())
+        content.replace(old_string, new_string)
     } else {
-        content.replacen(old.as_ref(), new.as_ref(), 1)
+        content.replacen(old_string, new_string, 1)
     };
+    let updated = apply_eol(updated, eol);
 
     tokio::fs::write(path, &updated)
         .await
@@ -142,6 +133,31 @@ async fn edit_file(
         Ok(format!("Replaced {match_count} occurrences in {path}."))
     } else {
         Ok(format!("Successfully edited {path}."))
+    }
+}
+
+// ── Line Endings ──
+
+fn dominant_eol(content: &str) -> &'static str {
+    let crlf = content.matches("\r\n").count();
+    // Each `\r\n` also contains a `\n`, so subtract to get the LF-only count.
+    let lf_only = content.matches('\n').count() - crlf;
+    if crlf > lf_only { "\r\n" } else { "\n" }
+}
+
+fn normalize_eol(content: String) -> String {
+    if content.contains("\r\n") {
+        content.replace("\r\n", "\n")
+    } else {
+        content
+    }
+}
+
+fn apply_eol(content: String, eol: &str) -> String {
+    if eol == "\r\n" {
+        content.replace('\n', "\r\n")
+    } else {
+        content
     }
 }
 
@@ -258,19 +274,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_mixed_line_endings_preserved() {
+    async fn edit_file_mixed_eol_normalized_to_dominant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.txt");
-        // File has CRLF for most lines but one LF-only line
-        std::fs::write(&path, "keep_lf\nkeep_crlf\r\nreplace_me\r\n").unwrap();
+        // 2 CRLF, 1 LF → dominant is CRLF
+        std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
 
         edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
             .await
             .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        // The LF-only line must remain LF-only — no silent conversion to CRLF
-        assert_eq!(bytes, b"keep_lf\nkeep_crlf\r\nreplaced\r\n");
+        // All line endings normalized to the dominant style (CRLF)
+        assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_mixed_eol_multiline_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.txt");
+        // LF between first two lines, CRLF after — previously failed to match
+        std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
+
+        edit_file(path.to_str().unwrap(), "foo\nbar", "a\nb", false)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        // Dominant is CRLF (2 vs 1), so all newlines become CRLF
+        assert_eq!(bytes, b"a\r\nb\r\nbaz\r\n");
     }
 
     #[tokio::test]
@@ -328,5 +360,57 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("2 occurrences"));
+    }
+
+    // ── dominant_eol ──
+
+    #[test]
+    fn dominant_eol_lf_only() {
+        assert_eq!(dominant_eol("a\nb\n"), "\n");
+    }
+
+    #[test]
+    fn dominant_eol_crlf_only() {
+        assert_eq!(dominant_eol("a\r\nb\r\n"), "\r\n");
+    }
+
+    #[test]
+    fn dominant_eol_mixed_favors_majority() {
+        assert_eq!(dominant_eol("a\nb\r\nc\r\n"), "\r\n");
+        assert_eq!(dominant_eol("a\nb\nc\r\n"), "\n");
+    }
+
+    #[test]
+    fn dominant_eol_tie_defaults_to_lf() {
+        assert_eq!(dominant_eol("a\nb\r\n"), "\n");
+    }
+
+    #[test]
+    fn dominant_eol_no_newlines() {
+        assert_eq!(dominant_eol("no newlines"), "\n");
+    }
+
+    // ── normalize_eol ──
+
+    #[test]
+    fn normalize_eol_converts_crlf_to_lf() {
+        assert_eq!(normalize_eol("a\r\nb\r\n".into()), "a\nb\n");
+    }
+
+    #[test]
+    fn normalize_eol_lf_unchanged() {
+        assert_eq!(normalize_eol("a\nb\n".into()), "a\nb\n");
+    }
+
+    // ── apply_eol ──
+
+    #[test]
+    fn apply_eol_inserts_cr_for_crlf() {
+        assert_eq!(apply_eol("a\nb\n".into(), "\r\n"), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn apply_eol_lf_unchanged() {
+        assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
     }
 }
