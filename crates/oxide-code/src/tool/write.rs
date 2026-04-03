@@ -52,14 +52,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     match write_file(&input.file_path, &input.content).await {

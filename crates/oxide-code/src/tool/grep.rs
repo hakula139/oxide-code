@@ -98,14 +98,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     let Input {
@@ -168,11 +163,7 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
     };
     let re = regex::Regex::new(&pattern).map_err(|e| format!("Invalid regex: {e}"))?;
 
-    let cwd =
-        std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
-    let base = params
-        .search_path
-        .map_or_else(|| cwd.clone(), std::path::PathBuf::from);
+    let base = super::resolve_base_dir(params.search_path)?;
 
     if !base.exists() {
         return Err(format!("Path does not exist: {}", base.display()));
@@ -269,18 +260,6 @@ fn format_skipped_warnings(skipped: &[(String, u64)]) -> String {
         _ = write!(output, "\n  {path} ({mb:.1} MB)");
     }
     output
-}
-
-fn is_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8192).any(|&b| b == 0)
-}
-
-fn read_text(path: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if is_binary(&bytes) {
-        return None;
-    }
-    std::str::from_utf8(&bytes).ok().map(String::from)
 }
 
 // ── Content Mode ──
@@ -498,6 +477,14 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
     }
 
     output
+}
+
+fn read_text(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if super::is_binary(&bytes) {
+        return None;
+    }
+    std::str::from_utf8(&bytes).ok().map(String::from)
 }
 
 #[cfg(test)]
@@ -726,31 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn grep_files_no_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
-
-        let mut p = params("nonexistent");
-        p.search_path = Some(dir.path().to_str().unwrap());
-        let result = grep_files(&p).unwrap();
-        assert_eq!(result, "No matches found");
-    }
-
-    #[test]
-    fn grep_files_invalid_regex() {
-        let err = grep_files(&params("[invalid")).unwrap_err();
-        assert!(err.contains("Invalid regex"));
-    }
-
-    #[test]
-    fn grep_files_nonexistent_path() {
-        let mut p = params("test");
-        p.search_path = Some("/nonexistent/path");
-        let err = grep_files(&p).unwrap_err();
-        assert!(err.contains("does not exist"));
-    }
-
-    #[test]
     fn grep_files_single_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.txt");
@@ -827,6 +789,31 @@ mod tests {
         assert!(result.contains("small.txt:1:match here"));
         assert!(result.contains("Skipped"));
         assert!(result.contains("large.txt"));
+    }
+
+    #[test]
+    fn grep_files_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
+
+        let mut p = params("nonexistent");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        let result = grep_files(&p).unwrap();
+        assert_eq!(result, "No matches found");
+    }
+
+    #[test]
+    fn grep_files_invalid_regex() {
+        let err = grep_files(&params("[invalid")).unwrap_err();
+        assert!(err.contains("Invalid regex"));
+    }
+
+    #[test]
+    fn grep_files_nonexistent_path() {
+        let mut p = params("test");
+        p.search_path = Some("/nonexistent/path");
+        let err = grep_files(&p).unwrap_err();
+        assert!(err.contains("does not exist"));
     }
 
     // ── grep_files (files_with_matches mode) ──

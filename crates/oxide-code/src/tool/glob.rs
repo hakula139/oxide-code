@@ -57,14 +57,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     let Input { pattern, path } = input;
@@ -86,9 +81,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 }
 
 fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String> {
-    let cwd =
-        std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
-    let base = search_dir.map_or_else(|| cwd.clone(), std::path::PathBuf::from);
+    let base = super::resolve_base_dir(search_dir)?;
 
     if !base.is_dir() {
         return Err(format!("Directory does not exist: {}", base.display()));
@@ -205,6 +198,21 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_sorted_by_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(dir.path().join("old.txt"), "old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+
+        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("new.txt"));
+        assert!(lines[1].contains("old.txt"));
+    }
+
+    #[test]
     fn glob_files_no_matches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
@@ -256,23 +264,5 @@ mod tests {
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
         assert!(result.contains("tracked.txt"));
         assert!(!result.contains("ignored.txt"));
-    }
-
-    #[test]
-    fn glob_files_sorted_by_mtime() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create files with slight time differences
-        std::fs::write(dir.path().join("old.txt"), "old").unwrap();
-        // Touch to ensure mtime differs
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
-
-        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines.len(), 2);
-        // Newest file should be first
-        assert!(lines[0].contains("new.txt"));
-        assert!(lines[1].contains("old.txt"));
     }
 }

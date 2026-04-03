@@ -8,7 +8,6 @@ use super::{Tool, ToolOutput};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
-const BINARY_CHECK_SIZE: usize = 8192;
 /// Cap on the formatted output size. Prevents a single minified line from
 /// flooding the context window. Roughly 32K tokens at ~4 chars / token.
 const MAX_OUTPUT_BYTES: usize = 128 * 1024;
@@ -67,14 +66,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     match read_file(&input.file_path, input.offset, input.limit).await {
@@ -116,15 +110,13 @@ async fn read_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    let check_len = bytes.len().min(BINARY_CHECK_SIZE);
-    if bytes[..check_len].contains(&0) {
+    if super::is_binary(&bytes) {
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
     }
 
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
 
-    // Count total lines and iterate once, selecting the requested window.
     // Avoids materializing all lines into a Vec.
     let total_lines = text.lines().count();
 
@@ -147,7 +139,6 @@ async fn read_file(
     let last_possible_line = total_lines.min(start_idx + limit);
     let width = last_possible_line.to_string().len().max(1);
 
-    // Build output line-by-line, enforcing both a line limit and a byte budget.
     // The byte budget prevents a single minified line from flooding context.
     let mut output = String::new();
     let mut num_shown: usize = 0;
@@ -164,8 +155,7 @@ async fn read_file(
         let line_num = i + 1;
         let truncated = super::truncate_line(line);
 
-        // Check if adding this line would exceed the byte budget.
-        // Account for: line_number + tab + content + newline.
+        // line_number + tab + content + newline
         let entry_len = width + 1 + truncated.len() + 1;
         if !output.is_empty() && output.len() + entry_len > MAX_OUTPUT_BYTES {
             truncated_by_bytes = true;
@@ -286,6 +276,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_strips_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.txt");
+        std::fs::write(&path, "\u{feff}hello\n").unwrap();
+
+        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+        assert!(result.contains("1\thello"));
+        assert!(!result.contains('\u{feff}'));
+    }
+
+    #[tokio::test]
+    async fn read_file_byte_budget_truncates_large_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let line = "x".repeat(600);
+        let content = std::iter::repeat_n(format!("{line}\n"), 500).collect::<String>();
+        std::fs::write(&path, &content).unwrap();
+
+        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+
+        assert!(result.len() < MAX_OUTPUT_BYTES + 200);
+        assert!(result.contains("Showing lines"));
+        assert!(!result.contains("500\t"));
+    }
+
+    #[tokio::test]
+    async fn read_file_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+
+        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+        assert_eq!(result, "(empty file)");
+    }
+
+    #[tokio::test]
     async fn read_file_not_found() {
         let err = read_file("/nonexistent/path.txt", None, None)
             .await
@@ -306,7 +332,6 @@ mod tests {
     async fn read_file_too_large() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");
-        // Create a file just over the limit using a sparse-ish approach
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_FILE_SIZE + 1).unwrap();
 
@@ -329,16 +354,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.txt");
-        std::fs::write(&path, "").unwrap();
-
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
-        assert_eq!(result, "(empty file)");
-    }
-
-    #[tokio::test]
     async fn read_file_offset_beyond_end() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
@@ -348,36 +363,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("beyond the end"));
-    }
-
-    #[tokio::test]
-    async fn read_file_strips_bom() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bom.txt");
-        std::fs::write(&path, "\u{feff}hello\n").unwrap();
-
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
-        assert!(result.contains("1\thello"));
-        assert!(!result.contains('\u{feff}'));
-    }
-
-    #[tokio::test]
-    async fn read_file_byte_budget_truncates_large_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.txt");
-        // Each line is ~600 chars (exceeds MAX_LINE_LENGTH, so truncated to ~500+marker).
-        // Write enough lines to exceed MAX_OUTPUT_BYTES.
-        let line = "x".repeat(600);
-        let content = std::iter::repeat_n(format!("{line}\n"), 500).collect::<String>();
-        std::fs::write(&path, &content).unwrap();
-
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
-
-        // Output should be bounded and include truncation notice
-        assert!(result.len() < MAX_OUTPUT_BYTES + 200); // allow some slack for the footer
-        assert!(result.contains("Showing lines"));
-        // Should not contain all 500 lines
-        assert!(!result.contains("500\t"));
     }
 
     // ── strip_bom ──

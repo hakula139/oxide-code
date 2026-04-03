@@ -7,25 +7,27 @@ pub(crate) mod write;
 
 use std::borrow::Cow;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 // ── Tool Definition ──
 
 /// Schema sent to the Anthropic API to describe an available tool.
 #[derive(Clone, Serialize)]
 pub(crate) struct ToolDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub input_schema: serde_json::Value,
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) input_schema: serde_json::Value,
 }
 
 // ── Tool Output ──
 
 pub(crate) struct ToolOutput {
-    pub content: String,
-    pub is_error: bool,
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
 }
 
 // ── Tool Trait ──
@@ -60,20 +62,43 @@ pub(crate) struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
+    pub(crate) fn new(tools: Vec<Box<dyn Tool>>) -> Self {
         Self { tools }
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+    pub(crate) fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
             .find(|t| t.name() == name)
             .map(AsRef::as_ref)
     }
 
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|t| t.definition()).collect()
     }
+}
+
+// ── Input Parsing ──
+
+pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
+    serde_json::from_value(raw).map_err(|e| ToolOutput {
+        content: format!("Invalid input: {e}"),
+        is_error: true,
+    })
+}
+
+// ── Path Resolution ──
+
+const BINARY_CHECK_SIZE: usize = 8192;
+
+pub(crate) fn resolve_base_dir(path: Option<&str>) -> Result<PathBuf, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
+    Ok(path.map_or(cwd, PathBuf::from))
+}
+
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
 
 // ── Formatting ──

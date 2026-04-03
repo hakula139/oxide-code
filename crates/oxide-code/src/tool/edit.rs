@@ -64,14 +64,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     match edit_file(
@@ -132,8 +127,6 @@ async fn edit_file(
         ));
     }
 
-    // Apply the replacement on normalized content, then restore original
-    // line endings if the file used CRLF.
     let updated = if replace_all {
         normalized.replace(old_string, new_string)
     } else {
@@ -229,6 +222,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_file_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "aaa bbb aaa").unwrap();
+
+        let msg = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
+            .await
+            .unwrap();
+
+        assert!(msg.contains("2 occurrences"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
+    }
+
+    #[tokio::test]
+    async fn edit_file_replace_all_single_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let msg = edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
+            .await
+            .unwrap();
+
+        assert!(msg.contains("Successfully edited"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_crlf_matching_preserves_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
+
+        edit_file(path.to_str().unwrap(), "line1\nline2", "a\nb", false)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"a\r\nb\r\n");
+    }
+
+    #[tokio::test]
     async fn edit_file_rejects_empty_old_string() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
@@ -283,48 +318,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("2 occurrences"));
-    }
-
-    #[tokio::test]
-    async fn edit_file_replace_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "aaa bbb aaa").unwrap();
-
-        let msg = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
-            .await
-            .unwrap();
-
-        assert!(msg.contains("2 occurrences"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
-    }
-
-    #[tokio::test]
-    async fn edit_file_crlf_matching_preserves_line_endings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
-
-        edit_file(path.to_str().unwrap(), "line1\nline2", "a\nb", false)
-            .await
-            .unwrap();
-
-        // CRLF line endings should be preserved in the output
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, b"a\r\nb\r\n");
-    }
-
-    #[tokio::test]
-    async fn edit_file_replace_all_single_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let msg = edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
-            .await
-            .unwrap();
-
-        assert!(msg.contains("Successfully edited"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 }

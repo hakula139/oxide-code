@@ -59,14 +59,9 @@ struct Input {
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     let timeout = input.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
@@ -199,13 +194,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_failing_command() {
-        let output = execute("false").await;
-        assert!(output.is_error);
-        assert_eq!(output.content, "Exit code: 1\n");
-    }
-
-    #[tokio::test]
     async fn execute_stderr_output() {
         let output = execute("echo err >&2").await;
         assert!(!output.is_error);
@@ -231,6 +219,13 @@ mod tests {
                 err
             "}
         );
+    }
+
+    #[tokio::test]
+    async fn execute_failing_command() {
+        let output = execute("false").await;
+        assert!(output.is_error);
+        assert_eq!(output.content, "Exit code: 1\n");
     }
 
     #[tokio::test]
