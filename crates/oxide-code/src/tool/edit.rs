@@ -5,6 +5,8 @@ use serde::Deserialize;
 
 use super::{Tool, ToolOutput};
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 pub(crate) struct EditTool;
 
 impl Tool for EditTool {
@@ -92,6 +94,23 @@ async fn edit_file(
 
     if old_string == new_string {
         return Err("old_string and new_string are identical. No changes to make.".into());
+    }
+
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
+
+    if metadata.len() > MAX_FILE_SIZE {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "file sizes are well within f64 range"
+        )]
+        let mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
+        return Err(format!(
+            "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+             Use the bash tool for large-file edits.",
+        ));
     }
 
     let content = tokio::fs::read_to_string(path)

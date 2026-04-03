@@ -117,7 +117,7 @@ async fn read_file(
 
     // offset is 1-indexed; 0 is treated as 1
     let offset = offset.unwrap_or(1).max(1);
-    let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT);
+    let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
     let start_idx = offset - 1;
 
     if start_idx >= total_lines {

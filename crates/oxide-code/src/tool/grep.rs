@@ -194,9 +194,18 @@ fn collect_files(
     include_matcher: Option<&globset::GlobMatcher>,
 ) -> CollectedFiles {
     if base.is_file() {
+        let mut files = Vec::new();
+        let mut skipped_large = Vec::new();
+        if let Ok(meta) = base.metadata()
+            && meta.len() > MAX_FILE_SIZE
+        {
+            skipped_large.push((base.to_string_lossy().into_owned(), meta.len()));
+        } else {
+            files.push(base.to_path_buf());
+        }
         return CollectedFiles {
-            files: vec![base.to_path_buf()],
-            skipped_large: Vec::new(),
+            files,
+            skipped_large,
         };
     }
 

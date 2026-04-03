@@ -62,7 +62,10 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
 async fn write_file(path: &str, content: &str) -> Result<String, String> {
     let file_path = std::path::Path::new(path);
-    let is_new = tokio::fs::metadata(path).await.is_err();
+    let is_new = matches!(
+        tokio::fs::metadata(path).await,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    );
 
     if let Some(parent) = file_path.parent() {
         tokio::fs::create_dir_all(parent)
