@@ -306,6 +306,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        // Create a file just over the limit using a sparse-ish approach
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        let err = read_file(path.to_str().unwrap(), None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("too large"));
+    }
+
+    #[tokio::test]
     async fn read_file_binary_detected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binary.bin");

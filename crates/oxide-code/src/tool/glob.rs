@@ -223,6 +223,19 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_truncated_at_max_results() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..MAX_RESULTS + 10 {
+            std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
+        }
+
+        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        let file_count = result.lines().filter(|l| l.contains(".txt")).count();
+        assert_eq!(file_count, MAX_RESULTS);
+        assert!(result.contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10)));
+    }
+
+    #[test]
     fn glob_files_sorted_by_mtime() {
         let dir = tempfile::tempdir().unwrap();
 

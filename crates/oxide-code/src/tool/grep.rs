@@ -619,6 +619,33 @@ mod tests {
     }
 
     #[test]
+    fn grep_files_with_context_separates_distant_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            "MATCH1\na\nb\nc\nd\ne\nf\nMATCH2\n",
+        )
+        .unwrap();
+
+        let mut p = params("MATCH");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.context = 1;
+        let result = grep_files(&p).unwrap();
+        // MATCH1 (line 1) context=1 → lines 1-2; MATCH2 (line 8) → lines 7-8.
+        // Gap between ranges, so a "--" separator should appear.
+        assert!(result.contains("--"));
+        assert!(result.contains("test.txt:1:MATCH1"));
+        assert!(result.contains("test.txt:2-a"));
+        assert!(result.contains("test.txt:7-f"));
+        assert!(result.contains("test.txt:8:MATCH2"));
+        // Middle lines should not appear
+        assert!(!result.contains("test.txt:3"));
+        assert!(!result.contains("test.txt:4"));
+        assert!(!result.contains("test.txt:5"));
+        assert!(!result.contains("test.txt:6"));
+    }
+
+    #[test]
     fn grep_files_with_include_filter() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
@@ -713,6 +740,23 @@ mod tests {
         assert!(result.contains("a.rs"));
         assert!(result.contains("b.rs"));
         assert!(!result.contains("c.txt"));
+    }
+
+    #[test]
+    fn grep_files_files_with_matches_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
+        }
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.output_mode = Some("files_with_matches");
+        p.head_limit = Some(2);
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("Results limited to 2 files"));
+        let file_count = result.lines().filter(|l| l.contains(".txt")).count();
+        assert_eq!(file_count, 2);
     }
 
     // ── grep_files (count mode) ──
