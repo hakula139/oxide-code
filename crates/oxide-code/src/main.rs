@@ -207,7 +207,7 @@ async fn stream_response(
         }
     }
 
-    // Newline after streamed text
+    // Streamed text deltas don't include a final newline
     let has_text = blocks
         .iter()
         .any(|b| matches!(b, Some(BlockAccumulator::Text(_))));

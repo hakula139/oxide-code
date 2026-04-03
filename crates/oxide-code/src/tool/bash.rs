@@ -222,7 +222,6 @@ mod tests {
     async fn execute_combined_stdout_and_stderr() {
         let output = execute("echo out && echo err >&2").await;
         assert!(!output.is_error);
-        // stdout comes first, then separator + STDERR section
         assert_eq!(
             output.content,
             indoc! {"
@@ -257,7 +256,6 @@ mod tests {
 
     #[tokio::test]
     async fn execute_truncates_large_output() {
-        // Use distinguishable head and tail so assertions prove both survive.
         let output = execute("echo HEAD_MARKER && yes | head -c 200000 && echo TAIL_MARKER").await;
         assert!(output.content.contains("lines truncated"));
         assert!(output.content.starts_with("HEAD_MARKER\n"));
@@ -292,10 +290,9 @@ mod tests {
         assert!(content.starts_with("HEAD_SENTINEL\n"));
         assert!(content.ends_with("TAIL_SENTINEL\n"));
         assert!(content.contains("lines truncated"));
-        // Verify size is bounded: head half + separator + tail half
         assert!(content.len() <= MAX_OUTPUT_BYTES + 100);
         assert!(content.len() >= MAX_OUTPUT_BYTES / 2);
-        // Verify separator sits between head and tail
+        // Separator sits between head and tail, not at the edges
         let sep_pos = content.find("lines truncated").unwrap();
         assert!(sep_pos > head.len());
         assert!(sep_pos < content.len() - tail.len());
@@ -316,12 +313,8 @@ mod tests {
 
         truncate_output(&mut content);
 
-        // Result must be valid UTF-8 (implicit — it's a String)
-        // and must contain the separator
         assert!(content.contains("lines truncated"));
-        // Head should start with our 'a' prefix
         assert!(content.starts_with("aaaa"));
-        // Tail should end with our 'b' filler
         assert!(content.ends_with('b'));
     }
 

@@ -442,7 +442,6 @@ mod tests {
             oauth["scopes"],
             serde_json::json!(["user:profile", "user:inference"])
         );
-        // Unknown fields preserved
         assert_eq!(oauth["subscriptionType"], "pro");
         assert_eq!(oauth["rateLimitTier"], "default");
     }
@@ -480,7 +479,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         let oauth = &json["claudeAiOauth"];
 
-        // Original scopes preserved when refresh response has no scope
         assert_eq!(oauth["scopes"], serde_json::json!(["user:profile"]));
     }
 
