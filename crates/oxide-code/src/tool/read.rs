@@ -260,7 +260,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             result,
-            "2\tb\n3\tc\n\n(Showing lines 2\u{2013}3 of 5 total)"
+            indoc! {"
+                2\tb
+                3\tc
+
+                (Showing lines 2\u{2013}3 of 5 total)"}
         );
     }
 
@@ -273,7 +277,12 @@ mod tests {
         let result = read_file(path.to_str().unwrap(), Some(0), None)
             .await
             .unwrap();
-        assert_eq!(result, "1\tfirst\n2\tsecond");
+        assert_eq!(
+            result,
+            indoc! {"
+                1\tfirst
+                2\tsecond"}
+        );
     }
 
     #[tokio::test]

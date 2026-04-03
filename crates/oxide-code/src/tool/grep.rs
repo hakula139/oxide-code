@@ -502,6 +502,8 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     fn params(pattern: &str) -> GrepParams<'_> {
@@ -521,7 +523,14 @@ mod tests {
     #[tokio::test]
     async fn run_finds_pattern() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("test.rs"),
+            indoc! {"
+                fn main() {}
+                fn helper() {}
+            "},
+        )
+        .unwrap();
 
         let output = run(serde_json::json!({
             "pattern": "fn main",
@@ -545,7 +554,14 @@ mod tests {
     #[test]
     fn grep_files_basic() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            indoc! {"
+                fn foo() {}
+                fn bar() {}
+            "},
+        )
+        .unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn baz() {}\n").unwrap();
 
         let mut p = params("fn foo");
@@ -561,7 +577,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.txt"),
-            "hello123\nworld456\nhello789\n",
+            indoc! {"
+                hello123
+                world456
+                hello789
+            "},
         )
         .unwrap();
 
@@ -576,7 +596,14 @@ mod tests {
     #[test]
     fn grep_files_case_insensitive() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "Hello World\nhello world\n").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                Hello World
+                hello world
+            "},
+        )
+        .unwrap();
 
         let mut p = params("hello");
         p.search_path = Some(dir.path().to_str().unwrap());
@@ -589,7 +616,17 @@ mod tests {
     #[test]
     fn grep_files_with_context() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                aaa
+                bbb
+                ccc
+                ddd
+                eee
+            "},
+        )
+        .unwrap();
 
         let mut p = params("ccc");
         p.search_path = Some(dir.path().to_str().unwrap());
@@ -609,7 +646,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.txt"),
-            "a\nb\nMATCH1\nc\nd\nMATCH2\ne\nf\n",
+            indoc! {"
+                a
+                b
+                MATCH1
+                c
+                d
+                MATCH2
+                e
+                f
+            "},
         )
         .unwrap();
 
@@ -634,7 +680,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.txt"),
-            "MATCH1\na\nb\nc\nd\ne\nf\nMATCH2\n",
+            indoc! {"
+                MATCH1
+                a
+                b
+                c
+                d
+                e
+                f
+                MATCH2
+            "},
         )
         .unwrap();
 
@@ -699,7 +754,15 @@ mod tests {
     fn grep_files_single_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.txt");
-        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::write(
+            &file,
+            indoc! {"
+                alpha
+                beta
+                gamma
+            "},
+        )
+        .unwrap();
 
         let mut p = params("beta");
         p.search_path = Some(file.to_str().unwrap());
@@ -733,6 +796,21 @@ mod tests {
         let result = grep_files(&p).unwrap();
         assert!(result.contains("visible.txt"));
         assert!(!result.contains(".hidden"));
+    }
+
+    #[test]
+    fn grep_files_respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "match me\n").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "match me\n").unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("tracked.txt"));
+        assert!(!result.contains("ignored.txt"));
     }
 
     #[test]
@@ -791,7 +869,15 @@ mod tests {
     #[test]
     fn grep_files_count_mode() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "aaa\nbbb\naaa\n").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                aaa
+                bbb
+                aaa
+            "},
+        )
+        .unwrap();
 
         let mut p = params("aaa");
         p.search_path = Some(dir.path().to_str().unwrap());

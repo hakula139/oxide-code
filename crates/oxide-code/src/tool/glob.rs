@@ -246,6 +246,19 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
+
+        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        assert!(result.contains("tracked.txt"));
+        assert!(!result.contains("ignored.txt"));
+    }
+
+    #[test]
     fn glob_files_sorted_by_mtime() {
         let dir = tempfile::tempdir().unwrap();
 

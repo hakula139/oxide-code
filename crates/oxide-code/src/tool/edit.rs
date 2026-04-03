@@ -160,6 +160,8 @@ async fn edit_file(
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     // ── run ──
@@ -198,7 +200,14 @@ mod tests {
     async fn edit_file_replaces_unique_string() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        std::fs::write(&path, "fn foo() {}\nfn bar() {}\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                fn foo() {}
+                fn bar() {}
+            "},
+        )
+        .unwrap();
 
         edit_file(
             path.to_str().unwrap(),
@@ -210,7 +219,13 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "fn foo() -> i32 { 42 }\nfn bar() {}\n");
+        assert_eq!(
+            content,
+            indoc! {"
+                fn foo() -> i32 { 42 }
+                fn bar() {}
+            "}
+        );
     }
 
     #[tokio::test]
