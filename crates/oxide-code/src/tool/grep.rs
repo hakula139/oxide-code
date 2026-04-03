@@ -394,6 +394,10 @@ fn format_files_with_matches(
     let mut matching_files: Vec<String> = Vec::new();
 
     for path in files {
+        if matching_files.len() > head_limit {
+            break;
+        }
+
         let Some(text) = read_text(path) else {
             continue;
         };
