@@ -14,15 +14,11 @@ The project direction is simple:
 - OAuth authentication via Claude Code credentials (`~/.claude/.credentials.json`).
 - API key authentication via `ANTHROPIC_API_KEY` environment variable.
 - Configurable model, base URL, and max tokens via environment variables.
+- Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
+- Bash tool — execute shell commands with timeout and head+tail output truncation.
+- Tool definitions sent via the Anthropic `tools` API parameter.
 
 ## Current Focus
-
-### Core Agent Loop
-
-- REPL that reads user input and sends it to an LLM.
-- Streaming responses from the Anthropic Messages API.
-- Tool dispatch: the LLM can request tool execution, and results feed back into the conversation.
-- Bash tool as the first tool — execute shell commands with timeout and output capture.
 
 ### Basic File Tools
 
@@ -31,9 +27,9 @@ The project direction is simple:
 
 ### System Prompt
 
-- Tool definitions in Anthropic tool-use format.
-- Project context injection (CLAUDE.md files).
-- Conversation history with token budget management.
+- System prompt construction with tool definitions and project context.
+- Load and inject `CLAUDE.md` files (global + project).
+- Conversation context management (token counting, message history).
 
 ## Next Phase
 

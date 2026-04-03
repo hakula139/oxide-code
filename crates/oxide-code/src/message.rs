@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -25,6 +29,8 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "is_default")]
+        is_error: bool,
     },
 }
 
@@ -42,6 +48,7 @@ impl Message {
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "called only in tests for now"))]
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -53,6 +60,54 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ContentBlock::ToolResult ──
+
+    #[test]
+    fn tool_result_serializes_is_error_when_true() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "id".to_owned(),
+            content: "error msg".to_owned(),
+            is_error: true,
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "tool_result");
+        assert_eq!(json["tool_use_id"], "id");
+        assert_eq!(json["content"], "error msg");
+        assert_eq!(json["is_error"], true);
+    }
+
+    #[test]
+    fn tool_result_omits_is_error_when_false() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "id".to_owned(),
+            content: "ok".to_owned(),
+            is_error: false,
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert!(json.get("is_error").is_none());
+    }
+
+    #[test]
+    fn tool_result_deserializes_missing_is_error_as_false() {
+        let json = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "id",
+            "content": "ok"
+        });
+        let block: ContentBlock = serde_json::from_value(json).unwrap();
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = block
+        else {
+            panic!("expected ToolResult");
+        };
+        assert_eq!(tool_use_id, "id");
+        assert_eq!(content, "ok");
+        assert!(!is_error);
+    }
 
     // ── Message::user ──
 

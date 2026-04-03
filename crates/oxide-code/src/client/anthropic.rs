@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{Auth, Config};
 use crate::message::Message;
+use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
@@ -27,6 +28,8 @@ struct CreateMessageRequest<'a> {
     messages: &'a [Message],
     system: &'a str,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ToolDefinition]>,
 }
 
 // ── SSE response types ──
@@ -63,9 +66,12 @@ pub enum StreamEvent {
     },
 }
 
-#[expect(
-    dead_code,
-    reason = "fields populated by serde, defined for full SSE protocol coverage"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "fields populated by serde, defined for full SSE protocol coverage"
+    )
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageResponse {
@@ -74,10 +80,6 @@ pub struct MessageResponse {
     pub usage: Option<Usage>,
 }
 
-#[expect(
-    dead_code,
-    reason = "fields populated by serde, defined for full SSE protocol coverage"
-)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
@@ -85,10 +87,6 @@ pub enum ContentBlockInfo {
     ToolUse { id: String, name: String },
 }
 
-#[expect(
-    dead_code,
-    reason = "InputJsonDelta defined for full SSE protocol coverage"
-)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
@@ -105,9 +103,12 @@ pub struct MessageDeltaBody {
     pub stop_reason: Option<String>,
 }
 
-#[expect(
-    dead_code,
-    reason = "fields populated by serde, defined for full SSE protocol coverage"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "fields populated by serde, defined for full SSE protocol coverage"
+    )
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
@@ -175,6 +176,7 @@ impl Client {
         &self,
         messages: &[Message],
         system: Option<&str>,
+        tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         let system_prompt = match system {
             Some(s) => format!("{SYSTEM_PROMPT_PREFIX}\n{s}"),
@@ -188,6 +190,7 @@ impl Client {
             messages,
             system: &system_prompt,
             stream: true,
+            tools: (!tools.is_empty()).then_some(tools),
         })
         .context("failed to serialize request")?;
 
@@ -284,13 +287,14 @@ mod tests {
             data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(
-            event,
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::TextDelta { .. },
-            }
-        ));
+        let StreamEvent::ContentBlockDelta { index, delta } = event else {
+            panic!("expected ContentBlockDelta");
+        };
+        assert_eq!(index, 0);
+        let Delta::TextDelta { text } = delta else {
+            panic!("expected TextDelta");
+        };
+        assert_eq!(text, "Hello");
     }
 
     #[test]
@@ -307,10 +311,17 @@ mod tests {
     fn parse_sse_frame_message_start() {
         let frame = indoc! {r#"
             event: message_start
-            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(event, StreamEvent::MessageStart { .. }));
+        let StreamEvent::MessageStart { message } = event else {
+            panic!("expected MessageStart");
+        };
+        assert_eq!(message.id, "msg_123");
+        assert_eq!(message.model, "claude-sonnet-4-6");
+        let usage = message.usage.expect("expected usage");
+        assert_eq!(usage.input_tokens, 25);
+        assert_eq!(usage.output_tokens, 1);
     }
 
     #[test]
@@ -320,7 +331,11 @@ mod tests {
             data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
-        assert!(matches!(event, StreamEvent::Error { .. }));
+        let StreamEvent::Error { error } = event else {
+            panic!("expected Error");
+        };
+        assert_eq!(error.error_type, "rate_limit_error");
+        assert_eq!(error.message, "Too many requests");
     }
 
     #[test]

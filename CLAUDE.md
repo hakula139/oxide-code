@@ -28,8 +28,11 @@ ox                      # Start an interactive session
 ├── config.rs           # Configuration loading (env vars, model, base URL)
 ├── config/
 │   └── oauth.rs        # Claude Code OAuth credentials, token refresh, file locking
-├── main.rs             # CLI entry point, async REPL
-└── message.rs          # Conversation message types
+├── main.rs             # CLI entry point, agent loop, async REPL
+├── message.rs          # Conversation message types
+├── tool.rs             # Tool trait, registry, definitions
+└── tool/
+    └── bash.rs         # Shell command execution with timeout
 ```
 
 ## Coding Conventions
@@ -53,7 +56,7 @@ ox                      # Start an interactive session
 ### Module Organization
 
 - New-style module paths: `foo.rs` alongside `foo/` directory, not `foo/mod.rs`.
-- Keep files focused: one primary type or concern per file.
+- Keep files focused: one primary type or concern per file. When a file or function grows large, split it into smaller units proactively rather than letting it accumulate.
 - Place functions and types in the module that reflects their conceptual domain — import paths should not mislead about what the item does. Create new modules when needed for clean organization.
 - Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
 - Order helper functions after their caller (top-down reading order).
@@ -112,6 +115,7 @@ ox                      # Start an interactive session
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
 - Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`).
 - Use `indoc!` for multi-line string literals in tests.
+- Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.
 
 ### Documentation Maintenance
 
