@@ -99,6 +99,10 @@ async fn edit_file(
     new_string: &str,
     replace_all: bool,
 ) -> Result<String, String> {
+    if old_string.is_empty() {
+        return Err("old_string must not be empty.".into());
+    }
+
     if old_string == new_string {
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
@@ -207,6 +211,19 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "fn foo() -> i32 { 42 }\nfn bar() {}\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_empty_old_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let err = edit_file(path.to_str().unwrap(), "", "x", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("must not be empty"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
     #[tokio::test]
