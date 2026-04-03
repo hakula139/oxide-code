@@ -8,8 +8,7 @@ use serde::Deserialize;
 use super::{Tool, ToolOutput};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
-const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1 MB — skip large files during search
-const HIDDEN_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj"];
+const MAX_FILE_SIZE: u64 = 1024 * 1024;
 
 pub(crate) struct GrepTool;
 
@@ -179,9 +178,9 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         return Err(format!("Path does not exist: {}", base.display()));
     }
 
-    let include_pattern = params
+    let include_matcher = params
         .include_glob
-        .map(glob::Pattern::new)
+        .map(|g| globset::Glob::new(g).map(|g| g.compile_matcher()))
         .transpose()
         .map_err(|e| format!("Invalid include pattern: {e}"))?;
 
@@ -191,58 +190,85 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         None => DEFAULT_HEAD_LIMIT,
     };
 
-    let files = collect_files(&base, include_pattern.as_ref());
+    let collected = collect_files(&base, include_matcher.as_ref());
 
-    Ok(match params.output_mode {
-        OutputMode::FilesWithMatches => format_files_with_matches(&files, &re, head_limit),
-        OutputMode::Count => format_count(&files, &re, head_limit),
-        OutputMode::Content => format_content(&files, &re, params.context, head_limit),
-    })
+    let mut result = match params.output_mode {
+        OutputMode::FilesWithMatches => {
+            format_files_with_matches(&collected.files, &re, head_limit)
+        }
+        OutputMode::Count => format_count(&collected.files, &re, head_limit),
+        OutputMode::Content => format_content(&collected.files, &re, params.context, head_limit),
+    };
+
+    result.push_str(&format_skipped_warnings(&collected.skipped_large));
+
+    Ok(result)
+}
+
+struct CollectedFiles {
+    files: Vec<std::path::PathBuf>,
+    skipped_large: Vec<(String, u64)>,
 }
 
 fn collect_files(
     base: &std::path::Path,
-    include_pattern: Option<&glob::Pattern>,
-) -> Vec<std::path::PathBuf> {
+    include_matcher: Option<&globset::GlobMatcher>,
+) -> CollectedFiles {
     if base.is_file() {
-        return vec![base.to_path_buf()];
+        return CollectedFiles {
+            files: vec![base.to_path_buf()],
+            skipped_large: Vec::new(),
+        };
     }
 
-    let walker = walkdir::WalkDir::new(base)
-        .into_iter()
-        .filter_entry(|e| !is_hidden_dir(e));
+    let walker = ignore::WalkBuilder::new(base).build();
+    let mut result = CollectedFiles {
+        files: Vec::new(),
+        skipped_large: Vec::new(),
+    };
 
-    let mut files = Vec::new();
     for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
+        }
+
+        if let Some(matcher) = include_matcher {
+            let file_name = entry.file_name().to_string_lossy();
+            if !matcher.is_match(file_name.as_ref()) {
+                continue;
+            }
         }
 
         if let Ok(meta) = entry.metadata()
             && meta.len() > MAX_FILE_SIZE
         {
+            result
+                .skipped_large
+                .push((entry.path().to_string_lossy().into_owned(), meta.len()));
             continue;
         }
 
-        if let Some(pat) = include_pattern {
-            let file_name = entry.file_name().to_string_lossy();
-            if !pat.matches(&file_name) {
-                continue;
-            }
-        }
-
-        files.push(entry.into_path());
+        result.files.push(entry.into_path());
     }
 
-    files
+    result
 }
 
-fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
+fn format_skipped_warnings(skipped: &[(String, u64)]) -> String {
+    if skipped.is_empty() {
+        return String::new();
     }
-    let name = entry.file_name().to_string_lossy();
-    HIDDEN_DIRS.iter().any(|d| *d == name.as_ref())
+    let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
+    let mut output = format!("\n\nSkipped (exceeds {limit_mb} MB size limit):");
+    for (path, size) in skipped {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "file sizes are well within f64 range"
+        )]
+        let mb = *size as f64 / (1024.0 * 1024.0);
+        _ = write!(output, "\n  {path} ({mb:.1} MB)");
+    }
+    output
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -697,16 +723,32 @@ mod tests {
     #[test]
     fn grep_files_skips_hidden_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join(".git");
-        std::fs::create_dir(&git).unwrap();
-        std::fs::write(git.join("config"), "match me\n").unwrap();
+        let hidden = dir.path().join(".hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("secret.txt"), "match me\n").unwrap();
         std::fs::write(dir.path().join("visible.txt"), "match me\n").unwrap();
 
         let mut p = params("match");
         p.search_path = Some(dir.path().to_str().unwrap());
         let result = grep_files(&p).unwrap();
         assert!(result.contains("visible.txt"));
-        assert!(!result.contains(".git"));
+        assert!(!result.contains(".hidden"));
+    }
+
+    #[test]
+    fn grep_files_warns_about_skipped_large_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.txt"), "match here\n").unwrap();
+        let large = dir.path().join("large.txt");
+        let f = std::fs::File::create(&large).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("small.txt:1:match here"));
+        assert!(result.contains("Skipped"));
+        assert!(result.contains("large.txt"));
     }
 
     // ── grep_files (files_with_matches mode) ──

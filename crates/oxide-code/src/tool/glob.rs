@@ -69,7 +69,6 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
     let Input { pattern, path } = input;
 
-    // glob crate is sync — run in a blocking task
     match tokio::task::spawn_blocking(move || glob_files(&pattern, path.as_deref())).await {
         Ok(Ok(content)) => ToolOutput {
             content,
@@ -95,30 +94,30 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
         return Err(format!("Directory does not exist: {}", base.display()));
     }
 
-    let full_pattern = if std::path::Path::new(pattern).is_absolute() {
-        pattern.to_owned()
-    } else {
-        format!("{}/{pattern}", base.display())
-    };
+    let glob = globset::Glob::new(pattern)
+        .map_err(|e| format!("Invalid glob pattern: {e}"))?
+        .compile_matcher();
 
-    let entries = glob::glob(&full_pattern).map_err(|e| format!("Invalid glob pattern: {e}"))?;
+    let walker = ignore::WalkBuilder::new(&base).build();
 
-    // Collect matching paths with their modification times
     let mut matches: Vec<(String, SystemTime)> = Vec::new();
-    for entry in entries {
-        let Ok(path) = entry else { continue };
-
-        if !path.is_file() {
+    for entry in walker.filter_map(Result::ok) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
 
-        let mtime = path
+        let path = entry.path();
+        let rel_path = path.strip_prefix(&base).unwrap_or(path);
+        if !glob.is_match(rel_path) {
+            continue;
+        }
+
+        let mtime = entry
             .metadata()
-            .and_then(|m| m.modified())
+            .map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH))
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let display_path = path.to_string_lossy().into_owned();
-        matches.push((display_path, mtime));
+        matches.push((path.to_string_lossy().into_owned(), mtime));
     }
 
     matches.sort_by(|a, b| b.1.cmp(&a.1));
@@ -231,6 +230,19 @@ mod tests {
         let file_count = result.lines().filter(|l| l.contains(".txt")).count();
         assert_eq!(file_count, MAX_RESULTS);
         assert!(result.contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10)));
+    }
+
+    #[test]
+    fn glob_files_skips_hidden_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let hidden = dir.path().join(".hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("secret.txt"), "").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+
+        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        assert!(result.contains("visible.txt"));
+        assert!(!result.contains(".hidden"));
     }
 
     #[test]
