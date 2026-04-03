@@ -74,7 +74,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     match tokio::time::timeout(timeout, execute(&input.command)).await {
         Ok(output) => output,
         Err(_) => ToolOutput {
-            content: format!("Command timed out after {}s", timeout.as_secs()),
+            content: format!("Command timed out after {}ms", timeout.as_millis()),
             is_error: true,
         },
     }
@@ -184,7 +184,7 @@ mod tests {
         }))
         .await;
         assert!(output.is_error);
-        assert!(output.content.contains("timed out"));
+        assert_eq!(output.content, "Command timed out after 100ms");
     }
 
     // ── execute ──

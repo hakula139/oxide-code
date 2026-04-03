@@ -91,11 +91,11 @@ async fn agent_turn(
         }
 
         let mut results = Vec::new();
-        for (id, name, input) in &tool_uses {
-            display_tool_call(name, input);
+        for (id, name, input) in tool_uses {
+            display_tool_call(&name, &input);
 
-            let output = match tools.get(name) {
-                Some(t) => t.run(input.clone()).await,
+            let output = match tools.get(&name) {
+                Some(t) => t.run(input).await,
                 None => ToolOutput {
                     content: format!("Unknown tool: {name}"),
                     is_error: true,
@@ -105,7 +105,7 @@ async fn agent_turn(
             display_tool_output(&output.content);
 
             results.push(ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
+                tool_use_id: id,
                 content: output.content,
                 is_error: output.is_error,
             });
