@@ -242,6 +242,15 @@ fn collect_files(
         result.files.push(entry.into_path());
     }
 
+    result.files.sort_by(|a, b| {
+        let mtime = |p: &std::path::Path| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        };
+        mtime(b).cmp(&mtime(a))
+    });
+
     result
 }
 
@@ -391,7 +400,7 @@ fn format_files_with_matches(
     re: &regex::Regex,
     head_limit: usize,
 ) -> String {
-    let mut matching_files: Vec<(String, SystemTime)> = Vec::new();
+    let mut matching_files: Vec<String> = Vec::new();
 
     for path in files {
         let Some(text) = read_text(path) else {
@@ -399,15 +408,9 @@ fn format_files_with_matches(
         };
 
         if text.lines().any(|line| re.is_match(line)) {
-            let mtime = path
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            matching_files.push((path.to_string_lossy().into_owned(), mtime));
+            matching_files.push(path.to_string_lossy().into_owned());
         }
     }
-
-    matching_files.sort_by(|a, b| b.1.cmp(&a.1));
 
     if matching_files.is_empty() {
         return "No files found".into();
@@ -416,11 +419,7 @@ fn format_files_with_matches(
     let truncated = matching_files.len() > head_limit;
     matching_files.truncate(head_limit);
 
-    let mut output: String = matching_files
-        .iter()
-        .map(|(p, _)| p.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut output = matching_files.join("\n");
 
     if truncated {
         _ = write!(output, "\n\n(Results limited to {head_limit} files)");
@@ -484,7 +483,7 @@ fn read_text(path: &std::path::Path) -> Option<String> {
     if super::is_binary(&bytes) {
         return None;
     }
-    std::str::from_utf8(&bytes).ok().map(String::from)
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
