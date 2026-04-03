@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -94,15 +95,23 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
 
-    let raw_content = tokio::fs::read_to_string(path)
+    let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    // Normalize CRLF → LF for matching, but keep original bytes for write-back
-    // so we don't silently convert a file's line endings.
-    let normalized = raw_content.replace("\r\n", "\n");
+    // Adapt search/replace strings to the file's line ending style instead of
+    // normalizing the entire file. This preserves original line endings exactly,
+    // even in files with mixed \n and \r\n.
+    let (old, new): (Cow<'_, str>, Cow<'_, str>) = if content.contains("\r\n") {
+        (
+            Cow::Owned(old_string.replace('\n', "\r\n")),
+            Cow::Owned(new_string.replace('\n', "\r\n")),
+        )
+    } else {
+        (Cow::Borrowed(old_string), Cow::Borrowed(new_string))
+    };
 
-    let match_count = normalized.matches(old_string).count();
+    let match_count = content.matches(old.as_ref()).count();
 
     if match_count == 0 {
         return Err(format!(
@@ -120,19 +129,12 @@ async fn edit_file(
     }
 
     let updated = if replace_all {
-        normalized.replace(old_string, new_string)
+        content.replace(old.as_ref(), new.as_ref())
     } else {
-        normalized.replacen(old_string, new_string, 1)
+        content.replacen(old.as_ref(), new.as_ref(), 1)
     };
 
-    let has_crlf = raw_content.contains("\r\n");
-    let final_content = if has_crlf {
-        updated.replace('\n', "\r\n")
-    } else {
-        updated
-    };
-
-    tokio::fs::write(path, &final_content)
+    tokio::fs::write(path, &updated)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
@@ -253,6 +255,22 @@ mod tests {
 
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes, b"a\r\nb\r\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_mixed_line_endings_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.txt");
+        // File has CRLF for most lines but one LF-only line
+        std::fs::write(&path, "keep_lf\nkeep_crlf\r\nreplace_me\r\n").unwrap();
+
+        edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        // The LF-only line must remain LF-only — no silent conversion to CRLF
+        assert_eq!(bytes, b"keep_lf\nkeep_crlf\r\nreplaced\r\n");
     }
 
     #[tokio::test]
