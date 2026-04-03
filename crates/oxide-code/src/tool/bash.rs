@@ -207,25 +207,22 @@ mod tests {
     async fn execute_stderr_output() {
         let output = execute("echo err >&2").await;
         assert!(!output.is_error);
-        assert!(output.content.contains("STDERR:"));
-        assert!(output.content.contains("err"));
+        assert_eq!(output.content, "STDERR:\nerr\n");
     }
 
     #[tokio::test]
     async fn execute_combined_stdout_and_stderr() {
         let output = execute("echo out && echo err >&2").await;
         assert!(!output.is_error);
-        assert!(output.content.contains("out"));
-        assert!(output.content.contains("STDERR:"));
-        assert!(output.content.contains("err"));
+        // stdout comes first, then separator + STDERR section
+        assert_eq!(output.content, "out\n\nSTDERR:\nerr\n");
     }
 
     #[tokio::test]
     async fn execute_output_with_nonzero_exit() {
         let output = execute("echo partial; false").await;
         assert!(output.is_error);
-        assert!(output.content.contains("partial"));
-        assert!(output.content.contains("Exit code: 1"));
+        assert_eq!(output.content, "partial\n\nExit code: 1");
     }
 
     #[tokio::test]
@@ -237,11 +234,11 @@ mod tests {
 
     #[tokio::test]
     async fn execute_truncates_large_output() {
-        let output = execute("yes | head -c 200000").await;
+        // Use distinguishable head and tail so assertions prove both survive.
+        let output = execute("echo HEAD_MARKER && yes | head -c 200000 && echo TAIL_MARKER").await;
         assert!(output.content.contains("lines truncated"));
-        // Head+tail truncation: keeps beginning and end
-        assert!(output.content.starts_with("y\n"));
-        assert!(output.content.ends_with("y\n"));
+        assert!(output.content.starts_with("HEAD_MARKER\n"));
+        assert!(output.content.ends_with("TAIL_MARKER\n"));
     }
 
     // ── truncate_output ──
@@ -255,20 +252,62 @@ mod tests {
 
     #[test]
     fn truncate_output_keeps_head_and_tail() {
-        let mut content = "x\n".repeat(100_000);
+        let head = "HEAD_SENTINEL\n";
+        let tail = "TAIL_SENTINEL\n";
+        let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
+        let filler_lines = filler_len / 2; // "x\n" is 2 bytes each
+
+        let mut content = String::with_capacity(head.len() + filler_len + tail.len());
+        content.push_str(head);
+        for _ in 0..filler_lines {
+            content.push_str("x\n");
+        }
+        content.push_str(tail);
+
         truncate_output(&mut content);
-        assert!(content.len() <= MAX_OUTPUT_BYTES + 100);
-        assert!(content.starts_with("x\n"));
-        assert!(content.ends_with("x\n"));
+
+        assert!(content.starts_with("HEAD_SENTINEL\n"));
+        assert!(content.ends_with("TAIL_SENTINEL\n"));
         assert!(content.contains("lines truncated"));
+        // Verify size is bounded: head half + separator + tail half
+        assert!(content.len() <= MAX_OUTPUT_BYTES + 100);
+        assert!(content.len() >= MAX_OUTPUT_BYTES / 2);
+        // Verify separator sits between head and tail
+        let sep_pos = content.find("lines truncated").unwrap();
+        assert!(sep_pos > head.len());
+        assert!(sep_pos < content.len() - tail.len());
+    }
+
+    #[test]
+    fn truncate_output_multibyte_at_split_boundary() {
+        // Place a 4-byte emoji right at the split point to exercise
+        // floor_char_boundary rounding down instead of splitting mid-char.
+        let half = MAX_OUTPUT_BYTES / 2;
+        let emoji = "🦀"; // 4 bytes
+        let prefix_len = half - 2; // emoji straddles the half boundary
+
+        let mut content = String::new();
+        content.push_str(&"a".repeat(prefix_len));
+        content.push_str(emoji);
+        content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2)); // enough to trigger truncation
+
+        truncate_output(&mut content);
+
+        // Result must be valid UTF-8 (implicit — it's a String)
+        // and must contain the separator
+        assert!(content.contains("lines truncated"));
+        // Head should start with our 'a' prefix
+        assert!(content.starts_with("aaaa"));
+        // Tail should end with our 'b' filler
+        assert!(content.ends_with('b'));
     }
 
     #[test]
     fn truncate_output_barely_over_limit_unchanged() {
-        let mut content = "a".repeat(MAX_OUTPUT_BYTES + 1);
-        let original_len = content.len();
+        let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let mut content = original.clone();
         truncate_output(&mut content);
         // Head and tail overlap — truncation would make it longer, so skip.
-        assert_eq!(content.len(), original_len);
+        assert_eq!(content, original);
     }
 }

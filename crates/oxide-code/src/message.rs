@@ -96,13 +96,17 @@ mod tests {
             "content": "ok"
         });
         let block: ContentBlock = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            block,
-            ContentBlock::ToolResult {
-                is_error: false,
-                ..
-            }
-        ));
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = block
+        else {
+            panic!("expected ToolResult");
+        };
+        assert_eq!(tool_use_id, "id");
+        assert_eq!(content, "ok");
+        assert!(!is_error);
     }
 
     // ── Message::user ──

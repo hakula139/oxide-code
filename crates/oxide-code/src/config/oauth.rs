@@ -427,7 +427,17 @@ mod tests {
 
         assert_eq!(oauth["accessToken"], "new-access");
         assert_eq!(oauth["refreshToken"], "new-refresh");
-        assert!(oauth["expiresAt"].as_u64().unwrap() > 1000);
+        let expires_at = oauth["expiresAt"].as_u64().unwrap();
+        let now = now_millis();
+        // expires_in is 3600s → 3_600_000ms from now, with tolerance for test execution time
+        assert!(
+            expires_at >= now + 3_500_000,
+            "expiresAt too early: {expires_at}"
+        );
+        assert!(
+            expires_at <= now + 3_700_000,
+            "expiresAt too late: {expires_at}"
+        );
         assert_eq!(
             oauth["scopes"],
             serde_json::json!(["user:profile", "user:inference"])
