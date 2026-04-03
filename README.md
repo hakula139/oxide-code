@@ -19,6 +19,21 @@ Early development. See [`docs/roadmap.md`](docs/roadmap.md) for the current road
 ox
 ```
 
+## Configuration
+
+oxide-code needs an Anthropic API credential. It checks two sources in order:
+
+1. **`ANTHROPIC_API_KEY`** — set this to your Anthropic API key.
+2. **Claude Code OAuth** — if no API key is set, oxide-code reads OAuth credentials from `~/.claude/.credentials.json` (created by [Claude Code](https://code.claude.com/docs)).
+
+Optional environment variables:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ANTHROPIC_MODEL` | `claude-opus-4-6` | Model to use |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base URL |
+| `ANTHROPIC_MAX_TOKENS` | `16384` | Max tokens per response |
+
 ## Building from Source
 
 Requires [Rust](https://www.rust-lang.org/tools/install) 1.85+ (edition 2024).

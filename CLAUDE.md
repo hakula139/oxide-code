@@ -15,6 +15,7 @@ ox                      # Start an interactive session
 ```text
 .
 ├── crates/oxide-code/  # Main binary crate
+├── docs/               # Roadmap and research notes
 └── target/             # Build output
 ```
 
