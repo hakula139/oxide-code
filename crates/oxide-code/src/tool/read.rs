@@ -108,8 +108,8 @@ async fn read_file(
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
 
-    // Avoids materializing all lines into a Vec.
-    let total_lines = text.lines().count();
+    let lines: Vec<&str> = text.lines().collect();
+    let total_lines = lines.len();
 
     if total_lines == 0 {
         return Ok("(empty file)".into());
@@ -135,15 +135,8 @@ async fn read_file(
     let mut num_shown: usize = 0;
     let mut truncated_by_bytes = false;
 
-    for (i, line) in text.lines().enumerate() {
-        if i < start_idx {
-            continue;
-        }
-        if num_shown >= limit {
-            break;
-        }
-
-        let line_num = i + 1;
+    for (i, line) in lines[start_idx..].iter().enumerate().take(limit) {
+        let line_num = start_idx + i + 1;
         let truncated = super::truncate_line(line);
 
         // line_number + tab + content + newline
