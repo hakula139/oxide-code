@@ -7,8 +7,9 @@ pub(crate) mod write;
 
 use std::borrow::Cow;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::time::SystemTime;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -116,6 +117,28 @@ const BINARY_CHECK_SIZE: usize = 8192;
 
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
+}
+
+// ── File Walking ──
+
+/// Returns a gitignore-aware iterator over regular files under `base`.
+///
+/// Respects `.gitignore`, `.ignore`, `.git/info/exclude`, and global ignore
+/// rules. Permission errors and symlink loops are silently skipped.
+pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+    ignore::WalkBuilder::new(base)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+}
+
+/// Extracts the modification time from a walker entry, falling back to
+/// `UNIX_EPOCH` when metadata is unavailable.
+pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
+    entry
+        .metadata()
+        .map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 // ── Formatting ──

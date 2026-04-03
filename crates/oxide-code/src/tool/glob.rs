@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -84,27 +83,16 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
         .map_err(|e| format!("Invalid glob pattern: {e}"))?
         .compile_matcher();
 
-    let walker = ignore::WalkBuilder::new(&base).build();
-
-    let mut matches: Vec<(String, SystemTime)> = Vec::new();
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-
-        let path = entry.path();
-        let rel_path = path.strip_prefix(&base).unwrap_or(path);
-        if !glob.is_match(rel_path) {
-            continue;
-        }
-
-        let mtime = entry
-            .metadata()
-            .map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-        matches.push((path.to_string_lossy().into_owned(), mtime));
-    }
+    let mut matches: Vec<(String, std::time::SystemTime)> = super::walk_files(&base)
+        .filter(|entry| {
+            let rel = entry.path().strip_prefix(&base).unwrap_or(entry.path());
+            glob.is_match(rel)
+        })
+        .map(|entry| {
+            let mtime = super::entry_mtime(&entry);
+            (entry.path().to_string_lossy().into_owned(), mtime)
+        })
+        .collect();
 
     matches.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -116,11 +104,13 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
     let total = matches.len();
     matches.truncate(MAX_RESULTS);
 
-    let mut output: String = matches
-        .into_iter()
-        .map(|(p, _)| p)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut output = String::new();
+    for (i, (p, _)) in matches.iter().enumerate() {
+        if i > 0 {
+            output.push('\n');
+        }
+        output.push_str(p);
+    }
 
     if truncated {
         _ = write!(

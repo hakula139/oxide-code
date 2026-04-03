@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -205,46 +204,36 @@ fn collect_files(
         };
     }
 
-    let walker = ignore::WalkBuilder::new(base).build();
-    let mut result = CollectedFiles {
-        files: Vec::new(),
-        skipped_large: Vec::new(),
-    };
+    let mut skipped_large = Vec::new();
+    let mut files_with_mtime: Vec<(std::path::PathBuf, std::time::SystemTime)> =
+        super::walk_files(base)
+            .filter(|entry| {
+                include_matcher.is_none_or(|m| {
+                    let name = entry.file_name().to_string_lossy();
+                    m.is_match(name.as_ref())
+                })
+            })
+            .filter(|entry| {
+                if let Ok(meta) = entry.metadata()
+                    && meta.len() > MAX_FILE_SIZE
+                {
+                    skipped_large.push((entry.path().to_string_lossy().into_owned(), meta.len()));
+                    return false;
+                }
+                true
+            })
+            .map(|entry| {
+                let mtime = super::entry_mtime(&entry);
+                (entry.into_path(), mtime)
+            })
+            .collect();
 
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
+    files_with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
 
-        if let Some(matcher) = include_matcher {
-            let file_name = entry.file_name().to_string_lossy();
-            if !matcher.is_match(file_name.as_ref()) {
-                continue;
-            }
-        }
-
-        if let Ok(meta) = entry.metadata()
-            && meta.len() > MAX_FILE_SIZE
-        {
-            result
-                .skipped_large
-                .push((entry.path().to_string_lossy().into_owned(), meta.len()));
-            continue;
-        }
-
-        result.files.push(entry.into_path());
+    CollectedFiles {
+        files: files_with_mtime.into_iter().map(|(p, _)| p).collect(),
+        skipped_large,
     }
-
-    result.files.sort_by(|a, b| {
-        let mtime = |p: &std::path::Path| {
-            p.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-        };
-        mtime(b).cmp(&mtime(a))
-    });
-
-    result
 }
 
 fn format_skipped_warnings(skipped: &[(String, u64)]) -> String {
@@ -447,11 +436,13 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
     let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
-    let mut output: String = counts
-        .iter()
-        .map(|(p, c)| format!("{p}:{c}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut output = String::new();
+    for (i, (p, c)) in counts.iter().enumerate() {
+        if i > 0 {
+            output.push('\n');
+        }
+        _ = write!(output, "{p}:{c}");
+    }
 
     _ = write!(
         output,
