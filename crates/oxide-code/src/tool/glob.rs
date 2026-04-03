@@ -65,14 +65,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     let Input { pattern, path } = input;
 
     match tokio::task::spawn_blocking(move || glob_files(&pattern, path.as_deref())).await {
-        Ok(Ok(content)) => ToolOutput {
-            content,
-            is_error: false,
-        },
-        Ok(Err(msg)) => ToolOutput {
-            content: msg,
-            is_error: true,
-        },
+        Ok(result) => ToolOutput::from_result(result),
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
             is_error: true,

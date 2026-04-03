@@ -71,16 +71,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    match read_file(&input.file_path, input.offset, input.limit).await {
-        Ok(content) => ToolOutput {
-            content,
-            is_error: false,
-        },
-        Err(msg) => ToolOutput {
-            content: msg,
-            is_error: true,
-        },
-    }
+    ToolOutput::from_result(read_file(&input.file_path, input.offset, input.limit).await)
 }
 
 async fn read_file(

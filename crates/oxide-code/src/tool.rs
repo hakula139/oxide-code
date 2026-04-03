@@ -30,6 +30,21 @@ pub(crate) struct ToolOutput {
     pub(crate) is_error: bool,
 }
 
+impl ToolOutput {
+    pub(crate) fn from_result(result: Result<String, String>) -> Self {
+        match result {
+            Ok(content) => Self {
+                content,
+                is_error: false,
+            },
+            Err(content) => Self {
+                content,
+                is_error: true,
+            },
+        }
+    }
+}
+
 // ── Tool Trait ──
 
 /// A tool that the agent can invoke.

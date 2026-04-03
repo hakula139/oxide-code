@@ -57,16 +57,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    match write_file(&input.file_path, &input.content).await {
-        Ok(msg) => ToolOutput {
-            content: msg,
-            is_error: false,
-        },
-        Err(msg) => ToolOutput {
-            content: msg,
-            is_error: true,
-        },
-    }
+    ToolOutput::from_result(write_file(&input.file_path, &input.content).await)
 }
 
 async fn write_file(path: &str, content: &str) -> Result<String, String> {

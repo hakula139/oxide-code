@@ -69,23 +69,15 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    match edit_file(
-        &input.file_path,
-        &input.old_string,
-        &input.new_string,
-        input.replace_all,
+    ToolOutput::from_result(
+        edit_file(
+            &input.file_path,
+            &input.old_string,
+            &input.new_string,
+            input.replace_all,
+        )
+        .await,
     )
-    .await
-    {
-        Ok(msg) => ToolOutput {
-            content: msg,
-            is_error: false,
-        },
-        Err(msg) => ToolOutput {
-            content: msg,
-            is_error: true,
-        },
-    }
 }
 
 async fn edit_file(
