@@ -90,10 +90,15 @@ async fn read_file(
     }
 
     if metadata.len() > MAX_FILE_SIZE {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "file sizes are well within f64 range"
+        )]
+        let mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
         return Err(format!(
-            "File is too large ({} bytes, max {MAX_FILE_SIZE}). \
+            "File is too large ({mb:.1} MB, max {limit_mb} MB). \
              Use offset and limit to read specific portions.",
-            metadata.len(),
         ));
     }
 
