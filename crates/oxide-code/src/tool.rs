@@ -5,6 +5,7 @@ pub(crate) mod grep;
 pub(crate) mod read;
 pub(crate) mod write;
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -75,6 +76,23 @@ impl ToolRegistry {
     }
 }
 
+// ── Formatting ──
+
+pub(crate) const MAX_LINE_LENGTH: usize = 500;
+
+/// Returns a borrowed slice when no truncation is needed.
+pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
+    if line.len() <= MAX_LINE_LENGTH {
+        return Cow::Borrowed(line);
+    }
+    let boundary = line.floor_char_boundary(MAX_LINE_LENGTH);
+    Cow::Owned(format!(
+        "{}... [{} chars]",
+        &line[..boundary],
+        line.chars().count(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::bash::BashTool;
@@ -106,5 +124,30 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["command"]));
+    }
+
+    // ── truncate_line ──
+
+    #[test]
+    fn truncate_line_short_unchanged() {
+        assert_eq!(truncate_line("hello").as_ref(), "hello");
+    }
+
+    #[test]
+    fn truncate_line_long_gets_truncated() {
+        let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
+        let result = truncate_line(&long_line);
+        assert!(result.starts_with(&"x".repeat(MAX_LINE_LENGTH)));
+        assert!(result.ends_with(&format!("[{} chars]", MAX_LINE_LENGTH + 100)));
+        assert!(result.len() < long_line.len());
+    }
+
+    #[test]
+    fn truncate_line_multibyte_safe() {
+        let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
+        line.push('🦀');
+        line.push_str(&"b".repeat(100));
+        let result = truncate_line(&line);
+        assert!(result.contains("chars]"));
     }
 }

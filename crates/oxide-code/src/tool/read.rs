@@ -9,7 +9,6 @@ use super::{Tool, ToolOutput};
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_CHECK_SIZE: usize = 8192;
-const MAX_LINE_LENGTH: usize = 500;
 /// Cap on the formatted output size. Prevents a single minified line from
 /// flooding the context window. Roughly 32K tokens at ~4 chars / token.
 const MAX_OUTPUT_BYTES: usize = 128 * 1024;
@@ -163,7 +162,7 @@ async fn read_file(
         }
 
         let line_num = i + 1;
-        let truncated = truncate_line(line);
+        let truncated = super::truncate_line(line);
 
         // Check if adding this line would exceed the byte budget.
         // Account for: line_number + tab + content + newline.
@@ -195,17 +194,6 @@ async fn read_file(
 
 fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
-}
-
-fn truncate_line(line: &str) -> String {
-    if line.len() <= MAX_LINE_LENGTH {
-        return line.to_owned();
-    }
-
-    // Find a char boundary near the limit
-    let boundary = line.floor_char_boundary(MAX_LINE_LENGTH);
-    let total = line.chars().count();
-    format!("{}... [{total} chars]", &line[..boundary])
 }
 
 #[cfg(test)]
@@ -393,32 +381,5 @@ mod tests {
     #[test]
     fn strip_bom_no_bom_unchanged() {
         assert_eq!(strip_bom("hello"), "hello");
-    }
-
-    // ── truncate_line ──
-
-    #[test]
-    fn truncate_line_short_unchanged() {
-        assert_eq!(truncate_line("hello"), "hello");
-    }
-
-    #[test]
-    fn truncate_line_long_gets_truncated() {
-        let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
-        let result = truncate_line(&long_line);
-        assert!(result.len() < long_line.len());
-        assert!(result.contains("chars]"));
-        assert!(result.ends_with(&format!("[{} chars]", MAX_LINE_LENGTH + 100)));
-    }
-
-    #[test]
-    fn truncate_line_multibyte_safe() {
-        // 4-byte emoji near the boundary
-        let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
-        line.push('🦀');
-        line.push_str(&"b".repeat(100));
-        let result = truncate_line(&line);
-        assert!(result.contains("chars]"));
-        // Should not panic or split a char
     }
 }

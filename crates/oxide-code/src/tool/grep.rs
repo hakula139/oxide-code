@@ -8,8 +8,8 @@ use serde::Deserialize;
 use super::{Tool, ToolOutput};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
-const MAX_LINE_LENGTH: usize = 500;
 const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1 MB — skip large files during search
+const HIDDEN_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj"];
 
 pub(crate) struct GrepTool;
 
@@ -70,6 +70,15 @@ impl Tool for GrepTool {
 
 // ── Input ──
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OutputMode {
+    #[default]
+    Content,
+    FilesWithMatches,
+    Count,
+}
+
 #[derive(Deserialize)]
 struct Input {
     pattern: String,
@@ -78,7 +87,7 @@ struct Input {
     #[serde(default)]
     include: Option<String>,
     #[serde(default)]
-    output_mode: Option<String>,
+    output_mode: OutputMode,
     #[serde(default)]
     context: Option<usize>,
     #[serde(default)]
@@ -115,7 +124,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
             pattern: &pattern,
             search_path: path.as_deref(),
             include_glob: include.as_deref(),
-            output_mode: output_mode.as_deref(),
+            output_mode,
             context: context.unwrap_or(0),
             case_insensitive,
             head_limit,
@@ -144,22 +153,10 @@ struct GrepParams<'a> {
     pattern: &'a str,
     search_path: Option<&'a str>,
     include_glob: Option<&'a str>,
-    output_mode: Option<&'a str>,
+    output_mode: OutputMode,
     context: usize,
     case_insensitive: bool,
     head_limit: Option<usize>,
-}
-
-// ── Hidden Directory Filter ──
-
-const HIDDEN_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj"];
-
-fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    let name = entry.file_name().to_string_lossy();
-    HIDDEN_DIRS.iter().any(|d| *d == name.as_ref())
 }
 
 // ── Search ──
@@ -188,7 +185,6 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         .transpose()
         .map_err(|e| format!("Invalid include pattern: {e}"))?;
 
-    let mode = params.output_mode.unwrap_or("content");
     let head_limit = match params.head_limit {
         Some(0) => usize::MAX,
         Some(n) => n,
@@ -197,10 +193,10 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 
     let files = collect_files(&base, include_pattern.as_ref());
 
-    Ok(match mode {
-        "files_with_matches" => format_files_with_matches(&files, &re, head_limit),
-        "count" => format_count(&files, &re, head_limit),
-        _ => format_content(&files, &re, params.context, head_limit),
+    Ok(match params.output_mode {
+        OutputMode::FilesWithMatches => format_files_with_matches(&files, &re, head_limit),
+        OutputMode::Count => format_count(&files, &re, head_limit),
+        OutputMode::Content => format_content(&files, &re, params.context, head_limit),
     })
 }
 
@@ -239,6 +235,14 @@ fn collect_files(
     }
 
     files
+}
+
+fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    HIDDEN_DIRS.iter().any(|d| *d == name.as_ref())
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -316,7 +320,7 @@ fn search_no_context(
         if re.is_match(line) {
             let mut entry = String::new();
             let _ = write!(entry, "{display_path}:{}:", line_num + 1);
-            truncate_into(&mut entry, line);
+            entry.push_str(&super::truncate_line(line));
             output_lines.push(entry);
         }
     }
@@ -342,7 +346,6 @@ fn search_with_context(
         return;
     }
 
-    // Merge overlapping context ranges
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for &idx in &match_indices {
         let start = idx.saturating_sub(context);
@@ -356,7 +359,6 @@ fn search_with_context(
         ranges.push((start, end));
     }
 
-    // Format with grep-style separators
     for (range_idx, &(start, end)) in ranges.iter().enumerate() {
         if output_lines.len() >= head_limit {
             return;
@@ -371,7 +373,7 @@ fn search_with_context(
             let sep = if match_indices.contains(&i) { ':' } else { '-' };
             let mut entry = String::new();
             let _ = write!(entry, "{display_path}:{}{sep}", i + 1);
-            truncate_into(&mut entry, line);
+            entry.push_str(&super::truncate_line(line));
             output_lines.push(entry);
         }
     }
@@ -400,7 +402,6 @@ fn format_files_with_matches(
         }
     }
 
-    // Sort by mtime descending (newest first)
     matching_files.sort_by(|a, b| b.1.cmp(&a.1));
 
     if matching_files.is_empty() {
@@ -473,18 +474,6 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
     output
 }
 
-// ── Formatting ──
-
-fn truncate_into(buf: &mut String, line: &str) {
-    if line.len() <= MAX_LINE_LENGTH {
-        buf.push_str(line);
-    } else {
-        let boundary = line.floor_char_boundary(MAX_LINE_LENGTH);
-        buf.push_str(&line[..boundary]);
-        let _ = write!(buf, "... [{} chars]", line.chars().count());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,7 +483,7 @@ mod tests {
             pattern,
             search_path: None,
             include_glob: None,
-            output_mode: None,
+            output_mode: OutputMode::Content,
             context: 0,
             case_insensitive: false,
             head_limit: None,
@@ -731,7 +720,7 @@ mod tests {
 
         let mut p = params("fn");
         p.search_path = Some(dir.path().to_str().unwrap());
-        p.output_mode = Some("files_with_matches");
+        p.output_mode = OutputMode::FilesWithMatches;
         let result = grep_files(&p).unwrap();
         assert!(result.contains("a.rs"));
         assert!(result.contains("b.rs"));
@@ -747,7 +736,7 @@ mod tests {
 
         let mut p = params("match");
         p.search_path = Some(dir.path().to_str().unwrap());
-        p.output_mode = Some("files_with_matches");
+        p.output_mode = OutputMode::FilesWithMatches;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
         assert!(result.contains("Results limited to 2 files"));
@@ -764,7 +753,7 @@ mod tests {
 
         let mut p = params("aaa");
         p.search_path = Some(dir.path().to_str().unwrap());
-        p.output_mode = Some("count");
+        p.output_mode = OutputMode::Count;
         let result = grep_files(&p).unwrap();
         assert!(result.contains("test.txt:2"));
         assert!(result.contains("2 total occurrences"));
@@ -779,7 +768,7 @@ mod tests {
 
         let mut p = params("match");
         p.search_path = Some(dir.path().to_str().unwrap());
-        p.output_mode = Some("count");
+        p.output_mode = OutputMode::Count;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
         // Summary should report all 5 files, not just the 2 shown
@@ -809,23 +798,5 @@ mod tests {
         // 5 match lines + blank + truncation notice
         assert!(result.contains("Results limited to 5 lines"));
         assert!(lines.len() <= 8);
-    }
-
-    // ── truncate_into ──
-
-    #[test]
-    fn truncate_into_short_unchanged() {
-        let mut buf = String::new();
-        truncate_into(&mut buf, "hello");
-        assert_eq!(buf, "hello");
-    }
-
-    #[test]
-    fn truncate_into_long_gets_truncated_with_indicator() {
-        let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
-        let mut buf = String::new();
-        truncate_into(&mut buf, &long_line);
-        assert!(buf.starts_with(&"x".repeat(MAX_LINE_LENGTH)));
-        assert!(buf.ends_with(&format!("[{} chars]", MAX_LINE_LENGTH + 100)));
     }
 }

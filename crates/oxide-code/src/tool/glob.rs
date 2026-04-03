@@ -95,7 +95,6 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
         return Err(format!("Directory does not exist: {}", base.display()));
     }
 
-    // Build the full glob pattern by joining base dir with the relative pattern
     let full_pattern = if std::path::Path::new(pattern).is_absolute() {
         pattern.to_owned()
     } else {
@@ -122,7 +121,6 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
         matches.push((display_path, mtime));
     }
 
-    // Sort by mtime descending (newest first)
     matches.sort_by(|a, b| b.1.cmp(&a.1));
 
     if matches.is_empty() {
