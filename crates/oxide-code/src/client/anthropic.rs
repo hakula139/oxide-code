@@ -184,7 +184,7 @@ impl Client {
             messages,
             system: &system_prompt,
             stream: true,
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: (!tools.is_empty()).then_some(tools),
         })
         .context("failed to serialize request")?;
 
