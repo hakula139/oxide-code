@@ -205,6 +205,13 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_invalid_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = glob_files("[invalid", Some(dir.path().to_str().unwrap())).unwrap_err();
+        assert!(err.contains("Invalid glob pattern"));
+    }
+
+    #[test]
     fn glob_files_invalid_directory() {
         let err = glob_files("*.txt", Some("/nonexistent/dir")).unwrap_err();
         assert!(err.contains("does not exist"));

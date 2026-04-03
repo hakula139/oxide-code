@@ -683,6 +683,45 @@ mod tests {
     }
 
     #[test]
+    fn grep_files_with_context_no_matches_in_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.txt"), "aaa\nbbb\nccc\n").unwrap();
+
+        let mut p = params("xyz");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.context = 1;
+        let result = grep_files(&p).unwrap();
+        assert_eq!(result, "No matches found");
+    }
+
+    #[test]
+    fn grep_files_with_context_respects_head_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                before1
+                MATCH
+                after1
+                gap
+                before2
+                MATCH
+                after2
+            "},
+        )
+        .unwrap();
+
+        let mut p = params("MATCH");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.context = 1;
+        p.head_limit = Some(3);
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("Results limited to 3 lines"));
+        let entry_count = result.lines().filter(|l| l.contains("test.txt:")).count();
+        assert_eq!(entry_count, 3);
+    }
+
+    #[test]
     fn grep_files_with_include_filter() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
@@ -800,6 +839,30 @@ mod tests {
         assert!(err.contains("does not exist"));
     }
 
+    #[test]
+    fn grep_files_invalid_include_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = params("test");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.include_glob = Some("[bad");
+        let err = grep_files(&p).unwrap_err();
+        assert!(err.contains("Invalid include pattern"));
+    }
+
+    #[test]
+    fn grep_files_single_file_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let large = dir.path().join("large.txt");
+        let f = std::fs::File::create(&large).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(large.to_str().unwrap());
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("Skipped"));
+        assert!(result.contains("large.txt"));
+    }
+
     // ── grep_files (files_with_matches mode) ──
 
     #[test]
@@ -833,6 +896,18 @@ mod tests {
         assert!(result.contains("Results limited to 2 files"));
         let file_count = result.lines().filter(|l| l.contains(".txt")).count();
         assert_eq!(file_count, 2);
+    }
+
+    #[test]
+    fn grep_files_files_with_matches_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
+
+        let mut p = params("nonexistent");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.output_mode = OutputMode::FilesWithMatches;
+        let result = grep_files(&p).unwrap();
+        assert_eq!(result, "No files found");
     }
 
     // ── grep_files (count mode) ──
@@ -878,6 +953,20 @@ mod tests {
         assert_eq!(file_lines.len(), 2);
     }
 
+    #[test]
+    fn grep_files_count_mode_singular() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "match once\n").unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.output_mode = OutputMode::Count;
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("1 total occurrence across 1 file."));
+        assert!(!result.contains("occurrences"));
+        assert!(!result.contains("files."));
+    }
+
     // ── grep_files (head_limit) ──
 
     #[test]
@@ -897,5 +986,38 @@ mod tests {
         // 5 match lines + blank + truncation notice
         assert!(result.contains("Results limited to 5 lines"));
         assert!(lines.len() <= 8);
+    }
+
+    #[test]
+    fn grep_files_head_limit_zero_means_unlimited() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (0..DEFAULT_HEAD_LIMIT + 10).fold(String::new(), |mut s, i| {
+            _ = writeln!(s, "match line {i}");
+            s
+        });
+        std::fs::write(dir.path().join("test.txt"), &content).unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.head_limit = Some(0);
+        let result = grep_files(&p).unwrap();
+        assert!(!result.contains("Results limited"));
+        assert!(result.contains(&format!("test.txt:{}:", DEFAULT_HEAD_LIMIT + 1)));
+    }
+
+    #[test]
+    fn grep_files_head_limit_across_multiple_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(name), "match\nmatch\nmatch\n").unwrap();
+        }
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.head_limit = Some(3);
+        let result = grep_files(&p).unwrap();
+        assert!(result.contains("Results limited to 3 lines"));
+        let match_lines: Vec<_> = result.lines().filter(|l| l.contains(":match")).collect();
+        assert_eq!(match_lines.len(), 3);
     }
 }

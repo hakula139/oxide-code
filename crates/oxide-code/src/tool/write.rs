@@ -155,4 +155,26 @@ mod tests {
         write_file(path.to_str().unwrap(), "").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
+
+    #[tokio::test]
+    async fn write_file_fails_when_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "I am a file").unwrap();
+
+        let path = blocker.join("child.txt");
+        let err = write_file(path.to_str().unwrap(), "content")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to create directory"));
+    }
+
+    #[tokio::test]
+    async fn write_file_fails_when_path_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = write_file(dir.path().to_str().unwrap(), "content")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to write file"));
+    }
 }

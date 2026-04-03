@@ -167,8 +167,26 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::bash::BashTool;
     use super::*;
+
+    // ── ToolOutput::from_result ──
+
+    #[test]
+    fn from_result_ok_clears_is_error() {
+        let out = ToolOutput::from_result(Ok("success".into()));
+        assert!(!out.is_error);
+        assert_eq!(out.content, "success");
+    }
+
+    #[test]
+    fn from_result_err_sets_is_error() {
+        let out = ToolOutput::from_result(Err("something went wrong".into()));
+        assert!(out.is_error);
+        assert_eq!(out.content, "something went wrong");
+    }
 
     // ── ToolRegistry::get ──
 
@@ -196,6 +214,20 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["command"]));
+    }
+
+    // ── resolve_base_dir ──
+
+    #[test]
+    fn resolve_base_dir_some_returns_given_path() {
+        let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/foo"));
+    }
+
+    #[test]
+    fn resolve_base_dir_none_returns_cwd() {
+        let result = resolve_base_dir(None).unwrap();
+        assert_eq!(result, std::env::current_dir().unwrap());
     }
 
     // ── truncate_line ──

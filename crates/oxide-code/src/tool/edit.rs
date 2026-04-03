@@ -381,6 +381,37 @@ mod tests {
         assert!(err.contains("2 occurrences"));
     }
 
+    #[tokio::test]
+    async fn edit_file_rejects_too_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_fails_if_write_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to write"));
+    }
+
     // ── dominant_eol ──
 
     #[test]
