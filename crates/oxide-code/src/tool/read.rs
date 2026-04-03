@@ -139,22 +139,25 @@ async fn read_file(
         let line_num = start_idx + i + 1;
         let truncated = super::truncate_line(line);
 
-        // line_number + tab + content + newline
-        let entry_len = width + 1 + truncated.len() + 1;
+        // separator + line_number + tab + content
+        let entry_len = 1 + width + 1 + truncated.len();
         if !output.is_empty() && output.len() + entry_len > MAX_OUTPUT_BYTES {
             truncated_by_bytes = true;
             break;
         }
 
-        _ = writeln!(output, "{line_num:>width$}\t{truncated}");
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        _ = write!(output, "{line_num:>width$}\t{truncated}");
         num_shown += 1;
     }
 
     if num_shown < total_lines || truncated_by_bytes {
         let last_shown = offset + num_shown - 1;
-        _ = writeln!(
+        _ = write!(
             output,
-            "\n(Showing lines {offset}\u{2013}{last_shown} of {total_lines} total)"
+            "\n\n(Showing lines {offset}\u{2013}{last_shown} of {total_lines} total)"
         );
     }
 
@@ -191,8 +194,7 @@ mod tests {
             output.content,
             indoc! {"
                 1\thello
-                2\tworld
-            "}
+                2\tworld"}
         );
     }
 
@@ -217,8 +219,7 @@ mod tests {
             indoc! {"
                 1\talpha
                 2\tbeta
-                3\tgamma
-            "}
+                3\tgamma"}
         );
     }
 
@@ -237,8 +238,7 @@ mod tests {
                 2\tb
                 3\tc
 
-                (Showing lines 2\u{2013}3 of 5 total)
-            "}
+                (Showing lines 2\u{2013}3 of 5 total)"}
         );
     }
 
@@ -255,8 +255,7 @@ mod tests {
             result,
             indoc! {"
                 1\tfirst
-                2\tsecond
-            "}
+                2\tsecond"}
         );
     }
 

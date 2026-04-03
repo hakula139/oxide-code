@@ -108,10 +108,10 @@ async fn execute(command: &str) -> ToolOutput {
             content.push('\n');
         }
         let code = output.status.code().unwrap_or(-1);
-        _ = writeln!(content, "Exit code: {code}");
+        _ = write!(content, "Exit code: {code}");
     }
     if content.is_empty() {
-        content.push_str("(no output)\n");
+        content.push_str("(no output)");
     }
 
     truncate_output(&mut content);
@@ -225,7 +225,7 @@ mod tests {
     async fn execute_failing_command() {
         let output = execute("false").await;
         assert!(output.is_error);
-        assert_eq!(output.content, "Exit code: 1\n");
+        assert_eq!(output.content, "Exit code: 1");
     }
 
     #[tokio::test]
@@ -237,8 +237,7 @@ mod tests {
             indoc! {"
                 partial
 
-                Exit code: 1
-            "}
+                Exit code: 1"}
         );
     }
 
@@ -246,7 +245,7 @@ mod tests {
     async fn execute_no_output() {
         let output = execute("true").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "(no output)\n");
+        assert_eq!(output.content, "(no output)");
     }
 
     #[tokio::test]
