@@ -311,14 +311,14 @@ mod tests {
     fn parse_sse_frame_message_start() {
         let frame = indoc! {r#"
             event: message_start
-            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         let StreamEvent::MessageStart { message } = event else {
             panic!("expected MessageStart");
         };
         assert_eq!(message.id, "msg_123");
-        assert_eq!(message.model, "claude-sonnet-4-20250514");
+        assert_eq!(message.model, "claude-sonnet-4-6");
         let usage = message.usage.expect("expected usage");
         assert_eq!(usage.input_tokens, 25);
         assert_eq!(usage.output_tokens, 1);
