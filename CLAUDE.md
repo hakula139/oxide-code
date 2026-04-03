@@ -32,7 +32,12 @@ ox                      # Start an interactive session
 ├── message.rs          # Conversation message types
 ├── tool.rs             # Tool trait, registry, definitions
 └── tool/
-    └── bash.rs         # Shell command execution with timeout
+    ├── bash.rs         # Shell command execution with timeout
+    ├── edit.rs         # Exact string replacement in files
+    ├── glob.rs         # File pattern matching (glob)
+    ├── grep.rs         # Content search via regex
+    ├── read.rs         # File reading with line numbers and pagination
+    └── write.rs        # File writing with directory creation
 ```
 
 ## Coding Conventions
