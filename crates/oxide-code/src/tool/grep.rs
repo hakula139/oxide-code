@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde::Deserialize;
@@ -179,20 +180,17 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         OutputMode::Content => format_content(&collected.files, &re, params.context, head_limit),
     };
 
-    result.push_str(&format_skipped_warnings(&collected.skipped_large));
+    append_skipped_warnings(&mut result, &collected.skipped_large);
 
     Ok(result)
 }
 
 struct CollectedFiles {
-    files: Vec<std::path::PathBuf>,
+    files: Vec<PathBuf>,
     skipped_large: Vec<(String, u64)>,
 }
 
-fn collect_files(
-    base: &std::path::Path,
-    include_matcher: Option<&globset::GlobMatcher>,
-) -> CollectedFiles {
+fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) -> CollectedFiles {
     if base.is_file() {
         let mut files = Vec::new();
         let mut skipped_large = Vec::new();
@@ -210,28 +208,27 @@ fn collect_files(
     }
 
     let mut skipped_large = Vec::new();
-    let mut files_with_mtime: Vec<(std::path::PathBuf, std::time::SystemTime)> =
-        super::walk_files(base)
-            .filter(|entry| {
-                include_matcher.is_none_or(|m| {
-                    let name = entry.file_name().to_string_lossy();
-                    m.is_match(name.as_ref())
-                })
+    let mut files_with_mtime: Vec<(PathBuf, std::time::SystemTime)> = super::walk_files(base)
+        .filter(|entry| {
+            include_matcher.is_none_or(|m| {
+                let name = entry.file_name().to_string_lossy();
+                m.is_match(name.as_ref())
             })
-            .filter(|entry| {
-                if let Ok(meta) = entry.metadata()
-                    && meta.len() > MAX_FILE_SIZE
-                {
-                    skipped_large.push((entry.path().to_string_lossy().into_owned(), meta.len()));
-                    return false;
-                }
-                true
-            })
-            .map(|entry| {
-                let mtime = super::entry_mtime(&entry);
-                (entry.into_path(), mtime)
-            })
-            .collect();
+        })
+        .filter(|entry| {
+            if let Ok(meta) = entry.metadata()
+                && meta.len() > MAX_FILE_SIZE
+            {
+                skipped_large.push((entry.path().to_string_lossy().into_owned(), meta.len()));
+                return false;
+            }
+            true
+        })
+        .map(|entry| {
+            let mtime = super::entry_mtime(&entry);
+            (entry.into_path(), mtime)
+        })
+        .collect();
 
     files_with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -241,12 +238,12 @@ fn collect_files(
     }
 }
 
-fn format_skipped_warnings(skipped: &[(String, u64)]) -> String {
+fn append_skipped_warnings(output: &mut String, skipped: &[(String, u64)]) {
     if skipped.is_empty() {
-        return String::new();
+        return;
     }
     let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
-    let mut output = format!("\n\nSkipped (exceeds {limit_mb} MB size limit):");
+    _ = write!(output, "\n\nSkipped (exceeds {limit_mb} MB size limit):");
     for (path, size) in skipped {
         #[expect(
             clippy::cast_precision_loss,
@@ -255,13 +252,12 @@ fn format_skipped_warnings(skipped: &[(String, u64)]) -> String {
         let mb = *size as f64 / (1024.0 * 1024.0);
         _ = write!(output, "\n  {path} ({mb:.1} MB)");
     }
-    output
 }
 
 // ── Content Mode ──
 
 fn format_content(
-    files: &[std::path::PathBuf],
+    files: &[PathBuf],
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
@@ -319,10 +315,8 @@ fn search_no_context(
             return;
         }
         if re.is_match(line) {
-            let mut entry = String::new();
-            _ = write!(entry, "{display_path}:{}:", line_num + 1);
-            entry.push_str(&super::truncate_line(line));
-            output_lines.push(entry);
+            let truncated = super::truncate_line(line);
+            output_lines.push(format!("{display_path}:{}:{truncated}", line_num + 1));
         }
     }
 }
@@ -376,21 +370,15 @@ fn search_with_context(
             } else {
                 '-'
             };
-            let mut entry = String::new();
-            _ = write!(entry, "{display_path}:{}{sep}", i + 1);
-            entry.push_str(&super::truncate_line(line));
-            output_lines.push(entry);
+            let truncated = super::truncate_line(line);
+            output_lines.push(format!("{display_path}:{}{sep}{truncated}", i + 1));
         }
     }
 }
 
 // ── Files-with-Matches Mode ──
 
-fn format_files_with_matches(
-    files: &[std::path::PathBuf],
-    re: &regex::Regex,
-    head_limit: usize,
-) -> String {
+fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: usize) -> String {
     let mut matching_files: Vec<String> = Vec::new();
 
     for path in files {
@@ -425,7 +413,7 @@ fn format_files_with_matches(
 
 // ── Count Mode ──
 
-fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usize) -> String {
+fn format_count(files: &[PathBuf], re: &regex::Regex, head_limit: usize) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
@@ -475,7 +463,7 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
     output
 }
 
-fn read_text(path: &std::path::Path) -> Option<String> {
+fn read_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if super::is_binary(&bytes) {
         return None;
