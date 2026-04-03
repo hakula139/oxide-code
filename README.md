@@ -28,11 +28,11 @@ oxide-code needs an Anthropic API credential. It checks two sources in order:
 
 Optional environment variables:
 
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `ANTHROPIC_MODEL` | `claude-opus-4-6` | Model to use |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base URL |
-| `ANTHROPIC_MAX_TOKENS` | `16384` | Max tokens per response |
+| Variable               | Default                     | Description             |
+| ---------------------- | --------------------------- | ----------------------- |
+| `ANTHROPIC_MODEL`      | `claude-opus-4-6`           | Model to use            |
+| `ANTHROPIC_BASE_URL`   | `https://api.anthropic.com` | API base URL            |
+| `ANTHROPIC_MAX_TOKENS` | `16384`                     | Max tokens per response |
 
 ## Building from Source
 

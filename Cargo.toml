@@ -32,20 +32,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = [
-  "rt-multi-thread",
   "io-std",
   "io-util",
   "macros",
   "process",
+  "rt-multi-thread",
   "signal",
   "sync",
   "time",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
-  "fmt",
-  "env-filter",
   "ansi",
+  "env-filter",
+  "fmt",
 ] }
 walkdir = "2"
 
