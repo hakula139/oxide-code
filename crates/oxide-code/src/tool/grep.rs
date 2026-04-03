@@ -425,11 +425,7 @@ fn format_files_with_matches(
 
 // ── Count Mode ──
 
-fn format_count(
-    files: &[std::path::PathBuf],
-    re: &regex::Regex,
-    head_limit: usize,
-) -> String {
+fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usize) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
