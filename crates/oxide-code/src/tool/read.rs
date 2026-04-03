@@ -175,13 +175,13 @@ async fn read_file(
         if !output.is_empty() {
             output.push('\n');
         }
-        let _ = write!(output, "{line_num:>width$}\t{truncated}");
+        _ = write!(output, "{line_num:>width$}\t{truncated}");
         num_shown += 1;
     }
 
     if num_shown < total_lines || truncated_by_bytes {
         let last_shown = offset + num_shown - 1;
-        let _ = write!(
+        _ = write!(
             output,
             "\n\n(Showing lines {offset}\u{2013}{last_shown} of {total_lines} total)"
         );

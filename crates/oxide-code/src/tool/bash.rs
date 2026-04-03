@@ -113,7 +113,7 @@ async fn execute(command: &str) -> ToolOutput {
             content.push('\n');
         }
         let code = output.status.code().unwrap_or(-1);
-        let _ = writeln!(content, "Exit code: {code}");
+        _ = writeln!(content, "Exit code: {code}");
     }
     if content.is_empty() {
         content.push_str("(no output)\n");
@@ -150,7 +150,7 @@ fn truncate_output(content: &mut String) {
 
     let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + 64);
     truncated.push_str(&content[..head_end]);
-    let _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
+    _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
     truncated.push_str(&content[tail_start..]);
 
     *content = truncated;

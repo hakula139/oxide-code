@@ -300,7 +300,7 @@ fn format_content(
     let mut output = output_lines.join("\n");
 
     if truncated {
-        let _ = write!(output, "\n\n(Results limited to {head_limit} lines)");
+        _ = write!(output, "\n\n(Results limited to {head_limit} lines)");
     }
 
     output
@@ -319,7 +319,7 @@ fn search_no_context(
         }
         if re.is_match(line) {
             let mut entry = String::new();
-            let _ = write!(entry, "{display_path}:{}:", line_num + 1);
+            _ = write!(entry, "{display_path}:{}:", line_num + 1);
             entry.push_str(&super::truncate_line(line));
             output_lines.push(entry);
         }
@@ -372,7 +372,7 @@ fn search_with_context(
             }
             let sep = if match_indices.contains(&i) { ':' } else { '-' };
             let mut entry = String::new();
-            let _ = write!(entry, "{display_path}:{}{sep}", i + 1);
+            _ = write!(entry, "{display_path}:{}{sep}", i + 1);
             entry.push_str(&super::truncate_line(line));
             output_lines.push(entry);
         }
@@ -418,7 +418,7 @@ fn format_files_with_matches(
         .join("\n");
 
     if truncated {
-        let _ = write!(output, "\n\n(Results limited to {head_limit} files)");
+        _ = write!(output, "\n\n(Results limited to {head_limit} files)");
     }
 
     output
@@ -456,7 +456,7 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
         .collect::<Vec<_>>()
         .join("\n");
 
-    let _ = write!(
+    _ = write!(
         output,
         "\n\nFound {total_matches} total {} across {total_files} {}.",
         if total_matches == 1 {
@@ -468,7 +468,7 @@ fn format_count(files: &[std::path::PathBuf], re: &regex::Regex, head_limit: usi
     );
 
     if truncated {
-        let _ = write!(output, " (Results limited to {head_limit} files)");
+        _ = write!(output, " (Results limited to {head_limit} files)");
     }
 
     output
@@ -785,7 +785,7 @@ mod tests {
     fn grep_files_head_limit() {
         let dir = tempfile::tempdir().unwrap();
         let content = (0..20).fold(String::new(), |mut s, i| {
-            let _ = writeln!(s, "match line {i}");
+            _ = writeln!(s, "match line {i}");
             s
         });
         std::fs::write(dir.path().join("test.txt"), &content).unwrap();

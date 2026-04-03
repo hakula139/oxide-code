@@ -138,7 +138,7 @@ fn glob_files(pattern: &str, search_dir: Option<&str>) -> Result<String, String>
         .join("\n");
 
     if truncated {
-        let _ = write!(
+        _ = write!(
             output,
             "\n\n(Showing {MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
