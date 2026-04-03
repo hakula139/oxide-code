@@ -124,9 +124,11 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 /// Returns a gitignore-aware iterator over regular files under `base`.
 ///
 /// Respects `.gitignore`, `.ignore`, `.git/info/exclude`, and global ignore
-/// rules. Permission errors and symlink loops are silently skipped.
+/// rules. Stays within the same filesystem to avoid crossing mount points.
+/// Permission errors and symlink loops are silently skipped.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
+        .same_file_system(true)
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))

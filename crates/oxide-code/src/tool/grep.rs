@@ -35,7 +35,7 @@ impl Tool for GrepTool {
                 },
                 "include": {
                     "type": "string",
-                    "description": "Glob pattern to filter files (e.g. \"*.rs\", \"*.{ts,tsx}\")"
+                    "description": "Glob pattern to filter by filename (e.g. \"*.rs\", \"*.{ts,tsx}\"). Matches the basename only, not the full path."
                 },
                 "output_mode": {
                     "type": "string",

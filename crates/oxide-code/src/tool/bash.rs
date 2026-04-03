@@ -75,7 +75,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 }
 
 async fn execute(command: &str) -> ToolOutput {
-    let result = Command::new("sh").arg("-c").arg(command).output().await;
+    let result = Command::new("bash").arg("-c").arg(command).output().await;
 
     let output = match result {
         Ok(o) => o,
