@@ -449,7 +449,8 @@ fn format_count(
         return "No matches found".into();
     }
 
-    let truncated = counts.len() > head_limit;
+    let total_files = counts.len();
+    let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
     let mut output: String = counts
@@ -458,16 +459,15 @@ fn format_count(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let file_count = counts.len();
     let _ = write!(
         output,
-        "\n\nFound {total_matches} total {} across {file_count} {}.",
+        "\n\nFound {total_matches} total {} across {total_files} {}.",
         if total_matches == 1 {
             "occurrence"
         } else {
             "occurrences"
         },
-        if file_count == 1 { "file" } else { "files" },
+        if total_files == 1 { "file" } else { "files" },
     );
 
     if truncated {
@@ -594,6 +594,31 @@ mod tests {
     }
 
     #[test]
+    fn grep_files_with_context_merges_adjacent_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            "a\nb\nMATCH1\nc\nd\nMATCH2\ne\nf\n",
+        )
+        .unwrap();
+
+        let mut p = params("MATCH");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.context = 1;
+        let result = grep_files(&p).unwrap();
+        // With context=1, MATCH1 (line 3) shows lines 2-4 and MATCH2 (line 6) shows
+        // lines 5-7. Lines 4 and 5 bridge the gap, so the ranges merge into one block
+        // with no "--" separator.
+        assert!(!result.contains("--"));
+        assert!(result.contains("test.txt:2-b"));
+        assert!(result.contains("test.txt:3:MATCH1"));
+        assert!(result.contains("test.txt:4-c"));
+        assert!(result.contains("test.txt:5-d"));
+        assert!(result.contains("test.txt:6:MATCH2"));
+        assert!(result.contains("test.txt:7-e"));
+    }
+
+    #[test]
     fn grep_files_with_include_filter() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("code.rs"), "fn test() {}\n").unwrap();
@@ -703,6 +728,26 @@ mod tests {
         let result = grep_files(&p).unwrap();
         assert!(result.contains("test.txt:2"));
         assert!(result.contains("2 total occurrences"));
+    }
+
+    #[test]
+    fn grep_files_count_mode_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("{i}.txt")), "match\n").unwrap();
+        }
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.output_mode = Some("count");
+        p.head_limit = Some(2);
+        let result = grep_files(&p).unwrap();
+        // Summary should report all 5 files, not just the 2 shown
+        assert!(result.contains("5 total occurrences across 5 files"));
+        assert!(result.contains("Results limited to 2 files"));
+        // Only 2 file lines shown
+        let file_lines: Vec<_> = result.lines().filter(|l| l.ends_with(":1")).collect();
+        assert_eq!(file_lines.len(), 2);
     }
 
     // ── grep_files (head_limit) ──
