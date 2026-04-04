@@ -80,6 +80,9 @@ async fn agent_turn(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
+        // The API rejects assistant messages with empty content (e.g., after
+        // stripping an all-thinking response).
+        messages.retain(|m| !(m.role == Role::Assistant && m.content.is_empty()));
         let blocks = stream_response(client, messages, &tool_defs).await?;
 
         let tool_uses: Vec<_> = blocks
@@ -319,8 +322,8 @@ fn apply_delta(
             // Signature is a full value, not incremental.
             *signature = sig_value;
         }
-        (_, delta) => {
-            debug!(?delta, "ignoring unhandled delta");
+        (block, delta) => {
+            debug!(?block, ?delta, "ignoring unhandled delta");
         }
     }
     Ok(())
