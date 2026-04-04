@@ -38,6 +38,7 @@ pub struct Config {
     pub base_url: String,
     pub max_tokens: u32,
     pub thinking: Option<ThinkingConfig>,
+    pub show_thinking: bool,
 }
 
 impl Config {
@@ -67,12 +68,16 @@ impl Config {
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
 
+        let show_thinking =
+            non_empty_env("OX_SHOW_THINKING").is_some_and(|v| v == "1" || v == "true");
+
         Ok(Self {
             auth,
             model,
             base_url,
             max_tokens,
             thinking,
+            show_thinking,
         })
     }
 }

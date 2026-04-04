@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::load().await?;
+    let show_thinking = config.show_thinking;
     let client = Client::new(config)?;
     let tools = ToolRegistry::new(vec![
         Box::new(BashTool),
@@ -43,10 +44,10 @@ async fn main() -> Result<()> {
         Box::new(GrepTool),
     ]);
 
-    repl(&client, &tools).await
+    repl(&client, &tools, show_thinking).await
 }
 
-async fn repl(client: &Client, tools: &ToolRegistry) -> Result<()> {
+async fn repl(client: &Client, tools: &ToolRegistry, show_thinking: bool) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = Vec::new();
@@ -65,7 +66,7 @@ async fn repl(client: &Client, tools: &ToolRegistry) -> Result<()> {
         }
 
         messages.push(Message::user(&input));
-        agent_turn(client, tools, &mut messages).await?;
+        agent_turn(client, tools, &mut messages, show_thinking).await?;
     }
 
     Ok(())
@@ -75,6 +76,7 @@ async fn agent_turn(
     client: &Client,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
+    show_thinking: bool,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
@@ -83,7 +85,7 @@ async fn agent_turn(
         // The API rejects assistant messages with empty content (e.g., after
         // stripping an all-thinking response).
         messages.retain(|m| !(m.role == Role::Assistant && m.content.is_empty()));
-        let blocks = stream_response(client, messages, &tool_defs).await?;
+        let blocks = stream_response(client, messages, &tool_defs, show_thinking).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -139,6 +141,9 @@ async fn agent_turn(
 }
 
 // ── Stream Processing ──
+
+const DIM: &str = "\x1b[2m";
+const DIM_END: &str = "\x1b[22m";
 
 #[derive(Debug)]
 enum BlockAccumulator {
@@ -203,6 +208,7 @@ async fn stream_response(
     client: &Client,
     messages: &[Message],
     tools: &[ToolDefinition],
+    show_thinking: bool,
 ) -> Result<Vec<ContentBlock>> {
     let mut rx = client.stream_message(messages, None, tools)?;
 
@@ -220,11 +226,27 @@ async fn stream_response(
                 if blocks.len() <= index {
                     blocks.resize_with(index + 1, || None);
                 }
-                blocks[index] = Some(init_accumulator(content_block, index, &mut stdout)?);
+                blocks[index] = Some(init_accumulator(
+                    content_block,
+                    index,
+                    &mut stdout,
+                    show_thinking,
+                )?);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, &mut stdout)?;
+                    apply_delta(block, delta, &mut stdout, show_thinking)?;
+                }
+            }
+            StreamEvent::ContentBlockStop { index } => {
+                if show_thinking
+                    && matches!(
+                        blocks.get(index),
+                        Some(Some(BlockAccumulator::Thinking { .. }))
+                    )
+                {
+                    writeln!(stdout)?;
+                    stdout.flush()?;
                 }
             }
             StreamEvent::Error { error } => {
@@ -253,6 +275,7 @@ fn init_accumulator(
     content_block: ContentBlockInfo,
     index: usize,
     stdout: &mut std::io::Stdout,
+    show_thinking: bool,
 ) -> Result<BlockAccumulator> {
     Ok(match content_block {
         ContentBlockInfo::Text { text } => {
@@ -275,10 +298,16 @@ fn init_accumulator(
         ContentBlockInfo::Thinking {
             thinking,
             signature,
-        } => BlockAccumulator::Thinking {
-            thinking,
-            signature,
-        },
+        } => {
+            if show_thinking && !thinking.is_empty() {
+                write!(stdout, "{DIM}{thinking}{DIM_END}")?;
+                stdout.flush()?;
+            }
+            BlockAccumulator::Thinking {
+                thinking,
+                signature,
+            }
+        }
         ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
         ContentBlockInfo::Unknown => {
             warn!("skipping unknown content block at index {index}");
@@ -291,6 +320,7 @@ fn apply_delta(
     block: &mut BlockAccumulator,
     delta: Delta,
     stdout: &mut std::io::Stdout,
+    show_thinking: bool,
 ) -> Result<()> {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
@@ -312,6 +342,10 @@ fn apply_delta(
             },
         ) => {
             thinking.push_str(&thinking_delta);
+            if show_thinking {
+                write!(stdout, "{DIM}{thinking_delta}{DIM_END}")?;
+                stdout.flush()?;
+            }
         }
         (
             BlockAccumulator::Thinking { signature, .. },
