@@ -130,6 +130,7 @@ ox                      # Start an interactive session
 - Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`).
 - Use `indoc!` for multi-line string literals in tests.
 - Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.
+- Prefer a concise test suite with full coverage over many minimal tests. Drop tests that are subsumed by more thorough ones. Merge tests that cover the same code path when the combined test remains readable.
 
 ### Documentation Maintenance
 

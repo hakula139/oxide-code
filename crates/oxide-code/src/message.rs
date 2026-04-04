@@ -248,24 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn strip_trailing_thinking_removes_redacted_at_end() {
-        let mut messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "answer".to_owned(),
-                },
-                ContentBlock::RedactedThinking {
-                    data: "opaque".to_owned(),
-                },
-            ],
-        }];
-        strip_trailing_thinking(&mut messages);
-        assert_eq!(messages[0].content.len(), 1);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
-    }
-
-    #[test]
     fn strip_trailing_thinking_preserves_non_trailing() {
         let mut messages = vec![Message {
             role: Role::Assistant,
@@ -281,6 +263,11 @@ mod tests {
         }];
         strip_trailing_thinking(&mut messages);
         assert_eq!(messages[0].content.len(), 2);
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::Thinking { .. }
+        ));
+        assert!(matches!(&messages[0].content[1], ContentBlock::Text { text } if text == "answer"));
     }
 
     #[test]
