@@ -140,6 +140,29 @@ mod tests {
         assert!(!is_error);
     }
 
+    // ── ContentBlock::ServerToolUse ──
+
+    #[test]
+    fn server_tool_use_round_trips_through_json() {
+        let block = ContentBlock::ServerToolUse {
+            id: "stu_01".to_owned(),
+            name: "advisor".to_owned(),
+            input: serde_json::json!({"query": "test"}),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "server_tool_use");
+        assert_eq!(json["id"], "stu_01");
+        assert_eq!(json["name"], "advisor");
+
+        let deserialized: ContentBlock = serde_json::from_value(json).unwrap();
+        let ContentBlock::ServerToolUse { id, name, input } = deserialized else {
+            panic!("expected ServerToolUse");
+        };
+        assert_eq!(id, "stu_01");
+        assert_eq!(name, "advisor");
+        assert_eq!(input["query"], "test");
+    }
+
     // ── ContentBlock::Thinking ──
 
     #[test]
@@ -181,29 +204,6 @@ mod tests {
             panic!("expected RedactedThinking");
         };
         assert_eq!(data, "base64data==");
-    }
-
-    // ── ContentBlock::ServerToolUse ──
-
-    #[test]
-    fn server_tool_use_round_trips_through_json() {
-        let block = ContentBlock::ServerToolUse {
-            id: "stu_01".to_owned(),
-            name: "advisor".to_owned(),
-            input: serde_json::json!({"query": "test"}),
-        };
-        let json = serde_json::to_value(&block).unwrap();
-        assert_eq!(json["type"], "server_tool_use");
-        assert_eq!(json["id"], "stu_01");
-        assert_eq!(json["name"], "advisor");
-
-        let deserialized: ContentBlock = serde_json::from_value(json).unwrap();
-        let ContentBlock::ServerToolUse { id, name, input } = deserialized else {
-            panic!("expected ServerToolUse");
-        };
-        assert_eq!(id, "stu_01");
-        assert_eq!(name, "advisor");
-        assert_eq!(input["query"], "test");
     }
 
     // ── Message::user ──
