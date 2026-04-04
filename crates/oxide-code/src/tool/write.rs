@@ -58,16 +58,9 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     };
 
     let (result, is_new) = write_file(&input.file_path, &input.content).await;
-    let name = file_name(&input.file_path);
+    let name = super::file_name(&input.file_path);
     let verb = if is_new { "Created" } else { "Updated" };
     ToolOutput::from_result(result).with_title(format!("{verb} {name}"))
-}
-
-fn file_name(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
 }
 
 async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool) {

@@ -25,7 +25,7 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "The glob pattern to match (e.g. \"**/*.rs\", \"src/**/*.ts\")"
+                    "description": r#"The glob pattern to match (e.g. "**/*.rs", "src/**/*.ts")"#
                 },
                 "path": {
                     "type": "string",

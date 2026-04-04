@@ -35,7 +35,7 @@ impl Tool for GrepTool {
                 },
                 "include": {
                     "type": "string",
-                    "description": "Glob pattern to filter by filename (e.g. \"*.rs\", \"*.{ts,tsx}\"). Matches the basename only, not the full path."
+                    "description": r#"Glob pattern to filter by filename (e.g. "*.rs", "*.{ts,tsx}"). Matches the basename only, not the full path."#
                 },
                 "output_mode": {
                     "type": "string",
@@ -259,6 +259,14 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         files: files_with_mtime.into_iter().map(|(p, _)| p).collect(),
         skipped_large,
     }
+}
+
+fn read_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if super::is_binary(&bytes) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], base: &Path) {
@@ -495,14 +503,6 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
     output
 }
 
-fn read_text(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    if super::is_binary(&bytes) {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
@@ -717,7 +717,15 @@ mod tests {
     #[test]
     fn grep_files_with_context_no_matches_in_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "aaa\nbbb\nccc\n").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                aaa
+                bbb
+                ccc
+            "},
+        )
+        .unwrap();
 
         let mut p = params("xyz");
         p.search_path = Some(dir.path().to_str().unwrap());

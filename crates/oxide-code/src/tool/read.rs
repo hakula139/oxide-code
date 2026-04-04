@@ -68,16 +68,9 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    let title = file_name(&input.file_path);
+    let name = super::file_name(&input.file_path);
     ToolOutput::from_result(read_file(&input.file_path, input.offset, input.limit).await)
-        .with_title(format!("Read {title}"))
-}
-
-fn file_name(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
+        .with_title(format!("Read {name}"))
 }
 
 async fn read_file(

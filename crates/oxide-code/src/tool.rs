@@ -141,7 +141,7 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
     })
 }
 
-// ── Path Resolution ──
+// ── Path Utilities ──
 
 /// Returns `search_path` as a [`PathBuf`] if provided, otherwise the current
 /// working directory.
@@ -150,8 +150,6 @@ pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, Str
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
     Ok(search_path.map_or(cwd, PathBuf::from))
 }
-
-// ── Display Path ──
 
 /// Returns a relative path string when `path` is inside `base`, otherwise the
 /// absolute path. When stripping the prefix yields an empty path (i.e.,
@@ -169,6 +167,16 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
         return rel.to_string_lossy().into_owned();
     }
     path.to_string_lossy().into_owned()
+}
+
+/// Extracts the filename component from a path string, falling back to the
+/// full path when no filename is present. Used by file tools to generate
+/// concise TUI titles.
+pub(crate) fn file_name(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
 }
 
 // ── Binary Detection ──
@@ -324,6 +332,18 @@ mod tests {
         let base = Path::new("/home/user/project/src/main.rs");
         let path = Path::new("/home/user/project/src/main.rs");
         assert_eq!(display_path(path, base), "main.rs");
+    }
+
+    // ── file_name ──
+
+    #[test]
+    fn file_name_extracts_basename() {
+        assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn file_name_bare_name_unchanged() {
+        assert_eq!(file_name("README.md"), "README.md");
     }
 
     // ── truncate_line ──
