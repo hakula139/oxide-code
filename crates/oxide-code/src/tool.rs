@@ -26,6 +26,12 @@ pub(crate) struct ToolDefinition {
 
 // ── Tool Output ──
 
+/// Result returned from a tool execution to the agent loop.
+///
+/// `is_error` signals an infrastructure failure (timeout, spawn error, invalid
+/// input) — not a semantic failure in the command itself. Nonzero exit codes,
+/// missing files, and regex mismatches are reported in `content` with
+/// `is_error: false` so the model can interpret severity from context.
 pub(crate) struct ToolOutput {
     pub(crate) content: String,
     pub(crate) is_error: bool,
@@ -96,6 +102,8 @@ impl ToolRegistry {
 
 // ── Input Parsing ──
 
+/// Deserializes raw JSON into a tool's input struct, returning a
+/// [`ToolOutput`] error that can be sent directly back to the model.
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
     serde_json::from_value(raw).map_err(|e| ToolOutput {
         content: format!("Invalid input: {e}"),
@@ -105,6 +113,8 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Resolution ──
 
+/// Returns `search_path` as a [`PathBuf`] if provided, otherwise the current
+/// working directory.
 pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
@@ -135,6 +145,10 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
+/// Detects binary files by scanning for null bytes in the first 8 KB.
+/// False negatives are possible for binary formats that avoid nulls (e.g.,
+/// base64-encoded data), but this catches ELF, Mach-O, images, and most
+/// compiled output cheaply.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -170,9 +184,12 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 /// Roughly 32K tokens at ~4 chars / token.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
+/// Per-line character cap for read and grep output. Matches the
+/// `--max-columns` default that ripgrep uses in Claude Code.
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
-/// Returns a borrowed slice when no truncation is needed.
+/// Truncates a line beyond [`MAX_LINE_LENGTH`] characters, appending a
+/// `[N chars]` suffix. Returns a borrowed slice when no truncation is needed.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
