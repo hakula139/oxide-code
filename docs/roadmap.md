@@ -14,7 +14,7 @@ The project direction is simple:
 
 - Async REPL that reads user input and streams responses from the Anthropic Messages API.
 - Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
-- Extended thinking — full streaming pipeline for `thinking`, `redacted_thinking`, `server_tool_use`, and signature handling with round-trip preservation. Unrecognized future content block types are silently skipped.
+- Extended thinking — full streaming pipeline for `thinking`, `redacted_thinking`, `server_tool_use`, and signature handling with round-trip preservation. Unrecognized future content block types are silently skipped. Optional dimmed thinking display (`OX_SHOW_THINKING`).
 
 ### Authentication & Configuration
 
@@ -54,10 +54,16 @@ The project direction is simple:
 - Inline tool call / result display using `ToolMetadata::title`.
 - Multi-line input editor.
 
+### Configuration File
+
+- TOML config file (`~/.config/ox/config.toml` or `ox.toml` in project root) to replace env-var-only configuration.
+- Layered loading: global defaults → user config → project config → env var overrides.
+- All current env vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `OX_SHOW_THINKING`, etc.) become config keys, with env vars still taking precedence.
+
 ### Tool Enhancements
 
 - Centralized output truncation — move truncation from individual tools into the tool dispatch layer. Enables consistent behavior and large-output persistence to disk.
-- File-change tracking — track read files and their mtimes. Return a stub on re-read when content hasn't changed (saves tokens). Enable read-before-write guards to prevent blind overwrites.
+- File-change tracking — track read files and their modification times. Return a stub on re-read when content hasn't changed (saves tokens). Enable read-before-write guards to prevent blind overwrites.
 
 ### Session Persistence
 
