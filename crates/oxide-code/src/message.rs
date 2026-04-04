@@ -13,8 +13,9 @@ pub enum Role {
 
 /// A content block within a message.
 ///
-/// User messages typically contain `Text` or `ToolResult` blocks.
-/// Assistant messages typically contain `Text` or `ToolUse` blocks.
+/// User messages contain `Text` or `ToolResult` blocks. Assistant messages
+/// contain `Text`, `ToolUse`, `ServerToolUse`, `Thinking`, and / or
+/// `RedactedThinking` blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
