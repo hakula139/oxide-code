@@ -262,6 +262,7 @@ mod tests {
         }];
         strip_trailing_thinking(&mut messages);
         assert_eq!(messages[0].content.len(), 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
     }
 
     #[test]
@@ -292,5 +293,40 @@ mod tests {
         }];
         strip_trailing_thinking(&mut messages);
         assert_eq!(messages[0].content.len(), 1);
+    }
+
+    #[test]
+    fn strip_trailing_thinking_removes_multiple_consecutive() {
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "answer".to_owned(),
+                },
+                ContentBlock::Thinking {
+                    thinking: "first".to_owned(),
+                    signature: "sig1".to_owned(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "opaque".to_owned(),
+                },
+            ],
+        }];
+        strip_trailing_thinking(&mut messages);
+        assert_eq!(messages[0].content.len(), 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn strip_trailing_thinking_empties_all_thinking_message() {
+        let mut messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "reasoning".to_owned(),
+                signature: "sig".to_owned(),
+            }],
+        }];
+        strip_trailing_thinking(&mut messages);
+        assert!(messages[0].content.is_empty());
     }
 }
