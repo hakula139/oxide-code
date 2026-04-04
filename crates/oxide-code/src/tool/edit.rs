@@ -296,22 +296,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_mixed_eol_normalized_to_dominant() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mixed.txt");
-        // 2 CRLF, 1 LF → dominant is CRLF
-        std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
-
-        edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
-            .await
-            .unwrap();
-
-        let bytes = std::fs::read(&path).unwrap();
-        // All line endings normalized to the dominant style (CRLF)
-        assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
-    }
-
-    #[tokio::test]
     async fn edit_file_crlf_in_new_string_not_doubled() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
@@ -325,6 +309,22 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         // \r\n in new_string is normalized to \n, then restored to \r\n — not \r\r\n
         assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_mixed_eol_normalized_to_dominant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.txt");
+        // 2 CRLF, 1 LF → dominant is CRLF
+        std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
+
+        edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        // All line endings normalized to the dominant style (CRLF)
+        assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
     }
 
     #[tokio::test]
