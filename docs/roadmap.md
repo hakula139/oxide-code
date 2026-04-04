@@ -14,7 +14,7 @@ The project direction is simple:
 
 - Async REPL that reads user input and streams responses from the Anthropic Messages API.
 - Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
-- Streaming robustness — unknown content block types (`thinking`, `redacted_thinking`, `signature_delta`, etc.) are silently skipped instead of crashing deserialization.
+- Extended thinking — full streaming pipeline for `thinking`, `redacted_thinking`, `server_tool_use`, and signature handling with round-trip preservation. Unrecognized future content block types are silently skipped.
 
 ### Authentication & Configuration
 

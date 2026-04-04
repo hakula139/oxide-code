@@ -156,5 +156,8 @@ After verification passes, review for:
 - Correctness and edge cases
 - Adherence to project conventions (this file)
 - Conciseness — prefer the simplest idiomatic solution
+- DRY — flag duplicate logic across modules; look for extraction opportunities
+- Cross-file consistency — parallel types and similar patterns should use the same structure, naming, ordering, and derive traits
+- Idiomatic Rust — proper use of iterators, pattern matching, type system, ownership, and standard library
 - Existing crates — flag hand-written logic that an established crate already handles
 - Test coverage gaps
