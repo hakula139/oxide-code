@@ -14,7 +14,7 @@ const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14"
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
-/// Matches the installed Claude Code version.
+/// Matches the referenced Claude Code version.
 const CLAUDE_CLI_VERSION: &str = "2.1.87";
 
 /// System prompt prefix that identifies the client to the Anthropic API. Required
