@@ -8,7 +8,7 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
@@ -137,6 +137,7 @@ async fn agent_turn(
 
 // ── Stream Processing ──
 
+#[derive(Debug)]
 enum BlockAccumulator {
     Text(String),
     ToolUse {
@@ -233,7 +234,7 @@ async fn stream_response(
     // Streamed text deltas don't include a final newline.
     let has_text = blocks
         .iter()
-        .any(|b| matches!(b, Some(BlockAccumulator::Text(_))));
+        .any(|b| matches!(b, Some(BlockAccumulator::Text(s)) if !s.is_empty()));
     if has_text {
         writeln!(stdout)?;
     }
@@ -318,7 +319,9 @@ fn apply_delta(
             // Signature is a full value, not incremental.
             *signature = sig_value;
         }
-        _ => {}
+        (_, delta) => {
+            debug!(?delta, "ignoring unhandled delta");
+        }
     }
     Ok(())
 }
