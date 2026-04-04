@@ -92,21 +92,22 @@ async fn execute(command: &str) -> ToolOutput {
 
     let mut content = String::new();
     if !stdout.is_empty() {
-        content.push_str(&stdout);
+        let trimmed = stdout.trim_start_matches('\n').trim_end();
+        content.push_str(trimmed);
     }
     if !stderr.is_empty() {
         if !content.is_empty() {
             content.push('\n');
         }
-        content.push_str("STDERR:\n");
-        content.push_str(&stderr);
+        content.push_str(stderr.trim());
     }
     if !output.status.success() {
-        if !content.is_empty() {
-            content.push('\n');
-        }
         let code = output.status.code().unwrap_or(-1);
-        _ = write!(content, "Exit code: {code}");
+        if content.is_empty() {
+            _ = write!(content, "(exit code {code})");
+        } else {
+            _ = write!(content, "\n\n(exit code {code})");
+        }
     }
     if content.is_empty() {
         content.push_str("(no output)");
@@ -114,9 +115,13 @@ async fn execute(command: &str) -> ToolOutput {
 
     truncate_output(&mut content);
 
+    // Only flag execution failures (timeout, spawn error) as is_error.
+    // Nonzero exit codes are informational — many commands use them normally
+    // (grep returns 1 for no matches, diff returns 1 for differences, etc.).
+    // The model can determine severity from the output content itself.
     ToolOutput {
         content,
-        is_error: !output.status.success(),
+        is_error: false,
     }
 }
 
@@ -154,8 +159,6 @@ fn truncate_output(content: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
-
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
@@ -165,7 +168,7 @@ mod tests {
     async fn run_valid_command() {
         let output = run(serde_json::json!({"command": "echo hello"})).await;
         assert!(!output.is_error);
-        assert_eq!(output.content.trim(), "hello");
+        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
@@ -192,49 +195,35 @@ mod tests {
     async fn execute_echo() {
         let output = execute("echo hello").await;
         assert!(!output.is_error);
-        assert_eq!(output.content.trim(), "hello");
+        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
     async fn execute_stderr_output() {
         let output = execute("echo err >&2").await;
         assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                STDERR:
-                err
-            "}
-        );
+        assert_eq!(output.content, "err");
     }
 
     #[tokio::test]
     async fn execute_combined_stdout_and_stderr() {
         let output = execute("echo out && echo err >&2").await;
         assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                out
-
-                STDERR:
-                err
-            "}
-        );
+        assert_eq!(output.content, "out\nerr");
     }
 
     #[tokio::test]
-    async fn execute_failing_command() {
+    async fn execute_nonzero_exit_not_flagged_as_error() {
         let output = execute("false").await;
-        assert!(output.is_error);
-        assert_eq!(output.content, "Exit code: 1");
+        assert!(!output.is_error);
+        assert_eq!(output.content, "(exit code 1)");
     }
 
     #[tokio::test]
     async fn execute_output_with_nonzero_exit() {
         let output = execute("echo partial; false").await;
-        assert!(output.is_error);
-        assert_eq!(output.content, "partial\n\nExit code: 1");
+        assert!(!output.is_error);
+        assert_eq!(output.content, "partial\n\n(exit code 1)");
     }
 
     #[tokio::test]
@@ -249,7 +238,7 @@ mod tests {
         let output = execute("echo HEAD_MARKER && yes | head -c 200000 && echo TAIL_MARKER").await;
         assert!(output.content.contains("lines truncated"));
         assert!(output.content.starts_with("HEAD_MARKER\n"));
-        assert!(output.content.ends_with("TAIL_MARKER\n"));
+        assert!(output.content.ends_with("TAIL_MARKER"));
     }
 
     // ── truncate_output ──

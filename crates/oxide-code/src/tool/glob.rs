@@ -89,7 +89,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
         })
         .map(|entry| {
             let mtime = super::entry_mtime(&entry);
-            (entry.path().to_string_lossy().into_owned(), mtime)
+            (super::display_path(entry.path(), &base), mtime)
         })
         .collect();
 

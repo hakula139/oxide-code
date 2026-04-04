@@ -173,20 +173,22 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
 
     let mut result = match params.output_mode {
         OutputMode::FilesWithMatches => {
-            format_files_with_matches(&collected.files, &re, head_limit)
+            format_files_with_matches(&collected.files, &base, &re, head_limit)
         }
-        OutputMode::Count => format_count(&collected.files, &re, head_limit),
-        OutputMode::Content => format_content(&collected.files, &re, params.context, head_limit),
+        OutputMode::Count => format_count(&collected.files, &base, &re, head_limit),
+        OutputMode::Content => {
+            format_content(&collected.files, &base, &re, params.context, head_limit)
+        }
     };
 
-    append_skipped_warnings(&mut result, &collected.skipped_large);
+    append_skipped_warnings(&mut result, &collected.skipped_large, &base);
 
     Ok(result)
 }
 
 struct CollectedFiles {
     files: Vec<PathBuf>,
-    skipped_large: Vec<(String, u64)>,
+    skipped_large: Vec<(PathBuf, u64)>,
 }
 
 fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) -> CollectedFiles {
@@ -196,7 +198,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         if let Ok(meta) = base.metadata()
             && meta.len() > MAX_FILE_SIZE
         {
-            skipped_large.push((base.to_string_lossy().into_owned(), meta.len()));
+            skipped_large.push((base.to_path_buf(), meta.len()));
         } else {
             files.push(base.to_path_buf());
         }
@@ -218,7 +220,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
             if let Ok(meta) = entry.metadata()
                 && meta.len() > MAX_FILE_SIZE
             {
-                skipped_large.push((entry.path().to_string_lossy().into_owned(), meta.len()));
+                skipped_large.push((entry.path().to_path_buf(), meta.len()));
                 return false;
             }
             true
@@ -237,7 +239,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
     }
 }
 
-fn append_skipped_warnings(output: &mut String, skipped: &[(String, u64)]) {
+fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], base: &Path) {
     if skipped.is_empty() {
         return;
     }
@@ -249,7 +251,8 @@ fn append_skipped_warnings(output: &mut String, skipped: &[(String, u64)]) {
             reason = "file sizes are well within f64 range"
         )]
         let mb = *size as f64 / (1024.0 * 1024.0);
-        _ = write!(output, "\n  {path} ({mb:.1} MB)");
+        let display = super::display_path(path, base);
+        _ = write!(output, "\n  {display} ({mb:.1} MB)");
     }
 }
 
@@ -257,6 +260,7 @@ fn append_skipped_warnings(output: &mut String, skipped: &[(String, u64)]) {
 
 fn format_content(
     files: &[PathBuf],
+    base: &Path,
     re: &regex::Regex,
     context: usize,
     head_limit: usize,
@@ -272,7 +276,7 @@ fn format_content(
             continue;
         };
 
-        let display_path = path.to_string_lossy();
+        let display_path = super::display_path(path, base);
 
         if context == 0 {
             search_no_context(&text, re, &display_path, &mut output_lines, head_limit);
@@ -377,7 +381,12 @@ fn search_with_context(
 
 // ── Files-with-Matches Mode ──
 
-fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: usize) -> String {
+fn format_files_with_matches(
+    files: &[PathBuf],
+    base: &Path,
+    re: &regex::Regex,
+    head_limit: usize,
+) -> String {
     let mut matching_files: Vec<String> = Vec::new();
 
     for path in files {
@@ -390,7 +399,7 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
         };
 
         if text.lines().any(|line| re.is_match(line)) {
-            matching_files.push(path.to_string_lossy().into_owned());
+            matching_files.push(super::display_path(path, base));
         }
     }
 
@@ -398,8 +407,12 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
         return "No files found".into();
     }
 
-    let truncated = matching_files.len() >= head_limit;
-    let mut output = matching_files.join("\n");
+    let num_files = matching_files.len();
+    let truncated = num_files >= head_limit;
+    let file_word = if num_files == 1 { "file" } else { "files" };
+
+    let mut output = format!("Found {num_files} {file_word}\n");
+    output.push_str(&matching_files.join("\n"));
 
     if truncated {
         _ = write!(output, "\n\n(Results limited to {head_limit} files)");
@@ -410,7 +423,7 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
 
 // ── Count Mode ──
 
-fn format_count(files: &[PathBuf], re: &regex::Regex, head_limit: usize) -> String {
+fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: usize) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut total_matches: usize = 0;
 
@@ -422,7 +435,7 @@ fn format_count(files: &[PathBuf], re: &regex::Regex, head_limit: usize) -> Stri
         let count = text.lines().filter(|line| re.is_match(line)).count();
         if count > 0 {
             total_matches += count;
-            counts.push((path.to_string_lossy().into_owned(), count));
+            counts.push((super::display_path(path, base), count));
         }
     }
 
@@ -873,6 +886,7 @@ mod tests {
         p.search_path = Some(dir.path().to_str().unwrap());
         p.output_mode = OutputMode::FilesWithMatches;
         let result = grep_files(&p).unwrap();
+        assert!(result.starts_with("Found 2 files\n"));
         assert!(result.contains("a.rs"));
         assert!(result.contains("b.rs"));
         assert!(!result.contains("c.txt"));
@@ -890,6 +904,7 @@ mod tests {
         p.output_mode = OutputMode::FilesWithMatches;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
+        assert!(result.starts_with("Found 2 files\n"));
         assert!(result.contains("Results limited to 2 files"));
         let file_count = result.lines().filter(|l| l.contains(".txt")).count();
         assert_eq!(file_count, 2);

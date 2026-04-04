@@ -126,10 +126,6 @@ async fn read_file(
         ));
     }
 
-    // Width for line-number column: based on the last possible line we might show.
-    let last_possible_line = total_lines.min(start_idx + limit);
-    let width = last_possible_line.to_string().len().max(1);
-
     // The byte budget prevents a single minified line from flooding context.
     let mut output = String::new();
     let mut num_shown: usize = 0;
@@ -139,8 +135,8 @@ async fn read_file(
         let line_num = start_idx + i + 1;
         let truncated = super::truncate_line(line);
 
-        // separator + line_number + tab + content
-        let entry_len = 1 + width + 1 + truncated.len();
+        let line_num_str = line_num.to_string();
+        let entry_len = 1 + line_num_str.len() + 1 + truncated.len();
         if !output.is_empty() && output.len() + entry_len > super::MAX_OUTPUT_BYTES {
             truncated_by_bytes = true;
             break;
@@ -149,7 +145,7 @@ async fn read_file(
         if !output.is_empty() {
             output.push('\n');
         }
-        _ = write!(output, "{line_num:>width$}\t{truncated}");
+        _ = write!(output, "{line_num}\t{truncated}");
         num_shown += 1;
     }
 

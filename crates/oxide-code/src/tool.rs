@@ -111,6 +111,26 @@ pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, Str
     Ok(search_path.map_or(cwd, PathBuf::from))
 }
 
+// ── Display Path ──
+
+/// Returns a relative path string when `path` is inside `base`, otherwise the
+/// absolute path. When stripping the prefix yields an empty path (i.e.,
+/// `path == base`), falls back to the filename. Saves tokens in tool output
+/// and matches how developers think about file locations.
+pub(crate) fn display_path(path: &Path, base: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(base) {
+        if rel.as_os_str().is_empty() {
+            // path == base (single-file search): show the filename
+            return path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+        }
+        return rel.to_string_lossy().into_owned();
+    }
+    path.to_string_lossy().into_owned()
+}
+
 // ── Binary Detection ──
 
 const BINARY_CHECK_SIZE: usize = 8192;
@@ -234,6 +254,29 @@ mod tests {
     fn resolve_base_dir_none_returns_cwd() {
         let result = resolve_base_dir(None).unwrap();
         assert_eq!(result, std::env::current_dir().unwrap());
+    }
+
+    // ── display_path ──
+
+    #[test]
+    fn display_path_relative_inside_base() {
+        let base = Path::new("/home/user/project");
+        let path = Path::new("/home/user/project/src/main.rs");
+        assert_eq!(display_path(path, base), "src/main.rs");
+    }
+
+    #[test]
+    fn display_path_outside_base_stays_absolute() {
+        let base = Path::new("/home/user/project");
+        let path = Path::new("/etc/config.toml");
+        assert_eq!(display_path(path, base), "/etc/config.toml");
+    }
+
+    #[test]
+    fn display_path_same_path_returns_filename() {
+        let base = Path::new("/home/user/project/src/main.rs");
+        let path = Path::new("/home/user/project/src/main.rs");
+        assert_eq!(display_path(path, base), "main.rs");
     }
 
     // ── truncate_line ──
