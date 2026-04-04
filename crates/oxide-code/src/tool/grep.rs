@@ -600,11 +600,11 @@ mod tests {
         p.search_path = Some(dir.path().to_str().unwrap());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // Context line uses `-` separator, match uses `:`
+        // Context line uses `-` separator, match uses `:`.
         assert!(result.contains("test.txt:2-bbb"));
         assert!(result.contains("test.txt:3:ccc"));
         assert!(result.contains("test.txt:4-ddd"));
-        // Lines outside context range should not appear
+        // Lines outside context range should not appear.
         assert!(!result.contains("aaa"));
         assert!(!result.contains("eee"));
     }
@@ -672,7 +672,7 @@ mod tests {
         assert!(result.contains("test.txt:2-a"));
         assert!(result.contains("test.txt:7-f"));
         assert!(result.contains("test.txt:8:MATCH2"));
-        // Middle lines should not appear
+        // Middle lines should not appear.
         assert!(!result.contains("test.txt:3"));
         assert!(!result.contains("test.txt:4"));
         assert!(!result.contains("test.txt:5"));
@@ -942,10 +942,10 @@ mod tests {
         p.output_mode = OutputMode::Count;
         p.head_limit = Some(2);
         let result = grep_files(&p).unwrap();
-        // Summary should report all 5 files, not just the 2 shown
+        // Summary should report all 5 files, not just the 2 shown.
         assert!(result.contains("5 total occurrences across 5 files"));
         assert!(result.contains("Results limited to 2 files"));
-        // Only 2 file lines shown
+        // Only 2 file lines shown.
         let file_lines: Vec<_> = result.lines().filter(|l| l.ends_with(":1")).collect();
         assert_eq!(file_lines.len(), 2);
     }

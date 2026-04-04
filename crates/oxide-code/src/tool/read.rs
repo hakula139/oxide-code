@@ -116,7 +116,7 @@ async fn read_file(
         return Ok("(empty file)".into());
     }
 
-    // offset is 1-indexed; 0 is treated as 1
+    // offset is 1-indexed; 0 is treated as 1.
     let offset = offset.unwrap_or(1).max(1);
     let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
     let start_idx = offset - 1;
@@ -126,7 +126,7 @@ async fn read_file(
         ));
     }
 
-    // Width for line-number column: based on the last possible line we might show
+    // Width for line-number column: based on the last possible line we might show.
     let last_possible_line = total_lines.min(start_idx + limit);
     let width = last_possible_line.to_string().len().max(1);
 
