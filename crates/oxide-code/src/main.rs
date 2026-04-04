@@ -143,19 +143,23 @@ enum BlockAccumulator {
         name: String,
         json_buf: String,
     },
+    /// Placeholder for unrecognized content block types. Absorbs deltas silently
+    /// and produces no [`ContentBlock`] at the end.
+    Skipped,
 }
 
 impl BlockAccumulator {
-    fn into_content_block(self) -> ContentBlock {
+    fn into_content_block(self) -> Option<ContentBlock> {
         match self {
-            Self::Text(text) => ContentBlock::Text { text },
+            Self::Text(text) => Some(ContentBlock::Text { text }),
             Self::ToolUse { id, name, json_buf } => {
                 let input = serde_json::from_str(&json_buf).unwrap_or_else(|e| {
                     warn!("malformed tool input JSON: {e}");
                     serde_json::Value::Object(serde_json::Map::new())
                 });
-                ContentBlock::ToolUse { id, name, input }
+                Some(ContentBlock::ToolUse { id, name, input })
             }
+            Self::Skipped => None,
         }
     }
 }
@@ -194,6 +198,10 @@ async fn stream_response(
                         name,
                         json_buf: String::new(),
                     },
+                    ContentBlockInfo::Unknown => {
+                        warn!("skipping unknown content block at index {index}");
+                        BlockAccumulator::Skipped
+                    }
                 });
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
@@ -232,7 +240,7 @@ async fn stream_response(
     Ok(blocks
         .into_iter()
         .flatten()
-        .map(BlockAccumulator::into_content_block)
+        .filter_map(BlockAccumulator::into_content_block)
         .collect())
 }
 

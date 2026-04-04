@@ -67,6 +67,9 @@ pub enum StreamEvent {
     Error {
         error: ApiError,
     },
+    /// Catch-all for unrecognized event types. Silently ignored in stream processing.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg_attr(
@@ -86,15 +89,36 @@ pub struct MessageResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
-    Text { text: String },
-    ToolUse { id: String, name: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+    },
+    /// Catch-all for unrecognized block types (e.g., `thinking`). Skipped during
+    /// stream processing.
+    #[serde(other)]
+    Unknown,
 }
 
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names mirror Anthropic API delta type values (text_delta, input_json_delta)"
+)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
-    TextDelta { text: String },
-    InputJsonDelta { partial_json: String },
+    TextDelta {
+        text: String,
+    },
+    InputJsonDelta {
+        partial_json: String,
+    },
+    /// Catch-all for unrecognized delta types (e.g., `thinking_delta`). Silently
+    /// dropped during stream processing.
+    #[serde(other)]
+    Unknown,
 }
 
 #[expect(
@@ -285,6 +309,38 @@ mod tests {
 
     use super::*;
 
+    // ── ContentBlockInfo ──
+
+    #[test]
+    fn content_block_info_unknown_type() {
+        let json = r#"{"type":"thinking","thinking":"reasoning text"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        assert!(matches!(info, ContentBlockInfo::Unknown));
+    }
+
+    #[test]
+    fn content_block_info_unknown_redacted_thinking() {
+        let json = r#"{"type":"redacted_thinking","data":"[redacted]"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        assert!(matches!(info, ContentBlockInfo::Unknown));
+    }
+
+    // ── Delta ──
+
+    #[test]
+    fn delta_unknown_type() {
+        let json = r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        assert!(matches!(delta, Delta::Unknown));
+    }
+
+    #[test]
+    fn delta_unknown_signature() {
+        let json = r#"{"type":"signature_delta","signature":"sig_abc123"}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        assert!(matches!(delta, Delta::Unknown));
+    }
+
     // ── parse_sse_frame ──
 
     #[test]
@@ -343,6 +399,16 @@ mod tests {
         };
         assert_eq!(error.error_type, "rate_limit_error");
         assert_eq!(error.message, "Too many requests");
+    }
+
+    #[test]
+    fn parse_sse_frame_unknown_event_type() {
+        let frame = indoc! {r#"
+            event: some_future_event
+            data: {"type":"some_future_event","payload":"data"}
+        "#};
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(event, StreamEvent::Unknown));
     }
 
     #[test]
