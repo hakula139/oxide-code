@@ -119,8 +119,10 @@ async fn edit_file(
 
     let eol = dominant_eol(&content);
     let content = normalize_eol(content);
+    let old_string = &normalize_eol(old_string.to_owned());
+    let new_string = &normalize_eol(new_string.to_owned());
 
-    let match_count = content.matches(old_string).count();
+    let match_count = content.matches(old_string.as_str()).count();
 
     if match_count == 0 {
         return Err(format!(
@@ -157,6 +159,8 @@ async fn edit_file(
 
 // ── Line Endings ──
 
+/// Detects the dominant line ending style. Bare CR (`\r` without `\n`) is not
+/// detected — such files are treated as LF and multi-line matches may fail.
 fn dominant_eol(content: &str) -> &'static str {
     let crlf = content.matches("\r\n").count();
     // Each `\r\n` also contains a `\n`, so subtract to get the LF-only count.
@@ -306,6 +310,22 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         // All line endings normalized to the dominant style (CRLF)
         assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_crlf_in_new_string_not_doubled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
+
+        // new_string contains \r\n — should be normalized before apply_eol
+        edit_file(path.to_str().unwrap(), "aaa", "x\r\ny", false)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        // \r\n in new_string is normalized to \n, then restored to \r\n — not \r\r\n
+        assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
     }
 
     #[tokio::test]
