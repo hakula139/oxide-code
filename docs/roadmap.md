@@ -22,6 +22,13 @@ The project direction is simple:
 
 ## Current Focus
 
+### macOS Keychain OAuth
+
+- Read OAuth tokens from macOS Keychain (`"Claude Code-credentials"` service) instead of only `~/.claude/.credentials.json`.
+- Claude Code uses Keychain as the primary store on macOS; the file is a fallback. The two can diverge, causing stale-token errors.
+- Write refreshed tokens back to both Keychain and file.
+- See `.claude/plans/macos-keychain-oauth.md` for full design.
+
 ### Streaming Robustness
 
 - Handle unknown content block types (`thinking`, `redacted_thinking`, `signature_delta`, etc.) gracefully instead of crashing on deserialization.
