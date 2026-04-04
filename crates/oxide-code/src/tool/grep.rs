@@ -126,11 +126,33 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     })
     .await
     {
-        Ok(result) => ToolOutput::from_result(result),
+        Ok(result) => {
+            let title = grep_title(result.as_deref().ok());
+            ToolOutput::from_result(result).with_title(title)
+        }
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
             is_error: true,
+            metadata: super::ToolMetadata::default(),
         },
+    }
+}
+
+fn grep_title(output: Option<&str>) -> String {
+    match output {
+        Some("No matches found" | "No files found") | None => "No matches found".into(),
+        Some(text) => {
+            // Count mode has a "Found N total occurrence(s)" summary line.
+            if let Some(line) = text.lines().find(|l| l.starts_with("Found ")) {
+                return line.trim_end_matches('.').to_owned();
+            }
+            let match_count = text
+                .lines()
+                .filter(|l| !l.starts_with('(') && l.contains(':'))
+                .count();
+            let word = if match_count == 1 { "match" } else { "matches" };
+            format!("{match_count} {word}")
+        }
     }
 }
 

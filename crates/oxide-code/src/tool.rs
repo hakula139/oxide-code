@@ -28,6 +28,10 @@ pub(crate) struct ToolDefinition {
 
 /// Result returned from a tool execution to the agent loop.
 ///
+/// `content` is the text sent back to the model as the `tool_result`.
+/// `metadata` carries structured data for UI display and logging — it is
+/// never sent to the model.
+///
 /// `is_error` signals an infrastructure failure (timeout, spawn error, invalid
 /// input) — not a semantic failure in the command itself. Nonzero exit codes,
 /// missing files, and regex mismatches are reported in `content` with
@@ -35,20 +39,45 @@ pub(crate) struct ToolDefinition {
 pub(crate) struct ToolOutput {
     pub(crate) content: String,
     pub(crate) is_error: bool,
+    pub(crate) metadata: ToolMetadata,
+}
+
+/// Structured data for UI display and logging, not sent to the model.
+///
+/// Every tool should set `title` to a concise, human-readable summary
+/// (e.g., "Read Cargo.toml", "Created src/main.rs", "3 matches in 2 files").
+/// The TUI renders this as the one-line label for each tool invocation.
+#[derive(Default)]
+pub(crate) struct ToolMetadata {
+    /// Short label for TUI display (5–15 words).
+    pub(crate) title: Option<String>,
+    /// Process exit code, present only for the bash tool.
+    #[expect(dead_code, reason = "read by the TUI once it exists")]
+    pub(crate) exit_code: Option<i32>,
 }
 
 impl ToolOutput {
+    /// Converts a `Result<String, String>` into a `ToolOutput` with default
+    /// metadata. `Err` maps to `is_error: true`.
     pub(crate) fn from_result(result: Result<String, String>) -> Self {
         match result {
             Ok(content) => Self {
                 content,
                 is_error: false,
+                metadata: ToolMetadata::default(),
             },
             Err(content) => Self {
                 content,
                 is_error: true,
+                metadata: ToolMetadata::default(),
             },
         }
+    }
+
+    /// Sets the [`ToolMetadata::title`] field.
+    pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.metadata.title = Some(title.into());
+        self
     }
 }
 
@@ -108,6 +137,7 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
     serde_json::from_value(raw).map_err(|e| ToolOutput {
         content: format!("Invalid input: {e}"),
         is_error: true,
+        metadata: ToolMetadata::default(),
     })
 }
 

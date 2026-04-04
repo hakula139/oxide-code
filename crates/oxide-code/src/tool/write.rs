@@ -57,31 +57,42 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
-    ToolOutput::from_result(write_file(&input.file_path, &input.content).await)
+    let (result, is_new) = write_file(&input.file_path, &input.content).await;
+    let name = file_name(&input.file_path);
+    let verb = if is_new { "Created" } else { "Updated" };
+    ToolOutput::from_result(result).with_title(format!("{verb} {name}"))
 }
 
-async fn write_file(path: &str, content: &str) -> Result<String, String> {
+fn file_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+}
+
+async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool) {
     let file_path = std::path::Path::new(path);
     let is_new = matches!(
         tokio::fs::metadata(path).await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound
     );
 
-    if let Some(parent) = file_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create directory: {e}"))?;
+    if let Some(parent) = file_path.parent()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        return (Err(format!("Failed to create directory: {e}")), is_new);
     }
 
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+    if let Err(e) = tokio::fs::write(path, content).await {
+        return (Err(format!("Failed to write file: {e}")), is_new);
+    }
 
-    if is_new {
-        Ok(format!("Successfully created {path}."))
+    let msg = if is_new {
+        format!("Successfully created {path}.")
     } else {
-        Ok(format!("Successfully updated {path}."))
-    }
+        format!("Successfully updated {path}.")
+    };
+    (Ok(msg), is_new)
 }
 
 #[cfg(test)]
@@ -120,8 +131,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
 
-        let msg = write_file(path.to_str().unwrap(), "content").await.unwrap();
-        assert!(msg.contains("created"));
+        let (result, is_new) = write_file(path.to_str().unwrap(), "content").await;
+        assert!(result.unwrap().contains("created"));
+        assert!(is_new);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
     }
 
@@ -131,10 +143,9 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let msg = write_file(path.to_str().unwrap(), "new content")
-            .await
-            .unwrap();
-        assert!(msg.contains("updated"));
+        let (result, is_new) = write_file(path.to_str().unwrap(), "new content").await;
+        assert!(result.unwrap().contains("updated"));
+        assert!(!is_new);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 
@@ -143,7 +154,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a").join("b").join("c.txt");
 
-        write_file(path.to_str().unwrap(), "deep").await.unwrap();
+        let (result, _) = write_file(path.to_str().unwrap(), "deep").await;
+        result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
     }
 
@@ -152,7 +164,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
 
-        write_file(path.to_str().unwrap(), "").await.unwrap();
+        let (result, _) = write_file(path.to_str().unwrap(), "").await;
+        result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
@@ -163,18 +176,14 @@ mod tests {
         std::fs::write(&blocker, "I am a file").unwrap();
 
         let path = blocker.join("child.txt");
-        let err = write_file(path.to_str().unwrap(), "content")
-            .await
-            .unwrap_err();
-        assert!(err.contains("Failed to create directory"));
+        let (result, _) = write_file(path.to_str().unwrap(), "content").await;
+        assert!(result.unwrap_err().contains("Failed to create directory"));
     }
 
     #[tokio::test]
     async fn write_file_fails_when_path_is_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let err = write_file(dir.path().to_str().unwrap(), "content")
-            .await
-            .unwrap_err();
-        assert!(err.contains("Failed to write file"));
+        let (result, _) = write_file(dir.path().to_str().unwrap(), "content").await;
+        assert!(result.unwrap_err().contains("Failed to write file"));
     }
 }

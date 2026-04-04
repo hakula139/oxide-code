@@ -14,8 +14,8 @@ use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role};
 use tool::{
-    ToolDefinition, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool,
-    grep::GrepTool, read::ReadTool, write::WriteTool,
+    ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
+    glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
 };
 
 const MAX_TOOL_ROUNDS: usize = 25;
@@ -109,9 +109,13 @@ async fn agent_turn(
                 None => ToolOutput {
                     content: format!("Unknown tool: {name}"),
                     is_error: true,
+                    metadata: ToolMetadata::default(),
                 },
             };
 
+            if let Some(title) = &output.metadata.title {
+                eprintln!("  {title}");
+            }
             display_tool_output(&output.content);
 
             results.push(ContentBlock::ToolResult {

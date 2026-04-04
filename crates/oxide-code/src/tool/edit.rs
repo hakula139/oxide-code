@@ -71,6 +71,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         Err(e) => return e,
     };
 
+    let name = file_name(&input.file_path);
     ToolOutput::from_result(
         edit_file(
             &input.file_path,
@@ -80,6 +81,14 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         )
         .await,
     )
+    .with_title(format!("Edited {name}"))
+}
+
+fn file_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
 }
 
 async fn edit_file(

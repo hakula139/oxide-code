@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolMetadata, ToolOutput};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -28,6 +28,10 @@ impl Tool for BashTool {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "A concise (5-10 word) description of what this command does"
                 },
                 "timeout": {
                     "type": "integer",
@@ -52,6 +56,8 @@ impl Tool for BashTool {
 struct Input {
     command: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     timeout: Option<u64>,
 }
 
@@ -65,13 +71,20 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
     let timeout = input.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
 
-    match tokio::time::timeout(timeout, execute(&input.command)).await {
+    let mut output = match tokio::time::timeout(timeout, execute(&input.command)).await {
         Ok(output) => output,
         Err(_) => ToolOutput {
             content: format!("Command timed out after {}ms", timeout.as_millis()),
             is_error: true,
+            metadata: ToolMetadata::default(),
         },
+    };
+
+    if let Some(desc) = input.description {
+        output.metadata.title = Some(desc);
     }
+
+    output
 }
 
 async fn execute(command: &str) -> ToolOutput {
@@ -83,10 +96,12 @@ async fn execute(command: &str) -> ToolOutput {
             return ToolOutput {
                 content: format!("Failed to execute command: {e}"),
                 is_error: true,
+                metadata: ToolMetadata::default(),
             };
         }
     };
 
+    let exit_code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -102,7 +117,7 @@ async fn execute(command: &str) -> ToolOutput {
         content.push_str(stderr.trim());
     }
     if !output.status.success() {
-        let code = output.status.code().unwrap_or(-1);
+        let code = exit_code.unwrap_or(-1);
         if content.is_empty() {
             _ = write!(content, "(exit code {code})");
         } else {
@@ -122,6 +137,10 @@ async fn execute(command: &str) -> ToolOutput {
     ToolOutput {
         content,
         is_error: false,
+        metadata: ToolMetadata {
+            exit_code,
+            ..ToolMetadata::default()
+        },
     }
 }
 

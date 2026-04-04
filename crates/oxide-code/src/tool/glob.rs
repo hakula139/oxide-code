@@ -64,11 +64,26 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     let Input { pattern, path } = input;
 
     match tokio::task::spawn_blocking(move || glob_files(&pattern, path.as_deref())).await {
-        Ok(result) => ToolOutput::from_result(result),
+        Ok(result) => {
+            let title = glob_title(result.as_deref().ok());
+            ToolOutput::from_result(result).with_title(title)
+        }
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
             is_error: true,
+            metadata: super::ToolMetadata::default(),
         },
+    }
+}
+
+fn glob_title(output: Option<&str>) -> String {
+    match output {
+        Some("No files found") | None => "No files found".into(),
+        Some(text) => {
+            let count = text.lines().filter(|l| !l.starts_with('(')).count();
+            let word = if count == 1 { "file" } else { "files" };
+            format!("Found {count} {word}")
+        }
     }
 }
 
