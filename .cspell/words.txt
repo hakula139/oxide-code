@@ -5,12 +5,14 @@ codex
 creds
 deserialize
 dtolnay
+feff
 hakula
 impls
 indoc
 println
 RAII
 ratatui
+replacen
 reqwest
 rustls
 serde

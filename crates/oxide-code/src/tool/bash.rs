@@ -6,10 +6,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolMetadata, ToolOutput};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
 pub(crate) struct BashTool;
 
@@ -29,6 +28,10 @@ impl Tool for BashTool {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "A concise (5-10 word) description of what this command does"
                 },
                 "timeout": {
                     "type": "integer",
@@ -53,35 +56,39 @@ impl Tool for BashTool {
 struct Input {
     command: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     timeout: Option<u64>,
 }
 
 // ── Execution ──
 
 async fn run(raw: serde_json::Value) -> ToolOutput {
-    let input: Input = match serde_json::from_value(raw) {
+    let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
-        Err(e) => {
-            return ToolOutput {
-                content: format!("Invalid input: {e}"),
-                is_error: true,
-            };
-        }
+        Err(e) => return e,
     };
 
     let timeout = input.timeout.map_or(DEFAULT_TIMEOUT, Duration::from_millis);
 
-    match tokio::time::timeout(timeout, execute(&input.command)).await {
+    let mut output = match tokio::time::timeout(timeout, execute(&input.command)).await {
         Ok(output) => output,
         Err(_) => ToolOutput {
             content: format!("Command timed out after {}ms", timeout.as_millis()),
             is_error: true,
+            metadata: ToolMetadata::default(),
         },
+    };
+
+    if let Some(desc) = input.description {
+        output.metadata.title = Some(desc);
     }
+
+    output
 }
 
 async fn execute(command: &str) -> ToolOutput {
-    let result = Command::new("sh").arg("-c").arg(command).output().await;
+    let result = Command::new("bash").arg("-c").arg(command).output().await;
 
     let output = match result {
         Ok(o) => o,
@@ -89,68 +96,83 @@ async fn execute(command: &str) -> ToolOutput {
             return ToolOutput {
                 content: format!("Failed to execute command: {e}"),
                 is_error: true,
+                metadata: ToolMetadata::default(),
             };
         }
     };
 
+    let exit_code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let mut content = String::new();
-
     if !stdout.is_empty() {
-        content.push_str(&stdout);
+        let trimmed = stdout.trim_start_matches('\n').trim_end();
+        content.push_str(trimmed);
     }
     if !stderr.is_empty() {
         if !content.is_empty() {
             content.push('\n');
         }
-        content.push_str("STDERR:\n");
-        content.push_str(&stderr);
+        content.push_str(stderr.trim());
     }
     if !output.status.success() {
-        if !content.is_empty() {
-            content.push('\n');
+        let code = exit_code.unwrap_or(-1);
+        if content.is_empty() {
+            _ = write!(content, "(exit code {code})");
+        } else {
+            _ = write!(content, "\n\n(exit code {code})");
         }
-        let code = output.status.code().unwrap_or(-1);
-        let _ = writeln!(content, "Exit code: {code}");
     }
     if content.is_empty() {
-        content.push_str("(no output)\n");
+        content.push_str("(no output)");
     }
 
     truncate_output(&mut content);
 
+    // Only flag execution failures (timeout, spawn error) as is_error.
+    // Nonzero exit codes are informational — many commands use them normally
+    // (grep returns 1 for no matches, diff returns 1 for differences, etc.).
+    // The model can determine severity from the output content itself.
     ToolOutput {
         content,
-        is_error: !output.status.success(),
+        is_error: false,
+        metadata: ToolMetadata {
+            exit_code,
+            ..ToolMetadata::default()
+        },
     }
 }
 
-/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`], keeping the first and
-/// last halves so the LLM sees both the beginning of the output and the end
-/// (where error messages and summaries usually appear).
+// ── Output Truncation ──
+
+/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
+/// keeping the first and last halves so the LLM sees both the beginning of the
+/// output and the end (where error messages and summaries usually appear).
 fn truncate_output(content: &mut String) {
-    if content.len() <= MAX_OUTPUT_BYTES {
+    // The separator line is ~35 bytes; 50 gives headroom for large line counts.
+    const TRUNCATION_OVERHEAD: usize = 50;
+
+    if content.len() <= super::MAX_OUTPUT_BYTES {
         return;
     }
 
-    let half = MAX_OUTPUT_BYTES / 2;
+    let half = super::MAX_OUTPUT_BYTES / 2;
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.floor_char_boundary(content.len() - half);
 
-    // The separator line is ~35 bytes. Only truncate if the omitted region
-    // is large enough that removing it actually saves space.
+    // Only truncate if the omitted region is larger than the separator we
+    // would insert — otherwise truncation makes the output longer.
     let omitted = &content[head_end..tail_start];
-    if omitted.len() < 50 {
+    if omitted.len() < TRUNCATION_OVERHEAD {
         return;
     }
 
     let omitted_lines = omitted.lines().count();
 
-    let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + 64);
+    let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
     truncated.push_str(&content[..head_end]);
-    let _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
+    _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
     truncated.push_str(&content[tail_start..]);
 
     *content = truncated;
@@ -158,8 +180,7 @@ fn truncate_output(content: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
-
+    use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
     // ── run ──
@@ -168,7 +189,7 @@ mod tests {
     async fn run_valid_command() {
         let output = run(serde_json::json!({"command": "echo hello"})).await;
         assert!(!output.is_error);
-        assert_eq!(output.content.trim(), "hello");
+        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
@@ -195,63 +216,42 @@ mod tests {
     async fn execute_echo() {
         let output = execute("echo hello").await;
         assert!(!output.is_error);
-        assert_eq!(output.content.trim(), "hello");
-    }
-
-    #[tokio::test]
-    async fn execute_failing_command() {
-        let output = execute("false").await;
-        assert!(output.is_error);
-        assert_eq!(output.content, "Exit code: 1\n");
+        assert_eq!(output.content, "hello");
     }
 
     #[tokio::test]
     async fn execute_stderr_output() {
         let output = execute("echo err >&2").await;
         assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                STDERR:
-                err
-            "}
-        );
+        assert_eq!(output.content, "err");
     }
 
     #[tokio::test]
     async fn execute_combined_stdout_and_stderr() {
         let output = execute("echo out && echo err >&2").await;
         assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                out
+        assert_eq!(output.content, "out\nerr");
+    }
 
-                STDERR:
-                err
-            "}
-        );
+    #[tokio::test]
+    async fn execute_nonzero_exit_not_flagged_as_error() {
+        let output = execute("false").await;
+        assert!(!output.is_error);
+        assert_eq!(output.content, "(exit code 1)");
     }
 
     #[tokio::test]
     async fn execute_output_with_nonzero_exit() {
         let output = execute("echo partial; false").await;
-        assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                partial
-
-                Exit code: 1
-            "}
-        );
+        assert!(!output.is_error);
+        assert_eq!(output.content, "partial\n\n(exit code 1)");
     }
 
     #[tokio::test]
     async fn execute_no_output() {
         let output = execute("true").await;
         assert!(!output.is_error);
-        assert_eq!(output.content, "(no output)\n");
+        assert_eq!(output.content, "(no output)");
     }
 
     #[tokio::test]
@@ -259,7 +259,7 @@ mod tests {
         let output = execute("echo HEAD_MARKER && yes | head -c 200000 && echo TAIL_MARKER").await;
         assert!(output.content.contains("lines truncated"));
         assert!(output.content.starts_with("HEAD_MARKER\n"));
-        assert!(output.content.ends_with("TAIL_MARKER\n"));
+        assert!(output.content.ends_with("TAIL_MARKER"));
     }
 
     // ── truncate_output ──

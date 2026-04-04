@@ -53,12 +53,12 @@ pub async fn load_token() -> Result<String> {
     let oauth = read_credentials(&path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
 
-    // Token is valid and not near-expiry
+    // Token is valid and not near-expiry.
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
     }
 
-    // No refresh token — use as-is if not yet expired
+    // No refresh token — use as-is if not yet expired.
     if oauth.refresh_token.is_none() {
         if is_expired(expires_at_ms) {
             bail!("Claude Code OAuth token has expired — run `claude` to refresh");
@@ -67,13 +67,12 @@ pub async fn load_token() -> Result<String> {
         return Ok(oauth.access_token);
     }
 
-    // Acquire lock and re-read (another process may have refreshed)
+    // Acquire lock and re-read (another process may have refreshed).
     let lock_path = lock_path().context("could not determine home directory")?;
     let _lock = acquire_lock(&lock_path).await?;
 
     let oauth = read_credentials(&path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
-
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
     }

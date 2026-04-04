@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.88) and testing against the production API.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.87) and testing against the production API.
 
 ## Authentication Methods
 
@@ -10,7 +10,12 @@ Standard approach. Set `x-api-key` header directly.
 
 ### OAuth (Claude Code Credentials)
 
-Claude Code stores OAuth tokens at `~/.claude/.credentials.json` (plaintext on Linux, macOS Keychain with plaintext fallback on macOS).
+Claude Code stores OAuth tokens in **platform-specific secure storage** with a plaintext fallback:
+
+- **macOS**: macOS Keychain (service `"Claude Code-credentials"`), falling back to `~/.claude/.credentials.json`.
+- **Linux**: `~/.claude/.credentials.json` (plaintext only; libsecret support is planned but not yet implemented).
+
+Both backends store the same JSON structure:
 
 ```json
 {
@@ -18,10 +23,14 @@ Claude Code stores OAuth tokens at `~/.claude/.credentials.json` (plaintext on L
     "accessToken": "...",
     "refreshToken": "...",
     "expiresAt": 1234567890000,
-    "scopes": ["user:inference", "user:profile", "..."]
+    "scopes": ["user:inference", "user:profile", "..."],
+    "subscriptionType": "team",
+    "rateLimitTier": "default_claude_max_5x"
   }
 }
 ```
+
+**Important**: On macOS, the Keychain and the file can hold **different tokens**. Claude Code reads from the Keychain first. If an external tool refreshes the token via the file only (without updating the Keychain), the file token becomes stale while the Keychain token remains valid. Token consumers on macOS must read from the Keychain to get the canonical token.
 
 OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
@@ -57,11 +66,14 @@ You are Claude Code, Anthropic's official CLI for Claude.
 
 This must be the start of the system prompt. The API server uses it to identify legitimate Claude Code clients and apply correct rate limits. **Without this prefix, OAuth requests for Opus and Sonnet models return 429.**
 
-### 3. Client identity header
+### 3. Client identity headers
 
 ```text
+User-Agent: claude-cli/<version> (external, cli)
 x-app: cli
 ```
+
+The `User-Agent` must start with `claude-cli/`. Claude Code constructs it as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
 
 ## What Happens Without These
 
@@ -104,4 +116,9 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 - `claude-code/src/services/api/client.ts` — SDK client construction
 - `claude-code/src/services/oauth/client.ts` — token refresh endpoint and request format
 - `claude-code/src/utils/auth.ts` — OAuth token retrieval and refresh
+- `claude-code/src/utils/betas.ts` — per-model beta header computation
+- `claude-code/src/utils/http.ts` — auth headers, User-Agent construction
+- `claude-code/src/utils/userAgent.ts` — `claude-cli/<version>` User-Agent format
+- `claude-code/src/utils/secureStorage/index.ts` — platform-specific storage dispatch
+- `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts` — macOS Keychain backend
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts` — credential file I/O

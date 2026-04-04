@@ -13,7 +13,10 @@ use tracing::warn;
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role};
-use tool::{ToolDefinition, ToolOutput, ToolRegistry, bash::BashTool};
+use tool::{
+    ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
+    glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
+};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
@@ -31,7 +34,14 @@ async fn main() -> Result<()> {
 
     let config = Config::load().await?;
     let client = Client::new(config)?;
-    let tools = ToolRegistry::new(vec![Box::new(BashTool)]);
+    let tools = ToolRegistry::new(vec![
+        Box::new(BashTool),
+        Box::new(ReadTool),
+        Box::new(WriteTool),
+        Box::new(EditTool),
+        Box::new(GlobTool),
+        Box::new(GrepTool),
+    ]);
 
     repl(&client, &tools).await
 }
@@ -99,9 +109,13 @@ async fn agent_turn(
                 None => ToolOutput {
                     content: format!("Unknown tool: {name}"),
                     is_error: true,
+                    metadata: ToolMetadata::default(),
                 },
             };
 
+            if let Some(title) = &output.metadata.title {
+                eprintln!("  {title}");
+            }
             display_tool_output(&output.content);
 
             results.push(ContentBlock::ToolResult {
@@ -207,7 +221,7 @@ async fn stream_response(
         }
     }
 
-    // Streamed text deltas don't include a final newline
+    // Streamed text deltas don't include a final newline.
     let has_text = blocks
         .iter()
         .any(|b| matches!(b, Some(BlockAccumulator::Text(_))));

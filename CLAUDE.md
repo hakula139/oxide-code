@@ -15,6 +15,7 @@ ox                      # Start an interactive session
 ```text
 .
 ├── crates/oxide-code/  # Main binary crate
+├── docs/               # Roadmap and research notes
 └── target/             # Build output
 ```
 
@@ -32,7 +33,12 @@ ox                      # Start an interactive session
 ├── message.rs          # Conversation message types
 ├── tool.rs             # Tool trait, registry, definitions
 └── tool/
-    └── bash.rs         # Shell command execution with timeout
+    ├── bash.rs         # Shell command execution with timeout
+    ├── edit.rs         # Exact string replacement in files
+    ├── glob.rs         # File pattern matching (glob)
+    ├── grep.rs         # Content search via regex
+    ├── read.rs         # File reading with line numbers and pagination
+    └── write.rs        # File writing with directory creation
 ```
 
 ## Coding Conventions
@@ -52,6 +58,13 @@ ox                      # Start an interactive session
 
 - Use `// ── Section Name ──` for section dividers in code (box-drawing character `─`, U+2500).
 - In tests, use `// ── function_name ──` as section headers grouping tests by the function they cover.
+
+### Blank Lines
+
+- One blank line between top-level items (functions, structs, enums, impls, constants).
+- One blank line before and after section dividers (`// ── Name ──`).
+- Inside function bodies, use blank lines to separate logical phases (e.g., setup → validation → execution → result).
+- Group a single-line computation with its immediate validation guard (early-return `if`) — no blank between them. Multi-line `let` bindings (async chains, builder patterns) keep the blank before their guard.
 
 ### Module Organization
 
@@ -128,6 +141,7 @@ ox                      # Start an interactive session
 Run after implementation and before review:
 
 ```bash
+cargo fmt --all --check                            # formatting
 cargo build
 cargo clippy --all-targets -- -D warnings          # zero warnings (pedantic lints)
 cargo test
