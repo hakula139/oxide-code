@@ -382,7 +382,7 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
     let mut matching_files: Vec<String> = Vec::new();
 
     for path in files {
-        if matching_files.len() > head_limit {
+        if matching_files.len() >= head_limit {
             break;
         }
 
@@ -399,8 +399,7 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
         return "No files found".into();
     }
 
-    let truncated = matching_files.len() > head_limit;
-    matching_files.truncate(head_limit);
+    let truncated = matching_files.len() >= head_limit;
 
     let mut output = matching_files.join("\n");
 
