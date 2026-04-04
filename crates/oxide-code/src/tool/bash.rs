@@ -121,10 +121,13 @@ async fn execute(command: &str) -> ToolOutput {
     }
 }
 
-/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES), keeping the first and
-/// last halves so the LLM sees both the beginning of the output and the end
-/// (where error messages and summaries usually appear).
+/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
+/// keeping the first and last halves so the LLM sees both the beginning of the
+/// output and the end (where error messages and summaries usually appear).
 fn truncate_output(content: &mut String) {
+    // The separator line is ~35 bytes; 50 gives headroom for large line counts.
+    const TRUNCATION_OVERHEAD: usize = 50;
+
     if content.len() <= super::MAX_OUTPUT_BYTES {
         return;
     }
@@ -133,16 +136,16 @@ fn truncate_output(content: &mut String) {
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.floor_char_boundary(content.len() - half);
 
-    // The separator line is ~35 bytes. Only truncate if the omitted region
-    // is large enough that removing it actually saves space.
+    // Only truncate if the omitted region is larger than the separator we
+    // would insert — otherwise truncation makes the output longer.
     let omitted = &content[head_end..tail_start];
-    if omitted.len() < 50 {
+    if omitted.len() < TRUNCATION_OVERHEAD {
         return;
     }
 
     let omitted_lines = omitted.lines().count();
 
-    let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + 64);
+    let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
     truncated.push_str(&content[..head_end]);
     _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
     truncated.push_str(&content[tail_start..]);
