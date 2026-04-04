@@ -172,8 +172,6 @@ fn strip_bom(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
-
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
@@ -191,12 +189,7 @@ mod tests {
         .await;
 
         assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                1\thello
-                2\tworld"}
-        );
+        assert_eq!(output.content, "1\thello\n2\tworld");
     }
 
     #[tokio::test]
@@ -215,13 +208,7 @@ mod tests {
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
 
         let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
-        assert_eq!(
-            result,
-            indoc! {"
-                1\talpha
-                2\tbeta
-                3\tgamma"}
-        );
+        assert_eq!(result, "1\talpha\n2\tbeta\n3\tgamma");
     }
 
     #[tokio::test]
@@ -235,11 +222,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result,
-            indoc! {"
-                2\tb
-                3\tc
-
-                (Showing lines 2\u{2013}3 of 5 total)"}
+            "2\tb\n3\tc\n\n(Showing lines 2\u{2013}3 of 5 total)"
         );
     }
 
@@ -252,12 +235,7 @@ mod tests {
         let result = read_file(path.to_str().unwrap(), Some(0), None)
             .await
             .unwrap();
-        assert_eq!(
-            result,
-            indoc! {"
-                1\tfirst
-                2\tsecond"}
-        );
+        assert_eq!(result, "1\tfirst\n2\tsecond");
     }
 
     #[tokio::test]

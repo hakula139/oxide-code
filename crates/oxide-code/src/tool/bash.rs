@@ -234,13 +234,7 @@ mod tests {
     async fn execute_output_with_nonzero_exit() {
         let output = execute("echo partial; false").await;
         assert!(output.is_error);
-        assert_eq!(
-            output.content,
-            indoc! {"
-                partial
-
-                Exit code: 1"}
-        );
+        assert_eq!(output.content, "partial\n\nExit code: 1");
     }
 
     #[tokio::test]
