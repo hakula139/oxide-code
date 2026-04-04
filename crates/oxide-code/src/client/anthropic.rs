@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -13,6 +13,9 @@ const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+
+/// Matches the installed Claude Code version.
+const CLAUDE_CLI_VERSION: &str = "2.1.87";
 
 /// System prompt prefix that identifies the client to the Anthropic API. Required
 /// for OAuth tokens — without it, non-Haiku models return 429. Always sent
@@ -155,9 +158,13 @@ impl Client {
             }
         }
 
-        headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
+        headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
+        );
         headers.insert("x-app", HeaderValue::from_static("cli"));
 
         let http = reqwest::Client::builder()
