@@ -112,7 +112,6 @@ async fn read_file(
 
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
-
     if total_lines == 0 {
         return Ok("(empty file)".into());
     }
@@ -121,7 +120,6 @@ async fn read_file(
     let offset = offset.unwrap_or(1).max(1);
     let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
     let start_idx = offset - 1;
-
     if start_idx >= total_lines {
         return Err(format!(
             "Offset {offset} is beyond the end of the file ({total_lines} lines).",

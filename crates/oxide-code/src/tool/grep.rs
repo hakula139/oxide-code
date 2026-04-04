@@ -153,7 +153,6 @@ fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
         .map_err(|e| format!("Invalid regex: {e}"))?;
 
     let base = super::resolve_base_dir(params.search_path)?;
-
     if !base.exists() {
         return Err(format!("Path does not exist: {}", base.display()));
     }
@@ -400,7 +399,6 @@ fn format_files_with_matches(files: &[PathBuf], re: &regex::Regex, head_limit: u
     }
 
     let truncated = matching_files.len() >= head_limit;
-
     let mut output = matching_files.join("\n");
 
     if truncated {

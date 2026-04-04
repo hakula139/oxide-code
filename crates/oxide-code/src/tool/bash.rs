@@ -91,7 +91,6 @@ async fn execute(command: &str) -> ToolOutput {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     let mut content = String::new();
-
     if !stdout.is_empty() {
         content.push_str(&stdout);
     }

@@ -73,7 +73,6 @@ pub async fn load_token() -> Result<String> {
 
     let oauth = read_credentials(&path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
-
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
     }

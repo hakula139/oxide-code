@@ -123,7 +123,6 @@ async fn edit_file(
     let new_string = &normalize_eol(new_string.to_owned());
 
     let match_count = content.matches(old_string.as_str()).count();
-
     if match_count == 0 {
         return Err(format!(
             "old_string not found in {path}. Make sure the string matches exactly, \
