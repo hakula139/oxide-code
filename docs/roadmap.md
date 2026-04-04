@@ -15,9 +15,10 @@ The project direction is simple:
 - API key authentication via `ANTHROPIC_API_KEY` environment variable.
 - Configurable model, base URL, and max tokens via environment variables.
 - Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
-- Bash tool — execute shell commands with timeout and head+tail output truncation.
+- Bash tool — execute shell commands with timeout, head+tail output truncation, and structured metadata (exit code, description).
 - File tools — read (line-numbered output, pagination, byte budget), write (with directory creation), edit (exact string replacement with CRLF handling).
 - Search tools — glob-based file pattern matching, regex content search with output modes (content / files / count), context lines, and head limit.
+- Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
 - Tool definitions sent via the Anthropic `tools` API parameter.
 
 ## Current Focus
@@ -46,8 +47,13 @@ The project direction is simple:
 
 - Replace the bare REPL with a ratatui-based TUI.
 - Real-time streaming display of assistant responses.
-- Inline tool call / result display.
+- Inline tool call / result display using `ToolMetadata::title`.
 - Multi-line input editor.
+
+### Tool Enhancements
+
+- Centralized output truncation — move truncation from individual tools into the tool dispatch layer. Enables consistent behavior and large-output persistence to disk.
+- File-change tracking — track read files and their mtimes. Return a stub on re-read when content hasn't changed (saves tokens). Enable read-before-write guards to prevent blind overwrites.
 
 ### Session Persistence
 
