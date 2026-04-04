@@ -4,7 +4,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::config::{Auth, Config};
+use crate::config::{Auth, Config, ThinkingConfig};
 use crate::message::Message;
 use crate::tool::ToolDefinition;
 
@@ -23,22 +23,6 @@ const CLAUDE_CLI_VERSION: &str = "2.1.87";
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Request types ──
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "variants are public API for callers to configure thinking mode"
-    )
-)]
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ThinkingConfig {
-    /// Model decides the thinking budget (Claude 4.6+).
-    Adaptive,
-    /// Fixed token budget for thinking.
-    Enabled { budget_tokens: u32 },
-}
 
 #[derive(Serialize)]
 struct CreateMessageRequest<'a> {
@@ -506,23 +490,5 @@ mod tests {
     fn parse_sse_frame_invalid_json() {
         let frame = "data: {not valid json}";
         assert!(parse_sse_frame(frame).is_err());
-    }
-
-    // ── ThinkingConfig ──
-
-    #[test]
-    fn thinking_config_adaptive_serializes() {
-        let json = serde_json::to_value(&ThinkingConfig::Adaptive).unwrap();
-        assert_eq!(json["type"], "adaptive");
-    }
-
-    #[test]
-    fn thinking_config_enabled_serializes_with_budget() {
-        let json = serde_json::to_value(&ThinkingConfig::Enabled {
-            budget_tokens: 10000,
-        })
-        .unwrap();
-        assert_eq!(json["type"], "enabled");
-        assert_eq!(json["budget_tokens"], 10000);
     }
 }
