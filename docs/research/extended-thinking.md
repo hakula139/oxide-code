@@ -81,23 +81,11 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code handles credential rotation in `stripSignatureBlocks()`, which removes all thinking / redacted_thinking blocks when the active credential changes.
 
-## Implementation Implications for oxide-code
-
-To properly support extended thinking, oxide-code needs:
-
-1. **New content block types**: `Thinking { thinking, signature }`, `RedactedThinking { data }`, `ServerToolUse { id, name, input }` in both `ContentBlockInfo` (streaming) and `ContentBlock` (message history).
-2. **New delta types**: `ThinkingDelta { thinking }`, `SignatureDelta { signature }` in `Delta`.
-3. **Block accumulators**: For thinking (text + signature) and server_tool_use (JSON, same as tool_use).
-4. **Request parameter**: `thinking` field in `CreateMessageRequest`.
-5. **Round-trip preservation**: Thinking / redacted_thinking blocks stored in `Message.content` and sent back in subsequent requests.
-6. **Trailing thinking removal**: Strip thinking blocks from the end of assistant messages before sending.
-7. **Credential rotation**: Strip all thinking / redacted_thinking blocks when OAuth credentials change.
-
-The current `#[serde(other)] Unknown` approach prevents crashes but silently drops thinking blocks, which would break conversation continuity if thinking were enabled.
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking removal. Adaptive thinking is enabled by default. Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
 
 ## Sources
 
+- `claude-code/src/constants/betas.ts` — `INTERLEAVED_THINKING_BETA_HEADER`, `REDACT_THINKING_BETA_HEADER`
 - `claude-code/src/services/api/claude.ts` — streaming handler, delta accumulation, request construction
 - `claude-code/src/utils/messages.ts` — `normalizeContentFromAPI`, `normalizeMessagesForAPI`, `stripSignatureBlocks`
 - `claude-code/src/utils/thinking.ts` — thinking config types, model support detection
-- `claude-code/src/constants/betas.ts` — `INTERLEAVED_THINKING_BETA_HEADER`, `REDACT_THINKING_BETA_HEADER`
