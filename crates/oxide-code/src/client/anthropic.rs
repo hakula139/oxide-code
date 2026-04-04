@@ -24,6 +24,22 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Request types ──
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "variants are public API for callers to configure thinking mode"
+    )
+)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingConfig {
+    /// Model decides the thinking budget (Claude 4.6+).
+    Adaptive,
+    /// Fixed token budget for thinking.
+    Enabled { budget_tokens: u32 },
+}
+
 #[derive(Serialize)]
 struct CreateMessageRequest<'a> {
     model: &'a str,
@@ -33,6 +49,8 @@ struct CreateMessageRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<&'a ThinkingConfig>,
 }
 
 // ── SSE response types ──
@@ -96,15 +114,25 @@ pub enum ContentBlockInfo {
         id: String,
         name: String,
     },
-    /// Catch-all for unrecognized block types (e.g., `thinking`). Skipped during
-    /// stream processing.
+    ServerToolUse {
+        id: String,
+        name: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    /// Catch-all for unrecognized block types. Skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
 
 #[expect(
     clippy::enum_variant_names,
-    reason = "variant names mirror Anthropic API delta type values (text_delta, input_json_delta)"
+    reason = "variant names mirror Anthropic API delta type values (text_delta, input_json_delta, etc.)"
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -115,8 +143,15 @@ pub enum Delta {
     InputJsonDelta {
         partial_json: String,
     },
-    /// Catch-all for unrecognized delta types (e.g., `thinking_delta`). Silently
-    /// dropped during stream processing.
+    ThinkingDelta {
+        thinking: String,
+    },
+    /// Full signature value (overwrites, not appended).
+    SignatureDelta {
+        signature: String,
+    },
+    /// Catch-all for unrecognized delta types. Silently dropped during stream
+    /// processing.
     #[serde(other)]
     Unknown,
 }
@@ -222,6 +257,7 @@ impl Client {
             system: &system_prompt,
             stream: true,
             tools: (!tools.is_empty()).then_some(tools),
+            thinking: self.config.thinking.as_ref(),
         })
         .context("failed to serialize request")?;
 
@@ -312,15 +348,44 @@ mod tests {
     // ── ContentBlockInfo ──
 
     #[test]
-    fn content_block_info_unknown_type() {
-        let json = r#"{"type":"thinking","thinking":"reasoning text"}"#;
+    fn content_block_info_thinking() {
+        let json = r#"{"type":"thinking","thinking":"","signature":""}"#;
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        assert!(matches!(info, ContentBlockInfo::Unknown));
+        let ContentBlockInfo::Thinking {
+            thinking,
+            signature,
+        } = info
+        else {
+            panic!("expected Thinking");
+        };
+        assert_eq!(thinking, "");
+        assert_eq!(signature, "");
     }
 
     #[test]
-    fn content_block_info_unknown_redacted_thinking() {
-        let json = r#"{"type":"redacted_thinking","data":"[redacted]"}"#;
+    fn content_block_info_redacted_thinking() {
+        let json = r#"{"type":"redacted_thinking","data":"base64data=="}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::RedactedThinking { data } = info else {
+            panic!("expected RedactedThinking");
+        };
+        assert_eq!(data, "base64data==");
+    }
+
+    #[test]
+    fn content_block_info_server_tool_use() {
+        let json = r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::ServerToolUse { id, name } = info else {
+            panic!("expected ServerToolUse");
+        };
+        assert_eq!(id, "stu_01");
+        assert_eq!(name, "advisor");
+    }
+
+    #[test]
+    fn content_block_info_unknown_type() {
+        let json = r#"{"type":"some_future_block","data":"opaque"}"#;
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
         assert!(matches!(info, ContentBlockInfo::Unknown));
     }
@@ -328,15 +393,28 @@ mod tests {
     // ── Delta ──
 
     #[test]
-    fn delta_unknown_type() {
+    fn delta_thinking() {
         let json = r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#;
         let delta: Delta = serde_json::from_str(json).unwrap();
-        assert!(matches!(delta, Delta::Unknown));
+        let Delta::ThinkingDelta { thinking } = delta else {
+            panic!("expected ThinkingDelta");
+        };
+        assert_eq!(thinking, "partial reasoning");
     }
 
     #[test]
-    fn delta_unknown_signature() {
+    fn delta_signature() {
         let json = r#"{"type":"signature_delta","signature":"sig_abc123"}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        let Delta::SignatureDelta { signature } = delta else {
+            panic!("expected SignatureDelta");
+        };
+        assert_eq!(signature, "sig_abc123");
+    }
+
+    #[test]
+    fn delta_unknown_type() {
+        let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
         let delta: Delta = serde_json::from_str(json).unwrap();
         assert!(matches!(delta, Delta::Unknown));
     }
@@ -428,5 +506,23 @@ mod tests {
     fn parse_sse_frame_invalid_json() {
         let frame = "data: {not valid json}";
         assert!(parse_sse_frame(frame).is_err());
+    }
+
+    // ── ThinkingConfig ──
+
+    #[test]
+    fn thinking_config_adaptive_serializes() {
+        let json = serde_json::to_value(&ThinkingConfig::Adaptive).unwrap();
+        assert_eq!(json["type"], "adaptive");
+    }
+
+    #[test]
+    fn thinking_config_enabled_serializes_with_budget() {
+        let json = serde_json::to_value(&ThinkingConfig::Enabled {
+            budget_tokens: 10000,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "enabled");
+        assert_eq!(json["budget_tokens"], 10000);
     }
 }

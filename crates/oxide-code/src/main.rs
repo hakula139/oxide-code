@@ -12,7 +12,7 @@ use tracing::warn;
 
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
-use message::{ContentBlock, Message, Role};
+use message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -79,6 +79,7 @@ async fn agent_turn(
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
+        strip_trailing_thinking(messages);
         let blocks = stream_response(client, messages, &tool_defs).await?;
 
         let tool_uses: Vec<_> = blocks
@@ -143,6 +144,18 @@ enum BlockAccumulator {
         name: String,
         json_buf: String,
     },
+    ServerToolUse {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     /// Placeholder for unrecognized content block types. Absorbs deltas silently
     /// and produces no [`ContentBlock`] at the end.
     Skipped,
@@ -152,16 +165,34 @@ impl BlockAccumulator {
     fn into_content_block(self) -> Option<ContentBlock> {
         match self {
             Self::Text(text) => Some(ContentBlock::Text { text }),
-            Self::ToolUse { id, name, json_buf } => {
-                let input = serde_json::from_str(&json_buf).unwrap_or_else(|e| {
-                    warn!("malformed tool input JSON: {e}");
-                    serde_json::Value::Object(serde_json::Map::new())
-                });
-                Some(ContentBlock::ToolUse { id, name, input })
-            }
+            Self::ToolUse { id, name, json_buf } => Some(ContentBlock::ToolUse {
+                id,
+                name,
+                input: parse_tool_json(&json_buf),
+            }),
+            Self::ServerToolUse { id, name, json_buf } => Some(ContentBlock::ServerToolUse {
+                id,
+                name,
+                input: parse_tool_json(&json_buf),
+            }),
+            Self::Thinking {
+                thinking,
+                signature,
+            } => Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }),
+            Self::RedactedThinking { data } => Some(ContentBlock::RedactedThinking { data }),
             Self::Skipped => None,
         }
     }
+}
+
+fn parse_tool_json(json_buf: &str) -> serde_json::Value {
+    serde_json::from_str(json_buf).unwrap_or_else(|e| {
+        warn!("malformed tool input JSON: {e}");
+        serde_json::Value::Object(serde_json::Map::new())
+    })
 }
 
 async fn stream_response(
@@ -185,41 +216,11 @@ async fn stream_response(
                 if blocks.len() <= index {
                     blocks.resize_with(index + 1, || None);
                 }
-                blocks[index] = Some(match content_block {
-                    ContentBlockInfo::Text { text } => {
-                        if !text.is_empty() {
-                            write!(stdout, "{text}")?;
-                            stdout.flush()?;
-                        }
-                        BlockAccumulator::Text(text)
-                    }
-                    ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        json_buf: String::new(),
-                    },
-                    ContentBlockInfo::Unknown => {
-                        warn!("skipping unknown content block at index {index}");
-                        BlockAccumulator::Skipped
-                    }
-                });
+                blocks[index] = Some(init_accumulator(content_block, index, &mut stdout)?);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    match (block, delta) {
-                        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
-                            buf.push_str(&text);
-                            write!(stdout, "{text}")?;
-                            stdout.flush()?;
-                        }
-                        (
-                            BlockAccumulator::ToolUse { json_buf, .. },
-                            Delta::InputJsonDelta { partial_json },
-                        ) => {
-                            json_buf.push_str(&partial_json);
-                        }
-                        _ => {}
-                    }
+                    apply_delta(block, delta, &mut stdout)?;
                 }
             }
             StreamEvent::Error { error } => {
@@ -242,6 +243,84 @@ async fn stream_response(
         .flatten()
         .filter_map(BlockAccumulator::into_content_block)
         .collect())
+}
+
+fn init_accumulator(
+    content_block: ContentBlockInfo,
+    index: usize,
+    stdout: &mut std::io::Stdout,
+) -> Result<BlockAccumulator> {
+    Ok(match content_block {
+        ContentBlockInfo::Text { text } => {
+            if !text.is_empty() {
+                write!(stdout, "{text}")?;
+                stdout.flush()?;
+            }
+            BlockAccumulator::Text(text)
+        }
+        ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
+            id,
+            name,
+            json_buf: String::new(),
+        },
+        ContentBlockInfo::ServerToolUse { id, name } => BlockAccumulator::ServerToolUse {
+            id,
+            name,
+            json_buf: String::new(),
+        },
+        ContentBlockInfo::Thinking {
+            thinking,
+            signature,
+        } => BlockAccumulator::Thinking {
+            thinking,
+            signature,
+        },
+        ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
+        ContentBlockInfo::Unknown => {
+            warn!("skipping unknown content block at index {index}");
+            BlockAccumulator::Skipped
+        }
+    })
+}
+
+fn apply_delta(
+    block: &mut BlockAccumulator,
+    delta: Delta,
+    stdout: &mut std::io::Stdout,
+) -> Result<()> {
+    match (block, delta) {
+        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
+            buf.push_str(&text);
+            write!(stdout, "{text}")?;
+            stdout.flush()?;
+        }
+        (
+            BlockAccumulator::ToolUse { json_buf, .. }
+            | BlockAccumulator::ServerToolUse { json_buf, .. },
+            Delta::InputJsonDelta { partial_json },
+        ) => {
+            json_buf.push_str(&partial_json);
+        }
+        (
+            BlockAccumulator::Thinking { thinking, .. },
+            Delta::ThinkingDelta {
+                thinking: thinking_delta,
+            },
+        ) => {
+            thinking.push_str(&thinking_delta);
+        }
+        (
+            BlockAccumulator::Thinking { signature, .. },
+            Delta::SignatureDelta {
+                signature: sig_value,
+            },
+        ) => {
+            // Signature is a full value, not incremental.
+            *signature = sig_value;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ── Display ──

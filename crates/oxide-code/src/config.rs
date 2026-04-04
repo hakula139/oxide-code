@@ -2,6 +2,8 @@ mod oauth;
 
 use anyhow::{Context, Result};
 
+use crate::client::anthropic::ThinkingConfig;
+
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_MAX_TOKENS: u32 = 16384;
@@ -20,6 +22,7 @@ pub struct Config {
     pub model: String,
     pub base_url: String,
     pub max_tokens: u32,
+    pub thinking: Option<ThinkingConfig>,
 }
 
 impl Config {
@@ -46,11 +49,14 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
+        let thinking = Some(ThinkingConfig::Adaptive);
+
         Ok(Self {
             auth,
             model,
             base_url,
             max_tokens,
+            thinking,
         })
     }
 }

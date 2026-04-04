@@ -73,6 +73,7 @@ ox                      # Start an interactive session
 - Place functions and types in the module that reflects their conceptual domain — import paths should not mislead about what the item does. Create new modules when needed for clean organization.
 - Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
 - Order helper functions after their caller (top-down reading order).
+- When adding new fields to structs or variants to enums, place them at the most semantically appropriate position among existing members, not simply appended at the bottom.
 
 ### Visibility
 
