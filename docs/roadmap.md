@@ -10,16 +10,25 @@ The project direction is simple:
 
 ## Working Today
 
+### Agent Loop
+
 - Async REPL that reads user input and streams responses from the Anthropic Messages API.
+- Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
+- Streaming robustness — unknown content block types (`thinking`, `redacted_thinking`, `signature_delta`, etc.) are silently skipped instead of crashing deserialization.
+
+### Authentication & Configuration
+
 - OAuth authentication via Claude Code credentials (`~/.claude/.credentials.json`).
 - API key authentication via `ANTHROPIC_API_KEY` environment variable.
 - Configurable model, base URL, and max tokens via environment variables.
-- Agent loop: the LLM can request tool execution, results feed back into the conversation, looping until a text-only response.
-- Bash tool — execute shell commands with timeout, head+tail output truncation, and structured metadata (exit code, description).
-- File tools — read (line-numbered output, pagination, byte budget), write (with directory creation), edit (exact string replacement with CRLF handling).
-- Search tools — glob-based file pattern matching, regex content search with output modes (content / files / count), context lines, and head limit.
-- Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
+
+### Tools
+
+- Bash — execute shell commands with timeout, head+tail output truncation, and structured metadata (exit code, description).
+- File — read (line-numbered output, pagination, byte budget), write (with directory creation), edit (exact string replacement with CRLF handling).
+- Search — glob-based file pattern matching, regex content search with output modes (content / files / count), context lines, and head limit.
 - Tool definitions sent via the Anthropic `tools` API parameter.
+- Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
 
 ## Current Focus
 
@@ -29,11 +38,6 @@ The project direction is simple:
 - Claude Code uses Keychain as the primary store on macOS; the file is a fallback. The two can diverge, causing stale-token errors.
 - Write refreshed tokens back to both Keychain and file.
 - See `.claude/plans/macos-keychain-oauth.md` for full design.
-
-### Streaming Robustness
-
-- Handle unknown content block types (`thinking`, `redacted_thinking`, `signature_delta`, etc.) gracefully instead of crashing on deserialization.
-- Required before enabling extended thinking support.
 
 ### System Prompt
 
