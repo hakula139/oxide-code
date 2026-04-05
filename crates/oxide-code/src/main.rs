@@ -218,7 +218,7 @@ async fn stream_response(
     system_prompt: &str,
     show_thinking: bool,
 ) -> Result<Vec<ContentBlock>> {
-    let mut rx = client.stream_message(messages, system_prompt, tools)?;
+    let mut rx = client.stream_message(messages, Some(system_prompt), tools)?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
     let mut stdout = std::io::stdout();

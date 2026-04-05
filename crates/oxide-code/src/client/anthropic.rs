@@ -17,6 +17,11 @@ const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 /// Matches the referenced Claude Code version.
 const CLAUDE_CLI_VERSION: &str = "2.1.87";
 
+/// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
+/// models with OAuth tokens unless the system prompt starts with this exact
+/// string in its own text block.
+const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 // ── Request types ──
 
 #[derive(Serialize)]
@@ -24,12 +29,22 @@ struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     messages: &'a [Message],
-    system: &'a str,
+    system: Vec<SystemBlock<'a>>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
+}
+
+/// A text block in the system prompt array. The Anthropic API accepts `system`
+/// as either a string or an array of these blocks. Using the array form lets
+/// the identity prefix occupy its own block, which is required for OAuth
+/// validation on non-Haiku models.
+#[derive(Serialize)]
+struct SystemBlock<'a> {
+    r#type: &'static str,
+    text: &'a str,
 }
 
 // ── SSE response types ──
@@ -222,15 +237,26 @@ impl Client {
     pub fn stream_message(
         &self,
         messages: &[Message],
-        system: &str,
+        system: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        let mut system_blocks = vec![SystemBlock {
+            r#type: "text",
+            text: SYSTEM_PROMPT_PREFIX,
+        }];
+        if let Some(s) = system {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: s,
+            });
+        }
+
         let url = format!("{}/v1/messages", self.config.base_url);
         let body = serde_json::to_value(CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
             messages,
-            system,
+            system: system_blocks,
             stream: true,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),

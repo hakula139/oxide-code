@@ -7,10 +7,6 @@ use tokio::process::Command;
 
 use environment::Environment;
 
-/// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
-/// models with OAuth tokens unless the system prompt starts with this string.
-const IDENTITY_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
 const IDENTITY: &str = "\
 You are an interactive AI assistant that helps with software engineering tasks. \
 Use the tools available to you to assist the user.
@@ -89,9 +85,9 @@ pub(crate) async fn build_system_prompt(model: &str) -> String {
 
 /// Assemble the system prompt from explicit path parameters.
 ///
-/// The prompt always begins with [`IDENTITY_PREFIX`] (required for OAuth)
-/// followed by static guidance sections, a detected environment section, and
-/// any discovered CLAUDE.md user instructions.
+/// The identity prefix required for OAuth is handled by the API client as a
+/// separate system block. This function builds the remaining prompt content:
+/// identity body, static guidance sections, environment, and user instructions.
 async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let (env, claude_md) = tokio::join!(
         Environment::detect(model, cwd, git_root),
@@ -99,7 +95,7 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> S
     );
 
     let mut sections = vec![
-        format!("{IDENTITY_PREFIX}\n{IDENTITY}"),
+        IDENTITY.to_owned(),
         TASK_GUIDANCE.to_owned(),
         CAUTION.to_owned(),
         TOOL_GUIDANCE.to_owned(),
@@ -146,12 +142,11 @@ mod tests {
     // ── build_system_prompt ──
 
     #[tokio::test]
-    async fn build_system_prompt_starts_with_identity_prefix() {
+    async fn build_system_prompt_starts_with_identity() {
         let prompt = build_system_prompt("test-model").await;
-        assert_eq!(
-            prompt.lines().next().unwrap(),
-            IDENTITY_PREFIX,
-            "first line must be the identity prefix"
+        assert!(
+            prompt.starts_with("You are an interactive AI assistant"),
+            "prompt should start with identity body (prefix is in the client)"
         );
     }
 
@@ -206,7 +201,7 @@ mod tests {
         let prompt = assemble("test-model", Some(tmp.path()), Some(tmp.path())).await;
 
         let expected_headers = [
-            IDENTITY_PREFIX,
+            "You are an interactive AI assistant",
             "# Doing tasks",
             "# Executing actions with care",
             "# Using your tools",
