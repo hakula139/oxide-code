@@ -69,7 +69,8 @@ pub enum StreamEvent {
     Error {
         error: ApiError,
     },
-    /// Catch-all for unrecognized event types. Silently ignored in stream processing.
+    /// Catch-all for unrecognized event types.
+    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
@@ -109,7 +110,8 @@ pub enum ContentBlockInfo {
     RedactedThinking {
         data: String,
     },
-    /// Catch-all for unrecognized block types. Skipped during stream processing.
+    /// Catch-all for unrecognized block types.
+    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
@@ -134,8 +136,8 @@ pub enum Delta {
     SignatureDelta {
         signature: String,
     },
-    /// Catch-all for unrecognized delta types. Silently dropped during stream
-    /// processing.
+    /// Catch-all for unrecognized delta types.
+    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
