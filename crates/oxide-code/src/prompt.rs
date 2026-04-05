@@ -148,7 +148,11 @@ mod tests {
     #[tokio::test]
     async fn build_system_prompt_starts_with_identity_prefix() {
         let prompt = build_system_prompt("test-model").await;
-        assert!(prompt.starts_with(&format!("{IDENTITY_PREFIX}\n")));
+        assert_eq!(
+            prompt.lines().next().unwrap(),
+            IDENTITY_PREFIX,
+            "first line must be the identity prefix"
+        );
     }
 
     #[tokio::test]
@@ -275,12 +279,13 @@ mod tests {
     // ── helpers ──
 
     fn init_git_repo(path: &Path) {
-        std::process::Command::new("git")
+        let status = std::process::Command::new("git")
             .args(["init"])
             .current_dir(path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .expect("git init failed");
+            .expect("failed to spawn git");
+        assert!(status.success(), "git init exited with non-zero status");
     }
 }
