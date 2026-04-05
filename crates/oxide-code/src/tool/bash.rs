@@ -172,7 +172,7 @@ fn truncate_output(content: &mut String) {
 
     let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
     truncated.push_str(&content[..head_end]);
-    _ = write!(truncated, "\n... ({omitted_lines} lines truncated) ...\n");
+    _ = write!(truncated, "\n... [{omitted_lines} lines truncated] ...\n");
     truncated.push_str(&content[tail_start..]);
 
     *content = truncated;
