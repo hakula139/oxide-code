@@ -31,6 +31,7 @@ const TOOL_GUIDANCE: &str = "\
 # Using your tools
 
 Use dedicated tools instead of running equivalent shell commands:
+
 - Read files: use `read`, not `cat` / `head` / `tail`
 - Edit files: use `edit`, not `sed` / `awk`
 - Write files: use `write`, not `echo` / `cat` with redirection
@@ -129,5 +130,49 @@ mod tests {
     async fn build_system_prompt_includes_model_name() {
         let prompt = build_system_prompt("claude-opus-4-6").await;
         assert!(prompt.contains("Model: claude-opus-4-6"));
+    }
+
+    /// This test runs inside the oxide-code repo which has CLAUDE.md, so the
+    /// non-empty instructions branch should be exercised.
+    #[tokio::test]
+    async fn build_system_prompt_includes_user_instructions() {
+        let prompt = build_system_prompt("test-model").await;
+        assert!(
+            prompt.contains("# User instructions"),
+            "expected user instructions from project CLAUDE.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_system_prompt_sections_joined_with_double_newline() {
+        let prompt = build_system_prompt("test-model").await;
+        // Each section boundary is a double newline. Verify the identity
+        // section is separated from the next by exactly "\n\n".
+        let identity_end = prompt.find("# Doing tasks").expect("task guidance missing");
+        let before = &prompt[..identity_end];
+        assert!(
+            before.ends_with("\n\n"),
+            "sections should be joined with double newline"
+        );
+    }
+
+    // ── find_git_root ──
+
+    #[tokio::test]
+    async fn find_git_root_inside_repo() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let root = find_git_root(&cwd).await;
+        assert!(root.is_some(), "test must run inside a git repo");
+        assert!(
+            root.as_ref().unwrap().join(".git").exists(),
+            "root should contain .git"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_git_root_outside_repo() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let root = find_git_root(tmp.path()).await;
+        assert!(root.is_none());
     }
 }
