@@ -1,6 +1,6 @@
 # Instruction Files
 
-Instruction files let you customize the assistant's behavior with persistent, project-specific context. They are Markdown files discovered automatically at startup and injected into the system prompt.
+Instruction files let you customize the assistant's behavior with persistent, project-specific context. They are Markdown files discovered automatically each turn and injected into the system prompt.
 
 ## Supported filenames
 
