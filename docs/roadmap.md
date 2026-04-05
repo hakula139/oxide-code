@@ -50,6 +50,7 @@ The project direction is simple:
 - TOML config file (`~/.config/ox/config.toml` or `ox.toml` in project root) to replace env-var-only configuration.
 - Layered loading: global defaults → user config → project config → env var overrides.
 - All current env vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `OX_SHOW_THINKING`, etc.) become config keys, with env vars still taking precedence.
+- Configurable instruction directories — allow users to specify additional directories to scan for instruction files (e.g., `.codex/`, `.opencode/`) beyond the hardcoded `.claude/`.
 
 ### Tool Enhancements
 
