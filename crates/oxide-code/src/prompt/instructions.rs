@@ -20,7 +20,7 @@ struct MemoryFile {
 /// [`INSTRUCTION_FILENAMES`] order — the first file found wins. Discovery
 /// locations:
 ///
-/// 1. User global: `~/.claude/CLAUDE.md`
+/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`
 /// 2. Project root: `CLAUDE.md` or `AGENTS.md`
 /// 3. Project `.claude/`: `.claude/CLAUDE.md` or `.claude/AGENTS.md`
 ///
@@ -43,16 +43,18 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
 
 /// Build candidate slots — groups of paths to try at each location.
 ///
-/// The global slot (`~/.claude/CLAUDE.md`) is always included when a home
-/// directory exists. Project slots are only included when `project_root` is
-/// available, and each slot lists [`INSTRUCTION_FILENAMES`] in priority order.
+/// Each slot lists [`INSTRUCTION_FILENAMES`] in priority order. The global
+/// slot is always included when a home directory exists. Project slots are
+/// only included when `project_root` is available.
 fn candidate_slots(project_root: Option<&Path>) -> Vec<(Vec<PathBuf>, &'static str)> {
     let mut slots = Vec::new();
 
-    // Global: only CLAUDE.md (the ~/.claude/ directory is Claude-specific)
     if let Some(home) = dirs::home_dir() {
         slots.push((
-            vec![home.join(".claude").join("CLAUDE.md")],
+            INSTRUCTION_FILENAMES
+                .iter()
+                .map(|f| home.join(".claude").join(f))
+                .collect(),
             "user's global instructions",
         ));
     }
@@ -157,10 +159,16 @@ mod tests {
     fn candidate_slots_without_project_root_still_includes_global() {
         let slots = candidate_slots(None);
 
-        if dirs::home_dir().is_some() {
+        if let Some(home) = dirs::home_dir() {
             assert_eq!(slots.len(), 1);
             assert_eq!(slots[0].1, "user's global instructions");
-            assert_eq!(slots[0].0.len(), 1);
+            assert_eq!(
+                slots[0].0,
+                vec![
+                    home.join(".claude").join("CLAUDE.md"),
+                    home.join(".claude").join("AGENTS.md"),
+                ]
+            );
         } else {
             assert!(slots.is_empty());
         }
