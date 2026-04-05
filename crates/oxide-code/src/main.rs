@@ -281,7 +281,7 @@ fn init_accumulator(
     Ok(match content_block {
         ContentBlockInfo::Text { text } => {
             if !text.is_empty() {
-                write!(stdout, "{text}")?;
+                stdout.write_all(text.as_bytes())?;
                 stdout.flush()?;
             }
             BlockAccumulator::Text(text)
@@ -326,7 +326,7 @@ fn apply_delta(
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            write!(stdout, "{text}")?;
+            stdout.write_all(text.as_bytes())?;
             stdout.flush()?;
         }
         (
