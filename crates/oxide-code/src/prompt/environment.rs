@@ -99,10 +99,12 @@ async fn detect_git_info(cwd: &Path) -> GitInfo {
     // dirty when a command fails, rather than discarding all git info.
     let branch = branch_result
         .ok()
+        .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .unwrap_or_default();
     let is_clean = status_result
         .ok()
+        .filter(|o| o.status.success())
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim().is_empty());
 
     GitInfo { branch, is_clean }
