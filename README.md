@@ -3,7 +3,9 @@
 [![CI](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml/badge.svg)](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs).
+A terminal-based AI coding assistant written in Rust, inspired by [Claude Code].
+
+[Claude Code]: https://code.claude.com/docs
 
 ## Overview
 
@@ -24,7 +26,7 @@ ox
 oxide-code needs an Anthropic API credential. It checks two sources in order:
 
 1. **`ANTHROPIC_API_KEY`** — set this to your Anthropic API key.
-2. **Claude Code OAuth** — if no API key is set, oxide-code reads OAuth credentials from `~/.claude/.credentials.json` (created by [Claude Code](https://code.claude.com/docs)).
+2. **Claude Code OAuth** — if no API key is set, oxide-code reads OAuth credentials from the macOS Keychain and `~/.claude/.credentials.json` (created by [Claude Code]), preferring whichever has the later expiry. Falls back to file-only on Linux.
 
 Optional environment variables:
 

@@ -131,15 +131,33 @@ fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
 #[cfg(target_os = "macos")]
 fn read_keychain() -> Option<CredentialsFile> {
     use security_framework::passwords::{PasswordOptions, generic_password};
+    use tracing::debug;
 
     let account = keychain_account()?;
-    let bytes = generic_password(PasswordOptions::new_generic_password(
+    let bytes = match generic_password(PasswordOptions::new_generic_password(
         KEYCHAIN_SERVICE,
         &account,
-    ))
-    .ok()?;
-    let json = String::from_utf8(bytes).ok()?;
-    serde_json::from_str(&json).ok()
+    )) {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("Keychain read failed: {e}");
+            return None;
+        }
+    };
+    let json = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Keychain data is not valid UTF-8: {e}");
+            return None;
+        }
+    };
+    match serde_json::from_str(&json) {
+        Ok(creds) => Some(creds),
+        Err(e) => {
+            debug!("Keychain JSON parse failed: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
