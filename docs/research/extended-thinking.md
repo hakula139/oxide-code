@@ -60,14 +60,18 @@ When thinking is enabled, `temperature` must be omitted from the request (API re
 
 **Critical**: Thinking and redacted_thinking blocks must be included in the conversation history sent back to the API. Stripping them causes the API to reject subsequent requests or produce degraded responses.
 
-Claude Code preserves these blocks through two normalization functions:
+Claude Code preserves these blocks through normalization in `normalizeMessagesForAPI()`, which runs a multi-pass pipeline before each API request:
 
-- `normalizeContentFromAPI()` — converts SDK response blocks into storable content.
-- `normalizeMessagesForAPI()` — prepares stored messages for the next API request.
+1. `filterOrphanedThinkingOnlyMessages()` — drops thinking-only assistant messages with no same-`message.id` partner carrying non-thinking content (handles resume / compaction artifacts).
+2. `filterTrailingThinkingFromLastAssistant()` — strips trailing thinking / redacted_thinking from the last assistant message. If stripping removes all content, inserts a `[No message content]` placeholder to preserve user / assistant alternation.
+3. `filterWhitespaceOnlyAssistantMessages()` — removes assistant messages with only whitespace text.
+4. `ensureNonEmptyAssistantContent()` — safety net for empty assistant messages.
+
+Order matters: trailing thinking must be stripped before whitespace filtering, otherwise a message like `[text("\n\n"), thinking("...")]` survives the whitespace filter, then thinking stripping removes the thinking block, leaving `[text("\n\n")]` which the API rejects.
 
 ### Constraints
 
-- **Trailing thinking**: Assistant messages must not end with a thinking block. Claude Code strips trailing thinking blocks before sending.
+- **Trailing thinking**: Assistant messages must not end with a thinking block. Stripping can leave a thinking-only message empty — a placeholder text block must be inserted (not message deletion) to preserve user / assistant alternation. Deleting the message would create consecutive user messages, which the API rejects.
 - **Credential rotation**: Signatures are cryptographically bound to the API key that generated them. When credentials change (e.g., user logs in with a different account), all thinking and redacted_thinking blocks must be stripped from the conversation history — their signatures are now invalid and the API will reject them with 400.
 
 ## Signatures
@@ -81,11 +85,11 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code handles credential rotation in `stripSignatureBlocks()`, which removes all thinking / redacted_thinking blocks when the active credential changes.
 
-oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking removal. Adaptive thinking is enabled by default. Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default. Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
 
 ## Sources
 
 - `claude-code/src/constants/betas.ts` — `INTERLEAVED_THINKING_BETA_HEADER`, `REDACT_THINKING_BETA_HEADER`
 - `claude-code/src/services/api/claude.ts` — streaming handler, delta accumulation, request construction
-- `claude-code/src/utils/messages.ts` — `normalizeContentFromAPI`, `normalizeMessagesForAPI`, `stripSignatureBlocks`
+- `claude-code/src/utils/messages.ts` — `normalizeMessagesForAPI`, `filterTrailingThinkingFromLastAssistant`, `filterOrphanedThinkingOnlyMessages`, `stripSignatureBlocks`
 - `claude-code/src/utils/thinking.ts` — thinking config types, model support detection

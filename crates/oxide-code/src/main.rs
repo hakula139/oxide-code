@@ -82,10 +82,6 @@ async fn agent_turn(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        // Stripping can leave an all-thinking assistant message with empty
-        // content (thinking-only responses lose their blocks here). The API
-        // rejects empty assistant messages, so remove them.
-        messages.retain(|m| !(m.role == Role::Assistant && m.content.is_empty()));
         let blocks = stream_response(client, messages, &tool_defs, show_thinking).await?;
 
         let tool_uses: Vec<_> = blocks

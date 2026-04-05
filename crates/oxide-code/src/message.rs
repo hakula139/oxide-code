@@ -77,6 +77,9 @@ impl Message {
 /// Strip trailing thinking / `redacted_thinking` blocks from the last assistant
 /// message. The API rejects assistant messages that end with thinking blocks.
 ///
+/// If stripping removes all content (thinking-only response), a placeholder text
+/// block is inserted to preserve user / assistant alternation.
+///
 /// Only the most recent assistant message can have un-stripped trailing thinking
 /// — earlier ones were already processed in prior iterations.
 pub fn strip_trailing_thinking(messages: &mut [Message]) {
@@ -90,6 +93,11 @@ pub fn strip_trailing_thinking(messages: &mut [Message]) {
         )
     }) {
         msg.content.pop();
+    }
+    if msg.content.is_empty() {
+        msg.content.push(ContentBlock::Text {
+            text: "[No message content]".to_owned(),
+        });
     }
 }
 
@@ -355,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_trailing_thinking_empties_all_thinking_message() {
+    fn strip_trailing_thinking_inserts_placeholder_for_thinking_only() {
         let mut messages = vec![Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Thinking {
@@ -364,6 +372,9 @@ mod tests {
             }],
         }];
         strip_trailing_thinking(&mut messages);
-        assert!(messages[0].content.is_empty());
+        assert_eq!(messages[0].content.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "[No message content]")
+        );
     }
 }
