@@ -39,7 +39,7 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
         "x-anthropic-billing-header: \
          cc_version={version}.{fingerprint}; \
          cc_entrypoint=cli; \
-         cch=00000;"
+         {CCH_PLACEHOLDER};"
     )
 }
 
@@ -76,6 +76,16 @@ mod tests {
     }
 
     #[test]
+    fn compute_fingerprint_varies_with_version() {
+        let fp1 = compute_fingerprint("hello world", "2.1.37");
+        let fp2 = compute_fingerprint("hello world", "2.1.87");
+        assert_ne!(
+            fp1, fp2,
+            "different versions should produce different fingerprints"
+        );
+    }
+
+    #[test]
     fn compute_fingerprint_short_message_pads_with_zero() {
         // "Hi" (len 2): all fingerprint indices (4, 7, 20) are out of bounds,
         // so chars default to '0'. Same result as an empty message.
@@ -94,16 +104,6 @@ mod tests {
         assert_ne!(
             fp, fp_all_zero,
             "partial in-bounds should differ from all-zero"
-        );
-    }
-
-    #[test]
-    fn compute_fingerprint_varies_with_version() {
-        let fp1 = compute_fingerprint("hello world", "2.1.37");
-        let fp2 = compute_fingerprint("hello world", "2.1.87");
-        assert_ne!(
-            fp1, fp2,
-            "different versions should produce different fingerprints"
         );
     }
 
@@ -145,19 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn inject_cch_replaces_only_first_occurrence() {
-        // system (with placeholder) is before messages — matches our struct field order.
-        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
-        let result = inject_cch(body);
-
-        assert_eq!(
-            result.matches("cch=00000").count(),
-            1,
-            "only the second occurrence (in messages) should remain"
-        );
-    }
-
-    #[test]
     fn inject_cch_produces_five_hex_chars() {
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
         let result = inject_cch(body);
@@ -167,6 +154,19 @@ mod tests {
         assert!(
             cch_value.chars().all(|c| c.is_ascii_hexdigit()),
             "cch should be 5 hex chars, got: {cch_value}"
+        );
+    }
+
+    #[test]
+    fn inject_cch_replaces_only_first_occurrence() {
+        // system (with placeholder) is before messages — matches our struct field order.
+        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
+        let result = inject_cch(body);
+
+        assert_eq!(
+            result.matches("cch=00000").count(),
+            1,
+            "only the second occurrence (in messages) should remain"
         );
     }
 }

@@ -46,12 +46,12 @@ tokio = { version = "1", features = [
   "time",
 ] }
 tracing = "0.1"
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
   "ansi",
   "env-filter",
   "fmt",
 ] }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [profile.release]
 lto = true
