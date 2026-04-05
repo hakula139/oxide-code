@@ -18,7 +18,7 @@ The project direction is simple:
 
 ### Authentication & Configuration
 
-- OAuth authentication via Claude Code credentials (`~/.claude/.credentials.json`).
+- OAuth authentication via Claude Code credentials — reads from macOS Keychain (`"Claude Code-credentials"` service) and `~/.claude/.credentials.json`, preferring whichever has the later expiry. Keychain access via `security-framework` crate (macOS-only). Falls back to file-only on Linux.
 - API key authentication via `ANTHROPIC_API_KEY` environment variable.
 - Configurable model, base URL, and max tokens via environment variables.
 
@@ -31,13 +31,6 @@ The project direction is simple:
 - Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
 
 ## Current Focus
-
-### macOS Keychain OAuth
-
-- Read OAuth tokens from macOS Keychain (`"Claude Code-credentials"` service) instead of only `~/.claude/.credentials.json`.
-- Claude Code uses Keychain as the primary store on macOS; the file is a fallback. The two can diverge, causing stale-token errors.
-- Write refreshed tokens back to both Keychain and file.
-- See `.claude/plans/macos-keychain-oauth.md` for full design.
 
 ### System Prompt
 

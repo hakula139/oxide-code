@@ -28,7 +28,7 @@ ox                      # Start an interactive session
 │   └── anthropic.rs    # Anthropic Messages API streaming client
 ├── config.rs           # Configuration loading (env vars, model, base URL)
 ├── config/
-│   └── oauth.rs        # Claude Code OAuth credentials, token refresh, file locking
+│   └── oauth.rs        # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
 ├── main.rs             # CLI entry point, agent loop, async REPL
 ├── message.rs          # Conversation message types
 ├── tool.rs             # Tool trait, registry, definitions

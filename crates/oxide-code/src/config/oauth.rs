@@ -21,6 +21,9 @@ const LOCK_MAX_RETRIES: u32 = 5;
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(1000);
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
 // ── Credential Types ──
 
 #[derive(Deserialize)]
@@ -46,11 +49,11 @@ impl OAuthCredential {
 
 // ── Token Loading ──
 
-/// Load an OAuth access token from Claude Code's credentials file, refreshing
+/// Load an OAuth access token from Claude Code credentials, refreshing
 /// proactively if the token is within 5 minutes of expiry.
 pub async fn load_token() -> Result<String> {
-    let path = credentials_path().context("could not determine home directory")?;
-    let oauth = read_credentials(&path)?.claude_ai_oauth;
+    let file_path = credentials_path().context("could not determine home directory")?;
+    let oauth = load_credentials(&file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
 
     // Token is valid and not near-expiry.
@@ -71,7 +74,7 @@ pub async fn load_token() -> Result<String> {
     let lock_path = lock_path().context("could not determine home directory")?;
     let _lock = acquire_lock(&lock_path).await?;
 
-    let oauth = read_credentials(&path)?.claude_ai_oauth;
+    let oauth = load_credentials(&file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
@@ -84,7 +87,7 @@ pub async fn load_token() -> Result<String> {
 
     match refresh_oauth_token(refresh_token).await {
         Ok(response) => {
-            write_refreshed_credentials(&path, &response)?;
+            write_refreshed_credentials(&file_path, &response)?;
             Ok(response.access_token)
         }
         Err(e) if is_expired(expires_at_ms) => {
@@ -95,6 +98,71 @@ pub async fn load_token() -> Result<String> {
             Ok(oauth.access_token)
         }
     }
+}
+
+/// Load credentials from the best available source.
+///
+/// On macOS, reads from both the Keychain and the credentials file, preferring
+/// whichever has the later expiry. Falls back gracefully if either source is
+/// unavailable.
+#[cfg(target_os = "macos")]
+fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
+    let keychain = read_keychain();
+    let file = read_credentials(file_path);
+
+    match (keychain, file) {
+        (Some(kc), Ok(fc)) => {
+            if fc.claude_ai_oauth.expires_at_ms() > kc.claude_ai_oauth.expires_at_ms() {
+                Ok(fc)
+            } else {
+                Ok(kc)
+            }
+        }
+        (Some(kc), Err(_)) => Ok(kc),
+        (None, file) => file,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
+    read_credentials(file_path)
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain() -> Option<CredentialsFile> {
+    use security_framework::passwords::{PasswordOptions, generic_password};
+    use tracing::debug;
+
+    let account = keychain_account()?;
+    let bytes = match generic_password(PasswordOptions::new_generic_password(
+        KEYCHAIN_SERVICE,
+        &account,
+    )) {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("Keychain read failed: {e}");
+            return None;
+        }
+    };
+    let json = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Keychain data is not valid UTF-8: {e}");
+            return None;
+        }
+    };
+    match serde_json::from_str(&json) {
+        Ok(creds) => Some(creds),
+        Err(e) => {
+            debug!("Keychain JSON parse failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_account() -> Option<String> {
+    std::env::var("USER").ok().filter(|u| !u.is_empty())
 }
 
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {
@@ -160,7 +228,8 @@ struct RefreshResponse {
     scope: Option<String>,
 }
 
-/// Write refreshed tokens back to the credentials file, preserving unknown fields.
+/// Write refreshed tokens back to the credentials file (and macOS Keychain),
+/// preserving unknown fields.
 ///
 /// Must be called while holding the [`LockGuard`] from [`acquire_lock`].
 fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
@@ -193,7 +262,21 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
 
+    #[cfg(all(target_os = "macos", not(test)))]
+    if let Err(e) = write_keychain(&serialized) {
+        warn!("failed to update Keychain: {e:#}");
+    }
+
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn write_keychain(json: &str) -> Result<()> {
+    use security_framework::passwords::set_generic_password;
+
+    let account = keychain_account().context("could not determine OS username")?;
+    set_generic_password(KEYCHAIN_SERVICE, &account, json.as_bytes())
+        .context("failed to write to Keychain")
 }
 
 fn now_millis() -> u64 {
