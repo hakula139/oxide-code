@@ -16,13 +16,17 @@ struct MemoryFile {
 /// Discover and load instruction files, returning the formatted section for the
 /// system prompt.
 ///
-/// At each project location, filenames are checked in
+/// At each directory level, filenames are checked in
 /// [`INSTRUCTION_FILENAMES`] order — the first file found wins. Discovery
-/// locations:
+/// walks from the project root down to the working directory so that
+/// subdirectory-specific instructions appear later (higher priority).
+///
+/// Discovery locations:
 ///
 /// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`
-/// 2. Project root: `CLAUDE.md` or `AGENTS.md`
-/// 3. Project `.claude/`: `.claude/CLAUDE.md` or `.claude/AGENTS.md`
+/// 2. Each directory from project root to CWD (inclusive):
+///    - `<dir>/CLAUDE.md` or `<dir>/AGENTS.md`
+///    - `<dir>/.claude/CLAUDE.md` or `<dir>/.claude/AGENTS.md`
 ///
 /// The project root is the git repository root when available, otherwise the
 /// current working directory. The global file is always checked regardless of
@@ -31,7 +35,7 @@ struct MemoryFile {
 /// Returns an empty string when no files are found.
 pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let project_root = git_root.or(cwd);
-    let slots = candidate_slots(project_root);
+    let slots = candidate_slots(cwd, project_root);
     let files = load_files(slots).await;
 
     if files.is_empty() {
@@ -44,9 +48,13 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
 /// Build candidate slots — groups of paths to try at each location.
 ///
 /// Each slot lists [`INSTRUCTION_FILENAMES`] in priority order. The global
-/// slot is always included when a home directory exists. Project slots are
-/// only included when `project_root` is available.
-fn candidate_slots(project_root: Option<&Path>) -> Vec<(Vec<PathBuf>, &'static str)> {
+/// slot is always included when a home directory exists. Project slots walk
+/// from the root to the working directory, generating two slots per directory
+/// level (root-level and `.claude/`).
+fn candidate_slots(
+    cwd: Option<&Path>,
+    project_root: Option<&Path>,
+) -> Vec<(Vec<PathBuf>, &'static str)> {
     let mut slots = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
@@ -60,20 +68,45 @@ fn candidate_slots(project_root: Option<&Path>) -> Vec<(Vec<PathBuf>, &'static s
     }
 
     if let Some(root) = project_root {
-        slots.push((
-            INSTRUCTION_FILENAMES.iter().map(|f| root.join(f)).collect(),
-            "project instructions",
-        ));
-        slots.push((
-            INSTRUCTION_FILENAMES
-                .iter()
-                .map(|f| root.join(".claude").join(f))
-                .collect(),
-            "project instructions (.claude/)",
-        ));
+        for dir in walk_root_to_cwd(root, cwd) {
+            slots.push((
+                INSTRUCTION_FILENAMES.iter().map(|f| dir.join(f)).collect(),
+                "project instructions",
+            ));
+            slots.push((
+                INSTRUCTION_FILENAMES
+                    .iter()
+                    .map(|f| dir.join(".claude").join(f))
+                    .collect(),
+                "project instructions (.claude/)",
+            ));
+        }
     }
 
     slots
+}
+
+/// Return every directory from `root` down to `cwd` (inclusive).
+///
+/// If `cwd` is not a subdirectory of `root`, or `cwd` is `None`, returns
+/// just `[root]`.
+fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
+    let Some(cwd) = cwd else {
+        return vec![root.to_path_buf()];
+    };
+
+    let Ok(relative) = cwd.strip_prefix(root) else {
+        return vec![root.to_path_buf()];
+    };
+
+    let mut dirs = vec![root.to_path_buf()];
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        dirs.push(current.clone());
+    }
+
+    dirs
 }
 
 /// Try each slot's candidates in order, loading the first file found per slot.
@@ -129,35 +162,42 @@ mod tests {
     // ── candidate_slots ──
 
     #[test]
-    fn candidate_slots_with_project_root() {
+    fn candidate_slots_cwd_equals_root() {
         let root = PathBuf::from("/home/user/project");
-        let slots = candidate_slots(Some(&root));
+        let slots = candidate_slots(Some(&root), Some(&root));
 
-        let project = slots
+        // 1 global + 2 project (root-level + .claude/)
+        let project: Vec<_> = slots
             .iter()
-            .find(|(_, l)| *l == "project instructions")
-            .expect("project instructions slot missing");
+            .filter(|(_, l)| *l == "project instructions")
+            .collect();
+        assert_eq!(project.len(), 1);
         assert_eq!(
-            project.0,
+            project[0].0,
             vec![root.join("CLAUDE.md"), root.join("AGENTS.md")]
-        );
-
-        let dotclaude = slots
-            .iter()
-            .find(|(_, l)| *l == "project instructions (.claude/)")
-            .expect(".claude/ slot missing");
-        assert_eq!(
-            dotclaude.0,
-            vec![
-                root.join(".claude").join("CLAUDE.md"),
-                root.join(".claude").join("AGENTS.md"),
-            ]
         );
     }
 
     #[test]
+    fn candidate_slots_walks_root_to_cwd() {
+        let root = PathBuf::from("/repo");
+        let cwd = PathBuf::from("/repo/crates/core");
+        let slots = candidate_slots(Some(&cwd), Some(&root));
+
+        let project: Vec<_> = slots
+            .iter()
+            .filter(|(_, l)| *l == "project instructions")
+            .collect();
+        // 3 levels: /repo, /repo/crates, /repo/crates/core
+        assert_eq!(project.len(), 3);
+        assert_eq!(project[0].0[0], root.join("CLAUDE.md"));
+        assert_eq!(project[1].0[0], root.join("crates").join("CLAUDE.md"));
+        assert_eq!(project[2].0[0], cwd.join("CLAUDE.md"));
+    }
+
+    #[test]
     fn candidate_slots_without_project_root_still_includes_global() {
-        let slots = candidate_slots(None);
+        let slots = candidate_slots(None, None);
 
         if let Some(home) = dirs::home_dir() {
             assert_eq!(slots.len(), 1);
@@ -172,6 +212,45 @@ mod tests {
         } else {
             assert!(slots.is_empty());
         }
+    }
+
+    // ── walk_root_to_cwd ──
+
+    #[test]
+    fn walk_root_to_cwd_same_directory() {
+        let root = PathBuf::from("/repo");
+        let dirs = walk_root_to_cwd(&root, Some(&root));
+        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
+    }
+
+    #[test]
+    fn walk_root_to_cwd_nested() {
+        let root = PathBuf::from("/repo");
+        let cwd = PathBuf::from("/repo/a/b");
+        let dirs = walk_root_to_cwd(&root, Some(&cwd));
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo/a"),
+                PathBuf::from("/repo/a/b"),
+            ]
+        );
+    }
+
+    #[test]
+    fn walk_root_to_cwd_outside_root_returns_root_only() {
+        let root = PathBuf::from("/repo");
+        let cwd = PathBuf::from("/other/dir");
+        let dirs = walk_root_to_cwd(&root, Some(&cwd));
+        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
+    }
+
+    #[test]
+    fn walk_root_to_cwd_none_returns_root_only() {
+        let root = PathBuf::from("/repo");
+        let dirs = walk_root_to_cwd(&root, None);
+        assert_eq!(dirs, vec![PathBuf::from("/repo")]);
     }
 
     // ── render ──
