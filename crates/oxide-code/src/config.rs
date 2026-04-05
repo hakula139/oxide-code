@@ -68,8 +68,7 @@ impl Config {
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
 
-        let show_thinking =
-            non_empty_env("OX_SHOW_THINKING").is_some_and(|v| v == "1" || v == "true");
+        let show_thinking = env_bool("OX_SHOW_THINKING");
 
         Ok(Self {
             auth,
@@ -84,6 +83,10 @@ impl Config {
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn env_bool(key: &str) -> bool {
+    non_empty_env(key).is_some_and(|v| v == "1" || v == "true")
 }
 
 #[cfg(test)]
