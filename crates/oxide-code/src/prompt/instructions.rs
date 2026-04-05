@@ -167,6 +167,38 @@ fn render(files: &[MemoryFile]) -> String {
 mod tests {
     use super::*;
 
+    // ── load ──
+
+    #[tokio::test]
+    async fn load_uses_cwd_as_fallback_root_when_git_root_is_none() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        fs::write(dir.path().join("CLAUDE.md"), "Fallback rules.")
+            .await
+            .unwrap();
+
+        let result = load(Some(dir.path()), None).await;
+        assert!(
+            result.contains("Fallback rules."),
+            "should discover CLAUDE.md using cwd as project root"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_discovers_claude_dir_instructions() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(claude_dir.join("CLAUDE.md"), "Hidden rules.")
+            .await
+            .unwrap();
+
+        let result = load(Some(dir.path()), Some(dir.path())).await;
+        assert!(
+            result.contains("Hidden rules."),
+            "should discover .claude/CLAUDE.md"
+        );
+    }
+
     // ── candidate_slots ──
 
     #[test]
