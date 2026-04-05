@@ -59,8 +59,10 @@ pub(crate) async fn build_system_prompt(model: &str) -> String {
         None => None,
     };
 
-    let env = Environment::detect(model, cwd.as_deref(), git_root.as_deref()).await;
-    let claude_md = claude_md::load(cwd.as_deref(), git_root.as_deref()).await;
+    let (env, claude_md) = tokio::join!(
+        Environment::detect(model, cwd.as_deref(), git_root.as_deref()),
+        claude_md::load(cwd.as_deref(), git_root.as_deref()),
+    );
 
     let mut sections = vec![
         format!("{IDENTITY_PREFIX}\n{IDENTITY}"),
@@ -111,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn build_system_prompt_starts_with_identity_prefix() {
         let prompt = build_system_prompt("test-model").await;
-        assert!(prompt.starts_with(IDENTITY_PREFIX));
+        assert!(prompt.starts_with(&format!("{IDENTITY_PREFIX}\n")));
     }
 
     #[tokio::test]

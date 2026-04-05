@@ -18,16 +18,12 @@ struct MemoryFile {
 /// 3. Project `.claude/`: `.claude/CLAUDE.md`
 ///
 /// The project root is the git repository root when available, otherwise the
-/// current working directory.
+/// current working directory. The global file is always checked regardless of
+/// whether a project root exists.
 ///
 /// Returns an empty string when no files are found.
 pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let project_root = git_root.or(cwd);
-
-    let Some(project_root) = project_root else {
-        return String::new();
-    };
-
     let candidates = candidate_paths(project_root);
     let files = load_files(candidates).await;
 
@@ -39,7 +35,11 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
 }
 
 /// Build the list of candidate CLAUDE.md paths to check.
-fn candidate_paths(project_root: &Path) -> Vec<(PathBuf, &'static str)> {
+///
+/// The global path (`~/.claude/CLAUDE.md`) is always included when a home
+/// directory exists. Project paths are only included when `project_root` is
+/// available.
+fn candidate_paths(project_root: Option<&Path>) -> Vec<(PathBuf, &'static str)> {
     let mut paths = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
@@ -49,12 +49,14 @@ fn candidate_paths(project_root: &Path) -> Vec<(PathBuf, &'static str)> {
         ));
     }
 
-    paths.push((project_root.join("CLAUDE.md"), "project instructions"));
+    if let Some(root) = project_root {
+        paths.push((root.join("CLAUDE.md"), "project instructions"));
 
-    paths.push((
-        project_root.join(".claude").join("CLAUDE.md"),
-        "project instructions (.claude/)",
-    ));
+        paths.push((
+            root.join(".claude").join("CLAUDE.md"),
+            "project instructions (.claude/)",
+        ));
+    }
 
     paths
 }
@@ -109,14 +111,31 @@ mod tests {
     // ── candidate_paths ──
 
     #[test]
-    fn candidate_paths_includes_project_and_dotclaude() {
+    fn candidate_paths_with_project_root() {
         let root = PathBuf::from("/home/user/project");
-        let paths = candidate_paths(&root);
+        let paths = candidate_paths(Some(&root));
 
         let targets: Vec<_> = paths.iter().map(|(p, _)| p.clone()).collect();
         assert!(targets.contains(&root.join("CLAUDE.md")));
         assert!(targets.contains(&root.join(".claude").join("CLAUDE.md")));
-        assert!(paths.len() >= 2);
+
+        if dirs::home_dir().is_some() {
+            assert_eq!(paths.len(), 3);
+        } else {
+            assert_eq!(paths.len(), 2);
+        }
+    }
+
+    #[test]
+    fn candidate_paths_without_project_root_still_includes_global() {
+        let paths = candidate_paths(None);
+
+        if dirs::home_dir().is_some() {
+            assert_eq!(paths.len(), 1);
+            assert!(paths[0].0.ends_with(".claude/CLAUDE.md"));
+        } else {
+            assert!(paths.is_empty());
+        }
     }
 
     // ── render ──
