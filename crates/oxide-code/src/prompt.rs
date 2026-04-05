@@ -191,6 +191,67 @@ mod tests {
         );
     }
 
+    // ── assemble ──
+
+    #[tokio::test]
+    async fn assemble_in_git_repo_includes_all_sections_in_order() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("CLAUDE.md"), "Test project rules.").unwrap();
+
+        let prompt = assemble("test-model", Some(tmp.path()), Some(tmp.path())).await;
+
+        let expected_headers = [
+            IDENTITY_PREFIX,
+            "# Doing tasks",
+            "# Executing actions with care",
+            "# Using your tools",
+            "# Tone and style",
+            "# Environment",
+            "# User instructions",
+        ];
+        let mut prev_pos = 0;
+        for header in &expected_headers {
+            let pos = prompt
+                .find(header)
+                .unwrap_or_else(|| panic!("missing section: {header}"));
+            assert!(
+                pos >= prev_pos,
+                "{header} should come after previous section"
+            );
+            prev_pos = pos;
+        }
+
+        assert!(prompt.contains(&format!("Working directory: {}", tmp.path().display())));
+        assert!(prompt.contains("Is a git repository: true"));
+        assert!(prompt.contains("Model: test-model"));
+        assert!(prompt.contains("Test project rules."));
+    }
+
+    #[tokio::test]
+    async fn assemble_walks_root_to_cwd_for_instruction_discovery() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let root = tmp.path();
+        init_git_repo(root);
+
+        std::fs::write(root.join("CLAUDE.md"), "Root rules.").unwrap();
+        let sub = root.join("crates").join("core");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("CLAUDE.md"), "Subdir rules.").unwrap();
+
+        let prompt = assemble("test-model", Some(&sub), Some(root)).await;
+
+        assert!(prompt.contains("Root rules."));
+        assert!(prompt.contains("Subdir rules."));
+
+        let root_pos = prompt.find("Root rules.").unwrap();
+        let sub_pos = prompt.find("Subdir rules.").unwrap();
+        assert!(
+            root_pos < sub_pos,
+            "root instructions should appear before subdirectory"
+        );
+    }
+
     // ── find_git_root ──
 
     #[tokio::test]
@@ -209,5 +270,17 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let root = find_git_root(tmp.path()).await;
         assert!(root.is_none());
+    }
+
+    // ── helpers ──
+
+    fn init_git_repo(path: &Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git init failed");
     }
 }
