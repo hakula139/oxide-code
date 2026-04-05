@@ -1,4 +1,5 @@
 anthropic
+anthropics
 anyhow
 claudemd
 clippy
@@ -15,6 +16,7 @@ RAII
 ratatui
 replacen
 reqwest
+rfind
 rustls
 serde
 strum
