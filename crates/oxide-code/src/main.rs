@@ -8,11 +8,11 @@ use std::io::Write;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
-use message::{ContentBlock, Message, Role};
+use message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::load().await?;
+    let show_thinking = config.show_thinking;
     let client = Client::new(config)?;
     let tools = ToolRegistry::new(vec![
         Box::new(BashTool),
@@ -43,10 +44,10 @@ async fn main() -> Result<()> {
         Box::new(GrepTool),
     ]);
 
-    repl(&client, &tools).await
+    repl(&client, &tools, show_thinking).await
 }
 
-async fn repl(client: &Client, tools: &ToolRegistry) -> Result<()> {
+async fn repl(client: &Client, tools: &ToolRegistry, show_thinking: bool) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = Vec::new();
@@ -65,7 +66,7 @@ async fn repl(client: &Client, tools: &ToolRegistry) -> Result<()> {
         }
 
         messages.push(Message::user(&input));
-        agent_turn(client, tools, &mut messages).await?;
+        agent_turn(client, tools, &mut messages, show_thinking).await?;
     }
 
     Ok(())
@@ -75,11 +76,13 @@ async fn agent_turn(
     client: &Client,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
+    show_thinking: bool,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
-        let blocks = stream_response(client, messages, &tool_defs).await?;
+        strip_trailing_thinking(messages);
+        let blocks = stream_response(client, messages, &tool_defs, show_thinking).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -136,6 +139,10 @@ async fn agent_turn(
 
 // ── Stream Processing ──
 
+const DIM: &str = "\x1b[2m";
+const DIM_END: &str = "\x1b[22m";
+
+#[derive(Debug)]
 enum BlockAccumulator {
     Text(String),
     ToolUse {
@@ -143,27 +150,62 @@ enum BlockAccumulator {
         name: String,
         json_buf: String,
     },
+    ServerToolUse {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    /// Placeholder for unrecognized content block types. Absorbs deltas silently
+    /// and produces no [`ContentBlock`] at the end.
+    Skipped,
 }
 
 impl BlockAccumulator {
-    fn into_content_block(self) -> ContentBlock {
+    fn into_content_block(self) -> Option<ContentBlock> {
         match self {
-            Self::Text(text) => ContentBlock::Text { text },
-            Self::ToolUse { id, name, json_buf } => {
-                let input = serde_json::from_str(&json_buf).unwrap_or_else(|e| {
-                    warn!("malformed tool input JSON: {e}");
-                    serde_json::Value::Object(serde_json::Map::new())
-                });
-                ContentBlock::ToolUse { id, name, input }
-            }
+            Self::Text(text) => Some(ContentBlock::Text { text }),
+            Self::ToolUse { id, name, json_buf } => Some(ContentBlock::ToolUse {
+                id,
+                name,
+                input: parse_tool_json(&json_buf),
+            }),
+            Self::ServerToolUse { id, name, json_buf } => Some(ContentBlock::ServerToolUse {
+                id,
+                name,
+                input: parse_tool_json(&json_buf),
+            }),
+            Self::Thinking {
+                thinking,
+                signature,
+            } => Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }),
+            Self::RedactedThinking { data } => Some(ContentBlock::RedactedThinking { data }),
+            Self::Skipped => None,
         }
     }
+}
+
+fn parse_tool_json(json_buf: &str) -> serde_json::Value {
+    serde_json::from_str(json_buf).unwrap_or_else(|e| {
+        warn!("malformed tool input JSON: {e}");
+        serde_json::Value::Object(serde_json::Map::new())
+    })
 }
 
 async fn stream_response(
     client: &Client,
     messages: &[Message],
     tools: &[ToolDefinition],
+    show_thinking: bool,
 ) -> Result<Vec<ContentBlock>> {
     let mut rx = client.stream_message(messages, None, tools)?;
 
@@ -181,37 +223,27 @@ async fn stream_response(
                 if blocks.len() <= index {
                     blocks.resize_with(index + 1, || None);
                 }
-                blocks[index] = Some(match content_block {
-                    ContentBlockInfo::Text { text } => {
-                        if !text.is_empty() {
-                            write!(stdout, "{text}")?;
-                            stdout.flush()?;
-                        }
-                        BlockAccumulator::Text(text)
-                    }
-                    ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        json_buf: String::new(),
-                    },
-                });
+                blocks[index] = Some(init_accumulator(
+                    content_block,
+                    index,
+                    &mut stdout,
+                    show_thinking,
+                )?);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    match (block, delta) {
-                        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
-                            buf.push_str(&text);
-                            write!(stdout, "{text}")?;
-                            stdout.flush()?;
-                        }
-                        (
-                            BlockAccumulator::ToolUse { json_buf, .. },
-                            Delta::InputJsonDelta { partial_json },
-                        ) => {
-                            json_buf.push_str(&partial_json);
-                        }
-                        _ => {}
-                    }
+                    apply_delta(block, delta, &mut stdout, show_thinking)?;
+                }
+            }
+            StreamEvent::ContentBlockStop { index } => {
+                if show_thinking
+                    && matches!(
+                        blocks.get(index),
+                        Some(Some(BlockAccumulator::Thinking { .. }))
+                    )
+                {
+                    writeln!(stdout)?;
+                    stdout.flush()?;
                 }
             }
             StreamEvent::Error { error } => {
@@ -224,7 +256,7 @@ async fn stream_response(
     // Streamed text deltas don't include a final newline.
     let has_text = blocks
         .iter()
-        .any(|b| matches!(b, Some(BlockAccumulator::Text(_))));
+        .any(|b| matches!(b, Some(BlockAccumulator::Text(s)) if !s.is_empty()));
     if has_text {
         writeln!(stdout)?;
     }
@@ -232,8 +264,100 @@ async fn stream_response(
     Ok(blocks
         .into_iter()
         .flatten()
-        .map(BlockAccumulator::into_content_block)
+        .filter_map(BlockAccumulator::into_content_block)
         .collect())
+}
+
+fn init_accumulator(
+    content_block: ContentBlockInfo,
+    index: usize,
+    stdout: &mut std::io::Stdout,
+    show_thinking: bool,
+) -> Result<BlockAccumulator> {
+    Ok(match content_block {
+        ContentBlockInfo::Text { text } => {
+            if !text.is_empty() {
+                stdout.write_all(text.as_bytes())?;
+                stdout.flush()?;
+            }
+            BlockAccumulator::Text(text)
+        }
+        ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
+            id,
+            name,
+            json_buf: String::new(),
+        },
+        ContentBlockInfo::ServerToolUse { id, name } => BlockAccumulator::ServerToolUse {
+            id,
+            name,
+            json_buf: String::new(),
+        },
+        ContentBlockInfo::Thinking {
+            thinking,
+            signature,
+        } => {
+            if show_thinking && !thinking.is_empty() {
+                write!(stdout, "{DIM}{thinking}{DIM_END}")?;
+                stdout.flush()?;
+            }
+            BlockAccumulator::Thinking {
+                thinking,
+                signature,
+            }
+        }
+        ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
+        ContentBlockInfo::Unknown => {
+            warn!("skipping unknown content block at index {index}");
+            BlockAccumulator::Skipped
+        }
+    })
+}
+
+fn apply_delta(
+    block: &mut BlockAccumulator,
+    delta: Delta,
+    stdout: &mut std::io::Stdout,
+    show_thinking: bool,
+) -> Result<()> {
+    match (block, delta) {
+        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
+            buf.push_str(&text);
+            stdout.write_all(text.as_bytes())?;
+            stdout.flush()?;
+        }
+        (
+            BlockAccumulator::ToolUse { json_buf, .. }
+            | BlockAccumulator::ServerToolUse { json_buf, .. },
+            Delta::InputJsonDelta { partial_json },
+        ) => {
+            json_buf.push_str(&partial_json);
+        }
+        (
+            BlockAccumulator::Thinking { thinking, .. },
+            Delta::ThinkingDelta {
+                thinking: thinking_delta,
+            },
+        ) => {
+            thinking.push_str(&thinking_delta);
+            if show_thinking {
+                write!(stdout, "{DIM}{thinking_delta}{DIM_END}")?;
+                stdout.flush()?;
+            }
+        }
+        (
+            BlockAccumulator::Thinking { signature, .. },
+            Delta::SignatureDelta {
+                signature: sig_value,
+            },
+        ) => {
+            // Signature is a full value, not incremental.
+            *signature = sig_value;
+        }
+        (block, delta) => {
+            debug!(?block, ?delta, "ignoring unhandled delta");
+        }
+    }
+    Ok(())
 }
 
 // ── Display ──

@@ -1,6 +1,7 @@
 mod oauth;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -14,12 +15,21 @@ pub enum Auth {
     OAuth(String),
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingConfig {
+    /// Model decides the thinking budget (Claude 4.6+).
+    Adaptive,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: Auth,
     pub model: String,
     pub base_url: String,
     pub max_tokens: u32,
+    pub thinking: Option<ThinkingConfig>,
+    pub show_thinking: bool,
 }
 
 impl Config {
@@ -46,15 +56,39 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
+        // Adaptive thinking is always enabled — the model decides the budget.
+        let thinking = Some(ThinkingConfig::Adaptive);
+
+        let show_thinking = env_bool("OX_SHOW_THINKING");
+
         Ok(Self {
             auth,
             model,
             base_url,
             max_tokens,
+            thinking,
+            show_thinking,
         })
     }
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn env_bool(key: &str) -> bool {
+    non_empty_env(key).is_some_and(|v| v == "1" || v == "true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ThinkingConfig ──
+
+    #[test]
+    fn thinking_config_adaptive_serializes() {
+        let json = serde_json::to_value(&ThinkingConfig::Adaptive).unwrap();
+        assert_eq!(json["type"], "adaptive");
+    }
 }
