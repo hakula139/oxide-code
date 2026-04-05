@@ -41,6 +41,7 @@ editing files or running tests can proceed freely. For actions that are hard to 
 affect shared systems, or could be destructive, ask the user before proceeding.
 
 Examples of risky actions that warrant confirmation:
+
 - Destructive: deleting files or branches, `rm -rf`, overwriting uncommitted changes.
 - Hard to reverse: force-pushing, `git reset --hard`, amending published commits.
 - Visible to others: pushing code, creating or commenting on PRs / issues.
