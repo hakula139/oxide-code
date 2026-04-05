@@ -60,3 +60,8 @@ Drop a `CLAUDE.md` file in your project root to give the assistant project-speci
 ```
 
 See [Instruction Files](instructions.md) for the full discovery hierarchy.
+
+## Next steps
+
+- [Configuration](configuration.md) — API credentials, model selection, and all environment variables.
+- [Instruction Files](instructions.md) — discovery hierarchy, global vs. project scope, writing tips.
