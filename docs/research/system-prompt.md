@@ -76,7 +76,7 @@ opencode (TypeScript / Bun) uses a similar hierarchical approach:
 
 ## Sources
 
-**Claude Code:**
+### Claude Code
 
 - `claude-code/src/constants/prompts.ts` — section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
 - `claude-code/src/constants/systemPromptSections.ts` — section caching system
@@ -86,7 +86,7 @@ opencode (TypeScript / Bun) uses a similar hierarchical approach:
 - `claude-code/src/utils/context.ts` — token budgeting, `getUserContext`
 - `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
 
-**opencode:**
+### opencode
 
 - `opencode/packages/opencode/src/config/config.ts` — 4-level config layering, MDM support
 - `opencode/packages/opencode/src/session/compaction.ts` — pruning + summarization strategies
