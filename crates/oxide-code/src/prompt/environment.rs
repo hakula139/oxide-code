@@ -113,6 +113,8 @@ async fn detect_git_info(cwd: &Path) -> GitInfo {
 // ── Date Detection ──
 
 fn current_date() -> String {
+    // now_local() fails on multi-threaded Linux (time crate safety constraint),
+    // so this effectively falls back to UTC there.
     let date = time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .date();
