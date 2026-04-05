@@ -243,7 +243,7 @@ impl Client {
         tokio::spawn(async move {
             let result = stream_sse(&http, &url, &body, &tx).await;
             if let Err(e) = result {
-                let _ = tx.send(Err(e)).await;
+                _ = tx.send(Err(e)).await;
             }
         });
 

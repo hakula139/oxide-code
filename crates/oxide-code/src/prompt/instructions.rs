@@ -151,7 +151,7 @@ fn render(files: &[MemoryFile]) -> String {
     );
 
     for file in files {
-        let _ = write!(
+        _ = write!(
             out,
             "\n\nContents of {} ({}):\n\n{}",
             file.path.display(),
