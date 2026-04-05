@@ -280,19 +280,6 @@ mod tests {
     // ── load_files ──
 
     #[tokio::test]
-    async fn load_files_returns_empty_when_no_files_exist() {
-        let slots = vec![Slot {
-            candidates: vec![
-                PathBuf::from("/nonexistent/CLAUDE.md"),
-                PathBuf::from("/nonexistent/AGENTS.md"),
-            ],
-            label: "test",
-        }];
-        let files = load_files(slots).await;
-        assert!(files.is_empty());
-    }
-
-    #[tokio::test]
     async fn load_files_prefers_first_candidate() {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let claude_path = dir.path().join("CLAUDE.md");
@@ -327,23 +314,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_files_skips_whitespace_only_files() {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let empty_path = dir.path().join("CLAUDE.md");
-        let agents_path = dir.path().join("AGENTS.md");
-        fs::write(&empty_path, "  \n  ").await.unwrap();
-        fs::write(&agents_path, "real content").await.unwrap();
-
-        let slots = vec![Slot {
-            candidates: vec![empty_path, agents_path.clone()],
-            label: "test",
-        }];
-        let files = load_files(slots).await;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, agents_path);
-    }
-
-    #[tokio::test]
     async fn load_files_collects_one_file_per_slot() {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let a_path = dir.path().join("a.md");
@@ -365,6 +335,36 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, a_path);
         assert_eq!(files[1].path, b_path);
+    }
+
+    #[tokio::test]
+    async fn load_files_skips_whitespace_only_files() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let empty_path = dir.path().join("CLAUDE.md");
+        let agents_path = dir.path().join("AGENTS.md");
+        fs::write(&empty_path, "  \n  ").await.unwrap();
+        fs::write(&agents_path, "real content").await.unwrap();
+
+        let slots = vec![Slot {
+            candidates: vec![empty_path, agents_path.clone()],
+            label: "test",
+        }];
+        let files = load_files(slots).await;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, agents_path);
+    }
+
+    #[tokio::test]
+    async fn load_files_returns_empty_when_no_files_exist() {
+        let slots = vec![Slot {
+            candidates: vec![
+                PathBuf::from("/nonexistent/CLAUDE.md"),
+                PathBuf::from("/nonexistent/AGENTS.md"),
+            ],
+            label: "test",
+        }];
+        let files = load_files(slots).await;
+        assert!(files.is_empty());
     }
 
     // ── render ──

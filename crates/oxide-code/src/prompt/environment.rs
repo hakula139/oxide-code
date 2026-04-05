@@ -131,10 +131,10 @@ mod tests {
     // ── Environment::detect ──
 
     #[tokio::test]
-    async fn detect_without_cwd_uses_unknown_and_skips_git() {
-        let env = Environment::detect("test-model", None, None).await;
-        assert_eq!(env.cwd, "(unknown)");
-        assert!(env.git.is_none());
+    async fn detect_inside_repo_populates_git_info() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
+        assert!(env.git.is_some());
     }
 
     #[tokio::test]
@@ -149,10 +149,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_inside_repo_populates_git_info() {
-        let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
-        assert!(env.git.is_some());
+    async fn detect_without_cwd_uses_unknown_and_skips_git() {
+        let env = Environment::detect("test-model", None, None).await;
+        assert_eq!(env.cwd, "(unknown)");
+        assert!(env.git.is_none());
     }
 
     // ── Environment::render ──
