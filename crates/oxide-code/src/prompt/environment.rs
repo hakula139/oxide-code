@@ -126,6 +126,33 @@ fn current_date() -> String {
 mod tests {
     use super::*;
 
+    // ── Environment::detect ──
+
+    #[tokio::test]
+    async fn detect_without_cwd_uses_unknown_and_skips_git() {
+        let env = Environment::detect("test-model", None, None).await;
+        assert_eq!(env.cwd, "(unknown)");
+        assert!(env.git.is_none());
+    }
+
+    #[tokio::test]
+    async fn detect_with_cwd_but_no_git_root_skips_git() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let env = Environment::detect("test-model", Some(tmp.path()), None).await;
+        assert!(env.git.is_none());
+        assert!(
+            env.cwd
+                .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_inside_repo_populates_git_info() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
+        assert!(env.git.is_some());
+    }
+
     // ── Environment::render ──
 
     #[test]
@@ -208,33 +235,6 @@ mod tests {
         let rendered = env.render();
         assert!(rendered.contains("Is a git repository: true"));
         assert!(!rendered.contains("Branch:"));
-    }
-
-    // ── Environment::detect ──
-
-    #[tokio::test]
-    async fn detect_without_cwd_uses_unknown_and_skips_git() {
-        let env = Environment::detect("test-model", None, None).await;
-        assert_eq!(env.cwd, "(unknown)");
-        assert!(env.git.is_none());
-    }
-
-    #[tokio::test]
-    async fn detect_with_cwd_but_no_git_root_skips_git() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let env = Environment::detect("test-model", Some(tmp.path()), None).await;
-        assert!(env.git.is_none());
-        assert!(
-            env.cwd
-                .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
-        );
-    }
-
-    #[tokio::test]
-    async fn detect_inside_repo_populates_git_info() {
-        let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
-        assert!(env.git.is_some());
     }
 
     // ── current_date ──
