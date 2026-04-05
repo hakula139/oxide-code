@@ -1,6 +1,12 @@
 # Documentation Index
 
-Internal docs for oxide-code development: research findings, architecture notes, and project status.
+## User Guide
+
+See [`guide/`](guide/) for user-facing documentation: [quickstart](guide/quickstart.md), [configuration](guide/configuration.md), and [instruction files](guide/instructions.md).
+
+## Internal
+
+Research findings, architecture notes, and project status.
 
 | Document                                                       | Description                                                            |
 | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
