@@ -2,20 +2,27 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-/// A discovered CLAUDE.md file with its content and a human-readable label.
+/// Instruction filenames to check at each project location, in priority order.
+/// At each location, the first file found is used.
+const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
+
+/// A discovered instruction file with its content and a human-readable label.
 struct MemoryFile {
     path: PathBuf,
     content: String,
     label: &'static str,
 }
 
-/// Discover and load CLAUDE.md files, returning the formatted section for the
+/// Discover and load instruction files, returning the formatted section for the
 /// system prompt.
 ///
-/// Discovery order:
+/// At each project location, filenames are checked in
+/// [`INSTRUCTION_FILENAMES`] order — the first file found wins. Discovery
+/// locations:
+///
 /// 1. User global: `~/.claude/CLAUDE.md`
-/// 2. Project root: `CLAUDE.md`
-/// 3. Project `.claude/`: `.claude/CLAUDE.md`
+/// 2. Project root: `CLAUDE.md` or `AGENTS.md`
+/// 3. Project `.claude/`: `.claude/CLAUDE.md` or `.claude/AGENTS.md`
 ///
 /// The project root is the git repository root when available, otherwise the
 /// current working directory. The global file is always checked regardless of
@@ -24,8 +31,8 @@ struct MemoryFile {
 /// Returns an empty string when no files are found.
 pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let project_root = git_root.or(cwd);
-    let candidates = candidate_paths(project_root);
-    let files = load_files(candidates).await;
+    let slots = candidate_slots(project_root);
+    let files = load_files(slots).await;
 
     if files.is_empty() {
         return String::new();
@@ -34,46 +41,55 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
     render(&files)
 }
 
-/// Build the list of candidate CLAUDE.md paths to check.
+/// Build candidate slots — groups of paths to try at each location.
 ///
-/// The global path (`~/.claude/CLAUDE.md`) is always included when a home
-/// directory exists. Project paths are only included when `project_root` is
-/// available.
-fn candidate_paths(project_root: Option<&Path>) -> Vec<(PathBuf, &'static str)> {
-    let mut paths = Vec::new();
+/// The global slot (`~/.claude/CLAUDE.md`) is always included when a home
+/// directory exists. Project slots are only included when `project_root` is
+/// available, and each slot lists [`INSTRUCTION_FILENAMES`] in priority order.
+fn candidate_slots(project_root: Option<&Path>) -> Vec<(Vec<PathBuf>, &'static str)> {
+    let mut slots = Vec::new();
 
+    // Global: only CLAUDE.md (the ~/.claude/ directory is Claude-specific)
     if let Some(home) = dirs::home_dir() {
-        paths.push((
-            home.join(".claude").join("CLAUDE.md"),
+        slots.push((
+            vec![home.join(".claude").join("CLAUDE.md")],
             "user's global instructions",
         ));
     }
 
     if let Some(root) = project_root {
-        paths.push((root.join("CLAUDE.md"), "project instructions"));
-
-        paths.push((
-            root.join(".claude").join("CLAUDE.md"),
+        slots.push((
+            INSTRUCTION_FILENAMES.iter().map(|f| root.join(f)).collect(),
+            "project instructions",
+        ));
+        slots.push((
+            INSTRUCTION_FILENAMES
+                .iter()
+                .map(|f| root.join(".claude").join(f))
+                .collect(),
             "project instructions (.claude/)",
         ));
     }
 
-    paths
+    slots
 }
 
-/// Load files that exist and have non-empty content.
-async fn load_files(candidates: Vec<(PathBuf, &'static str)>) -> Vec<MemoryFile> {
+/// Try each slot's candidates in order, loading the first file found per slot.
+async fn load_files(slots: Vec<(Vec<PathBuf>, &'static str)>) -> Vec<MemoryFile> {
     let mut files = Vec::new();
 
-    for (path, label) in candidates {
-        if let Ok(content) = fs::read_to_string(&path).await {
-            let content = content.trim().to_owned();
-            if !content.is_empty() {
-                files.push(MemoryFile {
-                    path,
-                    content,
-                    label,
-                });
+    for (candidates, label) in slots {
+        for path in candidates {
+            if let Ok(content) = fs::read_to_string(&path).await {
+                let content = content.trim().to_owned();
+                if !content.is_empty() {
+                    files.push(MemoryFile {
+                        path,
+                        content,
+                        label,
+                    });
+                    break;
+                }
             }
         }
     }
@@ -108,33 +124,45 @@ fn render(files: &[MemoryFile]) -> String {
 mod tests {
     use super::*;
 
-    // ── candidate_paths ──
+    // ── candidate_slots ──
 
     #[test]
-    fn candidate_paths_with_project_root() {
+    fn candidate_slots_with_project_root() {
         let root = PathBuf::from("/home/user/project");
-        let paths = candidate_paths(Some(&root));
+        let slots = candidate_slots(Some(&root));
 
-        let targets: Vec<_> = paths.iter().map(|(p, _)| p.clone()).collect();
-        assert!(targets.contains(&root.join("CLAUDE.md")));
-        assert!(targets.contains(&root.join(".claude").join("CLAUDE.md")));
+        let project = slots
+            .iter()
+            .find(|(_, l)| *l == "project instructions")
+            .expect("project instructions slot missing");
+        assert_eq!(
+            project.0,
+            vec![root.join("CLAUDE.md"), root.join("AGENTS.md")]
+        );
 
-        if dirs::home_dir().is_some() {
-            assert_eq!(paths.len(), 3);
-        } else {
-            assert_eq!(paths.len(), 2);
-        }
+        let dotclaude = slots
+            .iter()
+            .find(|(_, l)| *l == "project instructions (.claude/)")
+            .expect(".claude/ slot missing");
+        assert_eq!(
+            dotclaude.0,
+            vec![
+                root.join(".claude").join("CLAUDE.md"),
+                root.join(".claude").join("AGENTS.md"),
+            ]
+        );
     }
 
     #[test]
-    fn candidate_paths_without_project_root_still_includes_global() {
-        let paths = candidate_paths(None);
+    fn candidate_slots_without_project_root_still_includes_global() {
+        let slots = candidate_slots(None);
 
         if dirs::home_dir().is_some() {
-            assert_eq!(paths.len(), 1);
-            assert!(paths[0].0.ends_with(".claude/CLAUDE.md"));
+            assert_eq!(slots.len(), 1);
+            assert_eq!(slots[0].1, "user's global instructions");
+            assert_eq!(slots[0].0.len(), 1);
         } else {
-            assert!(paths.is_empty());
+            assert!(slots.is_empty());
         }
     }
 
