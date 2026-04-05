@@ -33,6 +33,16 @@ Files are loaded in priority order (latest = highest priority):
 | 5     | Local   | `CLAUDE.local.md`                     | Private project-specific (gitignored) |
 | 6     | AutoMem | `~/.claude/projects/<slug>/MEMORY.md` | Auto-accumulated memory               |
 
+Project files (Order 3) are discovered by walking from the git root down to CWD, checking at each intermediate directory. For a CWD of `/repo/crates/core`:
+
+```text
+/repo/CLAUDE.md              /repo/.claude/CLAUDE.md
+/repo/crates/CLAUDE.md       /repo/crates/.claude/CLAUDE.md
+/repo/crates/core/CLAUDE.md  /repo/crates/core/.claude/CLAUDE.md
+```
+
+This walk ensures subdirectory-specific instructions appear later (higher priority) than root-level ones.
+
 Features:
 
 - **`@include` directives**: `@./relative/path`, `@~/home`, `@/absolute` — recursive include with max depth 5.
@@ -56,14 +66,17 @@ The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheab
 
 ## opencode Patterns
 
-opencode (Go) uses a similar hierarchical approach:
+opencode (TypeScript / Bun) uses a similar hierarchical approach:
 
-- **Agent-specific base prompts**: Each agent type (build, plan, explore) has its own prompt template.
-- **Config-driven instructions**: `instructions: string[]` in config, concatenated into the system prompt.
-- **8-level config precedence**: Managed → account → inline → `.opencode/` → `opencode.json` → custom path → global → remote.
-- **Three-phase compaction**: Pruning (erase old tool outputs) → summarization (compaction agent) → truncation (replace with summary).
+- **Provider-specific prompt templates**: Different base prompts for GPT, Claude, Gemini, etc. — selected by model at prompt assembly time.
+- **Instruction file hierarchy**: `AGENTS.md` → `CLAUDE.md` → `CONTEXT.md` (deprecated), first match wins. Walk-up from CWD with per-message claim tracking to prevent duplicate attachment.
+- **Per-turn rebuild**: System prompt assembled per user message (not per session), enabling dynamic skill updates and environment refresh.
+- **4-level config precedence**: Managed (macOS MDM) → global (`~/.opencode/`) → instance (project) → plugins. Instructions arrays are concatenated with deduplication, not replaced.
+- **Two-phase compaction**: Backward-walk pruning (truncate older tool outputs, protect recent 40K tokens) → manual summarization. Messages are never removed, only tool output is truncated.
 
 ## Sources
+
+**Claude Code:**
 
 - `claude-code/src/constants/prompts.ts` — section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
 - `claude-code/src/constants/systemPromptSections.ts` — section caching system
@@ -72,3 +85,11 @@ opencode (Go) uses a similar hierarchical approach:
 - `claude-code/src/utils/claudemd.ts` — `getMemoryFiles`, `@include`, conditional rules
 - `claude-code/src/utils/context.ts` — token budgeting, `getUserContext`
 - `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
+
+**opencode:**
+
+- `opencode/packages/opencode/src/config/config.ts` — 4-level config layering, MDM support
+- `opencode/packages/opencode/src/session/compaction.ts` — pruning + summarization strategies
+- `opencode/packages/opencode/src/session/instruction.ts` — instruction file discovery, walk-up semantics
+- `opencode/packages/opencode/src/session/prompt.ts` — per-turn prompt assembly
+- `opencode/packages/opencode/src/session/system.ts` — provider-specific templates, environment detection
