@@ -1,0 +1,172 @@
+use sha2::{Digest, Sha256};
+use xxhash_rust::xxh64;
+
+/// Salt for the version fingerprint (hardcoded in Claude Code JS source).
+const FINGERPRINT_SALT: &str = "59cf53e54c78";
+
+/// Character indices extracted from the first user message for fingerprinting.
+const FINGERPRINT_INDICES: [usize; 3] = [4, 7, 20];
+
+/// xxHash64 seed for the cch body hash (extracted from the Bun binary).
+const CCH_SEED: u64 = 0x6E52_736A_C806_831E;
+
+/// Placeholder written into the billing header before the real hash is computed.
+const CCH_PLACEHOLDER: &str = "cch=00000";
+
+// ── Public API ──
+
+/// Compute the 3-character hex fingerprint suffix for `cc_version`.
+///
+/// `SHA-256(salt + chars_at_indices + version)`, take first 3 hex chars.
+/// Character extraction uses Unicode scalar indexing, which matches
+/// JavaScript's UTF-16 code-unit indexing for all BMP characters.
+pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> String {
+    let chars: String = FINGERPRINT_INDICES
+        .iter()
+        .map(|&i| first_user_message.chars().nth(i).unwrap_or('0'))
+        .collect();
+
+    let input = format!("{FINGERPRINT_SALT}{chars}{version}");
+    let hash = Sha256::digest(input.as_bytes());
+    format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_string()
+}
+
+/// Build the billing attribution header with a `cch=00000` placeholder.
+///
+/// The placeholder is later replaced by [`inject_cch`] with the computed hash.
+pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
+    format!(
+        "x-anthropic-billing-header: \
+         cc_version={version}.{fingerprint}; \
+         cc_entrypoint=cli; \
+         cch=00000;"
+    )
+}
+
+/// Compute xxHash64 of the request body and replace the `cch` placeholder.
+///
+/// The hash is computed over the body *with* the placeholder in place,
+/// then the placeholder is replaced with the 5-char hex result. Only the
+/// first occurrence is replaced — field ordering in
+/// [`super::anthropic::CreateMessageRequest`] ensures `system` is serialized
+/// before `messages`, so the billing header's placeholder comes first.
+pub(super) fn inject_cch(body: &str) -> String {
+    debug_assert!(
+        body.contains(CCH_PLACEHOLDER),
+        "cch placeholder not found in request body"
+    );
+
+    let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
+    let cch = format!("{:05x}", hash & 0xFFFFF);
+    body.replacen(CCH_PLACEHOLDER, &format!("cch={cch}"), 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── compute_fingerprint ──
+
+    /// Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71…".
+    /// Chars at indices [4, 7, 20] of "Say 'hello'…" are `'`, `l`, `i`.
+    #[test]
+    fn compute_fingerprint_known_vector() {
+        let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
+        assert_eq!(fp, "9e7");
+    }
+
+    #[test]
+    fn compute_fingerprint_short_message_pads_with_zero() {
+        // "Hi" (len 2): all fingerprint indices (4, 7, 20) are out of bounds,
+        // so chars default to '0'. Same result as an empty message.
+        let short = compute_fingerprint("Hi", "2.1.87");
+        let empty = compute_fingerprint("", "2.1.87");
+        assert_eq!(short, empty, "both should pad all positions with '0'");
+    }
+
+    #[test]
+    fn compute_fingerprint_partial_bounds() {
+        // "Hello" (len 5): index 4 = 'o', indices 7 and 20 out of bounds.
+        let fp = compute_fingerprint("Hello", "2.1.87");
+        let fp_all_zero = compute_fingerprint("", "2.1.87");
+        assert_eq!(fp.len(), 3);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(
+            fp, fp_all_zero,
+            "partial in-bounds should differ from all-zero"
+        );
+    }
+
+    #[test]
+    fn compute_fingerprint_varies_with_version() {
+        let fp1 = compute_fingerprint("hello world", "2.1.37");
+        let fp2 = compute_fingerprint("hello world", "2.1.87");
+        assert_ne!(
+            fp1, fp2,
+            "different versions should produce different fingerprints"
+        );
+    }
+
+    // ── build_billing_header ──
+
+    #[test]
+    fn build_billing_header_format() {
+        let header = build_billing_header("2.1.87", "abc");
+        assert_eq!(
+            header,
+            "x-anthropic-billing-header: cc_version=2.1.87.abc; cc_entrypoint=cli; cch=00000;"
+        );
+    }
+
+    // ── inject_cch ──
+
+    #[test]
+    fn inject_cch_replaces_placeholder() {
+        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
+        let result = inject_cch(body);
+
+        assert!(
+            !result.contains(CCH_PLACEHOLDER),
+            "placeholder should be replaced"
+        );
+
+        let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
+        let expected = format!("{:05x}", hash & 0xFFFFF);
+        assert!(
+            result.contains(&format!("cch={expected}")),
+            "result should contain cch={expected}, got: {result}"
+        );
+    }
+
+    #[test]
+    fn inject_cch_deterministic() {
+        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
+        assert_eq!(inject_cch(body), inject_cch(body));
+    }
+
+    #[test]
+    fn inject_cch_replaces_only_first_occurrence() {
+        // system (with placeholder) is before messages — matches our struct field order.
+        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
+        let result = inject_cch(body);
+
+        assert_eq!(
+            result.matches("cch=00000").count(),
+            1,
+            "only the second occurrence (in messages) should remain"
+        );
+    }
+
+    #[test]
+    fn inject_cch_produces_five_hex_chars() {
+        let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
+        let result = inject_cch(body);
+
+        let cch_start = result.find("cch=").expect("cch= not found") + 4;
+        let cch_value = &result[cch_start..cch_start + 5];
+        assert!(
+            cch_value.chars().all(|c| c.is_ascii_hexdigit()),
+            "cch should be 5 hex chars, got: {cch_value}"
+        );
+    }
+}

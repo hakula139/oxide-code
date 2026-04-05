@@ -25,7 +25,8 @@ ox                      # Start an interactive session
 .
 ├── client.rs           # Client module root
 ├── client/
-│   └── anthropic.rs    # Anthropic Messages API streaming client
+│   ├── anthropic.rs    # Anthropic Messages API streaming client
+│   └── billing.rs      # Billing attribution header (fingerprint, cch attestation)
 ├── config.rs           # Configuration loading (env vars, model, base URL)
 ├── config/
 │   └── oauth.rs        # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
