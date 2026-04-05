@@ -30,15 +30,13 @@ The project direction is simple:
 - Tool definitions sent via the Anthropic `tools` API parameter.
 - Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
 
-## Current Focus
-
 ### System Prompt
 
-- System prompt construction with tool definitions and project context.
-- Load and inject `CLAUDE.md` files (global + project).
-- Conversation context management (token counting, message history).
+- Section-based system prompt builder: identity (OAuth-required prefix), task guidance, tool usage guidance, tone / style.
+- CLAUDE.md discovery and injection — user global (`~/.claude/CLAUDE.md`), project root (`CLAUDE.md`), project `.claude/` directory (`.claude/CLAUDE.md`).
+- Runtime environment detection — working directory, platform, shell, git info (branch, clean / dirty status), date, model name.
 
-## Next Phase
+## Current Focus
 
 ### Terminal UI
 
