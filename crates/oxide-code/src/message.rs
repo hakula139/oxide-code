@@ -27,16 +27,16 @@ pub enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(default, skip_serializing_if = "is_default")]
         is_error: bool,
-    },
-    ServerToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
     },
     Thinking {
         thinking: String,
@@ -74,24 +74,51 @@ impl Message {
 
 // ── Message normalization ──
 
-/// Strip trailing thinking / `redacted_thinking` blocks from assistant messages.
-/// The API rejects assistant messages that end with thinking blocks.
+/// Strip trailing thinking / `redacted_thinking` blocks from the last assistant
+/// message. The API rejects assistant messages that end with thinking blocks.
+///
+/// Only the most recent assistant message can have un-stripped trailing thinking
+/// — earlier ones were already processed in prior iterations.
 pub fn strip_trailing_thinking(messages: &mut [Message]) {
-    for msg in messages.iter_mut().filter(|m| m.role == Role::Assistant) {
-        while msg.content.last().is_some_and(|b| {
-            matches!(
-                b,
-                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-            )
-        }) {
-            msg.content.pop();
-        }
+    let Some(msg) = messages.iter_mut().rfind(|m| m.role == Role::Assistant) else {
+        return;
+    };
+    while msg.content.last().is_some_and(|b| {
+        matches!(
+            b,
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+        )
+    }) {
+        msg.content.pop();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ContentBlock::ServerToolUse ──
+
+    #[test]
+    fn server_tool_use_round_trips_through_json() {
+        let block = ContentBlock::ServerToolUse {
+            id: "stu_01".to_owned(),
+            name: "advisor".to_owned(),
+            input: serde_json::json!({"query": "test"}),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "server_tool_use");
+        assert_eq!(json["id"], "stu_01");
+        assert_eq!(json["name"], "advisor");
+
+        let deserialized: ContentBlock = serde_json::from_value(json).unwrap();
+        let ContentBlock::ServerToolUse { id, name, input } = deserialized else {
+            panic!("expected ServerToolUse");
+        };
+        assert_eq!(id, "stu_01");
+        assert_eq!(name, "advisor");
+        assert_eq!(input["query"], "test");
+    }
 
     // ── ContentBlock::ToolResult ──
 
@@ -139,29 +166,6 @@ mod tests {
         assert_eq!(tool_use_id, "id");
         assert_eq!(content, "ok");
         assert!(!is_error);
-    }
-
-    // ── ContentBlock::ServerToolUse ──
-
-    #[test]
-    fn server_tool_use_round_trips_through_json() {
-        let block = ContentBlock::ServerToolUse {
-            id: "stu_01".to_owned(),
-            name: "advisor".to_owned(),
-            input: serde_json::json!({"query": "test"}),
-        };
-        let json = serde_json::to_value(&block).unwrap();
-        assert_eq!(json["type"], "server_tool_use");
-        assert_eq!(json["id"], "stu_01");
-        assert_eq!(json["name"], "advisor");
-
-        let deserialized: ContentBlock = serde_json::from_value(json).unwrap();
-        let ContentBlock::ServerToolUse { id, name, input } = deserialized else {
-            panic!("expected ServerToolUse");
-        };
-        assert_eq!(id, "stu_01");
-        assert_eq!(name, "advisor");
-        assert_eq!(input["query"], "test");
     }
 
     // ── ContentBlock::Thinking ──
@@ -303,6 +307,51 @@ mod tests {
         strip_trailing_thinking(&mut messages);
         assert_eq!(messages[0].content.len(), 1);
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn strip_trailing_thinking_targets_only_last_assistant() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "first".to_owned(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "old".to_owned(),
+                        signature: "sig_old".to_owned(),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "follow-up".to_owned(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "second".to_owned(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "new".to_owned(),
+                        signature: "sig_new".to_owned(),
+                    },
+                ],
+            },
+        ];
+        strip_trailing_thinking(&mut messages);
+        // Only the last assistant message is stripped.
+        assert_eq!(messages[0].content.len(), 2);
+        assert!(matches!(
+            &messages[0].content[1],
+            ContentBlock::Thinking { thinking, .. } if thinking == "old"
+        ));
+        assert_eq!(messages[2].content.len(), 1);
+        assert!(matches!(&messages[2].content[0], ContentBlock::Text { text } if text == "second"));
     }
 
     #[test]
