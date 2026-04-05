@@ -17,11 +17,6 @@ const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 /// Matches the referenced Claude Code version.
 const CLAUDE_CLI_VERSION: &str = "2.1.87";
 
-/// System prompt prefix that identifies the client to the Anthropic API. Required
-/// for OAuth tokens — without it, non-Haiku models return 429. Always sent
-/// regardless of auth method for simplicity.
-const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
 // ── Request types ──
 
 #[derive(Serialize)]
@@ -227,20 +222,15 @@ impl Client {
     pub fn stream_message(
         &self,
         messages: &[Message],
-        system: Option<&str>,
+        system: &str,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        let system_prompt = match system {
-            Some(s) => format!("{SYSTEM_PROMPT_PREFIX}\n{s}"),
-            None => SYSTEM_PROMPT_PREFIX.to_owned(),
-        };
-
         let url = format!("{}/v1/messages", self.config.base_url);
         let body = serde_json::to_value(CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
             messages,
-            system: &system_prompt,
+            system,
             stream: true,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),

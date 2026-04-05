@@ -1,6 +1,7 @@
 mod client;
 mod config;
 mod message;
+mod prompt;
 mod tool;
 
 use std::io::Write;
@@ -34,6 +35,7 @@ async fn main() -> Result<()> {
 
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
+    let system_prompt = prompt::build_system_prompt(&config.model).await;
     let client = Client::new(config)?;
     let tools = ToolRegistry::new(vec![
         Box::new(BashTool),
@@ -44,10 +46,15 @@ async fn main() -> Result<()> {
         Box::new(GrepTool),
     ]);
 
-    repl(&client, &tools, show_thinking).await
+    repl(&client, &tools, &system_prompt, show_thinking).await
 }
 
-async fn repl(client: &Client, tools: &ToolRegistry, show_thinking: bool) -> Result<()> {
+async fn repl(
+    client: &Client,
+    tools: &ToolRegistry,
+    system_prompt: &str,
+    show_thinking: bool,
+) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = Vec::new();
@@ -66,7 +73,7 @@ async fn repl(client: &Client, tools: &ToolRegistry, show_thinking: bool) -> Res
         }
 
         messages.push(Message::user(&input));
-        agent_turn(client, tools, &mut messages, show_thinking).await?;
+        agent_turn(client, tools, &mut messages, system_prompt, show_thinking).await?;
     }
 
     Ok(())
@@ -76,13 +83,15 @@ async fn agent_turn(
     client: &Client,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
+    system_prompt: &str,
     show_thinking: bool,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        let blocks = stream_response(client, messages, &tool_defs, show_thinking).await?;
+        let blocks =
+            stream_response(client, messages, &tool_defs, system_prompt, show_thinking).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -205,9 +214,10 @@ async fn stream_response(
     client: &Client,
     messages: &[Message],
     tools: &[ToolDefinition],
+    system_prompt: &str,
     show_thinking: bool,
 ) -> Result<Vec<ContentBlock>> {
-    let mut rx = client.stream_message(messages, None, tools)?;
+    let mut rx = client.stream_message(messages, system_prompt, tools)?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
     let mut stdout = std::io::stdout();
