@@ -33,7 +33,7 @@ The project direction is simple:
 ### System Prompt
 
 - Section-based system prompt builder: identity (OAuth-required prefix), task guidance, tool usage guidance, tone / style.
-- CLAUDE.md discovery and injection — user global (`~/.claude/CLAUDE.md`), project root (`CLAUDE.md`), project `.claude/` directory (`.claude/CLAUDE.md`).
+- CLAUDE.md / AGENTS.md discovery and injection — user global (`~/.claude/`), project root to CWD walk (root-level and `.claude/` at each directory level). Fallback filename: first found wins per location.
 - Runtime environment detection — working directory, platform, shell, git info (branch, clean / dirty status), date, model name.
 
 ## Current Focus
