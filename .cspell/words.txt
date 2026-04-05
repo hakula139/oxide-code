@@ -1,5 +1,6 @@
 anthropic
 anyhow
+claudemd
 clippy
 codex
 creds

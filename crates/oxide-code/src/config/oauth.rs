@@ -302,7 +302,7 @@ struct LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -318,7 +318,7 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale_lock(path) {
-                    let _ = std::fs::remove_dir_all(path);
+                    _ = std::fs::remove_dir_all(path);
                     continue;
                 }
                 if attempt == LOCK_MAX_RETRIES {

@@ -30,15 +30,13 @@ The project direction is simple:
 - Tool definitions sent via the Anthropic `tools` API parameter.
 - Tool output with structured metadata — title and tool-specific fields for TUI rendering, separate from model-facing content.
 
-## Current Focus
-
 ### System Prompt
 
-- System prompt construction with tool definitions and project context.
-- Load and inject `CLAUDE.md` files (global + project).
-- Conversation context management (token counting, message history).
+- Section-based system prompt builder: identity (OAuth-required prefix), task guidance, tool usage guidance, tone / style.
+- CLAUDE.md / AGENTS.md discovery and injection — user global (`~/.claude/`), project root to CWD walk (root-level and `.claude/` at each directory level). Fallback filename: first found wins per location.
+- Runtime environment detection — working directory, platform, shell, git info (branch, clean / dirty status), date, model name.
 
-## Next Phase
+## Current Focus
 
 ### Terminal UI
 
@@ -52,6 +50,7 @@ The project direction is simple:
 - TOML config file (`~/.config/ox/config.toml` or `ox.toml` in project root) to replace env-var-only configuration.
 - Layered loading: global defaults → user config → project config → env var overrides.
 - All current env vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `OX_SHOW_THINKING`, etc.) become config keys, with env vars still taking precedence.
+- Configurable instruction directories — allow users to specify additional directories to scan for instruction files (e.g., `.codex/`, `.opencode/`) beyond the hardcoded `.claude/`.
 
 ### Tool Enhancements
 

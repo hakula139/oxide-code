@@ -18,23 +18,17 @@ Early development. See [`docs/roadmap.md`](docs/roadmap.md) for the current road
 ## Usage
 
 ```bash
+export ANTHROPIC_API_KEY=sk-ant-...
 ox
 ```
 
-## Configuration
+## Documentation
 
-oxide-code needs an Anthropic API credential. It checks two sources in order:
-
-1. **`ANTHROPIC_API_KEY`** — set this to your Anthropic API key.
-2. **Claude Code OAuth** — if no API key is set, oxide-code reads OAuth credentials from the macOS Keychain and `~/.claude/.credentials.json` (created by [Claude Code]), preferring whichever has the later expiry. Falls back to file-only on Linux.
-
-Optional environment variables:
-
-| Variable               | Default                     | Description             |
-| ---------------------- | --------------------------- | ----------------------- |
-| `ANTHROPIC_MODEL`      | `claude-opus-4-6`           | Model to use            |
-| `ANTHROPIC_BASE_URL`   | `https://api.anthropic.com` | API base URL            |
-| `ANTHROPIC_MAX_TOKENS` | `16384`                     | Max tokens per response |
+| Document                                        | Description                                     |
+| ----------------------------------------------- | ----------------------------------------------- |
+| [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                 |
+| [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment   |
+| [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules |
 
 ## Building from Source
 
