@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
 
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
-    let system_prompt = prompt::build_system_prompt(&config.model).await;
+    let model = config.model.clone();
     let client = Client::new(config)?;
     let tools = ToolRegistry::new(vec![
         Box::new(BashTool),
@@ -46,13 +46,13 @@ async fn main() -> Result<()> {
         Box::new(GrepTool),
     ]);
 
-    repl(&client, &tools, &system_prompt, show_thinking).await
+    repl(&client, &tools, &model, show_thinking).await
 }
 
 async fn repl(
     client: &Client,
     tools: &ToolRegistry,
-    system_prompt: &str,
+    model: &str,
     show_thinking: bool,
 ) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
@@ -73,7 +73,8 @@ async fn repl(
         }
 
         messages.push(Message::user(&input));
-        agent_turn(client, tools, &mut messages, system_prompt, show_thinking).await?;
+        let system_prompt = prompt::build_system_prompt(model).await;
+        agent_turn(client, tools, &mut messages, &system_prompt, show_thinking).await?;
     }
 
     Ok(())
