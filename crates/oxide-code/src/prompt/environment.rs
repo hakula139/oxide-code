@@ -29,7 +29,7 @@ impl Environment {
         );
 
         let git = match cwd {
-            Some(cwd) if git_root.is_some() => detect_git_info(cwd).await,
+            Some(cwd) if git_root.is_some() => Some(detect_git_info(cwd).await),
             _ => None,
         };
 
@@ -37,7 +37,7 @@ impl Environment {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "(unknown)".to_owned());
 
-        let date = current_date().await;
+        let date = current_date();
 
         Self {
             cwd: cwd_str,
@@ -81,7 +81,7 @@ impl Environment {
 
 // ── Git Detection ──
 
-async fn detect_git_info(cwd: &Path) -> Option<GitInfo> {
+async fn detect_git_info(cwd: &Path) -> GitInfo {
     let (branch_result, status_result) = tokio::join!(
         Command::new("git")
             .args(["branch", "--show-current"])
@@ -105,20 +105,21 @@ async fn detect_git_info(cwd: &Path) -> Option<GitInfo> {
         .ok()
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim().is_empty());
 
-    Some(GitInfo { branch, is_clean })
+    GitInfo { branch, is_clean }
 }
 
 // ── Date Detection ──
 
-async fn current_date() -> String {
-    Command::new("date")
-        .arg("+%Y-%m-%d")
-        .output()
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "(unknown)".to_owned())
+fn current_date() -> String {
+    let date = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    format!(
+        "{}-{:02}-{:02}",
+        date.year(),
+        date.month() as u8,
+        date.day()
+    )
 }
 
 #[cfg(test)]
@@ -128,7 +129,7 @@ mod tests {
     // ── Environment::render ──
 
     #[test]
-    fn render_with_git_shows_branch_and_status() {
+    fn render_with_git_shows_all_fields_in_order() {
         let env = Environment {
             cwd: "/home/user/project".to_owned(),
             platform: "linux (x86_64)".to_owned(),
@@ -141,14 +142,18 @@ mod tests {
             model: "claude-opus-4-6".to_owned(),
         };
         let rendered = env.render();
-        assert!(rendered.contains("Working directory: /home/user/project"));
-        assert!(rendered.contains("Is a git repository: true"));
-        assert!(rendered.contains("Branch: main"));
-        assert!(rendered.contains("Status: clean"));
-        assert!(rendered.contains("Platform: linux (x86_64)"));
-        assert!(rendered.contains("Shell: /bin/bash"));
-        assert!(rendered.contains("Date: 2026-04-05"));
-        assert!(rendered.contains("Model: claude-opus-4-6"));
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(lines[0], "# Environment");
+        assert_eq!(lines[1], "- Working directory: /home/user/project");
+        assert_eq!(lines[2], "  - Is a git repository: true");
+        assert_eq!(lines[3], "  - Branch: main");
+        assert_eq!(lines[4], "  - Status: clean");
+        assert_eq!(lines[5], "- Platform: linux (x86_64)");
+        assert_eq!(lines[6], "- Shell: /bin/bash");
+        assert_eq!(lines[7], "- Date: 2026-04-05");
+        assert_eq!(lines[8], "- Model: claude-opus-4-6");
+        assert_eq!(lines.len(), 9);
     }
 
     #[test]
@@ -162,9 +167,12 @@ mod tests {
             model: "test-model".to_owned(),
         };
         let rendered = env.render();
-        assert!(rendered.contains("Is a git repository: false"));
-        assert!(!rendered.contains("Branch:"));
-        assert!(!rendered.contains("Status:"));
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(lines[2], "  - Is a git repository: false");
+        // No branch or status lines — jump straight to platform.
+        assert_eq!(lines[3], "- Platform: macos (aarch64)");
+        assert_eq!(lines.len(), 7);
     }
 
     #[test]
@@ -202,13 +210,43 @@ mod tests {
         assert!(!rendered.contains("Branch:"));
     }
 
-    // ── current_date ──
+    // ── Environment::detect ──
 
     #[tokio::test]
-    async fn current_date_matches_iso_format() {
-        let date = current_date().await;
+    async fn detect_without_cwd_uses_unknown_and_skips_git() {
+        let env = Environment::detect("test-model", None, None).await;
+        assert_eq!(env.cwd, "(unknown)");
+        assert!(env.git.is_none());
+    }
+
+    #[tokio::test]
+    async fn detect_with_cwd_but_no_git_root_skips_git() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let env = Environment::detect("test-model", Some(tmp.path()), None).await;
+        assert!(env.git.is_none());
+        assert!(
+            env.cwd
+                .ends_with(tmp.path().file_name().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_inside_repo_populates_git_info() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
+        assert!(env.git.is_some());
+    }
+
+    // ── current_date ──
+
+    #[test]
+    fn current_date_matches_iso_format() {
+        let date = current_date();
         assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got: {date}");
         assert_eq!(&date[4..5], "-");
         assert_eq!(&date[7..8], "-");
+        // Verify it represents a plausible year.
+        let year: u32 = date[..4].parse().expect("year should be numeric");
+        assert!((2025..=2100).contains(&year), "unexpected year: {year}");
     }
 }
