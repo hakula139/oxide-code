@@ -1,5 +1,5 @@
-mod claude_md;
 mod environment;
+mod instructions;
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +61,7 @@ pub(crate) async fn build_system_prompt(model: &str) -> String {
 
     let (env, claude_md) = tokio::join!(
         Environment::detect(model, cwd.as_deref(), git_root.as_deref()),
-        claude_md::load(cwd.as_deref(), git_root.as_deref()),
+        instructions::load(cwd.as_deref(), git_root.as_deref()),
     );
 
     let mut sections = vec![

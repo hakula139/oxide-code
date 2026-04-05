@@ -33,8 +33,8 @@ ox                      # Start an interactive session
 ├── message.rs          # Conversation message types
 ├── prompt.rs           # System prompt builder (section assembly, static content)
 ├── prompt/
-│   ├── claude_md.rs    # CLAUDE.md discovery and loading (global + project)
-│   └── environment.rs  # Runtime environment detection (platform, git, date)
+│   ├── environment.rs  # Runtime environment detection (platform, git, date)
+│   └── instructions.rs # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 ├── tool.rs             # Tool trait, registry, definitions
 └── tool/
     ├── bash.rs         # Shell command execution with timeout

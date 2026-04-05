@@ -1,6 +1,6 @@
 # System Prompt Architecture
 
-Research notes on how Claude Code constructs its system prompt. Based on [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.87) and [`opencode`](https://github.com/anomalyco/opencode).
+Research notes on how Claude Code and opencode construct their system prompts. Based on [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.87) and [`opencode`](https://github.com/anomalyco/opencode).
 
 ## Section-Based Assembly
 
@@ -67,8 +67,8 @@ opencode (Go) uses a similar hierarchical approach:
 
 - `claude-code/src/constants/prompts.ts` — section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`
 - `claude-code/src/constants/systemPromptSections.ts` — section caching system
-- `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
+- `claude-code/src/services/api/claude.ts` — `queryModel`, `buildSystemPromptBlocks`
+- `claude-code/src/utils/api.ts` — `splitSysPromptPrefix`, cache scope assignment
 - `claude-code/src/utils/claudemd.ts` — `getMemoryFiles`, `@include`, conditional rules
 - `claude-code/src/utils/context.ts` — token budgeting, `getUserContext`
-- `claude-code/src/utils/api.ts` — `splitSysPromptPrefix`, cache scope assignment
-- `claude-code/src/services/api/claude.ts` — `queryModel`, `buildSystemPromptBlocks`
+- `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
