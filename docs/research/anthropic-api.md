@@ -77,25 +77,51 @@ The API validates that the **first non-attribution text block** matches one of t
 
 **Critical**: Concatenating the prefix into the prompt body as a single string causes the API to reject OAuth requests with 429, even though the same prefix content is present. The block-level separation is what the server checks.
 
-### 3. Attribution header (optional, recommended)
+### 3. Attribution header
 
 Claude Code prepends an attribution header as the very first system block:
 
 ```json
-{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.87.a3f; cc_entrypoint=cli;"}
+{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.87.a3f; cc_entrypoint=cli; cch=1b4e2;"}
 ```
 
-Format: `x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>;`
+Format: `x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>; cch=<HASH>;`
 
-The fingerprint is a 3-character hex value computed per request:
+#### Fingerprint (3-char version suffix)
+
+A 3-character hex value derived from conversation content:
 
 1. Extract characters at indices `[4, 7, 20]` from the first user message text (use `"0"` if index is out of bounds).
 2. Compute `SHA256(SALT + chars + VERSION)`, take the first 3 hex characters.
-3. Salt: `59cf53e54c78` (hardcoded, must match server).
+3. Salt: `59cf53e54c78` (hardcoded in `claude-code/src/utils/fingerprint.ts`, must match server).
 
 The entrypoint is `cli` for interactive sessions.
 
-When `NATIVE_CLIENT_ATTESTATION` is enabled (compile-time feature flag in Bun), the header also includes a `cch=00000` placeholder that Bun's native HTTP stack (Zig) overwrites with a computed attestation token before sending. This is a tamper-proof mechanism that third-party tools cannot replicate.
+#### cch (5-char request integrity hash)
+
+The `cch` field is a request integrity hash used for feature gating (fast mode) and billing attribution. It was reverse-engineered from Anthropic's custom Bun binary in February 2026 ([a10k.co writeup](https://a10k.co/b/reverse-engineering-claude-code-cch.html)).
+
+How it works:
+
+1. The JavaScript layer writes a `cch=00000` placeholder into the billing header (controlled by `feature('NATIVE_CLIENT_ATTESTATION')` compile-time flag).
+2. The request body is serialized to JSON with the placeholder in place.
+3. Bun's native HTTP stack (compiled Zig, `bun-anthropic/src/http/Attestation.zig`) intercepts the `fetch()` call, detects the placeholder, and computes `xxHash64(body_bytes, seed) & 0xFFFFF`.
+4. The five `0` characters are overwritten in-place with the 5-char hex result before sending.
+
+Constants:
+
+- **Seed**: `0x6E52736AC806831E` (64-bit, embedded in the binary's data section).
+- **Mask**: `& 0xFFFFF` (20 bits → 5 hex chars, zero-padded).
+
+The hash covers the entire serialized body (messages, tools, metadata, model, thinking config). The only safe post-hash modification is to non-billing system blocks, which the server excludes from its verification.
+
+**JSON key ordering matters**: `system` must be serialized before `messages` so the placeholder in the billing header appears first in the JSON. If tool results contain the literal `cch=00000`, serializing `messages` first would cause the replacement to hit the wrong occurrence.
+
+#### Known bug: cch substitution breaks prompt cache
+
+The Bun binary performs a global find-and-replace of `cch=` values across the entire serialized request body, including historical tool results. If any tool result in the conversation contains a `cch=XXXXX` string (e.g., from reading proxy logs or session JSONL files), the substitution rewrites those historical bytes on every turn, changing the conversation prefix and permanently invalidating the prompt cache. This wastes 30-50K+ tokens per turn and never self-heals. Tracked as [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652), partially mitigated in v2.1.90-91.
+
+oxide-code avoids this entirely: we serialize with `serde_json`, replace only the first occurrence via `str::replacen`, and never mutate historical message content.
 
 ### 4. Client identity headers
 
@@ -124,7 +150,9 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 - **API key** (`ANTHROPIC_API_KEY`) with standard per-token billing.
 - **Extra Usage** billing enabled on the account, which allows OAuth but bills per-token beyond the subscription.
 
-The native client attestation (`cch` in the attribution header) is the primary technical enforcement mechanism. Third-party tools cannot compute the attestation token since it requires Anthropic's custom Bun binary. Without valid attestation, subscription-tier rate limits are not applied.
+The `cch` hash is the primary technical enforcement mechanism. The algorithm (xxHash64, non-cryptographic) and constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time — the current scheme is billing plumbing, not a security boundary.
+
+oxide-code computes valid `cch` hashes for OAuth requests. The fingerprint salt and xxHash64 seed are version-specific constants; they may change with Claude Code releases.
 
 ## API Version
 

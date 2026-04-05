@@ -4,8 +4,9 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use super::billing;
 use crate::config::{Auth, Config, ThinkingConfig};
-use crate::message::Message;
+use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
@@ -28,13 +29,17 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    messages: &'a [Message],
+    /// Serialized before `messages` so the billing header's `cch=00000`
+    /// placeholder appears first in the JSON, making [`billing::inject_cch`]'s
+    /// single-occurrence replacement safe even when tool results contain the
+    /// literal placeholder string.
     system: Vec<SystemBlock<'a>>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
+    messages: &'a [Message],
 }
 
 /// A text block in the system prompt array. The Anthropic API accepts `system`
@@ -240,10 +245,28 @@ impl Client {
         system: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        let mut system_blocks = vec![SystemBlock {
+        let billing_header = if matches!(self.config.auth, Auth::OAuth(_)) {
+            let first_text = first_user_text(messages);
+            let fingerprint = billing::compute_fingerprint(first_text, CLAUDE_CLI_VERSION);
+            Some(billing::build_billing_header(
+                CLAUDE_CLI_VERSION,
+                &fingerprint,
+            ))
+        } else {
+            None
+        };
+
+        let mut system_blocks = Vec::new();
+        if let Some(ref header) = billing_header {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: header,
+            });
+        }
+        system_blocks.push(SystemBlock {
             r#type: "text",
             text: SYSTEM_PROMPT_PREFIX,
-        }];
+        });
         if let Some(s) = system {
             system_blocks.push(SystemBlock {
                 r#type: "text",
@@ -252,22 +275,26 @@ impl Client {
         }
 
         let url = format!("{}/v1/messages", self.config.base_url);
-        let body = serde_json::to_value(CreateMessageRequest {
+        let mut body = serde_json::to_string(&CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
-            messages,
             system: system_blocks,
             stream: true,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
+            messages,
         })
         .context("failed to serialize request")?;
+
+        if billing_header.is_some() {
+            body = billing::inject_cch(&body);
+        }
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
 
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, &body, &tx).await;
+            let result = stream_sse(&http, &url, body, &tx).await;
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
@@ -277,13 +304,27 @@ impl Client {
     }
 }
 
+/// Extract the text of the first user message for fingerprint computation.
+fn first_user_text(messages: &[Message]) -> &str {
+    messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .into_iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
 async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
-    body: &serde_json::Value,
+    body: String,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    let response = http.post(url).json(body).send().await?;
+    let response = http.post(url).body(body).send().await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -508,5 +549,38 @@ mod tests {
     fn parse_sse_frame_invalid_json() {
         let frame = "data: {not valid json}";
         assert!(parse_sse_frame(frame).is_err());
+    }
+
+    // ── first_user_text ──
+
+    #[test]
+    fn first_user_text_extracts_from_first_user_message() {
+        let messages = vec![Message::user("hello world"), Message::assistant("hi")];
+        assert_eq!(first_user_text(&messages), "hello world");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_for_no_user_messages() {
+        let messages = vec![Message::assistant("hi")];
+        assert_eq!(first_user_text(&messages), "");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_for_empty_messages() {
+        let messages: Vec<Message> = vec![];
+        assert_eq!(first_user_text(&messages), "");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_when_first_user_has_no_text() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "id".to_owned(),
+                content: "result".to_owned(),
+                is_error: false,
+            }],
+        }];
+        assert_eq!(first_user_text(&messages), "");
     }
 }
