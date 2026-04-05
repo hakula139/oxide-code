@@ -75,9 +75,8 @@ const STYLE: &str = "\
 
 /// Build the complete system prompt for the agent.
 ///
-/// The prompt always begins with [`IDENTITY_PREFIX`] (required for OAuth)
-/// followed by static guidance sections, a detected environment section, and
-/// any discovered CLAUDE.md user instructions.
+/// Resolves the working directory and git root automatically, then delegates
+/// to [`assemble`].
 pub(crate) async fn build_system_prompt(model: &str) -> String {
     let cwd = std::env::current_dir().ok();
     let git_root = match &cwd {
@@ -85,9 +84,18 @@ pub(crate) async fn build_system_prompt(model: &str) -> String {
         None => None,
     };
 
+    assemble(model, cwd.as_deref(), git_root.as_deref()).await
+}
+
+/// Assemble the system prompt from explicit path parameters.
+///
+/// The prompt always begins with [`IDENTITY_PREFIX`] (required for OAuth)
+/// followed by static guidance sections, a detected environment section, and
+/// any discovered CLAUDE.md user instructions.
+async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let (env, claude_md) = tokio::join!(
-        Environment::detect(model, cwd.as_deref(), git_root.as_deref()),
-        instructions::load(cwd.as_deref(), git_root.as_deref()),
+        Environment::detect(model, cwd, git_root),
+        instructions::load(cwd, git_root),
     );
 
     let mut sections = vec![
