@@ -1,6 +1,7 @@
 anthropic
 anthropics
 anyhow
+atuin
 catppuccin
 claudemd
 clippy
@@ -26,6 +27,7 @@ reqwest
 rfind
 rustls
 serde
+serie
 strum
 swatinem
 syntect
@@ -35,3 +37,4 @@ tokio
 tracing
 venv
 xxhash
+yazi

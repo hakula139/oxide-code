@@ -121,11 +121,16 @@ Recommendation: line-based commit for prose, buffered re-highlight for code bloc
 
 ## Reference Apps
 
-| App                                                  | Language | Framework | Relevance                                    |
-| ---------------------------------------------------- | -------- | --------- | -------------------------------------------- |
-| [Oatmeal](https://github.com/dustinblackman/oatmeal) | Rust     | ratatui   | LLM chat TUI — closest to our use case       |
-| [gitui](https://github.com/gitui-org/gitui)          | Rust     | ratatui   | Complex state management, responsive layouts |
-| [bottom](https://github.com/ClementTsang/bottom)     | Rust     | ratatui   | Rich visualizations, efficient rendering     |
+Actively maintained, visually impressive ratatui apps to study for patterns.
+
+| App                                                        | Relevance                                                                                        |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [Codex](https://github.com/openai/codex)                   | Terminal AI coding agent — streaming token display, agent state machine, closest to our use case |
+| [yazi](https://github.com/sxyazi/yazi)                     | Async file manager — image previews, Lua plugin system, theme system, responsive layout          |
+| [atuin](https://github.com/atuinsh/atuin)                  | Shell history search — fuzzy search UI, SQLite integration, large dataset handling               |
+| [gitui](https://github.com/gitui-org/gitui)                | Git TUI — complex state management, diff rendering, multi-pane layout, keybinding system         |
+| [serie](https://github.com/lusingander/serie)              | Git commit graph — creative visual rendering, terminal image protocol                            |
+| [television](https://github.com/alexpasmantier/television) | Fuzzy finder — extensible data source pattern, async fuzzy matching, provider architecture       |
 
 ## Design Decisions for oxide-code
 
