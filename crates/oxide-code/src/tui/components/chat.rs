@@ -120,9 +120,8 @@ impl ChatView {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         for msg in &self.messages {
-            // Two blank lines between messages for visual breathing room.
+            // Single blank line between messages.
             if !lines.is_empty() {
-                lines.push(Line::raw(""));
                 lines.push(Line::raw(""));
             }
 
@@ -135,9 +134,8 @@ impl ChatView {
                 Span::raw("  "),
                 Span::styled(label, style),
             ]));
-            lines.push(Line::raw(""));
 
-            // Content lines.
+            // Content lines (immediately after label, no blank line).
             for line in msg.content.lines() {
                 lines.push(Line::from(vec![
                     Span::raw("    "),
@@ -150,13 +148,11 @@ impl ChatView {
         if !self.streaming_buffer.is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::raw(""));
-                lines.push(Line::raw(""));
             }
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("⟡ Assistant", self.theme.secondary()),
             ]));
-            lines.push(Line::raw(""));
             for line in self.streaming_buffer.lines() {
                 lines.push(Line::from(vec![
                     Span::raw("    "),
