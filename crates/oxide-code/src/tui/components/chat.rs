@@ -136,7 +136,7 @@ impl ChatView {
             ]));
 
             // Content lines (immediately after label, no blank line).
-            for line in msg.content.lines() {
+            for line in msg.content.trim().lines() {
                 lines.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled(line, self.theme.text()),
@@ -153,7 +153,7 @@ impl ChatView {
                 Span::raw("  "),
                 Span::styled("⟡ Assistant", self.theme.secondary()),
             ]));
-            for line in self.streaming_buffer.lines() {
+            for line in self.streaming_buffer.trim().lines() {
                 lines.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled(line, self.theme.text()),
