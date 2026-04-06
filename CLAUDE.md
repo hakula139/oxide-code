@@ -31,20 +31,32 @@ ox     # Start an interactive session
 ├── config/
 │   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
-├── main.rs                     # CLI entry point, agent loop, async REPL
+├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly, static content)
 ├── prompt/
 │   ├── environment.rs          # Runtime environment detection (platform, git, date)
 │   └── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 ├── tool.rs                     # Tool trait, registry, definitions
-└── tool/
-    ├── bash.rs                 # Shell command execution with timeout
-    ├── edit.rs                 # Exact string replacement in files
-    ├── glob.rs                 # File pattern matching (glob)
-    ├── grep.rs                 # Content search via regex
-    ├── read.rs                 # File reading with line numbers and pagination
-    └── write.rs                # File writing with directory creation
+├── tool/
+│   ├── bash.rs                 # Shell command execution with timeout
+│   ├── edit.rs                 # Exact string replacement in files
+│   ├── glob.rs                 # File pattern matching (glob)
+│   ├── grep.rs                 # Content search via regex
+│   ├── read.rs                 # File reading with line numbers and pagination
+│   └── write.rs                # File writing with directory creation
+├── tui.rs                      # TUI module root
+└── tui/
+    ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
+    ├── component.rs            # Component trait and Action enum
+    ├── components.rs           # Components module root
+    ├── components/
+    │   ├── chat.rs             # Scrollable chat message list with streaming buffer
+    │   ├── input.rs            # Single-line input area with cursor navigation
+    │   └── status.rs           # Status bar (model, status indicator)
+    ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
+    ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
+    └── theme.rs                # Catppuccin Mocha palette, style helpers
 ```
 
 ## Coding Conventions

@@ -1,0 +1,260 @@
+use std::cell::Cell;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::Paragraph;
+
+use crate::tui::component::{Action, Component};
+use crate::tui::theme::Theme;
+
+// ── Chat Message ──
+
+/// A rendered chat message with role and content text.
+#[derive(Debug, Clone)]
+struct ChatMessage {
+    role: ChatRole,
+    content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatRole {
+    User,
+    Assistant,
+}
+
+// ── Chat View ──
+
+/// Scrollable chat message list.
+///
+/// Renders messages vertically with role labels and auto-scrolls to the
+/// bottom on new content. The user can scroll up to review history; new
+/// content pauses auto-scroll until the user scrolls back to the bottom.
+///
+/// Currently renders plain text. Future work: markdown rendering,
+/// viewport virtualization for long conversations.
+pub(crate) struct ChatView {
+    theme: Theme,
+    messages: Vec<ChatMessage>,
+    /// Text being streamed for the current assistant response. Appended to
+    /// on each `AgentEvent::StreamToken`.
+    streaming_buffer: String,
+    scroll_offset: u16,
+    /// Total content height from the last render (for scroll bounds).
+    /// Uses `Cell` for interior mutability so `render` (`&self`) can
+    /// update it during the render pass without a second `build_text` call.
+    content_height: Cell<u16>,
+    /// Viewport height from the last render.
+    viewport_height: u16,
+    auto_scroll: bool,
+}
+
+impl ChatView {
+    pub(crate) fn new(theme: Theme) -> Self {
+        Self {
+            theme,
+            messages: Vec::new(),
+            streaming_buffer: String::new(),
+            scroll_offset: 0,
+            content_height: Cell::new(0),
+            viewport_height: 0,
+            auto_scroll: true,
+        }
+    }
+
+    /// Append a user message to the chat history.
+    pub(crate) fn push_user_message(&mut self, text: String) {
+        self.messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: text,
+        });
+        self.auto_scroll = true;
+    }
+
+    /// Append a streamed token to the current assistant response buffer.
+    pub(crate) fn append_stream_token(&mut self, token: &str) {
+        self.streaming_buffer.push_str(token);
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+
+    /// Finalize the current streaming buffer into a committed assistant message.
+    pub(crate) fn commit_streaming(&mut self) {
+        if !self.streaming_buffer.is_empty() {
+            let content = std::mem::take(&mut self.streaming_buffer);
+            self.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content,
+            });
+        }
+    }
+
+    /// Append a tool call summary to the chat.
+    pub(crate) fn push_tool_call(&mut self, name: &str, title: Option<&str>) {
+        let label = title.map_or_else(|| format!("⟡ {name}"), |t| format!("⟡ {name}: {t}"));
+        self.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: label,
+        });
+    }
+
+    /// Update cached viewport height and sync scroll position. Called by
+    /// [`App`](super::super::app::App) after each frame.
+    pub(crate) fn update_layout(&mut self, area: Rect) {
+        self.viewport_height = area.height;
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+}
+
+impl Component for ChatView {
+    fn handle_event(&mut self, event: &Event) -> Option<Action> {
+        match event {
+            Event::Key(KeyEvent {
+                code: KeyCode::Up, ..
+            })
+            | Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
+            }) => {
+                self.scroll_up(1);
+                None
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                ..
+            })
+            | Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                ..
+            }) => {
+                self.scroll_down(1);
+                None
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::PageUp,
+                ..
+            }) => {
+                self.scroll_up(self.viewport_height.saturating_sub(2));
+                None
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::PageDown,
+                ..
+            }) => {
+                self.scroll_down(self.viewport_height.saturating_sub(2));
+                None
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Home,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) => {
+                self.scroll_offset = 0;
+                self.auto_scroll = false;
+                None
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::End,
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) => {
+                self.scroll_to_bottom();
+                self.auto_scroll = true;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        self.render_inner(frame, area);
+    }
+}
+
+// ── Private Helpers ──
+
+impl ChatView {
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
+    }
+
+    fn scroll_up(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.auto_scroll = false;
+    }
+
+    fn scroll_down(&mut self, lines: u16) {
+        let max = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
+        if self.scroll_offset >= max {
+            self.auto_scroll = true;
+        }
+    }
+
+    fn render_inner(&self, frame: &mut Frame, area: Rect) {
+        let text = self.build_text();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "line count fits in u16 for any realistic conversation"
+        )]
+        let height = text.lines.len() as u16;
+        self.content_height.set(height);
+        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
+        frame.render_widget(paragraph, area);
+    }
+
+    fn build_text(&self) -> Text<'_> {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+
+        for msg in &self.messages {
+            self.push_message_lines(&mut lines, msg.role, &msg.content);
+        }
+
+        // Streaming buffer (not yet committed).
+        if !self.streaming_buffer.is_empty() {
+            self.push_message_lines(&mut lines, ChatRole::Assistant, &self.streaming_buffer);
+        }
+
+        Text::from(lines)
+    }
+
+    fn push_message_lines<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        role: ChatRole,
+        content: &'a str,
+    ) {
+        // Single blank line between messages.
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+
+        // Role label.
+        let (label, style) = match role {
+            ChatRole::User => ("❯ You", self.theme.accent()),
+            ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label, style),
+        ]));
+
+        // Content lines (immediately after label, no blank line).
+        for line in content.trim().lines() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(line, self.theme.text()),
+            ]));
+        }
+    }
+}

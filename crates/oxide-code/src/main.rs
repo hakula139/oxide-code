@@ -3,12 +3,14 @@ mod config;
 mod message;
 mod prompt;
 mod tool;
+mod tui;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
@@ -18,16 +20,25 @@ use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
 };
+use tui::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
-struct Cli {}
+struct Cli {
+    /// Disable the TUI and use a bare REPL instead.
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Run in headless mode: send a single prompt and print the response.
+    #[arg(short, long, value_name = "PROMPT")]
+    prompt: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -37,24 +48,99 @@ async fn main() -> Result<()> {
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
     let client = Client::new(config)?;
-    let tools = ToolRegistry::new(vec![
+
+    let tools = create_tool_registry();
+
+    if let Some(prompt_text) = cli.prompt {
+        return headless(&client, &tools, &model, show_thinking, &prompt_text).await;
+    }
+
+    if cli.no_tui || !std::io::stdout().is_terminal() {
+        return bare_repl(&client, &tools, &model, show_thinking).await;
+    }
+
+    run_tui(&client, &model, tools).await
+}
+
+fn create_tool_registry() -> ToolRegistry {
+    ToolRegistry::new(vec![
         Box::new(BashTool),
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(GlobTool),
         Box::new(GrepTool),
-    ]);
-
-    repl(&client, &tools, &model, show_thinking).await
+    ])
 }
 
-async fn repl(
+// ── TUI Mode ──
+
+async fn run_tui(client: &Client, model: &str, tools: ToolRegistry) -> Result<()> {
+    tui::terminal::install_panic_hook();
+
+    let (agent_sink, agent_rx) = tui::event::channel();
+    let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
+
+    let mut terminal = tui::terminal::init()?;
+    let mut app = tui::app::App::new(model.to_owned(), agent_rx, user_tx);
+
+    let agent_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { agent_loop_task(client, tools, agent_sink, user_rx).await })
+    };
+
+    // Run the TUI on the main thread (it needs terminal access).
+    let result = app.run(&mut terminal).await;
+
+    tui::terminal::restore();
+
+    // Cancel the agent loop — it may be blocked on an API stream.
+    agent_handle.abort();
+    match agent_handle.await {
+        Ok(Err(e)) => warn!("agent loop error: {e}"),
+        Err(e) if !e.is_cancelled() => warn!("agent task panicked: {e}"),
+        _ => {}
+    }
+
+    result
+}
+
+async fn agent_loop_task(
+    client: Client,
+    tools: ToolRegistry,
+    sink: tui::event::ChannelSink,
+    mut user_rx: mpsc::UnboundedReceiver<UserAction>,
+) -> Result<()> {
+    let mut messages: Vec<Message> = Vec::new();
+
+    while let Some(action) = user_rx.recv().await {
+        match action {
+            UserAction::SubmitPrompt(text) => {
+                messages.push(Message::user(&text));
+                let system_prompt = prompt::build_system_prompt(client.model()).await;
+                if let Err(e) =
+                    agent_turn(&client, &tools, &mut messages, &system_prompt, &sink).await
+                {
+                    _ = sink.send(AgentEvent::Error(e.to_string()));
+                }
+                _ = sink.send(AgentEvent::TurnComplete);
+            }
+            UserAction::Quit => break,
+        }
+    }
+
+    Ok(())
+}
+
+// ── Bare REPL Mode ──
+
+async fn bare_repl(
     client: &Client,
     tools: &ToolRegistry,
     model: &str,
     show_thinking: bool,
 ) -> Result<()> {
+    let sink = StdioSink::new(show_thinking);
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = Vec::new();
@@ -74,25 +160,44 @@ async fn repl(
 
         messages.push(Message::user(&input));
         let system_prompt = prompt::build_system_prompt(model).await;
-        agent_turn(client, tools, &mut messages, &system_prompt, show_thinking).await?;
+        agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
+        _ = sink.send(AgentEvent::TurnComplete);
     }
 
     Ok(())
 }
+
+// ── Headless Mode ──
+
+async fn headless(
+    client: &Client,
+    tools: &ToolRegistry,
+    model: &str,
+    show_thinking: bool,
+    prompt_text: &str,
+) -> Result<()> {
+    let sink = StdioSink::new(show_thinking);
+    let mut messages = vec![Message::user(prompt_text)];
+    let system_prompt = prompt::build_system_prompt(model).await;
+    agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
+    println!();
+    Ok(())
+}
+
+// ── Agent Turn (shared across all modes) ──
 
 async fn agent_turn(
     client: &Client,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     system_prompt: &str,
-    show_thinking: bool,
+    sink: &dyn AgentSink,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        let blocks =
-            stream_response(client, messages, &tool_defs, system_prompt, show_thinking).await?;
+        let blocks = stream_response(client, messages, &tool_defs, system_prompt, sink).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -115,7 +220,11 @@ async fn agent_turn(
 
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
-            display_tool_call(&name, &input);
+            _ = sink.send(AgentEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            });
 
             let output = match tools.get(&name) {
                 Some(t) => t.run(input).await,
@@ -126,10 +235,12 @@ async fn agent_turn(
                 },
             };
 
-            if let Some(title) = &output.metadata.title {
-                eprintln!("  {title}");
-            }
-            display_tool_output(&output.content);
+            _ = sink.send(AgentEvent::ToolCallEnd {
+                id: id.clone(),
+                title: output.metadata.title.clone(),
+                content: output.content.clone(),
+                is_error: output.is_error,
+            });
 
             results.push(ContentBlock::ToolResult {
                 tool_use_id: id,
@@ -148,9 +259,6 @@ async fn agent_turn(
 }
 
 // ── Stream Processing ──
-
-const DIM: &str = "\x1b[2m";
-const DIM_END: &str = "\x1b[22m";
 
 #[derive(Debug)]
 enum BlockAccumulator {
@@ -216,12 +324,11 @@ async fn stream_response(
     messages: &[Message],
     tools: &[ToolDefinition],
     system_prompt: &str,
-    show_thinking: bool,
+    sink: &dyn AgentSink,
 ) -> Result<Vec<ContentBlock>> {
     let mut rx = client.stream_message(messages, Some(system_prompt), tools)?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
-    let mut stdout = std::io::stdout();
 
     while let Some(event) = rx.recv().await {
         let event = event.context("stream error")?;
@@ -234,27 +341,19 @@ async fn stream_response(
                 if blocks.len() <= index {
                     blocks.resize_with(index + 1, || None);
                 }
-                blocks[index] = Some(init_accumulator(
-                    content_block,
-                    index,
-                    &mut stdout,
-                    show_thinking,
-                )?);
+                let acc = init_accumulator(content_block, index);
+                // Send initial text to display if non-empty (the API
+                // typically sends empty initial text, but be safe).
+                if let BlockAccumulator::Text(text) = &acc
+                    && !text.is_empty()
+                {
+                    sink.send(AgentEvent::StreamToken(text.clone()))?;
+                }
+                blocks[index] = Some(acc);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, &mut stdout, show_thinking)?;
-                }
-            }
-            StreamEvent::ContentBlockStop { index } => {
-                if show_thinking
-                    && matches!(
-                        blocks.get(index),
-                        Some(Some(BlockAccumulator::Thinking { .. }))
-                    )
-                {
-                    writeln!(stdout)?;
-                    stdout.flush()?;
+                    apply_delta(block, delta, sink)?;
                 }
             }
             StreamEvent::Error { error } => {
@@ -264,14 +363,6 @@ async fn stream_response(
         }
     }
 
-    // Streamed text deltas don't include a final newline.
-    let has_text = blocks
-        .iter()
-        .any(|b| matches!(b, Some(BlockAccumulator::Text(s)) if !s.is_empty()));
-    if has_text {
-        writeln!(stdout)?;
-    }
-
     Ok(blocks
         .into_iter()
         .flatten()
@@ -279,20 +370,9 @@ async fn stream_response(
         .collect())
 }
 
-fn init_accumulator(
-    content_block: ContentBlockInfo,
-    index: usize,
-    stdout: &mut std::io::Stdout,
-    show_thinking: bool,
-) -> Result<BlockAccumulator> {
-    Ok(match content_block {
-        ContentBlockInfo::Text { text } => {
-            if !text.is_empty() {
-                stdout.write_all(text.as_bytes())?;
-                stdout.flush()?;
-            }
-            BlockAccumulator::Text(text)
-        }
+fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccumulator {
+    match content_block {
+        ContentBlockInfo::Text { text } => BlockAccumulator::Text(text),
         ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
             id,
             name,
@@ -306,35 +386,23 @@ fn init_accumulator(
         ContentBlockInfo::Thinking {
             thinking,
             signature,
-        } => {
-            if show_thinking && !thinking.is_empty() {
-                write!(stdout, "{DIM}{thinking}{DIM_END}")?;
-                stdout.flush()?;
-            }
-            BlockAccumulator::Thinking {
-                thinking,
-                signature,
-            }
-        }
+        } => BlockAccumulator::Thinking {
+            thinking,
+            signature,
+        },
         ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
         ContentBlockInfo::Unknown => {
             warn!("skipping unknown content block at index {index}");
             BlockAccumulator::Skipped
         }
-    })
+    }
 }
 
-fn apply_delta(
-    block: &mut BlockAccumulator,
-    delta: Delta,
-    stdout: &mut std::io::Stdout,
-    show_thinking: bool,
-) -> Result<()> {
+fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) -> Result<()> {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            stdout.write_all(text.as_bytes())?;
-            stdout.flush()?;
+            sink.send(AgentEvent::StreamToken(text))?;
         }
         (
             BlockAccumulator::ToolUse { json_buf, .. }
@@ -350,10 +418,7 @@ fn apply_delta(
             },
         ) => {
             thinking.push_str(&thinking_delta);
-            if show_thinking {
-                write!(stdout, "{DIM}{thinking_delta}{DIM_END}")?;
-                stdout.flush()?;
-            }
+            sink.send(AgentEvent::ThinkingToken(thinking_delta))?;
         }
         (
             BlockAccumulator::Thinking { signature, .. },
@@ -361,7 +426,6 @@ fn apply_delta(
                 signature: sig_value,
             },
         ) => {
-            // Signature is a full value, not incremental.
             *signature = sig_value;
         }
         (block, delta) => {
@@ -369,24 +433,4 @@ fn apply_delta(
         }
     }
     Ok(())
-}
-
-// ── Display ──
-
-fn display_tool_call(name: &str, input: &serde_json::Value) {
-    if name == "bash"
-        && let Some(cmd) = input.get("command").and_then(serde_json::Value::as_str)
-    {
-        eprintln!("⟡ {name}: {cmd}");
-        return;
-    }
-    eprintln!("⟡ {name}");
-}
-
-fn display_tool_output(content: &str) {
-    let trimmed = content.trim();
-    if !trimmed.is_empty() {
-        eprintln!("{trimmed}");
-    }
-    eprintln!();
 }

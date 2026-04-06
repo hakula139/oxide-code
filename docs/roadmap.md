@@ -37,14 +37,22 @@ The project direction is simple:
 - CLAUDE.md / AGENTS.md discovery and injection — user global (`~/.claude/`), project root to CWD walk (root-level and `.claude/` at each directory level). Fallback filename: first found wins per location.
 - Runtime environment detection — working directory, platform, shell, git info (branch, clean / dirty status), date, model name.
 
+### Terminal UI (Foundation)
+
+- ratatui + crossterm TUI with `tokio::select!` event loop, 60 FPS render coalescing, and synchronized output (DEC 2026) for flicker prevention.
+- `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
+- Component architecture: `ChatView` (scrollable message list with streaming buffer), `InputArea` (single-line input with cursor), `StatusBar` (model + status).
+- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct for user-defined palettes.
+- Alternate screen, panic-safe terminal restore.
+
 ## Current Focus
 
-### Terminal UI
+### Terminal UI (Polish)
 
-- Replace the bare REPL with a ratatui-based TUI.
-- Real-time streaming display of assistant responses.
-- Inline tool call / result display using `ToolMetadata::title`.
-- Multi-line input editor.
+- Markdown rendering for assistant messages (syntax-highlighted code blocks).
+- Multi-line input editor (`tui-textarea`).
+- Tool call / result display with collapsible sections.
+- Viewport virtualization for long conversations.
 
 ### Tool & Prompt Enhancements
 

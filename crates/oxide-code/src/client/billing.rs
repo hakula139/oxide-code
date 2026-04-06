@@ -67,8 +67,8 @@ mod tests {
 
     // ── compute_fingerprint ──
 
-    /// Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71…".
-    /// Chars at indices [4, 7, 20] of "Say 'hello'…" are `'`, `l`, `i`.
+    /// Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
+    /// Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
     #[test]
     fn compute_fingerprint_known_vector() {
         let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
