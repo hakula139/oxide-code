@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 /// section. The built-in palette is named `"default"`.
 #[expect(
     dead_code,
-    reason = "all color slots are part of the theme API, used in later PRs"
+    reason = "all color slots are part of the theme API; not all consumed yet"
 )]
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -66,7 +66,10 @@ impl Theme {
     }
 
     /// Muted / secondary text.
-    #[expect(dead_code, reason = "used by components added in later PRs")]
+    #[expect(
+        dead_code,
+        reason = "part of the theme API; no component reads this slot yet"
+    )]
     pub fn muted(&self) -> Style {
         Style::default().fg(self.fg_muted)
     }
@@ -99,13 +102,19 @@ impl Theme {
     }
 
     /// Error indicator.
-    #[expect(dead_code, reason = "used by components added in later PRs")]
+    #[expect(
+        dead_code,
+        reason = "part of the theme API; no component reads this slot yet"
+    )]
     pub fn error(&self) -> Style {
         Style::default().fg(self.error)
     }
 
     /// Info / cost indicator.
-    #[expect(dead_code, reason = "used by components added in later PRs")]
+    #[expect(
+        dead_code,
+        reason = "part of the theme API; no component reads this slot yet"
+    )]
     pub fn info(&self) -> Style {
         Style::default().fg(self.info)
     }

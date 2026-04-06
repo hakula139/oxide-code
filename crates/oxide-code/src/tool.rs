@@ -52,7 +52,10 @@ pub(crate) struct ToolMetadata {
     /// Short label for TUI display (5–15 words).
     pub(crate) title: Option<String>,
     /// Process exit code, present only for the bash tool.
-    #[expect(dead_code, reason = "read by the TUI once it exists")]
+    #[expect(
+        dead_code,
+        reason = "set by bash tool but not yet surfaced in TUI display"
+    )]
     pub(crate) exit_code: Option<i32>,
 }
 

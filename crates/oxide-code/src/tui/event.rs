@@ -16,18 +16,27 @@ pub enum AgentEvent {
     ThinkingToken(String),
     /// A tool call has started execution.
     ToolCallStart {
-        #[expect(dead_code, reason = "used for tool status tracking in PR 3.4")]
+        #[expect(
+            dead_code,
+            reason = "carried for structural completeness; not yet read by any consumer"
+        )]
         id: String,
         name: String,
         input: serde_json::Value,
     },
     /// A tool call has finished.
     ToolCallEnd {
-        #[expect(dead_code, reason = "used for tool status tracking in PR 3.4")]
+        #[expect(
+            dead_code,
+            reason = "carried for structural completeness; not yet read by any consumer"
+        )]
         id: String,
         title: Option<String>,
         content: String,
-        #[expect(dead_code, reason = "used for error styling in PR 3.4")]
+        #[expect(
+            dead_code,
+            reason = "carried for structural completeness; not yet read by any consumer"
+        )]
         is_error: bool,
     },
     /// The current assistant turn is complete (text-only response, no more

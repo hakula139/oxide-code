@@ -48,69 +48,52 @@ async fn main() -> Result<()> {
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
     let client = Client::new(config)?;
-    let tools = ToolRegistry::new(vec![
+
+    if let Some(prompt_text) = cli.prompt {
+        let tools = create_tool_registry();
+        return headless(&client, &tools, &model, show_thinking, &prompt_text).await;
+    }
+
+    if cli.no_tui || !std::io::stdout().is_terminal() {
+        let tools = create_tool_registry();
+        return bare_repl(&client, &tools, &model, show_thinking).await;
+    }
+
+    run_tui(&client, &model).await
+}
+
+fn create_tool_registry() -> ToolRegistry {
+    ToolRegistry::new(vec![
         Box::new(BashTool),
         Box::new(ReadTool),
         Box::new(WriteTool),
         Box::new(EditTool),
         Box::new(GlobTool),
         Box::new(GrepTool),
-    ]);
-
-    if let Some(prompt_text) = cli.prompt {
-        return headless(&client, &tools, &model, show_thinking, &prompt_text).await;
-    }
-
-    if cli.no_tui || !std::io::stdout().is_terminal() {
-        return bare_repl(&client, &tools, &model, show_thinking).await;
-    }
-
-    run_tui(&client, &tools, &model, show_thinking).await
+    ])
 }
 
 // ── TUI Mode ──
 
-async fn run_tui(
-    client: &Client,
-    tools: &ToolRegistry,
-    model: &str,
-    show_thinking: bool,
-) -> Result<()> {
+async fn run_tui(client: &Client, model: &str) -> Result<()> {
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
-    let (user_tx, mut user_rx) = mpsc::unbounded_channel::<UserAction>();
+    let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
 
     let mut terminal = tui::terminal::init()?;
     let mut app = tui::app::App::new(model.to_owned(), agent_rx, user_tx);
 
-    // Spawn the agent loop in a background task.
     let agent_handle = {
         let client = client.clone();
-        let tools_defs = tools.definitions();
-        let model = model.to_owned();
-        let sink = agent_sink;
-
-        // We need to pass tool registry to the agent task. Since ToolRegistry
-        // isn't Clone, we pass individual tool references via a channel-based
-        // approach. For now, we run the agent loop inline and spawn the TUI.
-        // TODO: Refactor to spawn agent loop when ToolRegistry is cloneable.
-        drop(tools_defs);
-        drop(model);
-
-        tokio::spawn(async move {
-            // Agent loop waits for user prompts and processes them.
-            agent_loop_task(client, sink, &mut user_rx, show_thinking).await
-        })
+        tokio::spawn(async move { agent_loop_task(client, agent_sink, user_rx).await })
     };
 
     // Run the TUI on the main thread (it needs terminal access).
     let result = app.run(&mut terminal).await;
 
-    // Cleanup.
     tui::terminal::restore();
 
-    // Wait for agent task to finish.
     if let Ok(Err(e)) = agent_handle.await {
         warn!("agent loop error: {e}");
     }
@@ -121,18 +104,9 @@ async fn run_tui(
 async fn agent_loop_task(
     client: Client,
     sink: tui::event::ChannelSink,
-    user_rx: &mut mpsc::UnboundedReceiver<UserAction>,
-    show_thinking: bool,
+    mut user_rx: mpsc::UnboundedReceiver<UserAction>,
 ) -> Result<()> {
-    let tools = ToolRegistry::new(vec![
-        Box::new(BashTool),
-        Box::new(ReadTool),
-        Box::new(WriteTool),
-        Box::new(EditTool),
-        Box::new(GlobTool),
-        Box::new(GrepTool),
-    ]);
-
+    let tools = create_tool_registry();
     let mut messages: Vec<Message> = Vec::new();
 
     while let Some(action) = user_rx.recv().await {
@@ -140,15 +114,8 @@ async fn agent_loop_task(
             UserAction::SubmitPrompt(text) => {
                 messages.push(Message::user(&text));
                 let system_prompt = prompt::build_system_prompt(client.model()).await;
-                if let Err(e) = agent_turn(
-                    &client,
-                    &tools,
-                    &mut messages,
-                    &system_prompt,
-                    show_thinking,
-                    &sink,
-                )
-                .await
+                if let Err(e) =
+                    agent_turn(&client, &tools, &mut messages, &system_prompt, &sink).await
                 {
                     let _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
@@ -189,15 +156,7 @@ async fn bare_repl(
 
         messages.push(Message::user(&input));
         let system_prompt = prompt::build_system_prompt(model).await;
-        agent_turn(
-            client,
-            tools,
-            &mut messages,
-            &system_prompt,
-            show_thinking,
-            &sink,
-        )
-        .await?;
+        agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
         let _ = sink.send(AgentEvent::TurnComplete);
     }
 
@@ -216,15 +175,7 @@ async fn headless(
     let sink = StdioSink::new(show_thinking);
     let mut messages = vec![Message::user(prompt_text)];
     let system_prompt = prompt::build_system_prompt(model).await;
-    agent_turn(
-        client,
-        tools,
-        &mut messages,
-        &system_prompt,
-        show_thinking,
-        &sink,
-    )
-    .await?;
+    agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
     println!();
     Ok(())
 }
@@ -236,22 +187,13 @@ async fn agent_turn(
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
     system_prompt: &str,
-    show_thinking: bool,
     sink: &dyn AgentSink,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        let blocks = stream_response(
-            client,
-            messages,
-            &tool_defs,
-            system_prompt,
-            show_thinking,
-            sink,
-        )
-        .await?;
+        let blocks = stream_response(client, messages, &tool_defs, system_prompt, sink).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -378,7 +320,6 @@ async fn stream_response(
     messages: &[Message],
     tools: &[ToolDefinition],
     system_prompt: &str,
-    _show_thinking: bool,
     sink: &dyn AgentSink,
 ) -> Result<Vec<ContentBlock>> {
     let mut rx = client.stream_message(messages, Some(system_prompt), tools)?;
