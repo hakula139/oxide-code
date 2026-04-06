@@ -15,8 +15,8 @@ use crate::tui::theme::Theme;
 /// Key bindings:
 /// - Enter: submit prompt
 /// - Ctrl+C / Ctrl+D: quit
-/// - Backspace: delete character
-/// - Left / Right: move cursor
+/// - Backspace / Delete: delete character
+/// - Left / Right / Home / End: move cursor
 pub(crate) struct InputArea {
     theme: Theme,
     buffer: String,
@@ -95,6 +95,23 @@ impl Component for InputArea {
                         .map_or(self.buffer.len(), |(i, _)| i);
                     self.buffer.drain(byte_idx..next_byte_idx);
                     self.cursor -= 1;
+                }
+                None
+            }
+            (KeyCode::Delete, _) => {
+                let char_count = self.buffer.chars().count();
+                if self.cursor < char_count {
+                    let byte_idx = self
+                        .buffer
+                        .char_indices()
+                        .nth(self.cursor)
+                        .map_or(self.buffer.len(), |(i, _)| i);
+                    let next_byte_idx = self
+                        .buffer
+                        .char_indices()
+                        .nth(self.cursor + 1)
+                        .map_or(self.buffer.len(), |(i, _)| i);
+                    self.buffer.drain(byte_idx..next_byte_idx);
                 }
                 None
             }

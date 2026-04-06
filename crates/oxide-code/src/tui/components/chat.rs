@@ -115,12 +115,20 @@ impl Component for ChatView {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
+            })
+            | Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                ..
             }) => {
                 self.scroll_up(1);
                 None
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Down,
+                ..
+            })
+            | Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
                 ..
             }) => {
                 self.scroll_down(1);
@@ -156,20 +164,6 @@ impl Component for ChatView {
             }) => {
                 self.scroll_to_bottom();
                 self.auto_scroll = true;
-                None
-            }
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                ..
-            }) => {
-                self.scroll_up(3);
-                None
-            }
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                ..
-            }) => {
-                self.scroll_down(3);
                 None
             }
             _ => None,
