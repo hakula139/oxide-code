@@ -468,6 +468,39 @@ mod tests {
         assert!(matches!(delta, Delta::Unknown));
     }
 
+    // ── first_user_text ──
+
+    #[test]
+    fn first_user_text_extracts_from_first_user_message() {
+        let messages = vec![Message::user("hello world"), Message::assistant("hi")];
+        assert_eq!(first_user_text(&messages), "hello world");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_for_no_user_messages() {
+        let messages = vec![Message::assistant("hi")];
+        assert_eq!(first_user_text(&messages), "");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_for_empty_messages() {
+        let messages: Vec<Message> = vec![];
+        assert_eq!(first_user_text(&messages), "");
+    }
+
+    #[test]
+    fn first_user_text_returns_empty_when_first_user_has_no_text() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "id".to_owned(),
+                content: "result".to_owned(),
+                is_error: false,
+            }],
+        }];
+        assert_eq!(first_user_text(&messages), "");
+    }
+
     // ── parse_sse_frame ──
 
     #[test]
@@ -555,38 +588,5 @@ mod tests {
     fn parse_sse_frame_invalid_json() {
         let frame = "data: {not valid json}";
         assert!(parse_sse_frame(frame).is_err());
-    }
-
-    // ── first_user_text ──
-
-    #[test]
-    fn first_user_text_extracts_from_first_user_message() {
-        let messages = vec![Message::user("hello world"), Message::assistant("hi")];
-        assert_eq!(first_user_text(&messages), "hello world");
-    }
-
-    #[test]
-    fn first_user_text_returns_empty_for_no_user_messages() {
-        let messages = vec![Message::assistant("hi")];
-        assert_eq!(first_user_text(&messages), "");
-    }
-
-    #[test]
-    fn first_user_text_returns_empty_for_empty_messages() {
-        let messages: Vec<Message> = vec![];
-        assert_eq!(first_user_text(&messages), "");
-    }
-
-    #[test]
-    fn first_user_text_returns_empty_when_first_user_has_no_text() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "id".to_owned(),
-                content: "result".to_owned(),
-                is_error: false,
-            }],
-        }];
-        assert_eq!(first_user_text(&messages), "");
     }
 }
