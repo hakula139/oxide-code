@@ -1,3 +1,3 @@
-pub mod chat;
-pub mod input;
-pub mod status;
+pub(crate) mod chat;
+pub(crate) mod input;
+pub(crate) mod status;

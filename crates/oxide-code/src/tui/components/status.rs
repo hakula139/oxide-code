@@ -12,21 +12,21 @@ use crate::tui::theme::Theme;
 /// Displays the product name, model, and current status. Uses pipe `│`
 /// separators between items and dimmed labels with bright values, matching
 /// the user's neovim / tmux style.
-pub struct StatusBar {
+pub(crate) struct StatusBar {
     theme: Theme,
     model: String,
     status: Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
+pub(crate) enum Status {
     Idle,
     Streaming,
     ToolRunning,
 }
 
 impl StatusBar {
-    pub fn new(model: String) -> Self {
+    pub(crate) fn new(model: String) -> Self {
         Self {
             theme: Theme::default(),
             model,
@@ -34,7 +34,7 @@ impl StatusBar {
         }
     }
 
-    pub fn set_status(&mut self, status: Status) {
+    pub(crate) fn set_status(&mut self, status: Status) {
         self.status = status;
     }
 }

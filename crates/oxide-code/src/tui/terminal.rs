@@ -9,7 +9,7 @@ use crossterm::{execute, queue};
 use ratatui::Terminal;
 use ratatui::prelude::CrosstermBackend;
 
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// Initializes the terminal for TUI mode.
 ///
@@ -20,7 +20,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 ///
 /// Returns a [`Terminal`] ready for rendering. The caller must ensure
 /// [`restore`] is called on exit (including panics — see [`install_panic_hook`]).
-pub fn init() -> Result<Tui> {
+pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -43,7 +43,7 @@ pub fn init() -> Result<Tui> {
 /// - Shows the cursor (in case it was hidden).
 ///
 /// Safe to call multiple times — each operation is idempotent.
-pub fn restore() {
+pub(crate) fn restore() {
     _ = execute!(
         io::stdout(),
         DisableMouseCapture,
@@ -62,7 +62,7 @@ pub fn restore() {
 /// `WezTerm`, Windows Terminal, tmux).
 ///
 /// Terminals that don't recognize the sequence silently ignore it.
-pub fn draw_sync(terminal: &mut Tui, f: impl FnOnce(&mut ratatui::Frame)) -> Result<()> {
+pub(crate) fn draw_sync(terminal: &mut Tui, f: impl FnOnce(&mut ratatui::Frame)) -> Result<()> {
     queue!(terminal.backend_mut(), terminal::BeginSynchronizedUpdate,)?;
     terminal.draw(f)?;
     queue!(terminal.backend_mut(), terminal::EndSynchronizedUpdate,)?;
@@ -73,7 +73,7 @@ pub fn draw_sync(terminal: &mut Tui, f: impl FnOnce(&mut ratatui::Frame)) -> Res
 /// Installs a panic hook that restores the terminal before printing the
 /// panic message. Without this, a panic leaves the terminal in raw mode
 /// with the alternate screen active, making the error unreadable.
-pub fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         restore();

@@ -15,13 +15,13 @@ use crate::tui::theme::Theme;
 /// Future PRs will add tool call blocks, markdown rendering, and collapsed
 /// sections.
 #[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: String,
+pub(crate) struct ChatMessage {
+    pub(crate) role: ChatRole,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
+pub(crate) enum ChatRole {
     User,
     Assistant,
 }
@@ -36,7 +36,7 @@ pub enum ChatRole {
 ///
 /// For PR 3.1 this renders plain text. PR 3.2 adds markdown rendering.
 /// PR 3.6 adds viewport virtualization for long conversations.
-pub struct ChatView {
+pub(crate) struct ChatView {
     theme: Theme,
     messages: Vec<ChatMessage>,
     /// Text being streamed for the current assistant response. Appended to
@@ -53,7 +53,7 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             theme: Theme::default(),
             messages: Vec::new(),
@@ -66,7 +66,7 @@ impl ChatView {
     }
 
     /// Append a user message to the chat history.
-    pub fn push_user_message(&mut self, text: String) {
+    pub(crate) fn push_user_message(&mut self, text: String) {
         self.messages.push(ChatMessage {
             role: ChatRole::User,
             content: text,
@@ -75,7 +75,7 @@ impl ChatView {
     }
 
     /// Append a streamed token to the current assistant response buffer.
-    pub fn append_stream_token(&mut self, token: &str) {
+    pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.streaming_buffer.push_str(token);
         if self.auto_scroll {
             self.scroll_to_bottom();
@@ -83,7 +83,7 @@ impl ChatView {
     }
 
     /// Finalize the current streaming buffer into a committed assistant message.
-    pub fn commit_streaming(&mut self) {
+    pub(crate) fn commit_streaming(&mut self) {
         if !self.streaming_buffer.is_empty() {
             let content = std::mem::take(&mut self.streaming_buffer);
             self.messages.push(ChatMessage {
@@ -94,7 +94,7 @@ impl ChatView {
     }
 
     /// Append a tool call summary to the chat.
-    pub fn push_tool_call(&mut self, name: &str, title: Option<&str>) {
+    pub(crate) fn push_tool_call(&mut self, name: &str, title: Option<&str>) {
         let label = title.map_or_else(|| format!("⟡ {name}"), |t| format!("⟡ {name}: {t}"));
         self.messages.push(ChatMessage {
             role: ChatRole::Assistant,
@@ -261,7 +261,7 @@ impl ChatView {
 
     /// Update cached viewport height and sync scroll position. Called by
     /// [`App`](super::super::app::App) after each frame.
-    pub fn update_layout(&mut self, area: Rect) {
+    pub(crate) fn update_layout(&mut self, area: Rect) {
         self.viewport_height = area.height;
         if self.auto_scroll {
             self.scroll_to_bottom();

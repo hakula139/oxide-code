@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 /// consumes them to update the display. Each variant carries exactly the
 /// data needed for rendering — no model-facing payloads.
 #[derive(Debug, Clone)]
-pub enum AgentEvent {
+pub(crate) enum AgentEvent {
     /// A chunk of assistant text (streamed incrementally).
     StreamToken(String),
     /// A chunk of thinking text (streamed incrementally).
@@ -50,7 +50,7 @@ pub enum AgentEvent {
 
 /// Actions from the user that the agent loop consumes.
 #[derive(Debug, Clone)]
-pub enum UserAction {
+pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),
     /// User requested quit.
@@ -65,19 +65,19 @@ pub enum UserAction {
 /// - [`StdioSink`] writes directly to stdout / stderr for the bare REPL.
 ///
 /// This keeps the agent loop DRY — the same code drives both display modes.
-pub trait AgentSink: Send + Sync {
+pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;
 }
 
 // ── Channel Sink (TUI) ──
 
 /// Sends agent events through an `mpsc` channel for TUI consumption.
-pub struct ChannelSink {
+pub(crate) struct ChannelSink {
     tx: mpsc::UnboundedSender<AgentEvent>,
 }
 
 impl ChannelSink {
-    pub fn new(tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
+    pub(crate) fn new(tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
         Self { tx }
     }
 }
@@ -94,12 +94,12 @@ impl AgentSink for ChannelSink {
 
 /// Writes agent events directly to stdout / stderr. Used by `--no-tui`
 /// and `-p` headless mode.
-pub struct StdioSink {
+pub(crate) struct StdioSink {
     show_thinking: bool,
 }
 
 impl StdioSink {
-    pub fn new(show_thinking: bool) -> Self {
+    pub(crate) fn new(show_thinking: bool) -> Self {
         Self { show_thinking }
     }
 }
@@ -154,7 +154,7 @@ impl AgentSink for StdioSink {
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and
 /// the `UnboundedReceiver` for the TUI.
-pub fn channel() -> (ChannelSink, mpsc::UnboundedReceiver<AgentEvent>) {
+pub(crate) fn channel() -> (ChannelSink, mpsc::UnboundedReceiver<AgentEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
     (ChannelSink::new(tx), rx)
 }

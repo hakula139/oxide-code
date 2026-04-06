@@ -1,6 +1,6 @@
-pub mod app;
-pub mod component;
-pub mod components;
-pub mod event;
-pub mod terminal;
-pub mod theme;
+pub(crate) mod app;
+pub(crate) mod component;
+pub(crate) mod components;
+pub(crate) mod event;
+pub(crate) mod terminal;
+pub(crate) mod theme;

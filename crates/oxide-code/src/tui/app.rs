@@ -17,7 +17,7 @@ use super::terminal::{Tui, draw_sync};
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Root application state. Owns all components and drives the render loop.
-pub struct App {
+pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
@@ -29,7 +29,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
+    pub(crate) fn new(
         model: String,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
@@ -46,7 +46,7 @@ impl App {
     }
 
     /// Main event loop. Runs until the user quits or the agent channel closes.
-    pub async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
+    pub(crate) async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
         let mut crossterm_events = EventStream::new();
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

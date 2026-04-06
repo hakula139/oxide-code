@@ -17,7 +17,7 @@ use crate::tui::theme::Theme;
 /// - Ctrl+C / Ctrl+D: quit
 /// - Backspace: delete character
 /// - Left / Right: move cursor
-pub struct InputArea {
+pub(crate) struct InputArea {
     theme: Theme,
     buffer: String,
     cursor: usize,
@@ -25,7 +25,7 @@ pub struct InputArea {
 }
 
 impl InputArea {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             theme: Theme::default(),
             buffer: String::new(),
@@ -34,16 +34,16 @@ impl InputArea {
         }
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
-    pub fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Returns the height this component needs (input line + hint line + border).
-    pub fn height(&self) -> u16 {
+    pub(crate) fn height(&self) -> u16 {
         _ = self;
         3
     }
