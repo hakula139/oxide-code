@@ -108,6 +108,10 @@ pub struct MessageResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
     Text {
+        #[expect(
+            dead_code,
+            reason = "deserialized from API but initial text is ignored"
+        )]
         text: String,
     },
     ToolUse {
@@ -190,6 +194,7 @@ pub struct ApiError {
 
 // ── Client ──
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     config: Config,
@@ -233,6 +238,11 @@ impl Client {
             .context("failed to build HTTP client")?;
 
         Ok(Self { http, config })
+    }
+
+    /// Returns the model name for use in the system prompt.
+    pub fn model(&self) -> &str {
+        &self.config.model
     }
 
     /// Stream a message response from the Anthropic API.
