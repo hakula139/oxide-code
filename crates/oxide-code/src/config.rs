@@ -1,3 +1,4 @@
+mod file;
 mod oauth;
 
 use anyhow::{Context, Result};
@@ -33,12 +34,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration.
+    /// Load configuration from files and environment variables.
     ///
-    /// Auth priority: `ANTHROPIC_API_KEY` env var > Claude Code OAuth
-    /// credentials at `~/.claude/.credentials.json`.
+    /// Precedence (highest wins): env vars > project `ox.toml` > user
+    /// `~/.config/ox/config.toml` > built-in defaults.
+    ///
+    /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
+    /// file > Claude Code OAuth credentials.
     pub async fn load() -> Result<Self> {
-        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY") {
+        let fc = file::load();
+
+        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY").or(fc.api_key) {
             Auth::ApiKey(key)
         } else {
             let token = oauth::load_token()
@@ -47,19 +53,25 @@ impl Config {
             Auth::OAuth(token)
         };
 
-        let model = non_empty_env("ANTHROPIC_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let model = non_empty_env("ANTHROPIC_MODEL")
+            .or(fc.model)
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
-        let base_url =
-            non_empty_env("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        let base_url = non_empty_env("ANTHROPIC_BASE_URL")
+            .or(fc.base_url)
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
         let max_tokens = non_empty_env("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
+            .or(fc.max_tokens)
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
 
-        let show_thinking = env_bool("OX_SHOW_THINKING");
+        let show_thinking = env_bool("OX_SHOW_THINKING")
+            .or(fc.show_thinking)
+            .unwrap_or(false);
 
         Ok(Self {
             auth,
@@ -76,8 +88,8 @@ fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_bool(key: &str) -> bool {
-    non_empty_env(key).is_some_and(|v| v == "1" || v == "true")
+fn env_bool(key: &str) -> Option<bool> {
+    non_empty_env(key).map(|v| v == "1" || v == "true")
 }
 
 #[cfg(test)]

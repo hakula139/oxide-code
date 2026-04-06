@@ -27,8 +27,9 @@ ox     # Start an interactive session
 ├── client/
 │   ├── anthropic.rs            # Anthropic Messages API streaming client
 │   └── billing.rs              # Billing attribution header (fingerprint, cch attestation)
-├── config.rs                   # Configuration loading (env vars, model, base URL)
+├── config.rs                   # Configuration loading and layered merging
 ├── config/
+│   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
 ├── main.rs                     # CLI entry point, agent loop, async REPL
 ├── message.rs                  # Conversation message types

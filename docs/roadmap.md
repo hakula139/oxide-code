@@ -18,9 +18,10 @@ The project direction is simple:
 
 ### Authentication & Configuration
 
+- TOML config file with layered loading: built-in defaults → user config (`~/.config/ox/config.toml`, respects `$XDG_CONFIG_HOME`) → project config (`ox.toml`, walks CWD upward) → env var overrides.
+- All configurable values (`api_key`, `model`, `base_url`, `max_tokens`, `show_thinking`) settable in config files with env vars still taking precedence.
 - OAuth authentication via Claude Code credentials — reads from macOS Keychain (`"Claude Code-credentials"` service) and `~/.claude/.credentials.json`, preferring whichever has the later expiry. Keychain access via `security-framework` crate (macOS-only). Falls back to file-only on Linux.
-- API key authentication via `ANTHROPIC_API_KEY` environment variable.
-- Configurable model, base URL, and max tokens via environment variables.
+- API key authentication via `ANTHROPIC_API_KEY` environment variable or `api_key` config key.
 
 ### Tools
 
@@ -47,9 +48,6 @@ The project direction is simple:
 
 ### Configuration File
 
-- TOML config file (`~/.config/ox/config.toml` or `ox.toml` in project root) to replace env-var-only configuration.
-- Layered loading: global defaults → user config → project config → env var overrides.
-- All current env vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `OX_SHOW_THINKING`, etc.) become config keys, with env vars still taking precedence.
 - Configurable instruction directories — allow users to specify additional directories to scan for instruction files (e.g., `.codex/`, `.opencode/`) beyond the hardcoded `.claude/`.
 
 ### Tool Enhancements
