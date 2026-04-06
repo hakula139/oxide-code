@@ -43,8 +43,10 @@ impl Config {
     /// file > Claude Code OAuth credentials.
     pub async fn load() -> Result<Self> {
         let fc = file::load();
+        let client = fc.client.unwrap_or_default();
+        let tui = fc.tui.unwrap_or_default();
 
-        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY").or(fc.api_key) {
+        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
         } else {
             let token = oauth::load_token()
@@ -54,23 +56,23 @@ impl Config {
         };
 
         let model = non_empty_env("ANTHROPIC_MODEL")
-            .or(fc.model)
+            .or(client.model)
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
         let base_url = non_empty_env("ANTHROPIC_BASE_URL")
-            .or(fc.base_url)
+            .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
         let max_tokens = non_empty_env("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
-            .or(fc.max_tokens)
+            .or(client.max_tokens)
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
 
         let show_thinking = env_bool("OX_SHOW_THINKING")
-            .or(fc.show_thinking)
+            .or(tui.show_thinking)
             .unwrap_or(false);
 
         Ok(Self {

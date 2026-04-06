@@ -7,33 +7,90 @@ const USER_CONFIG_DIR: &str = "ox";
 const USER_CONFIG_FILENAME: &str = "config.toml";
 const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 
-/// Partial configuration loaded from a TOML file.
+// ── Config Structs ──
+
+/// Top-level configuration loaded from a TOML file.
 ///
-/// All fields are optional — each source contributes only the values it sets.
-/// Higher-priority sources override lower-priority ones field by field via
-/// [`FileConfig::merge`].
+/// All sections and fields are optional — each source contributes only the
+/// values it sets. Higher-priority sources override lower-priority ones
+/// field by field via [`FileConfig::merge`].
+///
+/// ```toml
+/// [client]
+/// model = "claude-sonnet-4-6"
+///
+/// [tui]
+/// show_thinking = true
+/// ```
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
+    pub client: Option<ClientConfig>,
+    pub tui: Option<TuiConfig>,
+}
+
+/// API client settings (`[client]` section).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClientConfig {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
+}
+
+/// Terminal UI settings (`[tui]` section).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TuiConfig {
     pub show_thinking: Option<bool>,
 }
 
+// ── Merge ──
+
 impl FileConfig {
     /// Merge two configs. Fields in `other` take precedence over `self`.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            client: merge_section(self.client, other.client, ClientConfig::merge),
+            tui: merge_section(self.tui, other.tui, TuiConfig::merge),
+        }
+    }
+}
+
+impl ClientConfig {
     fn merge(self, other: Self) -> Self {
         Self {
             api_key: other.api_key.or(self.api_key),
             model: other.model.or(self.model),
             base_url: other.base_url.or(self.base_url),
             max_tokens: other.max_tokens.or(self.max_tokens),
+        }
+    }
+}
+
+impl TuiConfig {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "signature must match merge_section's fn(T, T) -> T"
+    )]
+    fn merge(self, other: Self) -> Self {
+        Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
         }
     }
 }
+
+/// Merge two optional config sections. When both are present, merge their
+/// fields. When only one is present, use it as-is.
+fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> Option<T> {
+    match (base, other) {
+        (Some(b), Some(o)) => Some(merge(b, o)),
+        (base, other) => other.or(base),
+    }
+}
+
+// ── Loading ──
 
 /// Load and merge configuration from user and project TOML files.
 ///
@@ -118,55 +175,96 @@ mod tests {
     #[test]
     fn merge_other_wins_when_both_set() {
         let base = FileConfig {
-            api_key: Some("base-key".to_owned()),
-            model: Some("base-model".to_owned()),
-            base_url: Some("https://base.example.com".to_owned()),
-            max_tokens: Some(1000),
-            show_thinking: Some(false),
+            client: Some(ClientConfig {
+                api_key: Some("base-key".to_owned()),
+                model: Some("base-model".to_owned()),
+                base_url: Some("https://base.example.com".to_owned()),
+                max_tokens: Some(1000),
+            }),
+            tui: Some(TuiConfig {
+                show_thinking: Some(false),
+            }),
         };
         let other = FileConfig {
-            api_key: Some("other-key".to_owned()),
-            model: Some("other-model".to_owned()),
-            base_url: Some("https://other.example.com".to_owned()),
-            max_tokens: Some(2000),
-            show_thinking: Some(true),
+            client: Some(ClientConfig {
+                api_key: Some("other-key".to_owned()),
+                model: Some("other-model".to_owned()),
+                base_url: Some("https://other.example.com".to_owned()),
+                max_tokens: Some(2000),
+            }),
+            tui: Some(TuiConfig {
+                show_thinking: Some(true),
+            }),
         };
         let merged = base.merge(other);
-        assert_eq!(merged.api_key.as_deref(), Some("other-key"));
-        assert_eq!(merged.model.as_deref(), Some("other-model"));
+
+        let client = merged.client.expect("client section should be present");
+        assert_eq!(client.api_key.as_deref(), Some("other-key"));
+        assert_eq!(client.model.as_deref(), Some("other-model"));
         assert_eq!(
-            merged.base_url.as_deref(),
+            client.base_url.as_deref(),
             Some("https://other.example.com")
         );
-        assert_eq!(merged.max_tokens, Some(2000));
-        assert_eq!(merged.show_thinking, Some(true));
+        assert_eq!(client.max_tokens, Some(2000));
+
+        let tui = merged.tui.expect("tui section should be present");
+        assert_eq!(tui.show_thinking, Some(true));
     }
 
     #[test]
     fn merge_falls_back_to_base_when_other_is_none() {
         let base = FileConfig {
-            api_key: Some("key".to_owned()),
-            model: Some("model".to_owned()),
-            base_url: Some("https://example.com".to_owned()),
-            max_tokens: Some(4096),
-            show_thinking: Some(true),
+            client: Some(ClientConfig {
+                api_key: Some("key".to_owned()),
+                model: Some("model".to_owned()),
+                base_url: Some("https://example.com".to_owned()),
+                max_tokens: Some(4096),
+            }),
+            tui: Some(TuiConfig {
+                show_thinking: Some(true),
+            }),
         };
         let merged = base.merge(FileConfig::default());
-        assert_eq!(merged.api_key.as_deref(), Some("key"));
-        assert_eq!(merged.model.as_deref(), Some("model"));
-        assert_eq!(merged.base_url.as_deref(), Some("https://example.com"));
-        assert_eq!(merged.max_tokens, Some(4096));
-        assert_eq!(merged.show_thinking, Some(true));
+
+        let client = merged.client.expect("client section should survive");
+        assert_eq!(client.api_key.as_deref(), Some("key"));
+        assert_eq!(client.model.as_deref(), Some("model"));
+        assert_eq!(client.base_url.as_deref(), Some("https://example.com"));
+        assert_eq!(client.max_tokens, Some(4096));
+
+        let tui = merged.tui.expect("tui section should survive");
+        assert_eq!(tui.show_thinking, Some(true));
+    }
+
+    #[test]
+    fn merge_cross_section_fills_gaps() {
+        let base = FileConfig {
+            client: Some(ClientConfig {
+                model: Some("base-model".to_owned()),
+                ..Default::default()
+            }),
+            tui: None,
+        };
+        let other = FileConfig {
+            client: None,
+            tui: Some(TuiConfig {
+                show_thinking: Some(true),
+            }),
+        };
+        let merged = base.merge(other);
+
+        let client = merged.client.expect("client from base should survive");
+        assert_eq!(client.model.as_deref(), Some("base-model"));
+
+        let tui = merged.tui.expect("tui from other should survive");
+        assert_eq!(tui.show_thinking, Some(true));
     }
 
     #[test]
     fn merge_both_empty_produces_empty() {
         let merged = FileConfig::default().merge(FileConfig::default());
-        assert!(merged.api_key.is_none());
-        assert!(merged.model.is_none());
-        assert!(merged.base_url.is_none());
-        assert!(merged.max_tokens.is_none());
-        assert!(merged.show_thinking.is_none());
+        assert!(merged.client.is_none());
+        assert!(merged.tui.is_none());
     }
 
     // ── load_file ──
@@ -178,21 +276,53 @@ mod tests {
         std::fs::write(
             &path,
             indoc! {r#"
+                [client]
                 api_key = "sk-test"
                 model = "claude-test"
                 base_url = "https://test.example.com"
                 max_tokens = 4096
+
+                [tui]
                 show_thinking = true
             "#},
         )
         .unwrap();
 
         let config = load_file(&path).expect("should parse valid TOML");
-        assert_eq!(config.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(config.model.as_deref(), Some("claude-test"));
-        assert_eq!(config.base_url.as_deref(), Some("https://test.example.com"));
-        assert_eq!(config.max_tokens, Some(4096));
-        assert_eq!(config.show_thinking, Some(true));
+
+        let client = config.client.expect("client section should be present");
+        assert_eq!(client.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(client.model.as_deref(), Some("claude-test"));
+        assert_eq!(client.base_url.as_deref(), Some("https://test.example.com"));
+        assert_eq!(client.max_tokens, Some(4096));
+
+        let tui = config.tui.expect("tui section should be present");
+        assert_eq!(tui.show_thinking, Some(true));
+    }
+
+    #[test]
+    fn load_file_single_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                model = "claude-test"
+            "#},
+        )
+        .unwrap();
+
+        let config = load_file(&path).expect("should parse partial TOML");
+        assert_eq!(
+            config
+                .client
+                .expect("client section should be present")
+                .model
+                .as_deref(),
+            Some("claude-test")
+        );
+        assert!(config.tui.is_none());
     }
 
     #[test]
@@ -202,14 +332,31 @@ mod tests {
         std::fs::write(&path, "").unwrap();
 
         let config = load_file(&path).expect("empty TOML is valid");
-        assert!(config.model.is_none());
+        assert!(config.client.is_none());
+        assert!(config.tui.is_none());
     }
 
     #[test]
-    fn load_file_rejects_unknown_keys() {
+    fn load_file_rejects_unknown_top_level_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, r#"api-key = "typo""#).unwrap();
+        std::fs::write(&path, r#"model = "misplaced""#).unwrap();
+
+        assert!(load_file(&path).is_none());
+    }
+
+    #[test]
+    fn load_file_rejects_unknown_section_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                api-key = "typo"
+            "#},
+        )
+        .unwrap();
 
         assert!(load_file(&path).is_none());
     }
@@ -280,7 +427,14 @@ mod tests {
     fn find_project_config_from_in_start_dir() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(&config_path, r#"model = "test""#).unwrap();
+        std::fs::write(
+            &config_path,
+            indoc! {r#"
+                [client]
+                model = "test"
+            "#},
+        )
+        .unwrap();
 
         let result = find_project_config_from(dir.path().to_path_buf());
         assert_eq!(result, Some(config_path));
@@ -290,7 +444,14 @@ mod tests {
     fn find_project_config_from_walks_upward() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(&config_path, r#"model = "test""#).unwrap();
+        std::fs::write(
+            &config_path,
+            indoc! {r#"
+                [client]
+                model = "test"
+            "#},
+        )
+        .unwrap();
         let child = dir.path().join("sub").join("deep");
         std::fs::create_dir_all(&child).unwrap();
 

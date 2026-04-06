@@ -18,7 +18,7 @@ The project direction is simple:
 
 ### Authentication & Configuration
 
-- TOML config file with layered loading: built-in defaults → user config (`~/.config/ox/config.toml`, respects `$XDG_CONFIG_HOME`) → project config (`ox.toml`, walks CWD upward) → env var overrides.
+- TOML config file with layered loading: built-in defaults → user config (`~/.config/ox/config.toml`, respects `$XDG_CONFIG_HOME`) → project config (`ox.toml`, walks CWD upward) → env var overrides. Sectioned layout (`[client]`, `[tui]`) for forward compatibility.
 - All configurable values (`api_key`, `model`, `base_url`, `max_tokens`, `show_thinking`) settable in config files with env vars still taking precedence.
 - OAuth authentication via Claude Code credentials — reads from macOS Keychain (`"Claude Code-credentials"` service) and `~/.claude/.credentials.json`, preferring whichever has the later expiry. Keychain access via `security-framework` crate (macOS-only). Falls back to file-only on Linux.
 - API key authentication via `ANTHROPIC_API_KEY` environment variable or `api_key` config key.

@@ -17,26 +17,32 @@ Create a TOML file at either location:
 # ~/.config/ox/config.toml (user-wide)
 # or ox.toml in your project root (per-project)
 
+[client]
 model = "claude-sonnet-4-6"
 base_url = "https://api.anthropic.com"
 max_tokens = 8192
-show_thinking = true
+# api_key = "sk-ant-..."   # prefer the environment variable for secrets
 
-# API key — prefer the environment variable for secrets.
-# api_key = "sk-ant-..."
+[tui]
+show_thinking = true
 ```
 
-All fields are optional. Project config (`ox.toml`) overrides user config (`~/.config/ox/config.toml`).
+All sections and fields are optional. Project config (`ox.toml`) overrides user config (`~/.config/ox/config.toml`).
 
-### Available keys
+### `[client]` — API connection
 
-| Key             | Type    | Default                     | Description             |
-| --------------- | ------- | --------------------------- | ----------------------- |
-| `api_key`       | string  | —                           | Anthropic API key       |
-| `model`         | string  | `claude-opus-4-6`           | Model to use            |
-| `base_url`      | string  | `https://api.anthropic.com` | API base URL            |
-| `max_tokens`    | integer | `16384`                     | Max tokens per response |
-| `show_thinking` | boolean | `false`                     | Show extended thinking  |
+| Key          | Type    | Default                     | Description             |
+| ------------ | ------- | --------------------------- | ----------------------- |
+| `api_key`    | string  | —                           | Anthropic API key       |
+| `model`      | string  | `claude-opus-4-6`           | Model to use            |
+| `base_url`   | string  | `https://api.anthropic.com` | API base URL            |
+| `max_tokens` | integer | `16384`                     | Max tokens per response |
+
+### `[tui]` — Terminal UI
+
+| Key             | Type    | Default | Description            |
+| --------------- | ------- | ------- | ---------------------- |
+| `show_thinking` | boolean | `false` | Show extended thinking |
 
 ## Authentication
 
@@ -52,7 +58,7 @@ This is the highest-priority method. The key is sent directly in the `x-api-key`
 
 ### 2. API key (config file)
 
-Set `api_key` in your user or project config file. The environment variable takes precedence if both are set.
+Set `api_key` under `[client]` in your user or project config file. The environment variable takes precedence if both are set.
 
 ### 3. Claude Code OAuth
 
@@ -69,12 +75,12 @@ You do not need to configure anything — if Claude Code is installed and authen
 
 Environment variables override all config file values.
 
-| Variable               | Config key      | Default                     | Description             |
-| ---------------------- | --------------- | --------------------------- | ----------------------- |
-| `ANTHROPIC_API_KEY`    | `api_key`       | —                           | Anthropic API key       |
-| `ANTHROPIC_MODEL`      | `model`         | `claude-opus-4-6`           | Model to use            |
-| `ANTHROPIC_BASE_URL`   | `base_url`      | `https://api.anthropic.com` | API base URL            |
-| `ANTHROPIC_MAX_TOKENS` | `max_tokens`    | `16384`                     | Max tokens per response |
-| `OX_SHOW_THINKING`     | `show_thinking` | `false`                     | Show extended thinking  |
+| Variable               | Config key          | Default                     | Description             |
+| ---------------------- | ------------------- | --------------------------- | ----------------------- |
+| `ANTHROPIC_API_KEY`    | `client.api_key`    | —                           | Anthropic API key       |
+| `ANTHROPIC_MODEL`      | `client.model`      | `claude-opus-4-6`           | Model to use            |
+| `ANTHROPIC_BASE_URL`   | `client.base_url`   | `https://api.anthropic.com` | API base URL            |
+| `ANTHROPIC_MAX_TOKENS` | `client.max_tokens` | `16384`                     | Max tokens per response |
+| `OX_SHOW_THINKING`     | `tui.show_thinking` | `false`                     | Show extended thinking  |
 
 Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
