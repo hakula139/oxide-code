@@ -51,9 +51,9 @@ pub(crate) struct ChatView {
 }
 
 impl ChatView {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self {
-            theme: Theme::default(),
+            theme,
             messages: Vec::new(),
             streaming_buffer: String::new(),
             scroll_offset: 0,

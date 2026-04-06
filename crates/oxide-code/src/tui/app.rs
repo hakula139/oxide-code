@@ -10,8 +10,9 @@ use super::component::{Action, Component};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::event::{AgentEvent, UserAction};
+use super::event::{AgentEvent, UserAction, tool_call_title};
 use super::terminal::{Tui, draw_sync};
+use super::theme::Theme;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -34,10 +35,11 @@ impl App {
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
     ) -> Self {
+        let theme = Theme::default();
         Self {
-            status_bar: StatusBar::new(model),
-            chat: ChatView::new(),
-            input: InputArea::new(),
+            status_bar: StatusBar::new(theme, model),
+            chat: ChatView::new(theme),
+            input: InputArea::new(theme),
             agent_rx,
             user_tx,
             should_quit: false,
@@ -112,6 +114,20 @@ impl App {
         self.dirty = true;
     }
 
+    fn handle_action(&mut self, action: Action) {
+        match action {
+            Action::SubmitPrompt(text) => {
+                self.chat.push_user_message(text.clone());
+                self.input.set_enabled(false);
+                _ = self.user_tx.send(UserAction::SubmitPrompt(text));
+            }
+            Action::Quit => {
+                _ = self.user_tx.send(UserAction::Quit);
+                self.should_quit = true;
+            }
+        }
+    }
+
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::StreamToken(token) => {
@@ -125,48 +141,30 @@ impl App {
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
                 self.chat.commit_streaming();
-                // Show bash commands inline for visibility.
-                let title = (name == "bash")
-                    .then(|| input.get("command").and_then(serde_json::Value::as_str))
-                    .flatten();
+                let title = tool_call_title(&name, &input);
                 self.chat.push_tool_call(&name, title);
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd { title, .. } => {
-                // Update the last tool call with its title if available.
                 if let Some(title) = &title {
-                    // For now, push a result line. A future PR will render
-                    // this as a collapsible tool result block.
                     self.chat.push_tool_call("result", Some(title));
                 }
             }
             AgentEvent::TurnComplete => {
-                self.chat.commit_streaming();
-                self.status_bar.set_status(Status::Idle);
-                self.input.set_enabled(true);
+                self.finish_turn();
             }
             AgentEvent::Error(msg) => {
-                self.chat.commit_streaming();
                 self.chat.push_tool_call("error", Some(&msg));
-                self.status_bar.set_status(Status::Idle);
-                self.input.set_enabled(true);
+                self.finish_turn();
             }
         }
         self.dirty = true;
     }
 
-    fn handle_action(&mut self, action: Action) {
-        match action {
-            Action::SubmitPrompt(text) => {
-                self.chat.push_user_message(text.clone());
-                self.input.set_enabled(false);
-                _ = self.user_tx.send(UserAction::SubmitPrompt(text));
-            }
-            Action::Quit => {
-                _ = self.user_tx.send(UserAction::Quit);
-                self.should_quit = true;
-            }
-        }
+    fn finish_turn(&mut self) {
+        self.chat.commit_streaming();
+        self.status_bar.set_status(Status::Idle);
+        self.input.set_enabled(true);
     }
 
     // ── Rendering ──

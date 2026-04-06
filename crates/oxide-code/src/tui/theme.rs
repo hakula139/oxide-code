@@ -1,4 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 
 /// Color palette and style constants for the TUI.
 ///
@@ -10,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
     dead_code,
     reason = "all color slots are part of the theme API; not all consumed yet"
 )]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Theme {
     /// Primary text.
     pub(crate) fg: Color,
@@ -115,6 +116,11 @@ impl Theme {
     )]
     pub(crate) fn info(&self) -> Style {
         Style::default().fg(self.info)
+    }
+
+    /// Styled pipe separator span (`" │ "`).
+    pub(crate) fn separator_span(&self) -> Span<'static> {
+        Span::styled(" │ ", self.separator())
     }
 
     /// Status bar separator style (dimmed pipe).

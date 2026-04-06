@@ -49,17 +49,17 @@ async fn main() -> Result<()> {
     let model = config.model.clone();
     let client = Client::new(config)?;
 
+    let tools = create_tool_registry();
+
     if let Some(prompt_text) = cli.prompt {
-        let tools = create_tool_registry();
         return headless(&client, &tools, &model, show_thinking, &prompt_text).await;
     }
 
     if cli.no_tui || !std::io::stdout().is_terminal() {
-        let tools = create_tool_registry();
         return bare_repl(&client, &tools, &model, show_thinking).await;
     }
 
-    run_tui(&client, &model).await
+    run_tui(&client, &model, tools).await
 }
 
 fn create_tool_registry() -> ToolRegistry {
@@ -75,7 +75,7 @@ fn create_tool_registry() -> ToolRegistry {
 
 // ── TUI Mode ──
 
-async fn run_tui(client: &Client, model: &str) -> Result<()> {
+async fn run_tui(client: &Client, model: &str, tools: ToolRegistry) -> Result<()> {
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
@@ -86,7 +86,7 @@ async fn run_tui(client: &Client, model: &str) -> Result<()> {
 
     let agent_handle = {
         let client = client.clone();
-        tokio::spawn(async move { agent_loop_task(client, agent_sink, user_rx).await })
+        tokio::spawn(async move { agent_loop_task(client, tools, agent_sink, user_rx).await })
     };
 
     // Run the TUI on the main thread (it needs terminal access).
@@ -107,10 +107,10 @@ async fn run_tui(client: &Client, model: &str) -> Result<()> {
 
 async fn agent_loop_task(
     client: Client,
+    tools: ToolRegistry,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::UnboundedReceiver<UserAction>,
 ) -> Result<()> {
-    let tools = create_tool_registry();
     let mut messages: Vec<Message> = Vec::new();
 
     while let Some(action) = user_rx.recv().await {

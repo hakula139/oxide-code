@@ -122,13 +122,11 @@ impl AgentSink for StdioSink {
                 }
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
-                if name == "bash"
-                    && let Some(cmd) = input.get("command").and_then(serde_json::Value::as_str)
-                {
-                    eprintln!("⟡ {name}: {cmd}");
-                    return Ok(());
+                if let Some(title) = tool_call_title(&name, &input) {
+                    eprintln!("⟡ {name}: {title}");
+                } else {
+                    eprintln!("⟡ {name}");
                 }
-                eprintln!("⟡ {name}");
             }
             AgentEvent::ToolCallEnd { title, content, .. } => {
                 if let Some(title) = title {
@@ -150,6 +148,15 @@ impl AgentSink for StdioSink {
         }
         Ok(())
     }
+}
+
+/// Returns the display title for a tool call start event.
+///
+/// Bash tools show their command; other tools return `None`.
+pub(crate) fn tool_call_title<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
+    (name == "bash")
+        .then(|| input.get("command").and_then(serde_json::Value::as_str))
+        .flatten()
 }
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and

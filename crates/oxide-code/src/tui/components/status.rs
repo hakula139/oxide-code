@@ -26,9 +26,9 @@ pub(crate) enum Status {
 }
 
 impl StatusBar {
-    pub(crate) fn new(model: String) -> Self {
+    pub(crate) fn new(theme: Theme, model: String) -> Self {
         Self {
-            theme: Theme::default(),
+            theme,
             model,
             status: Status::Idle,
         }
@@ -45,15 +45,15 @@ impl Component for StatusBar {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let sep = Span::styled(" │ ", self.theme.separator());
+        let sep = self.theme.separator_span();
 
         let name = Span::styled("ox", self.theme.accent());
         let model = Span::styled(self.model.as_str(), self.theme.text());
 
         let status_span = match self.status {
             Status::Idle => Span::styled("ready", self.theme.success()),
-            Status::Streaming => Span::styled("streaming…", self.theme.warning()),
-            Status::ToolRunning => Span::styled("running tool…", self.theme.warning()),
+            Status::Streaming => Span::styled("streaming...", self.theme.warning()),
+            Status::ToolRunning => Span::styled("running tool...", self.theme.warning()),
         };
 
         let line = Line::from(vec![
