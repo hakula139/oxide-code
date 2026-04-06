@@ -13,7 +13,15 @@ oxide-code is a Rust reimplementation of Claude Code — an interactive CLI agen
 
 ## Status
 
-Early development. See [`docs/roadmap.md`](docs/roadmap.md) for the current roadmap.
+Early development. What works today:
+
+- Agent loop with streaming and extended thinking
+- File and search tools (read, write, edit, glob, grep, bash)
+- System prompt with CLAUDE.md / AGENTS.md injection
+- Authentication (API key and Claude Code OAuth)
+- TOML config file with layered loading
+
+Next up: terminal UI. See [`docs/roadmap.md`](docs/roadmap.md) for details.
 
 ## Usage
 
