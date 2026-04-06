@@ -2,7 +2,7 @@ use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::component::{Action, Component};
 use crate::tui::theme::Theme;
@@ -57,7 +57,7 @@ impl Component for StatusBar {
         };
 
         let line = Line::from(vec![
-            Span::raw(" "),
+            Span::raw("  "),
             name,
             sep.clone(),
             model,
@@ -65,7 +65,10 @@ impl Component for StatusBar {
             status_span,
         ]);
 
-        let bar = Paragraph::new(line);
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(self.theme.border_unfocused());
+        let bar = Paragraph::new(line).block(block);
         frame.render_widget(bar, area);
     }
 }

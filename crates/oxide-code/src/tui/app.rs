@@ -92,14 +92,18 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
-        // Input area gets first crack at key events.
-        if let Some(action) = self.input.handle_event(event) {
-            self.handle_action(action);
+        // Input area gets first crack at key events. Any key event while
+        // input is enabled mutates the buffer and needs a re-render, even
+        // if no Action is produced (e.g., typing a character).
+        if matches!(event, Event::Key(..)) {
+            if let Some(action) = self.input.handle_event(event) {
+                self.handle_action(action);
+            }
             self.dirty = true;
             return;
         }
 
-        // Then the chat view (scroll events).
+        // Scroll events go to the chat view.
         if self.chat.handle_event(event).is_some() {
             self.dirty = true;
             return;
@@ -174,7 +178,7 @@ impl App {
 
         draw_sync(terminal, |frame| {
             let chunks = Layout::vertical([
-                Constraint::Length(1),            // status bar
+                Constraint::Length(2),            // status bar (content + border)
                 Constraint::Min(1),               // chat view
                 Constraint::Length(input_height), // input area
             ])

@@ -120,22 +120,27 @@ impl ChatView {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         for msg in &self.messages {
-            // Blank line between messages.
+            // Two blank lines between messages for visual breathing room.
             if !lines.is_empty() {
+                lines.push(Line::raw(""));
                 lines.push(Line::raw(""));
             }
 
             // Role label.
             let (label, style) = match msg.role {
-                ChatRole::User => ("You", self.theme.accent()),
-                ChatRole::Assistant => ("Assistant", self.theme.secondary()),
+                ChatRole::User => ("❯ You", self.theme.accent()),
+                ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
             };
-            lines.push(Line::from(vec![Span::raw(" "), Span::styled(label, style)]));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(label, style),
+            ]));
+            lines.push(Line::raw(""));
 
             // Content lines.
             for line in msg.content.lines() {
                 lines.push(Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw("    "),
                     Span::styled(line, self.theme.text()),
                 ]));
             }
@@ -145,19 +150,19 @@ impl ChatView {
         if !self.streaming_buffer.is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::raw(""));
+                lines.push(Line::raw(""));
             }
             lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled("Assistant", self.theme.secondary()),
+                Span::raw("  "),
+                Span::styled("⟡ Assistant", self.theme.secondary()),
             ]));
+            lines.push(Line::raw(""));
             for line in self.streaming_buffer.lines() {
                 lines.push(Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw("    "),
                     Span::styled(line, self.theme.text()),
                 ]));
             }
-            // If the buffer ends with a newline, the last `lines()` item is
-            // already included. If not, we've shown the partial line.
         }
 
         Text::from(lines)
