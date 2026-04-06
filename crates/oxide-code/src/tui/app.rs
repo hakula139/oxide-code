@@ -120,7 +120,7 @@ impl App {
                 self.input.set_enabled(false);
             }
             AgentEvent::ThinkingToken(_) => {
-                // TODO(PR 3.2): Render thinking in a dimmed/collapsible block.
+                // TODO: Render thinking in a dimmed / collapsible block.
                 self.status_bar.set_status(Status::Streaming);
             }
             AgentEvent::ToolCallStart { name, .. } => {
@@ -131,8 +131,8 @@ impl App {
             AgentEvent::ToolCallEnd { title, .. } => {
                 // Update the last tool call with its title if available.
                 if let Some(title) = &title {
-                    // For now, push a result line. PR 3.4 will render this
-                    // as a collapsible tool result block.
+                    // For now, push a result line. A future PR will render
+                    // this as a collapsible tool result block.
                     self.chat.push_tool_call("result", Some(title));
                 }
             }

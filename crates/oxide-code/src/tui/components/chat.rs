@@ -34,8 +34,8 @@ pub(crate) enum ChatRole {
 /// bottom on new content. The user can scroll up to review history; new
 /// content pauses auto-scroll until the user scrolls back to the bottom.
 ///
-/// For PR 3.1 this renders plain text. PR 3.2 adds markdown rendering.
-/// PR 3.6 adds viewport virtualization for long conversations.
+/// Currently renders plain text. Future work: markdown rendering,
+/// viewport virtualization for long conversations.
 pub(crate) struct ChatView {
     theme: Theme,
     messages: Vec<ChatMessage>,

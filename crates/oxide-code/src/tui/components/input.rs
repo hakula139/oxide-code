@@ -9,8 +9,8 @@ use crate::tui::theme::Theme;
 
 /// Multi-line input area at the bottom of the TUI.
 ///
-/// For PR 3.1 this is a simple single-line input with cursor. PR 3.3 will
-/// replace the internals with `tui-textarea` for full multi-line editing.
+/// Currently a simple single-line input with cursor. Will be replaced
+/// with `tui-textarea` for full multi-line editing.
 ///
 /// Key bindings:
 /// - Enter: submit prompt
