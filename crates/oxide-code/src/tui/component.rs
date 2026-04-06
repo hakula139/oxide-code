@@ -27,6 +27,6 @@ pub trait Component {
 pub enum Action {
     /// User submitted a prompt from the input area.
     SubmitPrompt(String),
-    /// User requested quit (Ctrl+C / Escape).
+    /// User requested quit (Ctrl+C / Ctrl+D).
     Quit,
 }

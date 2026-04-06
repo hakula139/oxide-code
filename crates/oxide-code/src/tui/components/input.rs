@@ -14,7 +14,7 @@ use crate::tui::theme::Theme;
 ///
 /// Key bindings:
 /// - Enter: submit prompt
-/// - Ctrl+C: quit
+/// - Ctrl+C / Ctrl+D: quit
 /// - Backspace: delete character
 /// - Left / Right: move cursor
 pub struct InputArea {
@@ -62,9 +62,9 @@ impl InputArea {
 impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<Action> {
         if !self.enabled {
-            // Still allow Ctrl+C to quit.
+            // Still allow Ctrl+C / Ctrl+D to quit.
             if let Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
+                code: KeyCode::Char('c' | 'd'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) = event
@@ -79,7 +79,7 @@ impl Component for InputArea {
         };
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
+            (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => Some(Action::Quit),
             (KeyCode::Enter, _) => self.submit(),
             (KeyCode::Backspace, _) => {
                 if self.cursor > 0 {
@@ -156,13 +156,18 @@ impl Component for InputArea {
         let input_line = Line::from(vec![Span::raw(" "), prompt, text]);
         frame.render_widget(Paragraph::new(input_line), chunks[0]);
 
-        // Place cursor after the prompt.
+        // Place cursor after the prompt (" > " = 3 chars offset).
         if self.enabled {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
-            frame.set_cursor_position((chunks[0].x + 3 + self.cursor as u16, chunks[0].y));
+            let cursor_x = chunks[0]
+                .x
+                .saturating_add(3)
+                .saturating_add(self.cursor as u16)
+                .min(chunks[0].right().saturating_sub(1));
+            frame.set_cursor_position((cursor_x, chunks[0].y));
         }
 
         // Hint line.
@@ -171,7 +176,7 @@ impl Component for InputArea {
             Span::styled("Enter", self.theme.dim()),
             Span::styled(": send", self.theme.dim()),
             Span::styled(" │ ", self.theme.separator()),
-            Span::styled("Ctrl+C", self.theme.dim()),
+            Span::styled("Ctrl+C / Ctrl+D", self.theme.dim()),
             Span::styled(": quit", self.theme.dim()),
         ]);
         frame.render_widget(Paragraph::new(hint), chunks[1]);
