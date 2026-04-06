@@ -44,13 +44,13 @@ pub fn init() -> Result<Tui> {
 ///
 /// Safe to call multiple times — each operation is idempotent.
 pub fn restore() {
-    let _ = execute!(
+    _ = execute!(
         io::stdout(),
         DisableMouseCapture,
         LeaveAlternateScreen,
         crossterm::cursor::Show,
     );
-    let _ = disable_raw_mode();
+    _ = disable_raw_mode();
 }
 
 /// Wraps a render closure with synchronized output sequences.

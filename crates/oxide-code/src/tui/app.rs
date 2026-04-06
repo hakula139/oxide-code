@@ -156,10 +156,10 @@ impl App {
             Action::SubmitPrompt(text) => {
                 self.chat.push_user_message(text.clone());
                 self.input.set_enabled(false);
-                let _ = self.user_tx.send(UserAction::SubmitPrompt(text));
+                _ = self.user_tx.send(UserAction::SubmitPrompt(text));
             }
             Action::Quit => {
-                let _ = self.user_tx.send(UserAction::Quit);
+                _ = self.user_tx.send(UserAction::Quit);
                 self.should_quit = true;
             }
         }

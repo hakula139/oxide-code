@@ -108,10 +108,6 @@ pub struct MessageResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlockInfo {
     Text {
-        #[expect(
-            dead_code,
-            reason = "deserialized from API but initial text is ignored"
-        )]
         text: String,
     },
     ToolUse {

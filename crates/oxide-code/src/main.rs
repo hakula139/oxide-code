@@ -117,9 +117,9 @@ async fn agent_loop_task(
                 if let Err(e) =
                     agent_turn(&client, &tools, &mut messages, &system_prompt, &sink).await
                 {
-                    let _ = sink.send(AgentEvent::Error(e.to_string()));
+                    _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
-                let _ = sink.send(AgentEvent::TurnComplete);
+                _ = sink.send(AgentEvent::TurnComplete);
             }
             UserAction::Quit => break,
         }
@@ -157,7 +157,7 @@ async fn bare_repl(
         messages.push(Message::user(&input));
         let system_prompt = prompt::build_system_prompt(model).await;
         agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
-        let _ = sink.send(AgentEvent::TurnComplete);
+        _ = sink.send(AgentEvent::TurnComplete);
     }
 
     Ok(())
@@ -216,7 +216,7 @@ async fn agent_turn(
 
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
-            let _ = sink.send(AgentEvent::ToolCallStart {
+            _ = sink.send(AgentEvent::ToolCallStart {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
@@ -231,7 +231,7 @@ async fn agent_turn(
                 },
             };
 
-            let _ = sink.send(AgentEvent::ToolCallEnd {
+            _ = sink.send(AgentEvent::ToolCallEnd {
                 id: id.clone(),
                 title: output.metadata.title.clone(),
                 content: output.content.clone(),
@@ -337,11 +337,19 @@ async fn stream_response(
                 if blocks.len() <= index {
                     blocks.resize_with(index + 1, || None);
                 }
-                blocks[index] = Some(init_accumulator(content_block, index));
+                let acc = init_accumulator(content_block, index);
+                // Send initial text to display if non-empty (the API
+                // typically sends empty initial text, but be safe).
+                if let BlockAccumulator::Text(text) = &acc
+                    && !text.is_empty()
+                {
+                    sink.send(AgentEvent::StreamToken(text.clone()))?;
+                }
+                blocks[index] = Some(acc);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, sink);
+                    apply_delta(block, delta, sink)?;
                 }
             }
             StreamEvent::Error { error } => {
@@ -360,7 +368,7 @@ async fn stream_response(
 
 fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccumulator {
     match content_block {
-        ContentBlockInfo::Text { .. } => BlockAccumulator::Text(String::new()),
+        ContentBlockInfo::Text { text } => BlockAccumulator::Text(text),
         ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
             id,
             name,
@@ -386,11 +394,11 @@ fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccum
     }
 }
 
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) {
+fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) -> Result<()> {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            let _ = sink.send(AgentEvent::StreamToken(text));
+            sink.send(AgentEvent::StreamToken(text))?;
         }
         (
             BlockAccumulator::ToolUse { json_buf, .. }
@@ -406,7 +414,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             },
         ) => {
             thinking.push_str(&thinking_delta);
-            let _ = sink.send(AgentEvent::ThinkingToken(thinking_delta));
+            sink.send(AgentEvent::ThinkingToken(thinking_delta))?;
         }
         (
             BlockAccumulator::Thinking { signature, .. },
@@ -420,4 +428,5 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             debug!(?block, ?delta, "ignoring unhandled delta");
         }
     }
+    Ok(())
 }

@@ -44,8 +44,7 @@ impl InputArea {
 
     /// Returns the height this component needs (input line + hint line + border).
     pub fn height(&self) -> u16 {
-        // Will depend on buffer line count once multi-line is added in PR 3.3.
-        let _ = self;
+        _ = self;
         3
     }
 
