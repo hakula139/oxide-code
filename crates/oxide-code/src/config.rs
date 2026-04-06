@@ -88,6 +88,13 @@ fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Parse a boolean environment variable.
+///
+/// Returns `Some(true)` for `"1"` or `"true"`, `Some(false)` for any other
+/// non-empty value, and `None` when unset or empty. The `Some(false)` case
+/// is intentional: setting the variable to any value (even `"0"` or `"no"`)
+/// is treated as an explicit override that prevents fallthrough to config
+/// file values.
 fn env_bool(key: &str) -> Option<bool> {
     non_empty_env(key).map(|v| v == "1" || v == "true")
 }

@@ -13,6 +13,7 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 /// Higher-priority sources override lower-priority ones field by field via
 /// [`FileConfig::merge`].
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
     pub api_key: Option<String>,
     pub model: Option<String>,
@@ -108,6 +109,8 @@ fn find_project_config_from(mut dir: PathBuf) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
 
     // ── FileConfig::merge ──
@@ -115,32 +118,44 @@ mod tests {
     #[test]
     fn merge_other_wins_when_both_set() {
         let base = FileConfig {
+            api_key: Some("base-key".to_owned()),
             model: Some("base-model".to_owned()),
+            base_url: Some("https://base.example.com".to_owned()),
             max_tokens: Some(1000),
-            ..Default::default()
+            show_thinking: Some(false),
         };
         let other = FileConfig {
+            api_key: Some("other-key".to_owned()),
             model: Some("other-model".to_owned()),
+            base_url: Some("https://other.example.com".to_owned()),
             max_tokens: Some(2000),
-            ..Default::default()
+            show_thinking: Some(true),
         };
         let merged = base.merge(other);
+        assert_eq!(merged.api_key.as_deref(), Some("other-key"));
         assert_eq!(merged.model.as_deref(), Some("other-model"));
+        assert_eq!(
+            merged.base_url.as_deref(),
+            Some("https://other.example.com")
+        );
         assert_eq!(merged.max_tokens, Some(2000));
+        assert_eq!(merged.show_thinking, Some(true));
     }
 
     #[test]
     fn merge_falls_back_to_base_when_other_is_none() {
         let base = FileConfig {
             api_key: Some("key".to_owned()),
+            model: Some("model".to_owned()),
             base_url: Some("https://example.com".to_owned()),
+            max_tokens: Some(4096),
             show_thinking: Some(true),
-            ..Default::default()
         };
-        let other = FileConfig::default();
-        let merged = base.merge(other);
+        let merged = base.merge(FileConfig::default());
         assert_eq!(merged.api_key.as_deref(), Some("key"));
+        assert_eq!(merged.model.as_deref(), Some("model"));
         assert_eq!(merged.base_url.as_deref(), Some("https://example.com"));
+        assert_eq!(merged.max_tokens, Some(4096));
         assert_eq!(merged.show_thinking, Some(true));
     }
 
@@ -157,21 +172,27 @@ mod tests {
     // ── load_file ──
 
     #[test]
-    fn load_file_valid_toml() {
+    fn load_file_all_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "model = \"claude-test\"\nmax_tokens = 4096\nshow_thinking = true\n",
+            indoc! {r#"
+                api_key = "sk-test"
+                model = "claude-test"
+                base_url = "https://test.example.com"
+                max_tokens = 4096
+                show_thinking = true
+            "#},
         )
         .unwrap();
 
         let config = load_file(&path).expect("should parse valid TOML");
+        assert_eq!(config.api_key.as_deref(), Some("sk-test"));
         assert_eq!(config.model.as_deref(), Some("claude-test"));
+        assert_eq!(config.base_url.as_deref(), Some("https://test.example.com"));
         assert_eq!(config.max_tokens, Some(4096));
         assert_eq!(config.show_thinking, Some(true));
-        assert!(config.api_key.is_none());
-        assert!(config.base_url.is_none());
     }
 
     #[test]
@@ -185,10 +206,19 @@ mod tests {
     }
 
     #[test]
+    fn load_file_rejects_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, r#"api-key = "typo""#).unwrap();
+
+        assert!(load_file(&path).is_none());
+    }
+
+    #[test]
     fn load_file_invalid_toml_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "not valid {{{{ toml").unwrap();
+        std::fs::write(&path, "[invalid").unwrap();
 
         assert!(load_file(&path).is_none());
     }
@@ -196,36 +226,6 @@ mod tests {
     #[test]
     fn load_file_missing_file_returns_none() {
         assert!(load_file(Path::new("/nonexistent/config.toml")).is_none());
-    }
-
-    // ── find_project_config_from ──
-
-    #[test]
-    fn find_project_config_from_in_start_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(&config_path, "model = \"test\"").unwrap();
-
-        let result = find_project_config_from(dir.path().to_path_buf());
-        assert_eq!(result, Some(config_path));
-    }
-
-    #[test]
-    fn find_project_config_from_walks_upward() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(&config_path, "model = \"test\"").unwrap();
-        let child = dir.path().join("sub").join("deep");
-        std::fs::create_dir_all(&child).unwrap();
-
-        let result = find_project_config_from(child);
-        assert_eq!(result, Some(config_path));
-    }
-
-    #[test]
-    fn find_project_config_from_returns_none_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(find_project_config_from(dir.path().to_path_buf()).is_none());
     }
 
     // ── resolve_user_config ──
@@ -272,5 +272,35 @@ mod tests {
     #[test]
     fn resolve_user_config_returns_none_without_home_or_xdg() {
         assert!(resolve_user_config(None, None).is_none());
+    }
+
+    // ── find_project_config_from ──
+
+    #[test]
+    fn find_project_config_from_in_start_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(&config_path, r#"model = "test""#).unwrap();
+
+        let result = find_project_config_from(dir.path().to_path_buf());
+        assert_eq!(result, Some(config_path));
+    }
+
+    #[test]
+    fn find_project_config_from_walks_upward() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(&config_path, r#"model = "test""#).unwrap();
+        let child = dir.path().join("sub").join("deep");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let result = find_project_config_from(child);
+        assert_eq!(result, Some(config_path));
+    }
+
+    #[test]
+    fn find_project_config_from_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_project_config_from(dir.path().to_path_buf()).is_none());
     }
 }
