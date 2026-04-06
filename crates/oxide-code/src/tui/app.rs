@@ -92,27 +92,24 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
-        // Input area gets first crack at key events. Any key event while
-        // input is enabled mutates the buffer and needs a re-render, even
-        // if no Action is produced (e.g., typing a character).
-        if matches!(event, Event::Key(..)) {
-            if let Some(action) = self.input.handle_event(event) {
-                self.handle_action(action);
+        match event {
+            Event::Key(..) => {
+                // Input area handles typing, submit, and quit.
+                if let Some(action) = self.input.handle_event(event) {
+                    self.handle_action(action);
+                }
+                // When input is disabled (streaming), scroll keys go to chat.
+                if !self.input.is_enabled() {
+                    self.chat.handle_event(event);
+                }
             }
-            self.dirty = true;
-            return;
+            Event::Mouse(..) => {
+                self.chat.handle_event(event);
+            }
+            Event::Resize(..) => {}
+            _ => return,
         }
-
-        // Scroll events go to the chat view.
-        if self.chat.handle_event(event).is_some() {
-            self.dirty = true;
-            return;
-        }
-
-        // Resize always triggers a re-render.
-        if matches!(event, Event::Resize(..)) {
-            self.dirty = true;
-        }
+        self.dirty = true;
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -193,7 +190,6 @@ impl App {
 
         // Update layout bookkeeping outside the render closure.
         self.chat.update_layout(chat_area);
-        self.chat.sync_scroll();
 
         Ok(())
     }

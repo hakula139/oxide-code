@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -42,7 +44,9 @@ pub struct ChatView {
     streaming_buffer: String,
     scroll_offset: u16,
     /// Total content height from the last render (for scroll bounds).
-    content_height: u16,
+    /// Uses `Cell` for interior mutability so `render` (`&self`) can
+    /// update it during the render pass without a second `build_text` call.
+    content_height: Cell<u16>,
     /// Viewport height from the last render.
     viewport_height: u16,
     auto_scroll: bool,
@@ -55,7 +59,7 @@ impl ChatView {
             messages: Vec::new(),
             streaming_buffer: String::new(),
             scroll_offset: 0,
-            content_height: 0,
+            content_height: Cell::new(0),
             viewport_height: 0,
             auto_scroll: true,
         }
@@ -99,7 +103,10 @@ impl ChatView {
     }
 
     fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.content_height.saturating_sub(self.viewport_height);
+        self.scroll_offset = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
     }
 
     fn scroll_up(&mut self, lines: u16) {
@@ -108,7 +115,10 @@ impl ChatView {
     }
 
     fn scroll_down(&mut self, lines: u16) {
-        let max = self.content_height.saturating_sub(self.viewport_height);
+        let max = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
         self.scroll_offset = (self.scroll_offset + lines).min(max);
         if self.scroll_offset >= max {
             self.auto_scroll = true;
@@ -237,41 +247,22 @@ impl Component for ChatView {
 }
 
 impl ChatView {
-    /// Separate method so we can mutate `content_height` / `viewport_height`
-    /// which are rendering bookkeeping, not logical state. We use interior
-    /// pattern: compute once, cache for scroll bounds.
-    ///
-    /// Note: `&self` here means we can't update the cached heights. The
-    /// `App` layer calls a post-render update instead.
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let text = self.build_text();
-        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
-        frame.render_widget(paragraph, area);
-    }
-
-    /// Update cached layout dimensions after a render pass. Called by
-    /// [`App`](super::super::app::App) after each frame.
-    pub fn update_layout(&mut self, area: Rect) {
-        self.viewport_height = area.height;
-        // Approximate content height by building text. In PR 3.6 this will
-        // use word-wrap-aware line counting.
         let text = self.build_text();
         #[expect(
             clippy::cast_possible_truncation,
             reason = "line count fits in u16 for any realistic conversation"
         )]
         let height = text.lines.len() as u16;
-        self.content_height = height;
-
-        if self.auto_scroll {
-            // Can't mutate self.scroll_offset here since we only have &mut
-            // through update_layout. The caller handles this.
-        }
+        self.content_height.set(height);
+        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
+        frame.render_widget(paragraph, area);
     }
 
-    /// Ensures scroll offset is at the bottom if auto-scroll is active.
-    /// Call after `update_layout`.
-    pub fn sync_scroll(&mut self) {
+    /// Update cached viewport height and sync scroll position. Called by
+    /// [`App`](super::super::app::App) after each frame.
+    pub fn update_layout(&mut self, area: Rect) {
+        self.viewport_height = area.height;
         if self.auto_scroll {
             self.scroll_to_bottom();
         }

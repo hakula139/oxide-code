@@ -38,6 +38,10 @@ impl InputArea {
         self.enabled = enabled;
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Returns the height this component needs (input line + hint line + border).
     pub fn height(&self) -> u16 {
         // Will depend on buffer line count once multi-line is added in PR 3.3.
