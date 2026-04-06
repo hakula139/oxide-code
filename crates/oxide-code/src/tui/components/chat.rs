@@ -100,73 +100,12 @@ impl ChatView {
         });
     }
 
-    fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self
-            .content_height
-            .get()
-            .saturating_sub(self.viewport_height);
-    }
-
-    fn scroll_up(&mut self, lines: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        self.auto_scroll = false;
-    }
-
-    fn scroll_down(&mut self, lines: u16) {
-        let max = self
-            .content_height
-            .get()
-            .saturating_sub(self.viewport_height);
-        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
-        if self.scroll_offset >= max {
-            self.auto_scroll = true;
-        }
-    }
-
-    /// Build the full text content for rendering.
-    fn build_text(&self) -> Text<'_> {
-        let mut lines: Vec<Line<'_>> = Vec::new();
-
-        for msg in &self.messages {
-            self.push_message_lines(&mut lines, msg.role, &msg.content);
-        }
-
-        // Streaming buffer (not yet committed).
-        if !self.streaming_buffer.is_empty() {
-            self.push_message_lines(&mut lines, ChatRole::Assistant, &self.streaming_buffer);
-        }
-
-        Text::from(lines)
-    }
-
-    /// Append a role label and content lines for a single message.
-    fn push_message_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        role: ChatRole,
-        content: &'a str,
-    ) {
-        // Single blank line between messages.
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-
-        // Role label.
-        let (label, style) = match role {
-            ChatRole::User => ("❯ You", self.theme.accent()),
-            ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
-        };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(label, style),
-        ]));
-
-        // Content lines (immediately after label, no blank line).
-        for line in content.trim().lines() {
-            lines.push(Line::from(vec![
-                Span::raw("    "),
-                Span::styled(line, self.theme.text()),
-            ]));
+    /// Update cached viewport height and sync scroll position. Called by
+    /// [`App`](super::super::app::App) after each frame.
+    pub(crate) fn update_layout(&mut self, area: Rect) {
+        self.viewport_height = area.height;
+        if self.auto_scroll {
+            self.scroll_to_bottom();
         }
     }
 }
@@ -242,7 +181,32 @@ impl Component for ChatView {
     }
 }
 
+// ── Private Helpers ──
+
 impl ChatView {
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
+    }
+
+    fn scroll_up(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.auto_scroll = false;
+    }
+
+    fn scroll_down(&mut self, lines: u16) {
+        let max = self
+            .content_height
+            .get()
+            .saturating_sub(self.viewport_height);
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
+        if self.scroll_offset >= max {
+            self.auto_scroll = true;
+        }
+    }
+
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
         let text = self.build_text();
         #[expect(
@@ -255,12 +219,48 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    /// Update cached viewport height and sync scroll position. Called by
-    /// [`App`](super::super::app::App) after each frame.
-    pub(crate) fn update_layout(&mut self, area: Rect) {
-        self.viewport_height = area.height;
-        if self.auto_scroll {
-            self.scroll_to_bottom();
+    fn build_text(&self) -> Text<'_> {
+        let mut lines: Vec<Line<'_>> = Vec::new();
+
+        for msg in &self.messages {
+            self.push_message_lines(&mut lines, msg.role, &msg.content);
+        }
+
+        // Streaming buffer (not yet committed).
+        if !self.streaming_buffer.is_empty() {
+            self.push_message_lines(&mut lines, ChatRole::Assistant, &self.streaming_buffer);
+        }
+
+        Text::from(lines)
+    }
+
+    fn push_message_lines<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        role: ChatRole,
+        content: &'a str,
+    ) {
+        // Single blank line between messages.
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+
+        // Role label.
+        let (label, style) = match role {
+            ChatRole::User => ("❯ You", self.theme.accent()),
+            ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label, style),
+        ]));
+
+        // Content lines (immediately after label, no blank line).
+        for line in content.trim().lines() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(line, self.theme.text()),
+            ]));
         }
     }
 }
