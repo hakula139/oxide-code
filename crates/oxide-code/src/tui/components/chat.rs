@@ -11,17 +11,15 @@ use crate::tui::theme::Theme;
 
 // ── Chat Message ──
 
-/// A rendered chat message. Stores the role and content text for display.
-/// Future PRs will add tool call blocks, markdown rendering, and collapsed
-/// sections.
+/// A rendered chat message with role and content text.
 #[derive(Debug, Clone)]
-pub(crate) struct ChatMessage {
-    pub(crate) role: ChatRole,
-    pub(crate) content: String,
+struct ChatMessage {
+    role: ChatRole,
+    content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChatRole {
+enum ChatRole {
     User,
     Assistant,
 }
@@ -119,7 +117,7 @@ impl ChatView {
             .content_height
             .get()
             .saturating_sub(self.viewport_height);
-        self.scroll_offset = (self.scroll_offset + lines).min(max);
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
         if self.scroll_offset >= max {
             self.auto_scroll = true;
         }
@@ -130,48 +128,46 @@ impl ChatView {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         for msg in &self.messages {
-            // Single blank line between messages.
-            if !lines.is_empty() {
-                lines.push(Line::raw(""));
-            }
-
-            // Role label.
-            let (label, style) = match msg.role {
-                ChatRole::User => ("❯ You", self.theme.accent()),
-                ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(label, style),
-            ]));
-
-            // Content lines (immediately after label, no blank line).
-            for line in msg.content.trim().lines() {
-                lines.push(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled(line, self.theme.text()),
-                ]));
-            }
+            self.push_message_lines(&mut lines, msg.role, &msg.content);
         }
 
         // Streaming buffer (not yet committed).
         if !self.streaming_buffer.is_empty() {
-            if !lines.is_empty() {
-                lines.push(Line::raw(""));
-            }
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("⟡ Assistant", self.theme.secondary()),
-            ]));
-            for line in self.streaming_buffer.trim().lines() {
-                lines.push(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled(line, self.theme.text()),
-                ]));
-            }
+            self.push_message_lines(&mut lines, ChatRole::Assistant, &self.streaming_buffer);
         }
 
         Text::from(lines)
+    }
+
+    /// Append a role label and content lines for a single message.
+    fn push_message_lines<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        role: ChatRole,
+        content: &'a str,
+    ) {
+        // Single blank line between messages.
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+
+        // Role label.
+        let (label, style) = match role {
+            ChatRole::User => ("❯ You", self.theme.accent()),
+            ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label, style),
+        ]));
+
+        // Content lines (immediately after label, no blank line).
+        for line in content.trim().lines() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(line, self.theme.text()),
+            ]));
+        }
     }
 }
 

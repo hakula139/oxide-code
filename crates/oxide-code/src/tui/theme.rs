@@ -5,9 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 /// The default theme uses Catppuccin Mocha colors with a transparent
 /// background (respects the user's terminal theme). All components reference
 /// the theme via [`Theme::default()`] rather than hardcoding colors.
-///
-/// Users can override individual color slots in the `[tui.theme]` config
-/// section. The built-in palette is named `"default"`.
+/// Named color slots are designed for future user-configurable overrides.
 #[expect(
     dead_code,
     reason = "all color slots are part of the theme API; not all consumed yet"

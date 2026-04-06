@@ -94,8 +94,12 @@ async fn run_tui(client: &Client, model: &str) -> Result<()> {
 
     tui::terminal::restore();
 
-    if let Ok(Err(e)) = agent_handle.await {
-        warn!("agent loop error: {e}");
+    // Cancel the agent loop — it may be blocked on an API stream.
+    agent_handle.abort();
+    match agent_handle.await {
+        Ok(Err(e)) => warn!("agent loop error: {e}"),
+        Err(e) if !e.is_cancelled() => warn!("agent task panicked: {e}"),
+        _ => {}
     }
 
     result

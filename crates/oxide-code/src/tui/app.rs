@@ -123,9 +123,13 @@ impl App {
                 // TODO: Render thinking in a dimmed / collapsible block.
                 self.status_bar.set_status(Status::Streaming);
             }
-            AgentEvent::ToolCallStart { name, .. } => {
+            AgentEvent::ToolCallStart { name, input, .. } => {
                 self.chat.commit_streaming();
-                self.chat.push_tool_call(&name, None);
+                // Show bash commands inline for visibility.
+                let title = (name == "bash")
+                    .then(|| input.get("command").and_then(serde_json::Value::as_str))
+                    .flatten();
+                self.chat.push_tool_call(&name, title);
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd { title, .. } => {
