@@ -74,10 +74,6 @@ impl Theme {
     }
 
     /// Muted / secondary text.
-    #[expect(
-        dead_code,
-        reason = "part of the theme API; no component reads this slot yet"
-    )]
     pub(crate) fn muted(&self) -> Style {
         Style::default().fg(self.fg_muted)
     }
@@ -123,15 +119,28 @@ impl Theme {
     }
 
     /// Error indicator.
-    #[expect(
-        dead_code,
-        reason = "part of the theme API; no component reads this slot yet"
-    )]
     pub(crate) fn error(&self) -> Style {
         Style::default().fg(self.error)
     }
 
     // Composite helpers
+
+    /// Left border for tool call blocks.
+    pub(crate) fn tool_border(&self) -> Style {
+        Style::default().fg(self.fg_muted)
+    }
+
+    /// Tool icon accent (non-bold).
+    pub(crate) fn tool_icon(&self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    /// Thinking text (dimmed italic).
+    pub(crate) fn thinking(&self) -> Style {
+        Style::default()
+            .fg(self.fg_dim)
+            .add_modifier(Modifier::ITALIC)
+    }
 
     /// Styled pipe separator span (`" │ "`).
     pub(crate) fn separator_span(&self) -> Span<'static> {

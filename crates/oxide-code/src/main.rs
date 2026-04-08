@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         return bare_repl(&client, &tools, &model, show_thinking).await;
     }
 
-    run_tui(&client, &model, tools).await
+    run_tui(&client, &model, show_thinking, tools).await
 }
 
 fn create_tool_registry() -> ToolRegistry {
@@ -76,14 +76,19 @@ fn create_tool_registry() -> ToolRegistry {
 
 // ── TUI Mode ──
 
-async fn run_tui(client: &Client, model: &str, tools: ToolRegistry) -> Result<()> {
+async fn run_tui(
+    client: &Client,
+    model: &str,
+    show_thinking: bool,
+    tools: ToolRegistry,
+) -> Result<()> {
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
     let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
 
     let mut terminal = tui::terminal::init()?;
-    let mut app = tui::app::App::new(model.to_owned(), agent_rx, user_tx);
+    let mut app = tui::app::App::new(model.to_owned(), show_thinking, agent_rx, user_tx);
 
     let agent_handle = {
         let client = client.clone();

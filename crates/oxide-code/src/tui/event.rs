@@ -33,10 +33,6 @@ pub(crate) enum AgentEvent {
         id: String,
         title: Option<String>,
         content: String,
-        #[expect(
-            dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
-        )]
         is_error: bool,
     },
     /// The current assistant turn is complete (text-only response, no more
@@ -162,6 +158,19 @@ pub(crate) fn tool_call_title<'a>(name: &str, input: &'a serde_json::Value) -> O
         _ => return None,
     };
     input.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// Returns a per-tool icon character for display.
+pub(crate) fn tool_call_icon(name: &str) -> &'static str {
+    match name {
+        "bash" => "$",
+        "read" => "→",
+        "write" => "←",
+        "edit" => "✎",
+        "glob" => "✱",
+        "grep" => "⌕",
+        _ => "⟡",
+    }
 }
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and

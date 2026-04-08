@@ -7,39 +7,36 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::component::{Action, Component};
+use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 
-// ── Chat Message ──
+// ── Chat Entry ──
 
-/// A rendered chat message with role and content text.
+/// A single entry in the chat history.
 #[derive(Debug, Clone)]
-struct ChatMessage {
-    role: ChatRole,
-    content: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatRole {
-    User,
-    Assistant,
+enum ChatEntry {
+    User(String),
+    Assistant(String),
+    ToolCall { icon: &'static str, label: String },
+    ToolResult { label: String, is_error: bool },
 }
 
 // ── Chat View ──
 
-/// Scrollable chat message list.
+/// Scrollable chat message list with markdown rendering, tool call display,
+/// and thinking block support.
 ///
 /// Renders messages vertically with role labels and auto-scrolls to the
 /// bottom on new content. The user can scroll up to review history; new
 /// content pauses auto-scroll until the user scrolls back to the bottom.
-///
-/// Currently renders plain text. Future work: markdown rendering,
-/// viewport virtualization for long conversations.
 pub(crate) struct ChatView {
     theme: Theme,
-    messages: Vec<ChatMessage>,
-    /// Text being streamed for the current assistant response. Appended to
-    /// on each `AgentEvent::StreamToken`.
+    entries: Vec<ChatEntry>,
+    /// Text being streamed for the current assistant response.
     streaming_buffer: String,
+    /// Thinking tokens accumulated during extended thinking.
+    thinking_buffer: String,
+    show_thinking: bool,
     scroll_offset: u16,
     /// Total content height from the last render (for scroll bounds).
     /// Uses `Cell` for interior mutability so `render` (`&self`) can
@@ -51,11 +48,13 @@ pub(crate) struct ChatView {
 }
 
 impl ChatView {
-    pub(crate) fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme, show_thinking: bool) -> Self {
         Self {
             theme,
-            messages: Vec::new(),
+            entries: Vec::new(),
             streaming_buffer: String::new(),
+            thinking_buffer: String::new(),
+            show_thinking,
             scroll_offset: 0,
             content_height: Cell::new(0),
             viewport_height: 0,
@@ -65,16 +64,24 @@ impl ChatView {
 
     /// Append a user message to the chat history.
     pub(crate) fn push_user_message(&mut self, text: String) {
-        self.messages.push(ChatMessage {
-            role: ChatRole::User,
-            content: text,
-        });
+        self.entries.push(ChatEntry::User(text));
         self.auto_scroll = true;
     }
 
     /// Append a streamed token to the current assistant response buffer.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
+        if !self.thinking_buffer.is_empty() {
+            self.thinking_buffer.clear();
+        }
         self.streaming_buffer.push_str(token);
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+
+    /// Append a thinking token to the thinking display buffer.
+    pub(crate) fn append_thinking_token(&mut self, token: &str) {
+        self.thinking_buffer.push_str(token);
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
@@ -82,21 +89,34 @@ impl ChatView {
 
     /// Finalize the current streaming buffer into a committed assistant message.
     pub(crate) fn commit_streaming(&mut self) {
+        self.thinking_buffer.clear();
         if !self.streaming_buffer.is_empty() {
             let content = std::mem::take(&mut self.streaming_buffer);
-            self.messages.push(ChatMessage {
-                role: ChatRole::Assistant,
-                content,
-            });
+            self.entries.push(ChatEntry::Assistant(content));
         }
     }
 
-    /// Append a tool call summary to the chat.
-    pub(crate) fn push_tool_call(&mut self, name: &str, title: Option<&str>) {
-        let label = title.map_or_else(|| format!("⟡ {name}"), |t| format!("⟡ {name}: {t}"));
-        self.messages.push(ChatMessage {
-            role: ChatRole::Assistant,
-            content: label,
+    /// Append a tool call entry with its icon and label.
+    pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
+        self.entries.push(ChatEntry::ToolCall {
+            icon,
+            label: label.to_owned(),
+        });
+    }
+
+    /// Append a tool result summary line.
+    pub(crate) fn push_tool_result(&mut self, label: &str, is_error: bool) {
+        self.entries.push(ChatEntry::ToolResult {
+            label: label.to_owned(),
+            is_error,
+        });
+    }
+
+    /// Append an error message.
+    pub(crate) fn push_error(&mut self, msg: &str) {
+        self.entries.push(ChatEntry::ToolResult {
+            label: msg.to_owned(),
+            is_error: true,
         });
     }
 
@@ -202,7 +222,7 @@ impl ChatView {
     }
 
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let text = self.build_text();
+        let text = self.build_text(area.width);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "line count fits in u16 for any realistic conversation"
@@ -213,48 +233,207 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    fn build_text(&self) -> Text<'_> {
+    fn build_text(&self, width: u16) -> Text<'_> {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
-        for msg in &self.messages {
-            self.push_message_lines(&mut lines, msg.role, &msg.content);
+        if self.entries.is_empty()
+            && self.streaming_buffer.is_empty()
+            && self.thinking_buffer.is_empty()
+        {
+            self.push_welcome(&mut lines);
+            return Text::from(lines);
+        }
+
+        for entry in &self.entries {
+            match entry {
+                ChatEntry::User(content) => {
+                    self.push_user_message_lines(&mut lines, content);
+                }
+                ChatEntry::Assistant(content) => {
+                    self.push_assistant_message_lines(&mut lines, content, width);
+                }
+                ChatEntry::ToolCall { icon, label } => {
+                    self.push_tool_call_line(&mut lines, icon, label, false);
+                }
+                ChatEntry::ToolResult { label, is_error } => {
+                    self.push_tool_result_line(&mut lines, label, *is_error);
+                }
+            }
+        }
+
+        // Thinking buffer (ephemeral — not stored in history).
+        if self.show_thinking && !self.thinking_buffer.is_empty() {
+            self.push_thinking_lines(&mut lines);
         }
 
         // Streaming buffer (not yet committed).
         if !self.streaming_buffer.is_empty() {
-            self.push_message_lines(&mut lines, ChatRole::Assistant, &self.streaming_buffer);
+            self.push_streaming_lines(&mut lines, width);
         }
 
         Text::from(lines)
     }
 
-    fn push_message_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        role: ChatRole,
-        content: &'a str,
-    ) {
-        // Single blank line between messages.
+    // ── Welcome ──
+
+    fn push_welcome(&self, lines: &mut Vec<Line<'_>>) {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::raw("          "),
+            Span::styled("Welcome to ox", self.theme.accent()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("       "),
+            Span::styled("Ask anything to begin.", self.theme.dim()),
+        ]));
+    }
+
+    // ── User Messages ──
+
+    fn push_user_message_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, content: &'a str) {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
-
-        // Role label.
-        let (label, style) = match role {
-            ChatRole::User => ("❯ You", self.theme.accent()),
-            ChatRole::Assistant => ("⟡ Assistant", self.theme.secondary()),
-        };
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(label, style),
+            Span::styled("❯ You", self.theme.accent()),
         ]));
-
-        // Content lines (immediately after label, no blank line).
         for line in content.trim().lines() {
             lines.push(Line::from(vec![
-                Span::raw("    "),
+                Span::styled("  ┃ ", self.theme.tool_border()),
                 Span::styled(line, self.theme.text()),
             ]));
         }
+    }
+
+    // ── Assistant Messages ──
+
+    fn push_assistant_message_lines<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        content: &'a str,
+        _width: u16,
+    ) {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("⟡ Assistant", self.theme.secondary()),
+        ]));
+
+        let rendered = render_markdown(content);
+        for line in rendered.lines {
+            let mut spans = vec![Span::raw("    ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, _width: u16) {
+        if !lines.is_empty()
+            && !self
+                .entries
+                .last()
+                .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)))
+        {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("⟡ Assistant", self.theme.secondary()),
+            ]));
+        }
+
+        // Split at the last newline: committed lines get markdown, trailing
+        // partial line gets plain text.
+        let buf = &self.streaming_buffer;
+        if let Some(boundary) = buf.rfind('\n') {
+            let committed = &buf[..boundary];
+            let trailing = &buf[boundary + 1..];
+
+            let rendered = render_markdown(committed);
+            for line in rendered.lines {
+                let mut spans = vec![Span::raw("    ")];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+
+            if !trailing.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(trailing, self.theme.text()),
+                ]));
+            }
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(buf.as_str(), self.theme.text()),
+            ]));
+        }
+    }
+
+    // ── Thinking ──
+
+    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>) {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Thinking…", self.theme.thinking()),
+        ]));
+        for line in self.thinking_buffer.lines() {
+            lines.push(Line::from(vec![
+                Span::styled("  ┃ ", self.theme.dim()),
+                Span::styled(line, self.theme.thinking()),
+            ]));
+        }
+    }
+
+    // ── Tool Calls ──
+
+    fn push_tool_call_line<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        icon: &'a str,
+        label: &'a str,
+        is_error: bool,
+    ) {
+        let border_style = if is_error {
+            self.theme.error()
+        } else {
+            self.theme.tool_border()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ┃ ", border_style),
+            Span::styled(icon, self.theme.tool_icon()),
+            Span::raw(" "),
+            Span::styled(label, self.theme.text()),
+        ]));
+    }
+
+    fn push_tool_result_line<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        label: &'a str,
+        is_error: bool,
+    ) {
+        let (indicator, style) = if is_error {
+            ("✗", self.theme.error())
+        } else {
+            ("✓", self.theme.success())
+        };
+        let border_style = if is_error {
+            self.theme.error()
+        } else {
+            self.theme.tool_border()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ┃   ", border_style),
+            Span::styled(indicator, style),
+            Span::raw(" "),
+            Span::styled(label, self.theme.muted()),
+        ]));
     }
 }
