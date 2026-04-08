@@ -64,6 +64,11 @@ The project direction is simple:
 
 - Viewport virtualization for long conversations.
 
+### Test Coverage
+
+- Integration test infrastructure — `insta` snapshot tests for TUI render methods, `temp-env` for config env var testing, `wiremock` for Anthropic SSE streaming client. See `.claude/plans/integration-tests.md`.
+- Logic extraction for testability — pure reducers from `app.rs`, key interpretation from `input.rs`, config merge from `config.rs`.
+
 ### Tool & Prompt Enhancements
 
 - Centralized output truncation — move truncation from individual tools into the tool dispatch layer. Enables consistent behavior and large-output persistence to disk.
