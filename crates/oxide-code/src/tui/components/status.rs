@@ -46,6 +46,10 @@ impl StatusBar {
     }
 
     pub(crate) fn set_status(&mut self, status: Status) {
+        if status != self.status {
+            self.spinner_frame = 0;
+            self.tick_counter = 0;
+        }
         self.status = status;
     }
 
@@ -93,7 +97,7 @@ impl Component for StatusBar {
 
         // Right side: cwd (dimmed, right-aligned)
         let cwd_span = Span::styled(&self.cwd, self.theme.dim());
-        let cwd_display_width = self.cwd.len() + 2; // trailing "  " padding
+        let cwd_display_width = cwd_span.width() + 2;
 
         let left_width: usize = left_spans.iter().map(Span::width).sum();
         let area_width = usize::from(area.width);
