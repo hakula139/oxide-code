@@ -152,11 +152,16 @@ impl AgentSink for StdioSink {
 
 /// Returns the display title for a tool call start event.
 ///
-/// Bash tools show their command; other tools return `None`.
+/// Each tool type extracts the most relevant field from its input for a
+/// concise one-line summary.
 pub(crate) fn tool_call_title<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
-    (name == "bash")
-        .then(|| input.get("command").and_then(serde_json::Value::as_str))
-        .flatten()
+    let key = match name {
+        "bash" => "command",
+        "read" | "write" | "edit" => "file_path",
+        "glob" | "grep" => "pattern",
+        _ => return None,
+    };
+    input.get(key).and_then(serde_json::Value::as_str)
 }
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and
