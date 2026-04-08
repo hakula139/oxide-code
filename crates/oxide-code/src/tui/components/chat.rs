@@ -44,6 +44,15 @@ pub(crate) struct ChatView {
     entries: Vec<ChatEntry>,
     /// Text being streamed for the current assistant response.
     streaming_buffer: String,
+    /// Rendered lines for the stable prefix of the streaming buffer.
+    /// Avoids re-parsing all committed text on every frame during
+    /// streaming — only new complete lines since the last boundary
+    /// are parsed and appended.
+    streaming_rendered: Vec<Line<'static>>,
+    /// Byte offset in `streaming_buffer` up to which `streaming_rendered`
+    /// is current. Everything before this offset is already rendered and
+    /// cached; only text from here to the next `\n` needs parsing.
+    streaming_rendered_boundary: usize,
     /// Thinking tokens accumulated during extended thinking.
     thinking_buffer: String,
     show_thinking: bool,
@@ -63,6 +72,8 @@ impl ChatView {
             theme,
             entries: Vec::new(),
             streaming_buffer: String::new(),
+            streaming_rendered: Vec::new(),
+            streaming_rendered_boundary: 0,
             thinking_buffer: String::new(),
             show_thinking,
             scroll_offset: 0,
@@ -84,6 +95,7 @@ impl ChatView {
             self.thinking_buffer.clear();
         }
         self.streaming_buffer.push_str(token);
+        self.advance_streaming_cache();
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
@@ -100,6 +112,8 @@ impl ChatView {
     /// Finalize the current streaming buffer into a committed assistant message.
     pub(crate) fn commit_streaming(&mut self) {
         self.thinking_buffer.clear();
+        self.streaming_rendered.clear();
+        self.streaming_rendered_boundary = 0;
         if !self.streaming_buffer.is_empty() {
             let content = std::mem::take(&mut self.streaming_buffer);
             self.entries.push(ChatEntry::Assistant(content));
@@ -459,18 +473,26 @@ impl ChatView {
             ]));
         }
 
-        // Split at the last newline: committed lines get markdown, trailing
-        // partial line gets plain text.
-        let buf = &self.streaming_buffer;
-        if let Some(boundary) = buf.rfind('\n') {
-            let committed = &buf[..boundary];
-            let trailing = &buf[boundary + 1..];
+        // Emit cached lines from the stable prefix (already rendered).
+        for line in &self.streaming_rendered {
+            lines.push(line.clone());
+        }
 
-            let rendered = render_markdown(committed);
-            for line in rendered.lines {
-                let mut spans = vec![Span::raw("    ")];
-                spans.extend(line.spans);
-                lines.push(Line::from(spans));
+        // Render only the new chunk beyond the cached boundary.
+        let buf = &self.streaming_buffer;
+        let tail = &buf[self.streaming_rendered_boundary..];
+
+        if let Some(rel_boundary) = tail.rfind('\n') {
+            let new_committed = &tail[..rel_boundary];
+            let trailing = &tail[rel_boundary + 1..];
+
+            if !new_committed.is_empty() {
+                let rendered = render_markdown(new_committed);
+                for line in rendered.lines {
+                    let mut spans = vec![Span::raw("    ")];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
             }
 
             if !trailing.is_empty() {
@@ -479,11 +501,38 @@ impl ChatView {
                     Span::styled(trailing, self.theme.text()),
                 ]));
             }
-        } else {
+        } else if !tail.is_empty() {
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(buf.as_str(), self.theme.text()),
+                Span::styled(tail, self.theme.text()),
             ]));
         }
+    }
+
+    /// Advance the streaming cache: render newly committed lines and store
+    /// them so subsequent frames skip re-parsing the stable prefix.
+    fn advance_streaming_cache(&mut self) {
+        let boundary = self.streaming_rendered_boundary;
+        let tail = &self.streaming_buffer[boundary..];
+
+        let Some(rel_boundary) = tail.rfind('\n') else {
+            return;
+        };
+
+        let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
+        if !new_committed.is_empty() {
+            let rendered = render_markdown(new_committed);
+            for line in rendered.lines {
+                let mut spans: Vec<Span<'static>> = vec![Span::raw("    ")];
+                spans.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.into_owned(), s.style)),
+                );
+                self.streaming_rendered.push(Line::from(spans));
+            }
+        }
+
+        self.streaming_rendered_boundary = boundary + rel_boundary + 1;
     }
 }
