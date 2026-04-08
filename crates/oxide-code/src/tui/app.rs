@@ -33,12 +33,13 @@ impl App {
     pub(crate) fn new(
         model: String,
         show_thinking: bool,
+        cwd: String,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
     ) -> Self {
         let theme = Theme::default();
         Self {
-            status_bar: StatusBar::new(theme, model),
+            status_bar: StatusBar::new(theme, model, cwd),
             chat: ChatView::new(theme, show_thinking),
             input: InputArea::new(theme),
             agent_rx,
@@ -75,8 +76,11 @@ impl App {
                         }
                     }
                 }
-                // Tick — coalesce renders.
+                // Tick — coalesce renders and advance spinner.
                 _ = tick.tick() => {
+                    if self.status_bar.tick() {
+                        self.dirty = true;
+                    }
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;

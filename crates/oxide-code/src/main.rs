@@ -87,8 +87,23 @@ async fn run_tui(
     let (agent_sink, agent_rx) = tui::event::channel();
     let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
 
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| {
+            dirs::home_dir().map_or_else(
+                || Some(p.display().to_string()),
+                |home| {
+                    p.strip_prefix(&home).map_or_else(
+                        |_| Some(p.display().to_string()),
+                        |rel| Some(format!("~/{}", rel.display())),
+                    )
+                },
+            )
+        })
+        .unwrap_or_default();
+
     let mut terminal = tui::terminal::init()?;
-    let mut app = tui::app::App::new(model.to_owned(), show_thinking, agent_rx, user_tx);
+    let mut app = tui::app::App::new(model.to_owned(), show_thinking, cwd, agent_rx, user_tx);
 
     let agent_handle = {
         let client = client.clone();
