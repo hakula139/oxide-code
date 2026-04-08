@@ -222,7 +222,7 @@ impl ChatView {
     }
 
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let text = self.build_text(area.width);
+        let text = self.build_text();
         #[expect(
             clippy::cast_possible_truncation,
             reason = "line count fits in u16 for any realistic conversation"
@@ -233,7 +233,7 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    fn build_text(&self, width: u16) -> Text<'_> {
+    fn build_text(&self) -> Text<'_> {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         if self.entries.is_empty()
@@ -250,10 +250,10 @@ impl ChatView {
                     self.push_user_message_lines(&mut lines, content);
                 }
                 ChatEntry::Assistant(content) => {
-                    self.push_assistant_message_lines(&mut lines, content, width);
+                    self.push_assistant_message_lines(&mut lines, content);
                 }
                 ChatEntry::ToolCall { icon, label } => {
-                    self.push_tool_call_line(&mut lines, icon, label, false);
+                    self.push_tool_call_line(&mut lines, icon, label);
                 }
                 ChatEntry::ToolResult { label, is_error } => {
                     self.push_tool_result_line(&mut lines, label, *is_error);
@@ -268,7 +268,7 @@ impl ChatView {
 
         // Streaming buffer (not yet committed).
         if !self.streaming_buffer.is_empty() {
-            self.push_streaming_lines(&mut lines, width);
+            self.push_streaming_lines(&mut lines);
         }
 
         Text::from(lines)
@@ -309,12 +309,7 @@ impl ChatView {
 
     // ── Assistant Messages ──
 
-    fn push_assistant_message_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        content: &'a str,
-        _width: u16,
-    ) {
+    fn push_assistant_message_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, content: &'a str) {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
@@ -331,7 +326,62 @@ impl ChatView {
         }
     }
 
-    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, _width: u16) {
+    // ── Tool Calls ──
+
+    fn push_tool_call_line<'a>(&'a self, lines: &mut Vec<Line<'a>>, icon: &'a str, label: &'a str) {
+        lines.push(Line::from(vec![
+            Span::styled("  ┃ ", self.theme.tool_border()),
+            Span::styled(icon, self.theme.tool_icon()),
+            Span::raw(" "),
+            Span::styled(label, self.theme.text()),
+        ]));
+    }
+
+    fn push_tool_result_line<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        label: &'a str,
+        is_error: bool,
+    ) {
+        let (indicator, style) = if is_error {
+            ("✗", self.theme.error())
+        } else {
+            ("✓", self.theme.success())
+        };
+        let border_style = if is_error {
+            self.theme.error()
+        } else {
+            self.theme.tool_border()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ┃   ", border_style),
+            Span::styled(indicator, style),
+            Span::raw(" "),
+            Span::styled(label, self.theme.muted()),
+        ]));
+    }
+
+    // ── Thinking ──
+
+    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>) {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Thinking…", self.theme.thinking()),
+        ]));
+        for line in self.thinking_buffer.lines() {
+            lines.push(Line::from(vec![
+                Span::styled("  ┃ ", self.theme.dim()),
+                Span::styled(line, self.theme.thinking()),
+            ]));
+        }
+    }
+
+    // ── Streaming ──
+
+    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>) {
         if !lines.is_empty()
             && !self
                 .entries
@@ -371,69 +421,5 @@ impl ChatView {
                 Span::styled(buf.as_str(), self.theme.text()),
             ]));
         }
-    }
-
-    // ── Thinking ──
-
-    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>) {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Thinking…", self.theme.thinking()),
-        ]));
-        for line in self.thinking_buffer.lines() {
-            lines.push(Line::from(vec![
-                Span::styled("  ┃ ", self.theme.dim()),
-                Span::styled(line, self.theme.thinking()),
-            ]));
-        }
-    }
-
-    // ── Tool Calls ──
-
-    fn push_tool_call_line<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        icon: &'a str,
-        label: &'a str,
-        is_error: bool,
-    ) {
-        let border_style = if is_error {
-            self.theme.error()
-        } else {
-            self.theme.tool_border()
-        };
-        lines.push(Line::from(vec![
-            Span::styled("  ┃ ", border_style),
-            Span::styled(icon, self.theme.tool_icon()),
-            Span::raw(" "),
-            Span::styled(label, self.theme.text()),
-        ]));
-    }
-
-    fn push_tool_result_line<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        label: &'a str,
-        is_error: bool,
-    ) {
-        let (indicator, style) = if is_error {
-            ("✗", self.theme.error())
-        } else {
-            ("✓", self.theme.success())
-        };
-        let border_style = if is_error {
-            self.theme.error()
-        } else {
-            self.theme.tool_border()
-        };
-        lines.push(Line::from(vec![
-            Span::styled("  ┃   ", border_style),
-            Span::styled(indicator, style),
-            Span::raw(" "),
-            Span::styled(label, self.theme.muted()),
-        ]));
     }
 }
