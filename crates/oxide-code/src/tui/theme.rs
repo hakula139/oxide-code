@@ -9,7 +9,7 @@ use ratatui::text::Span;
 /// Named color slots are designed for future user-configurable overrides.
 #[expect(
     dead_code,
-    reason = "all color slots are part of the theme API; not all consumed yet"
+    reason = "all color slots are part of the theme API; some are unused by current components"
 )]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Theme {
@@ -102,7 +102,7 @@ impl Theme {
     /// Info / cost indicator.
     #[expect(
         dead_code,
-        reason = "part of the theme API; no component reads this slot yet"
+        reason = "part of the theme API; no component reads this slot"
     )]
     pub(crate) fn info(&self) -> Style {
         Style::default().fg(self.info)

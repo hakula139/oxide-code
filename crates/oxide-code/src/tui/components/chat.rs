@@ -3,6 +3,7 @@ use std::cell::Cell;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
@@ -386,19 +387,14 @@ impl ChatView {
         label: &'a str,
         is_error: bool,
     ) {
-        let (indicator, style) = if is_error {
+        let (indicator, indicator_style) = if is_error {
             ("✗", self.theme.error())
         } else {
             ("✓", self.theme.success())
         };
-        let border_style = if is_error {
-            self.theme.error()
-        } else {
-            self.theme.tool_border()
-        };
         lines.push(Line::from(vec![
-            Span::styled("  ┃   ", border_style),
-            Span::styled(indicator, style),
+            Span::styled("  ┃   ", self.tool_border_style(is_error)),
+            Span::styled(indicator, indicator_style),
             Span::raw(" "),
             Span::styled(label, self.theme.muted()),
         ]));
@@ -415,11 +411,7 @@ impl ChatView {
             return;
         }
 
-        let border_style = if is_error {
-            self.theme.error()
-        } else {
-            self.theme.tool_border()
-        };
+        let border_style = self.tool_border_style(is_error);
         let text_style = self.theme.dim();
 
         let output_lines: Vec<&str> = trimmed.lines().collect();
@@ -448,6 +440,14 @@ impl ChatView {
                     self.theme.dim(),
                 ),
             ]));
+        }
+    }
+
+    fn tool_border_style(&self, is_error: bool) -> Style {
+        if is_error {
+            self.theme.error()
+        } else {
+            self.theme.tool_border()
         }
     }
 

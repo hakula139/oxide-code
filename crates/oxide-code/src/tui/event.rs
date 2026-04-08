@@ -18,7 +18,7 @@ pub(crate) enum AgentEvent {
     ToolCallStart {
         #[expect(
             dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
+            reason = "carried for structural completeness; no consumer reads this field"
         )]
         id: String,
         name: String,
@@ -28,7 +28,7 @@ pub(crate) enum AgentEvent {
     ToolCallEnd {
         #[expect(
             dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
+            reason = "carried for structural completeness; no consumer reads this field"
         )]
         id: String,
         title: Option<String>,

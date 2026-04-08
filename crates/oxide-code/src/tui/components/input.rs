@@ -45,6 +45,9 @@ impl InputArea {
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
         self.enabled = enabled;
         if enabled {
             self.textarea.set_style(self.theme.text());
