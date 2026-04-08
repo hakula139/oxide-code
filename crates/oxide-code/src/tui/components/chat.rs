@@ -548,3 +548,650 @@ impl ChatView {
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+    use super::*;
+
+    fn test_chat() -> ChatView {
+        ChatView::new(Theme::default(), true)
+    }
+
+    /// Count lines produced by `build_text` at a default width.
+    fn line_count(chat: &ChatView) -> usize {
+        chat.build_text(80).lines.len()
+    }
+
+    /// Collect all raw text from `build_text` into a single string for
+    /// substring assertions.
+    fn all_text(chat: &ChatView) -> String {
+        chat.build_text(80)
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // ── build_text (empty / welcome) ──
+
+    #[test]
+    fn build_text_empty_shows_welcome() {
+        let chat = test_chat();
+        let text = all_text(&chat);
+        assert!(text.contains("Welcome to ox"));
+        assert!(text.contains("Ask anything to begin."));
+    }
+
+    #[test]
+    fn build_text_welcome_centered_for_width() {
+        let chat = test_chat();
+
+        let narrow = chat.build_text(30);
+        let wide = chat.build_text(120);
+
+        let narrow_pad = narrow.lines[2].spans.first().map_or(0, |s| s.content.len());
+        let wide_pad = wide.lines[2].spans.first().map_or(0, |s| s.content.len());
+        assert!(wide_pad > narrow_pad);
+    }
+
+    // ── build_text (user message) ──
+
+    #[test]
+    fn build_text_user_message_has_label_and_content() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello world".to_owned());
+        let text = all_text(&chat);
+        assert!(text.contains("❯ You"));
+        assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn build_text_user_message_multiline() {
+        let mut chat = test_chat();
+        chat.push_user_message("line1\nline2\nline3".to_owned());
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+    }
+
+    // ── build_text (assistant message) ──
+
+    #[test]
+    fn build_text_assistant_message_has_label() {
+        let mut chat = test_chat();
+        chat.entries
+            .push(ChatEntry::Assistant("response".to_owned()));
+        let text = all_text(&chat);
+        assert!(text.contains("⟡ Assistant"));
+        assert!(text.contains("response"));
+    }
+
+    // ── build_text (tool call / result) ──
+
+    #[test]
+    fn build_text_tool_call_shows_icon_and_label() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls -la");
+        let text = all_text(&chat);
+        assert!(text.contains('$'));
+        assert!(text.contains("ls -la"));
+    }
+
+    #[test]
+    fn build_text_tool_result_success() {
+        let mut chat = test_chat();
+        chat.push_tool_result("done", "output text", false);
+        let text = all_text(&chat);
+        assert!(text.contains("✓"));
+        assert!(text.contains("done"));
+        assert!(text.contains("output text"));
+    }
+
+    #[test]
+    fn build_text_tool_result_error() {
+        let mut chat = test_chat();
+        chat.push_tool_result("failed", "error details", true);
+        let text = all_text(&chat);
+        assert!(text.contains("✗"));
+        assert!(text.contains("failed"));
+        assert!(text.contains("error details"));
+    }
+
+    #[test]
+    fn build_text_tool_output_truncation() {
+        let mut chat = test_chat();
+        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        chat.push_tool_result("result", &long_output.join("\n"), false);
+        let text = all_text(&chat);
+
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 4"));
+        assert!(!text.contains("line 5"));
+        assert!(text.contains("… 5 more lines"));
+    }
+
+    #[test]
+    fn build_text_tool_output_empty_content_no_output_lines() {
+        let mut chat = test_chat();
+        chat.push_tool_result("result", "  \n  ", false);
+        let before = line_count(&chat);
+
+        let mut chat2 = test_chat();
+        chat2.push_tool_result("result", "", false);
+        let after = line_count(&chat2);
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn build_text_push_error() {
+        let mut chat = test_chat();
+        chat.push_error("something broke");
+        let text = all_text(&chat);
+        assert!(text.contains("✗"));
+        assert!(text.contains("something broke"));
+    }
+
+    // ── build_text (thinking) ──
+
+    #[test]
+    fn build_text_thinking_visible_when_enabled() {
+        let mut chat = test_chat();
+        chat.append_thinking_token("pondering...");
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking…"));
+        assert!(text.contains("pondering..."));
+    }
+
+    #[test]
+    fn build_text_thinking_hidden_when_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.append_thinking_token("pondering...");
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking…"));
+        assert!(!text.contains("pondering..."));
+    }
+
+    // ── build_text (streaming) ──
+
+    #[test]
+    fn build_text_streaming_shows_partial_text() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("partial response");
+        let text = all_text(&chat);
+        assert!(text.contains("⟡ Assistant"));
+        assert!(text.contains("partial response"));
+    }
+
+    #[test]
+    fn build_text_streaming_clears_thinking() {
+        let mut chat = test_chat();
+        chat.append_thinking_token("thinking...");
+        assert!(!chat.thinking_buffer.is_empty());
+
+        chat.append_stream_token("text");
+        assert!(chat.thinking_buffer.is_empty());
+    }
+
+    // ── advance_streaming_cache ──
+
+    #[test]
+    fn advance_streaming_cache_no_newline_stays_at_zero() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "no newline here".to_owned();
+        chat.advance_streaming_cache();
+        assert_eq!(chat.streaming_rendered_boundary, 0);
+        assert!(chat.streaming_rendered.is_empty());
+    }
+
+    #[test]
+    fn advance_streaming_cache_single_newline() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "first line\nincomplete".to_owned();
+        chat.advance_streaming_cache();
+        assert_eq!(chat.streaming_rendered_boundary, "first line\n".len());
+        assert!(!chat.streaming_rendered.is_empty());
+    }
+
+    #[test]
+    fn advance_streaming_cache_multiple_newlines() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "line1\nline2\nline3\npartial".to_owned();
+        chat.advance_streaming_cache();
+        assert_eq!(
+            chat.streaming_rendered_boundary,
+            "line1\nline2\nline3\n".len()
+        );
+    }
+
+    #[test]
+    fn advance_streaming_cache_incremental() {
+        let mut chat = test_chat();
+
+        chat.streaming_buffer = "first\n".to_owned();
+        chat.advance_streaming_cache();
+        let boundary1 = chat.streaming_rendered_boundary;
+        let cached1 = chat.streaming_rendered.len();
+
+        chat.streaming_buffer.push_str("second\n");
+        chat.advance_streaming_cache();
+        assert!(chat.streaming_rendered_boundary > boundary1);
+        assert!(chat.streaming_rendered.len() >= cached1);
+    }
+
+    #[test]
+    fn advance_streaming_cache_trailing_newline_only() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "\n".to_owned();
+        chat.advance_streaming_cache();
+        assert_eq!(chat.streaming_rendered_boundary, 1);
+    }
+
+    // ── commit_streaming ──
+
+    #[test]
+    fn commit_streaming_moves_buffer_to_entry() {
+        let mut chat = test_chat();
+        chat.append_stream_token("hello world");
+        assert!(chat.entries.is_empty());
+
+        chat.commit_streaming();
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(&chat.entries[0], ChatEntry::Assistant(s) if s == "hello world"));
+        assert!(chat.streaming_buffer.is_empty());
+    }
+
+    #[test]
+    fn commit_streaming_empty_buffer_no_entry() {
+        let mut chat = test_chat();
+        chat.commit_streaming();
+        assert!(chat.entries.is_empty());
+    }
+
+    #[test]
+    fn commit_streaming_clears_cache() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "line1\nline2\npartial".to_owned();
+        chat.advance_streaming_cache();
+        assert!(!chat.streaming_rendered.is_empty());
+
+        chat.commit_streaming();
+        assert!(chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_rendered_boundary, 0);
+        assert!(chat.thinking_buffer.is_empty());
+    }
+
+    // ── scroll math ──
+
+    #[test]
+    fn scroll_up_decreases_offset_and_disables_auto_scroll() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 50;
+        chat.auto_scroll = true;
+
+        chat.scroll_up(5);
+        assert_eq!(chat.scroll_offset, 45);
+        assert!(!chat.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_up_saturates_at_zero() {
+        let mut chat = test_chat();
+        chat.scroll_offset = 3;
+
+        chat.scroll_up(10);
+        assert_eq!(chat.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_down_increases_offset() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 50;
+        chat.auto_scroll = false;
+
+        chat.scroll_down(5);
+        assert_eq!(chat.scroll_offset, 55);
+        assert!(!chat.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_down_clamps_to_max_and_enables_auto_scroll() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 75;
+
+        chat.scroll_down(10);
+        assert_eq!(chat.scroll_offset, 80);
+        assert!(chat.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_to_bottom_sets_offset_correctly() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, 80);
+    }
+
+    #[test]
+    fn scroll_to_bottom_zero_when_content_fits() {
+        let mut chat = test_chat();
+        chat.content_height.set(10);
+        chat.viewport_height = 20;
+
+        chat.scroll_to_bottom();
+        assert_eq!(chat.scroll_offset, 0);
+    }
+
+    // ── streaming header ──
+
+    #[test]
+    fn streaming_after_assistant_entry_omits_duplicate_header() {
+        let mut chat = test_chat();
+        chat.entries
+            .push(ChatEntry::Assistant("committed".to_owned()));
+        chat.streaming_buffer = "streaming".to_owned();
+
+        let text = all_text(&chat);
+        let count = text.matches("⟡ Assistant").count();
+        assert_eq!(count, 1, "header should appear once, not duplicated");
+    }
+
+    #[test]
+    fn streaming_without_prior_assistant_shows_header() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.streaming_buffer = "response".to_owned();
+
+        let text = all_text(&chat);
+        assert!(text.contains("⟡ Assistant"));
+    }
+
+    // ── push_streaming_lines (cached + tail rendering) ──
+
+    #[test]
+    fn streaming_lines_render_cached_and_tail() {
+        let mut chat = test_chat();
+        chat.streaming_buffer = "cached line\ntail text".to_owned();
+        chat.advance_streaming_cache();
+
+        let text = all_text(&chat);
+        assert!(text.contains("cached line"));
+        assert!(text.contains("tail text"));
+    }
+
+    // ── integration: full conversation ──
+
+    #[test]
+    fn build_text_full_conversation() {
+        let mut chat = test_chat();
+        chat.push_user_message("What is 2+2?".to_owned());
+        chat.entries
+            .push(ChatEntry::Assistant("The answer is 4.".to_owned()));
+        chat.push_tool_call("$", "python -c 'print(2+2)'");
+        chat.push_tool_result("4", "4", false);
+        chat.push_user_message("Thanks!".to_owned());
+        chat.append_stream_token("You're welcome");
+
+        let text = all_text(&chat);
+        assert!(text.contains("What is 2+2?"));
+        assert!(text.contains("The answer is 4."));
+        assert!(text.contains("python -c 'print(2+2)'"));
+        assert!(text.contains("You're welcome"));
+        assert_eq!(text.matches("❯ You").count(), 2);
+    }
+
+    // ── multiline tool output at boundary ──
+
+    #[test]
+    fn tool_output_exactly_max_lines_no_truncation_indicator() {
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..MAX_TOOL_OUTPUT_LINES)
+            .map(|i| format!("line {i}"))
+            .collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(!text.contains("more lines"));
+    }
+
+    #[test]
+    fn tool_output_one_over_max_shows_truncation() {
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..=MAX_TOOL_OUTPUT_LINES)
+            .map(|i| format!("line {i}"))
+            .collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(text.contains("… 1 more lines"));
+    }
+
+    // ── push_thinking_lines (separator) ──
+
+    #[test]
+    fn build_text_thinking_after_entries_has_separator() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.append_thinking_token("deep thought");
+        let lines_before_thinking = {
+            let mut c = test_chat();
+            c.push_user_message("hello".to_owned());
+            line_count(&c)
+        };
+        assert!(line_count(&chat) > lines_before_thinking + 1);
+    }
+
+    // ── push_streaming_lines (uncommitted newlines) ──
+
+    #[test]
+    fn streaming_lines_uncommitted_newlines_renders_both_committed_and_trailing() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.streaming_buffer = "line1\nline2\npartial".to_owned();
+
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("partial"));
+    }
+
+    #[test]
+    fn streaming_lines_uncommitted_newline_with_empty_trailing() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.streaming_buffer = "line1\nline2\n".to_owned();
+
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+    }
+
+    // ── handle_event ──
+
+    fn key_event(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl_key_event(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn mouse_scroll(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn handle_event_arrow_up_scrolls_up() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+
+        let action = chat.handle_event(&key_event(KeyCode::Up));
+        assert!(action.is_none());
+        assert_eq!(chat.scroll_offset, 9);
+        assert!(!chat.auto_scroll);
+    }
+
+    #[test]
+    fn handle_event_arrow_down_scrolls_down() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+        chat.auto_scroll = false;
+
+        let action = chat.handle_event(&key_event(KeyCode::Down));
+        assert!(action.is_none());
+        assert_eq!(chat.scroll_offset, 11);
+    }
+
+    #[test]
+    fn handle_event_mouse_scroll_up() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+
+        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
+        assert!(action.is_none());
+        assert_eq!(chat.scroll_offset, 9);
+    }
+
+    #[test]
+    fn handle_event_mouse_scroll_down() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+        chat.auto_scroll = false;
+
+        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
+        assert!(action.is_none());
+        assert_eq!(chat.scroll_offset, 11);
+    }
+
+    #[test]
+    fn handle_event_page_up() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 30;
+
+        chat.handle_event(&key_event(KeyCode::PageUp));
+        assert_eq!(chat.scroll_offset, 12);
+    }
+
+    #[test]
+    fn handle_event_page_down() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 30;
+        chat.auto_scroll = false;
+
+        chat.handle_event(&key_event(KeyCode::PageDown));
+        assert_eq!(chat.scroll_offset, 48);
+    }
+
+    #[test]
+    fn handle_event_ctrl_home_scrolls_to_top() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 50;
+
+        chat.handle_event(&ctrl_key_event(KeyCode::Home));
+        assert_eq!(chat.scroll_offset, 0);
+        assert!(!chat.auto_scroll);
+    }
+
+    #[test]
+    fn handle_event_ctrl_end_scrolls_to_bottom() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+        chat.auto_scroll = false;
+
+        chat.handle_event(&ctrl_key_event(KeyCode::End));
+        assert_eq!(chat.scroll_offset, 80);
+        assert!(chat.auto_scroll);
+    }
+
+    #[test]
+    fn handle_event_unhandled_key_returns_none() {
+        let mut chat = test_chat();
+        let action = chat.handle_event(&key_event(KeyCode::Char('a')));
+        assert!(action.is_none());
+    }
+
+    // ── update_layout ──
+
+    #[test]
+    fn update_layout_sets_viewport_height() {
+        let mut chat = test_chat();
+        chat.update_layout(Rect::new(0, 0, 80, 30));
+        assert_eq!(chat.viewport_height, 30);
+    }
+
+    #[test]
+    fn update_layout_auto_scrolls_when_enabled() {
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.auto_scroll = true;
+
+        chat.update_layout(Rect::new(0, 0, 80, 20));
+        assert_eq!(chat.scroll_offset, 80);
+    }
+
+    // ── push_streaming_lines (empty new_committed with trailing) ──
+
+    #[test]
+    fn streaming_lines_empty_committed_with_trailing() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.streaming_buffer = "cached\n\ntrailing".to_owned();
+        chat.streaming_rendered_boundary = 7; // right after "cached\n"
+
+        let text = all_text(&chat);
+        assert!(text.contains("trailing"));
+    }
+
+    // ── render (Component trait) ──
+
+    #[test]
+    fn render_updates_content_height() {
+        let chat = test_chat();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                chat.render(frame, frame.area());
+            })
+            .unwrap();
+        assert!(chat.content_height.get() > 0);
+    }
+}

@@ -118,3 +118,168 @@ impl Component for StatusBar {
         frame.render_widget(bar, area);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_bar() -> StatusBar {
+        StatusBar::new(
+            Theme::default(),
+            "test-model".to_owned(),
+            "~/test".to_owned(),
+        )
+    }
+
+    // ── tick ──
+
+    #[test]
+    fn tick_idle_returns_false() {
+        let mut bar = test_bar();
+        assert!(!bar.tick());
+        assert_eq!(bar.spinner_frame, 0);
+        assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn tick_streaming_increments_counter_before_threshold() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME - 1 {
+            assert!(!bar.tick());
+        }
+        assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
+        assert_eq!(bar.spinner_frame, 0);
+    }
+
+    #[test]
+    fn tick_streaming_advances_frame_at_threshold() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME - 1 {
+            bar.tick();
+        }
+        assert!(bar.tick());
+        assert_eq!(bar.spinner_frame, 1);
+        assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn tick_wraps_spinner_frames() {
+        let mut bar = test_bar();
+        bar.set_status(Status::ToolRunning);
+
+        for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
+            bar.tick();
+        }
+        assert_eq!(bar.spinner_frame, 0);
+    }
+
+    // ── set_status ──
+
+    #[test]
+    fn set_status_resets_spinner_on_transition() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME * 3 {
+            bar.tick();
+        }
+        assert_eq!(bar.spinner_frame, 3);
+
+        bar.set_status(Status::ToolRunning);
+        assert_eq!(bar.spinner_frame, 0);
+        assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn set_status_same_status_preserves_spinner() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME * 2 {
+            bar.tick();
+        }
+        let frame_before = bar.spinner_frame;
+
+        bar.set_status(Status::Streaming);
+        assert_eq!(bar.spinner_frame, frame_before);
+    }
+
+    #[test]
+    fn set_status_to_idle_resets_spinner() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME * 2 {
+            bar.tick();
+        }
+
+        bar.set_status(Status::Idle);
+        assert_eq!(bar.spinner_frame, 0);
+        assert_eq!(bar.tick_counter, 0);
+        assert!(!bar.tick());
+    }
+
+    // ── render ──
+
+    fn render_to_string(bar: &StatusBar, width: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                bar.render(frame, Rect::new(0, 0, width, 2));
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..width)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn render_idle_shows_ready() {
+        let bar = test_bar();
+        let output = render_to_string(&bar, 80);
+        assert!(output.contains("ox"));
+        assert!(output.contains("test-model"));
+        assert!(output.contains("ready"));
+    }
+
+    #[test]
+    fn render_streaming_shows_spinner() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+        let output = render_to_string(&bar, 80);
+        assert!(output.contains("streaming..."));
+    }
+
+    #[test]
+    fn render_tool_running_shows_spinner() {
+        let mut bar = test_bar();
+        bar.set_status(Status::ToolRunning);
+        let output = render_to_string(&bar, 80);
+        assert!(output.contains("running tool..."));
+    }
+
+    #[test]
+    fn render_wide_shows_cwd() {
+        let bar = test_bar();
+        let output = render_to_string(&bar, 120);
+        assert!(output.contains("~/test"));
+    }
+
+    #[test]
+    fn render_narrow_omits_cwd() {
+        let bar = test_bar();
+        let output = render_to_string(&bar, 30);
+        assert!(!output.contains("~/test"));
+    }
+}

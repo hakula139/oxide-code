@@ -162,3 +162,79 @@ impl Theme {
         Style::default().fg(self.fg_dim)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default ──
+
+    #[test]
+    fn default_theme_has_distinct_colors() {
+        let t = Theme::default();
+        assert_ne!(t.fg, t.fg_muted);
+        assert_ne!(t.fg_muted, t.fg_dim);
+        assert_ne!(t.accent, t.secondary);
+        assert_ne!(t.success, t.error);
+    }
+
+    // ── Style helpers ──
+
+    #[test]
+    fn style_helpers_return_expected_foreground() {
+        let t = Theme::default();
+
+        assert_eq!(t.text().fg, Some(t.fg));
+        assert_eq!(t.muted().fg, Some(t.fg_muted));
+        assert_eq!(t.dim().fg, Some(t.fg_dim));
+        assert_eq!(t.accent().fg, Some(t.accent));
+        assert_eq!(t.secondary().fg, Some(t.secondary));
+        assert_eq!(t.success().fg, Some(t.success));
+        assert_eq!(t.warning().fg, Some(t.warning));
+        assert_eq!(t.error().fg, Some(t.error));
+    }
+
+    #[test]
+    fn accent_is_bold() {
+        let t = Theme::default();
+        assert!(t.accent().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn thinking_is_italic() {
+        let t = Theme::default();
+        assert!(t.thinking().add_modifier.contains(Modifier::ITALIC));
+    }
+
+    // ── Composite helpers ──
+
+    #[test]
+    fn tool_border_uses_muted_foreground() {
+        let t = Theme::default();
+        assert_eq!(t.tool_border().fg, Some(t.fg_muted));
+    }
+
+    #[test]
+    fn tool_icon_uses_accent_foreground() {
+        let t = Theme::default();
+        assert_eq!(t.tool_icon().fg, Some(t.accent));
+    }
+
+    #[test]
+    fn separator_span_contains_pipe() {
+        let t = Theme::default();
+        assert!(t.separator_span().content.contains('│'));
+    }
+
+    #[test]
+    fn border_focused_uses_accent() {
+        let t = Theme::default();
+        assert_eq!(t.border_focused().fg, Some(t.accent));
+    }
+
+    #[test]
+    fn border_unfocused_uses_dim() {
+        let t = Theme::default();
+        assert_eq!(t.border_unfocused().fg, Some(t.fg_dim));
+    }
+}
