@@ -20,8 +20,8 @@ const TICKS_PER_FRAME: usize = 5;
 pub(crate) struct StatusBar {
     theme: Theme,
     model: String,
-    status: Status,
     cwd: String,
+    status: Status,
     spinner_frame: usize,
     tick_counter: usize,
 }
@@ -38,8 +38,8 @@ impl StatusBar {
         Self {
             theme,
             model,
-            status: Status::Idle,
             cwd,
+            status: Status::Idle,
             spinner_frame: 0,
             tick_counter: 0,
         }

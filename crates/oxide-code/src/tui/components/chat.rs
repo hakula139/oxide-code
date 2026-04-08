@@ -12,9 +12,6 @@ use crate::tui::theme::Theme;
 
 // ── Chat Entry ──
 
-/// Maximum lines of tool output shown inline before truncation.
-const MAX_TOOL_OUTPUT_LINES: usize = 5;
-
 /// A single entry in the chat history.
 #[derive(Debug, Clone)]
 enum ChatEntry {
@@ -33,6 +30,9 @@ enum ChatEntry {
 
 // ── Chat View ──
 
+/// Maximum lines of tool output shown inline before truncation.
+const MAX_TOOL_OUTPUT_LINES: usize = 5;
+
 /// Scrollable chat message list with markdown rendering, tool call display,
 /// and thinking block support.
 ///
@@ -40,8 +40,14 @@ enum ChatEntry {
 /// bottom on new content. The user can scroll up to review history; new
 /// content pauses auto-scroll until the user scrolls back to the bottom.
 pub(crate) struct ChatView {
+    // Config
     theme: Theme,
+    show_thinking: bool,
+
+    // Persistent data
     entries: Vec<ChatEntry>,
+
+    // Transient buffers (cleared per turn)
     /// Text being streamed for the current assistant response.
     streaming_buffer: String,
     /// Rendered lines for the stable prefix of the streaming buffer.
@@ -55,13 +61,13 @@ pub(crate) struct ChatView {
     streaming_rendered_boundary: usize,
     /// Thinking tokens accumulated during extended thinking.
     thinking_buffer: String,
-    show_thinking: bool,
+
+    // View state
     scroll_offset: u16,
     /// Total content height from the last render (for scroll bounds).
     /// Uses `Cell` for interior mutability so `render` (`&self`) can
     /// update it during the render pass without a second `build_text` call.
     content_height: Cell<u16>,
-    /// Viewport height from the last render.
     viewport_height: u16,
     auto_scroll: bool,
 }
@@ -70,12 +76,12 @@ impl ChatView {
     pub(crate) fn new(theme: Theme, show_thinking: bool) -> Self {
         Self {
             theme,
+            show_thinking,
             entries: Vec::new(),
             streaming_buffer: String::new(),
             streaming_rendered: Vec::new(),
             streaming_rendered_boundary: 0,
             thinking_buffer: String::new(),
-            show_thinking,
             scroll_offset: 0,
             content_height: Cell::new(0),
             viewport_height: 0,
