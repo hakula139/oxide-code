@@ -49,8 +49,8 @@ The project direction is simple:
 - `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
 - Component architecture: `ChatView` (scrollable message list), `InputArea` (multi-line textarea), `StatusBar` (model + spinner + status + cwd).
 - Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, tool borders, thinking, semantic accents).
-- Markdown rendering for assistant messages via pulldown-cmark + syntect, with streaming-aware line-based commit boundary for partial render during streaming.
-- Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, and success / error result indicators.
+- Markdown rendering for assistant messages via pulldown-cmark + syntect, with streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
+- Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, success / error result indicators, and truncated output body (5 lines with overflow count).
 - Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
 - Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text.
 - Braille spinner animation (~80 ms per frame) during streaming and tool execution.
