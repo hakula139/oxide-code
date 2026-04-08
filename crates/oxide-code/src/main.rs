@@ -89,16 +89,13 @@ async fn run_tui(
 
     let cwd = std::env::current_dir()
         .ok()
-        .and_then(|p| {
-            dirs::home_dir().map_or_else(
-                || Some(p.display().to_string()),
-                |home| {
-                    p.strip_prefix(&home).map_or_else(
-                        |_| Some(p.display().to_string()),
-                        |rel| Some(format!("~/{}", rel.display())),
-                    )
-                },
-            )
+        .map(|p| {
+            dirs::home_dir()
+                .and_then(|home| p.strip_prefix(&home).ok().map(ToOwned::to_owned))
+                .map_or_else(
+                    || p.display().to_string(),
+                    |rel| format!("~/{}", rel.display()),
+                )
         })
         .unwrap_or_default();
 
