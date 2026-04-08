@@ -43,21 +43,25 @@ The project direction is simple:
   - **Context compression**: "The system will automatically compress prior messages as it approaches context limits."
   - **Security testing restrictions**: CTF / pentesting / DoS guardrails (re-evaluate when expanding user base).
 
-### Terminal UI (Foundation)
+### Terminal UI
 
 - ratatui + crossterm TUI with `tokio::select!` event loop, 60 FPS render coalescing, and synchronized output (DEC 2026) for flicker prevention.
 - `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
-- Component architecture: `ChatView` (scrollable message list with streaming buffer), `InputArea` (single-line input with cursor), `StatusBar` (model + status).
-- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct for user-defined palettes.
+- Component architecture: `ChatView` (scrollable message list), `InputArea` (multi-line textarea), `StatusBar` (model + spinner + status + cwd).
+- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, tool borders, thinking, semantic accents).
+- Markdown rendering for assistant messages via pulldown-cmark + syntect, with streaming-aware line-based commit boundary for partial render during streaming.
+- Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, and success / error result indicators.
+- Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
+- Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text.
+- Braille spinner animation (~80 ms per frame) during streaming and tool execution.
+- Right-aligned working directory in status bar with `~/` home prefix.
+- Empty-state welcome screen.
 - Alternate screen, panic-safe terminal restore.
 
 ## Current Focus
 
-### Terminal UI (Polish)
+### Terminal UI (Remaining)
 
-- Markdown rendering for assistant messages (syntax-highlighted code blocks).
-- Multi-line input editor (`tui-textarea`).
-- Tool call / result display with collapsible sections.
 - Viewport virtualization for long conversations.
 
 ### Tool & Prompt Enhancements
