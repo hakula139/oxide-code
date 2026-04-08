@@ -200,12 +200,6 @@ mod tests {
         assert!(t.accent().add_modifier.contains(Modifier::BOLD));
     }
 
-    #[test]
-    fn thinking_is_italic() {
-        let t = Theme::default();
-        assert!(t.thinking().add_modifier.contains(Modifier::ITALIC));
-    }
-
     // ── Composite helpers ──
 
     #[test]
@@ -218,6 +212,12 @@ mod tests {
     fn tool_icon_uses_accent_foreground() {
         let t = Theme::default();
         assert_eq!(t.tool_icon().fg, Some(t.accent));
+    }
+
+    #[test]
+    fn thinking_is_italic() {
+        let t = Theme::default();
+        assert!(t.thinking().add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

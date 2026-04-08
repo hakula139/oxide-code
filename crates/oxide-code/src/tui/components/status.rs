@@ -131,52 +131,6 @@ mod tests {
         )
     }
 
-    // ── tick ──
-
-    #[test]
-    fn tick_idle_returns_false() {
-        let mut bar = test_bar();
-        assert!(!bar.tick());
-        assert_eq!(bar.spinner_frame, 0);
-        assert_eq!(bar.tick_counter, 0);
-    }
-
-    #[test]
-    fn tick_streaming_increments_counter_before_threshold() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME - 1 {
-            assert!(!bar.tick());
-        }
-        assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
-        assert_eq!(bar.spinner_frame, 0);
-    }
-
-    #[test]
-    fn tick_streaming_advances_frame_at_threshold() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-
-        for _ in 0..TICKS_PER_FRAME - 1 {
-            bar.tick();
-        }
-        assert!(bar.tick());
-        assert_eq!(bar.spinner_frame, 1);
-        assert_eq!(bar.tick_counter, 0);
-    }
-
-    #[test]
-    fn tick_wraps_spinner_frames() {
-        let mut bar = test_bar();
-        bar.set_status(Status::ToolRunning);
-
-        for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
-            bar.tick();
-        }
-        assert_eq!(bar.spinner_frame, 0);
-    }
-
     // ── set_status ──
 
     #[test]
@@ -221,6 +175,52 @@ mod tests {
         assert_eq!(bar.spinner_frame, 0);
         assert_eq!(bar.tick_counter, 0);
         assert!(!bar.tick());
+    }
+
+    // ── tick ──
+
+    #[test]
+    fn tick_idle_returns_false() {
+        let mut bar = test_bar();
+        assert!(!bar.tick());
+        assert_eq!(bar.spinner_frame, 0);
+        assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn tick_streaming_increments_counter_before_threshold() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME - 1 {
+            assert!(!bar.tick());
+        }
+        assert_eq!(bar.tick_counter, TICKS_PER_FRAME - 1);
+        assert_eq!(bar.spinner_frame, 0);
+    }
+
+    #[test]
+    fn tick_streaming_advances_frame_at_threshold() {
+        let mut bar = test_bar();
+        bar.set_status(Status::Streaming);
+
+        for _ in 0..TICKS_PER_FRAME - 1 {
+            bar.tick();
+        }
+        assert!(bar.tick());
+        assert_eq!(bar.spinner_frame, 1);
+        assert_eq!(bar.tick_counter, 0);
+    }
+
+    #[test]
+    fn tick_wraps_spinner_frames() {
+        let mut bar = test_bar();
+        bar.set_status(Status::ToolRunning);
+
+        for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
+            bar.tick();
+        }
+        assert_eq!(bar.spinner_frame, 0);
     }
 
     // ── render ──
