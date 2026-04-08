@@ -153,10 +153,13 @@ impl App {
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
-                title, is_error, ..
+                title,
+                content,
+                is_error,
+                ..
             } => {
                 if let Some(title) = &title {
-                    self.chat.push_tool_result(title, is_error);
+                    self.chat.push_tool_result(title, &content, is_error);
                 }
             }
             AgentEvent::TurnComplete => {

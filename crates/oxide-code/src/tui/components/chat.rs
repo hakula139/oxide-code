@@ -12,13 +12,23 @@ use crate::tui::theme::Theme;
 
 // ── Chat Entry ──
 
+/// Maximum lines of tool output shown inline before truncation.
+const MAX_TOOL_OUTPUT_LINES: usize = 5;
+
 /// A single entry in the chat history.
 #[derive(Debug, Clone)]
 enum ChatEntry {
     User(String),
     Assistant(String),
-    ToolCall { icon: &'static str, label: String },
-    ToolResult { label: String, is_error: bool },
+    ToolCall {
+        icon: &'static str,
+        label: String,
+    },
+    ToolResult {
+        label: String,
+        content: String,
+        is_error: bool,
+    },
 }
 
 // ── Chat View ──
@@ -104,10 +114,11 @@ impl ChatView {
         });
     }
 
-    /// Append a tool result summary line.
-    pub(crate) fn push_tool_result(&mut self, label: &str, is_error: bool) {
+    /// Append a tool result summary line with optional output content.
+    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
         self.entries.push(ChatEntry::ToolResult {
             label: label.to_owned(),
+            content: content.to_owned(),
             is_error,
         });
     }
@@ -116,6 +127,7 @@ impl ChatView {
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.entries.push(ChatEntry::ToolResult {
             label: msg.to_owned(),
+            content: String::new(),
             is_error: true,
         });
     }
@@ -255,8 +267,13 @@ impl ChatView {
                 ChatEntry::ToolCall { icon, label } => {
                     self.push_tool_call_line(&mut lines, icon, label);
                 }
-                ChatEntry::ToolResult { label, is_error } => {
+                ChatEntry::ToolResult {
+                    label,
+                    content,
+                    is_error,
+                } => {
                     self.push_tool_result_line(&mut lines, label, *is_error);
+                    self.push_tool_output_lines(&mut lines, content, *is_error);
                 }
             }
         }
@@ -359,6 +376,53 @@ impl ChatView {
             Span::raw(" "),
             Span::styled(label, self.theme.muted()),
         ]));
+    }
+
+    fn push_tool_output_lines<'a>(
+        &'a self,
+        lines: &mut Vec<Line<'a>>,
+        content: &'a str,
+        is_error: bool,
+    ) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let border_style = if is_error {
+            self.theme.error()
+        } else {
+            self.theme.tool_border()
+        };
+        let text_style = self.theme.dim();
+
+        let output_lines: Vec<&str> = trimmed.lines().collect();
+        let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
+        let visible = if truncated {
+            &output_lines[..MAX_TOOL_OUTPUT_LINES]
+        } else {
+            &output_lines
+        };
+
+        for line in visible {
+            lines.push(Line::from(vec![
+                Span::styled("  ┃     ", border_style),
+                Span::styled(*line, text_style),
+            ]));
+        }
+
+        if truncated {
+            lines.push(Line::from(vec![
+                Span::styled("  ┃     ", border_style),
+                Span::styled(
+                    format!(
+                        "… {} more lines",
+                        output_lines.len() - MAX_TOOL_OUTPUT_LINES
+                    ),
+                    self.theme.dim(),
+                ),
+            ]));
+        }
     }
 
     // ── Thinking ──
