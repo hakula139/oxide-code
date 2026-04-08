@@ -152,38 +152,23 @@ The terminal flickering problem (anthropics/claude-code#1913) affects most CLI-b
 
 ### Rendering & Content
 
-| Crate                                          | Purpose                                                      |
-| ---------------------------------------------- | ------------------------------------------------------------ |
-| `tui-markdown` (with `highlight-code` feature) | Markdown → ratatui widget, uses pulldown-cmark + syntect     |
-| `syntect`                                      | Syntax highlighting for code blocks (Sublime Text grammar)   |
-| `ansi-to-tui`                                  | Convert raw ANSI output (from shell tools) to ratatui Styles |
-
-### Input & Interaction
-
-| Crate              | Purpose                                                          |
-| ------------------ | ---------------------------------------------------------------- |
-| `ratatui-textarea`  | Multi-line text input widget with cursor, selection, undo / redo |
-
-### Visual Polish
-
-| Crate                  | Purpose                                                 |
-| ---------------------- | ------------------------------------------------------- |
-| `throbber-widgets-tui` | Spinners and activity indicators (braille dot patterns) |
+| Crate                                          | Purpose                                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| `tui-markdown` (with `highlight-code` feature) | Markdown → ratatui `Text`, uses pulldown-cmark + syntect (syntax highlighting) |
+| `ratatui-textarea`                             | Multi-line text input widget with cursor, selection, undo / redo               |
 
 ### Architecture Pattern: Component Trait
 
-The recommended pattern from ratatui's official templates (and used by gitui, bottom, etc.):
+Our simplified variant of the pattern from ratatui's official templates:
 
 ```text
 trait Component {
-    fn init(&mut self) -> Result<()>;
-    fn handle_event(&mut self, event: Event) -> Result<Option<Action>>;
-    fn update(&mut self, action: Action) -> Result<Option<Action>>;
+    fn handle_event(&mut self, event: &Event) -> Option<Action>;
     fn render(&self, frame: &mut Frame, area: Rect);
 }
 ```
 
-Each component owns its state, handles its events, and renders into a given area. The root `App` dispatches events top-down and collects actions bottom-up.
+Each component owns its state, handles its events, and renders into a given area. The root `App` dispatches events top-down and collects actions bottom-up. We omit `init()` and `update()` — state mutations happen directly in event handlers, keeping the interface minimal.
 
 ### Async Integration Pattern
 
