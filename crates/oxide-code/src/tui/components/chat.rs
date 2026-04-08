@@ -248,7 +248,7 @@ impl ChatView {
     }
 
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let text = self.build_text();
+        let text = self.build_text(area.width);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "line count fits in u16 for any realistic conversation"
@@ -259,14 +259,14 @@ impl ChatView {
         frame.render_widget(paragraph, area);
     }
 
-    fn build_text(&self) -> Text<'_> {
+    fn build_text(&self, width: u16) -> Text<'_> {
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         if self.entries.is_empty()
             && self.streaming_buffer.is_empty()
             && self.thinking_buffer.is_empty()
         {
-            self.push_welcome(&mut lines);
+            self.push_welcome(&mut lines, width);
             return Text::from(lines);
         }
 
@@ -307,16 +307,22 @@ impl ChatView {
 
     // ── Welcome ──
 
-    fn push_welcome(&self, lines: &mut Vec<Line<'_>>) {
+    fn push_welcome(&self, lines: &mut Vec<Line<'_>>, width: u16) {
+        let w = usize::from(width);
+        let title = "Welcome to ox";
+        let subtitle = "Ask anything to begin.";
+        let title_pad = w.saturating_sub(title.len()) / 2;
+        let subtitle_pad = w.saturating_sub(subtitle.len()) / 2;
+
         lines.push(Line::raw(""));
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
-            Span::raw("          "),
-            Span::styled("Welcome to ox", self.theme.accent()),
+            Span::raw(" ".repeat(title_pad)),
+            Span::styled(title, self.theme.accent()),
         ]));
         lines.push(Line::from(vec![
-            Span::raw("       "),
-            Span::styled("Ask anything to begin.", self.theme.dim()),
+            Span::raw(" ".repeat(subtitle_pad)),
+            Span::styled(subtitle, self.theme.dim()),
         ]));
     }
 
