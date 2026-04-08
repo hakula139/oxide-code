@@ -8,30 +8,119 @@ Research findings for the oxide-code TUI, based on analysis of reference project
 
 claude-code uses a **custom fork of Ink** — a React-based terminal rendering engine with a custom reconciler. The rendering pipeline is: React component tree → Yoga Flexbox layout (pure TypeScript, no C++ bindings) → screen buffer diff → minimal ANSI output.
 
-**Key patterns**:
+#### Key Patterns
 
-- **Streaming-first components**: Every component is designed to handle partial / streaming data. Text tokens accumulate in React state; tool call JSON is parsed incrementally on each delta.
-- **Double-buffered frames**: The Ink instance maintains `frontFrame` and `backFrame` buffers, diffing them to emit only changed cells. This reduces terminal I/O but doesn't eliminate flicker because React's reconciler still triggers full tree traversals on every state change.
-- **ANSI parser as React component**: An `Ansi` component converts raw escape sequences from shell output into React-compatible `Text` spans, bridging imperative terminal output into the declarative component model.
-- **Collapsible tool groups**: `CollapsedReadSearchContent` groups repeated tool calls (e.g., multiple file reads) into a single expandable row, keeping the chat history scannable.
-- **Glimmer animation**: `GlimmerMessage` renders a shimmering progress indicator with elapsed time for long-running operations.
-- **Theme system**: CSS-like theming via `ThemedBox` / `ThemedText` components with terminal color adaptation.
+- Streaming-first components — every component handles partial / streaming data. Text tokens accumulate in React state; tool call JSON is parsed incrementally on each delta.
+- Double-buffered frames — `frontFrame` / `backFrame` buffers, diffing to emit only changed cells. Reduces terminal I/O but doesn't eliminate flicker because React's reconciler still triggers full tree traversals on every state change.
+- ANSI parser as React component — an `Ansi` component converts raw escape sequences from shell output into React-compatible `Text` spans.
+- Collapsible tool groups — `CollapsedReadSearchContent` groups repeated tool calls (e.g., multiple file reads) into a single expandable row.
+- Glimmer animation — `GlimmerMessage` renders a shimmering progress indicator with elapsed time for long-running operations.
+- Theme system — CSS-like theming via `ThemedBox` / `ThemedText` with terminal color adaptation.
 
-**Weakness**: Full-screen redraw on every React state change causes severe flickering in long sessions (anthropics/claude-code#1913 — 315 reactions). This is Ink's fundamental limitation.
+Full-screen redraw on every React state change causes severe flickering in long sessions (anthropics/claude-code#1913 — 315 reactions). This is Ink's fundamental limitation.
+
+#### Streaming Markdown
+
+`Markdown.tsx`, `utils/markdown.ts`
+
+- Two-layer hybrid: `marked` lexer for tokenization, `chalk` for ANSI styling, `cli-highlight` (lazy-loaded via Suspense) for syntax highlighting in code blocks.
+- `StreamingMarkdown` splits content at the last *top-level block boundary* (not line). Maintains a monotonic `useRef` boundary — only the final growing block is re-parsed per delta, giving O(1) amortized cost regardless of total text length.
+- Module-level LRU token cache (500 entries, keyed by content hash) avoids re-parsing on virtual-scroll remount (~3 ms per `marked.lexer` call saved).
+- Fast-path regex check: scans first 500 chars for markdown syntax; if none found, skips the lexer entirely and returns a single paragraph token.
+- Tables are extracted and rendered as React components with flexbox layout; all other content is concatenated into ANSI strings and rendered via `<Ansi>`.
+
+#### Thinking Display
+
+`AssistantThinkingMessage.tsx`
+
+- Collapsed by default: shows `"∴ Thinking"` in dim italic as a single line, with a `Ctrl+O` expand hint. Only expanded in verbose / transcript mode.
+- When expanded: `"∴ Thinking…"` header, then full thinking content rendered via `<Markdown dimColor>` with `paddingLeft={2}`.
+
+#### Tool Display
+
+`AssistantToolUseMessage.tsx`
+
+- Highly polymorphic: each `Tool` object provides its own `renderToolUseMessage()`, `renderToolUseProgressMessage()`, and `renderToolUseQueuedMessage()`.
+- Status dot: dim `●` (queued) → animated spinner (in progress) → error state.
+- Tool name rendered bold, optional background color and tags (timeout, model, resume ID).
+- Some tools are "transparent wrappers" — hide their name and show only progress.
+
+#### Input
+
+`PromptInput.tsx` (~2300 lines)
+
+- Full vim emulation via `src/vim/` module (motions, operators, text objects, mode transitions).
+- Command autocomplete with typeahead suggestions, slash commands.
+- Arrow-key history navigation, history search.
+- Image paste detection from clipboard.
+
+#### Virtual Scrolling
+
+`VirtualMessageList.tsx`, `ScrollBox.tsx`
+
+- `ScrollBox` bypasses React for scroll — `scrollTo` / `scrollBy` mutate DOM directly and schedule a throttled render. No React state per wheel event.
+- Height cache per message, invalidated on terminal width change. Viewport culling — only visible children rendered.
+- `React.memo` on `LogoHeader` prevents dirty-flag cascade through all `MessageRow` siblings (critical for long sessions — without it, 150K+ writes per frame).
+- `OffscreenFreeze` wraps static content to prevent re-renders. `useDeferredValue` for non-critical state updates.
 
 ### opencode (TypeScript / @opentui + Solid.js)
 
-opencode uses **@opentui/core** with **Solid.js** for fine-grained reactive terminal rendering.
+opencode uses **@opentui/core** with **Solid.js** for fine-grained reactive terminal rendering. (Note: despite early documentation suggesting Go / Bubble Tea, the current implementation is a TypeScript monorepo.)
 
-**Key patterns**:
+#### Key Patterns
 
-- **Fine-grained reactivity**: Solid.js signals trigger surgical updates — only the specific text node receiving a new token re-renders, not the entire component tree. This avoids the redraw problem that plagues Ink.
-- **SDK event-driven streaming**: The SDK emits typed events (`message.part.updated`), which the Session component catches and applies to a Solid store via `produce()`. Dependent `createMemo` computations and UI nodes update automatically.
-- **30+ themes with auto-detection**: JSON-defined themes with dark / light detection via ANSI OSC 11 query. Adaptive foreground contrast calculation. Theme priority: defaults < plugins < custom files < system.
-- **Leader-key input**: Default `Ctrl+X` prefix for extended keybinds, reducing conflicts with terminal and shell bindings.
-- **Plugin system**: Full plugin API with command registration, custom routes, theme injection, and slot-based extension points (home footer, sidebar panels, session routes).
-- **Scroll acceleration**: macOS-aware scroll speed with configurable acceleration curves.
-- **Responsive layout**: Width breakpoint at 120 columns, sidebar toggling, `contentWidth = width - (sidebarVisible ? 42 : 0) - 4`.
+- Fine-grained reactivity — Solid.js signals trigger surgical updates; only the specific text node receiving a new token re-renders, not the entire component tree. This avoids the redraw problem that plagues Ink.
+- SDK event-driven streaming — typed events (`message.part.updated`) applied to a Solid store via `produce()`. Dependent `createMemo` computations and UI nodes update automatically.
+- 30+ themes with auto-detection — JSON-defined themes with dark / light detection via ANSI OSC 11 query. Adaptive foreground contrast calculation. Theme priority: defaults < plugins < custom files < system.
+- Leader-key input — default `Ctrl+X` prefix for extended keybinds, reducing conflicts with terminal and shell bindings.
+- Plugin system — full API with command registration, custom routes, theme injection, and slot-based extension points.
+- Scroll acceleration — macOS-aware scroll speed with configurable acceleration curves.
+- Responsive layout — width breakpoint at 120 columns, sidebar toggling, `contentWidth = width - (sidebarVisible ? 42 : 0) - 4`.
+
+#### Markdown Rendering
+
+`routes/session/index.tsx`
+
+- Uses tree-sitter WASM parsers for syntax highlighting (~20 languages declared in `parsers-config.ts`).
+- Two rendering modes: `<code filetype="markdown">` (standard) and `<markdown>` (experimental, behind a feature flag). Both accept `streaming={true}` for incremental parsing.
+- Concealment: toggle to hide markdown syntax characters (e.g., `**` for bold) — saves horizontal space.
+- Dedicated theme colors for each markdown element: `markdownHeading`, `markdownCode`, `markdownBlockQuote`, `markdownEmph`, etc.
+
+#### Tool Display
+
+`routes/session/index.tsx`
+
+- Two-tier pattern:
+  - `InlineTool`: compact one-liner with icon prefix (`→` read, `←` write, `$` bash, `✱` glob, `⌕` grep, `⚙` generic). Pending state shows `~ message` with spinner. Denied permissions render with strikethrough.
+  - `BlockTool`: bordered panel (`┃` left border) with title, body content, and hover background. Used for tools with output.
+- Bash output capped at 10 lines with expand / collapse. Generic tools capped at 3 lines.
+- Entire tool detail layer is toggle-able via keybind — when hidden, completed tools vanish entirely.
+
+#### Thinking Display
+
+`routes/session/index.tsx`
+
+- Left `┃` border in `backgroundElement` color (subtler than tool borders).
+- Content rendered at 60% opacity via `subtleSyntax()` — same syntax rules but with alpha-reduced foreground colors.
+- Prefixed with italic `_Thinking:_`. `[REDACTED]` tokens stripped.
+- Toggle-able via keybind or `/thinking` command.
+
+#### Input
+
+`component/prompt/index.tsx` (~1280 lines)
+
+- Extmarks — virtual inline text markers for file references (`[Image 1]`), agent mentions, pasted text (`[Pasted ~N lines]`). Expanded inline on submit.
+- Prompt stash — push / pop prompt content for later use (switch context without losing draft).
+- `$EDITOR` integration — opens external editor with current prompt, reconciles extmark positions on return.
+- Shell mode entered by typing `!` at position 0.
+- `Meta+Enter` for newline (vs Shift+Enter).
+
+#### Footer
+
+`routes/session/footer.tsx`
+
+- Left: working directory. Right: LSP count (`• N LSP`), MCP count (`⊙ N MCP`) with error coloring, permission warnings, `/status` hint.
+- Subagent footer shows agent label, sibling index (e.g., "3 of 5"), token usage, parent / prev / next navigation.
 
 ## Flickering Prevention
 
@@ -71,9 +160,9 @@ The terminal flickering problem (anthropics/claude-code#1913) affects most CLI-b
 
 ### Input & Interaction
 
-| Crate          | Purpose                                                          |
-| -------------- | ---------------------------------------------------------------- |
-| `tui-textarea` | Multi-line text input widget with cursor, selection, undo / redo |
+| Crate              | Purpose                                                          |
+| ------------------ | ---------------------------------------------------------------- |
+| `ratatui-textarea`  | Multi-line text input widget with cursor, selection, undo / redo |
 
 ### Visual Polish
 
@@ -113,11 +202,11 @@ This multiplexes all event sources into a single loop. Render is triggered after
 
 Tokens arrive mid-syntax (e.g., `**part` then `ial**`). Approaches:
 
-1. **Line-based commit**: Buffer tokens, commit to the rendered view at `\n` boundaries. Prevents mid-tag visual glitches. Simple and effective.
-2. **Incremental parse**: `pulldown-cmark` supports event-based parsing. Process events as they arrive, re-parse the trailing incomplete line on each frame.
+1. **Line-based commit with stable-prefix cache**: Buffer tokens, commit to the rendered view at `\n` boundaries. Track a monotonic byte boundary — only lines beyond the cached boundary are re-parsed. The stable prefix is rendered once and stored as owned `Line<'static>` values. This gives O(new lines) per token instead of O(total text). Adopted by oxide-code; inspired by claude-code's block-level variant.
+2. **Block-level commit** (claude-code): Same idea but at pulldown-cmark block boundaries instead of line boundaries. Theoretically more precise (a code fence mid-line is still one block) but requires deeper parser integration.
 3. **Code block handling**: Buffer entire code blocks before applying syntax highlighting (avoids partial-highlight flicker), or apply a simple monospace style during streaming and re-highlight on block completion.
 
-Recommendation: line-based commit for prose, buffered re-highlight for code blocks.
+Recommendation: line-based commit with stable-prefix cache for the initial implementation. Upgrade to block-level boundaries when viewport virtualization is added.
 
 ## Reference Apps
 
@@ -140,7 +229,7 @@ Based on the research, the following decisions guide the TUI implementation:
 2. **Component trait pattern** for UI architecture. Each view (chat, input, status, tool display) is a self-contained component.
 3. **Synchronized output** enabled by default. Wrap every frame in DEC 2026 sequences.
 4. **Render throttling at ~60 FPS**. Batch streaming tokens between frames.
-5. **Line-based markdown commit** during streaming, full re-render on message completion.
-6. **Dark theme by default** with a curated palette (4–6 colors). Light theme as an option, detected via OSC 11 or config.
-7. **Collapsible tool groups** for repeated operations (inspired by claude-code's `CollapsedReadSearchContent`).
-8. **Viewport virtualization** for long conversations — only render visible messages.
+5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on message completion. Monotonic boundary avoids O(n) re-parsing.
+6. **Catppuccin Mocha dark theme by default** with 11 named color slots. Transparent background to respect user's terminal theme.
+7. **Two-tier tool display** — inline summary with per-tool icons, plus truncated output body (inspired by opencode's InlineTool / BlockTool pattern). Truncation at 5 lines with overflow count.
+8. **Viewport virtualization** for long conversations — only render visible messages (planned).
