@@ -16,6 +16,7 @@ gitui
 hakula
 impls
 indoc
+insta
 isatty
 mpsc
 println
