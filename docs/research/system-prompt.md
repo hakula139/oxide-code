@@ -87,10 +87,10 @@ Why this split matters:
 
 ### Context sources
 
-| Function             | Returns                       | Injected via                                    |
-| -------------------- | ----------------------------- | ----------------------------------------------- |
-| `getSystemContext()` | `gitStatus`, `cacheBreaker`   | `appendSystemContext()` → `system` parameter    |
-| `getUserContext()`   | `claudeMd`, `currentDate`     | `prependUserContext()` → `messages[0]`          |
+| Function             | Returns                     | Injected via                                 |
+| -------------------- | --------------------------- | -------------------------------------------- |
+| `getSystemContext()` | `gitStatus`, `cacheBreaker` | `appendSystemContext()` → `system` parameter |
+| `getUserContext()`   | `claudeMd`, `currentDate`   | `prependUserContext()` → `messages[0]`       |
 
 Both are memoized per conversation. `getSystemContext()` skips git status in remote sessions.
 
@@ -98,17 +98,17 @@ Both are memoized per conversation. `getSystemContext()` skips git status in rem
 
 Claude Code uses XML-like tags extensively in message content for structured metadata. The model is instructed to recognize these tags as system-generated (not user-written). Key tags:
 
-| Tag                      | Purpose                                                   | Where used                           |
-| ------------------------ | --------------------------------------------------------- | ------------------------------------ |
-| `<system-reminder>`      | Wraps injected context (CLAUDE.md, tool results metadata) | User messages, tool results          |
-| `<local-command-caveat>` | Marks locally-run command output (not a user prompt)      | User messages                        |
-| `<local-command-stdout>` | Stdout from local `!` commands                            | User messages                        |
-| `<local-command-stderr>` | Stderr from local `!` commands                            | User messages                        |
-| `<bash-stdout>`          | Tool result stdout                                        | Tool results                         |
-| `<bash-stderr>`          | Tool result stderr                                        | Tool results                         |
-| `<command-name>`         | Skill / slash command identifier                          | User messages                        |
-| `<task-notification>`    | Background task completion                                | User messages                        |
-| `<teammate-message>`     | Inter-agent communication                                 | User messages                        |
+| Tag                      | Purpose                                                   | Where used                  |
+| ------------------------ | --------------------------------------------------------- | --------------------------- |
+| `<system-reminder>`      | Wraps injected context (CLAUDE.md, tool results metadata) | User messages, tool results |
+| `<local-command-caveat>` | Marks locally-run command output (not a user prompt)      | User messages               |
+| `<local-command-stdout>` | Stdout from local `!` commands                            | User messages               |
+| `<local-command-stderr>` | Stderr from local `!` commands                            | User messages               |
+| `<bash-stdout>`          | Tool result stdout                                        | Tool results                |
+| `<bash-stderr>`          | Tool result stderr                                        | Tool results                |
+| `<command-name>`         | Skill / slash command identifier                          | User messages               |
+| `<task-notification>`    | Background task completion                                | User messages               |
+| `<teammate-message>`     | Inter-agent communication                                 | User messages               |
 
 The system prompt instructs the model about `<system-reminder>` tags:
 
