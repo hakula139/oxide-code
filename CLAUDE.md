@@ -33,10 +33,11 @@ ox     # Start an interactive session
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
 ├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
 ├── message.rs                  # Conversation message types
-├── prompt.rs                   # System prompt builder (section assembly, static content)
+├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs          # Runtime environment detection (platform, git, date)
-│   └── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
+│   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
+│   └── sections.rs             # Static prompt section constants (intro, guidance, style)
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout
