@@ -278,10 +278,13 @@ impl Client {
         // Stainless SDK headers — the Anthropic TypeScript SDK adds these
         // automatically. Third-party gateways may check for their presence.
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
-        headers.insert("x-stainless-os", HeaderValue::from_static(stainless_os()));
+        headers.insert(
+            "x-stainless-os",
+            HeaderValue::from_static(normalize_platform(std::env::consts::OS)),
+        );
         headers.insert(
             "x-stainless-arch",
-            HeaderValue::from_static(stainless_arch()),
+            HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
         );
 
         let http = reqwest::Client::builder()
@@ -423,10 +426,6 @@ impl Client {
 }
 
 /// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
-fn stainless_os() -> &'static str {
-    normalize_platform(std::env::consts::OS)
-}
-
 fn normalize_platform(os: &str) -> &'static str {
     match os {
         "macos" => "MacOS",
@@ -441,10 +440,6 @@ fn normalize_platform(os: &str) -> &'static str {
 }
 
 /// Map `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
-fn stainless_arch() -> &'static str {
-    normalize_arch(std::env::consts::ARCH)
-}
-
 fn normalize_arch(arch: &str) -> &'static str {
     match arch {
         "x86" => "x32",
