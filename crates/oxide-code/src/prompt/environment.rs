@@ -1,14 +1,11 @@
 use std::path::Path;
 
-use tokio::process::Command;
-
-/// Frontier model marketing name used for the "fast mode" bullet.
-const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
+use indoc::formatdoc;
+use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
 /// Detected runtime environment for the system prompt.
 ///
-/// Mirrors Claude Code's `computeSimpleEnvInfo()` — each field maps to one
-/// or more bullets in the `# Environment` section.
+/// Each field maps to one or more bullets in the `# Environment` section.
 pub(super) struct Environment {
     cwd: String,
     is_git: bool,
@@ -24,15 +21,15 @@ impl Environment {
     ///
     /// All detection is best-effort: failures produce fallback values rather
     /// than errors, so the system prompt is always constructible.
-    pub(super) async fn detect(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> Self {
+    pub(super) fn detect(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> Self {
         let cwd_str = cwd.map_or_else(
             || "(unknown)".to_owned(),
             |p| p.to_string_lossy().into_owned(),
         );
         let is_git = git_root.is_some();
-        let platform = detect_platform();
+        let platform = normalize_node_platform(std::env::consts::OS).to_owned();
         let shell = detect_shell();
-        let os_version = detect_os_version().await;
+        let os_version = detect_os_version();
         let date = current_date();
 
         Self {
@@ -53,67 +50,40 @@ impl Environment {
 
     /// Render the environment section for the system prompt.
     ///
-    /// Output format mirrors Claude Code's `computeSimpleEnvInfo()` with
-    /// `prependBullets()` formatting:
-    /// - Top-level items: ` - item` (1-space indent)
+    /// Standard markdown formatting:
+    /// - Top-level items: `- item`
     /// - Sub-items: `  - item` (2-space indent)
     pub(super) fn render(&self) -> String {
-        // Note: the trailing space after "environment:" matches Claude Code.
-        let mut lines = vec![
-            "# Environment".to_owned(),
-            "You have been invoked in the following environment: ".to_owned(),
-            format!(" - Primary working directory: {}", self.cwd),
-            format!("  - Is a git repository: {}", self.is_git),
-            format!(" - Platform: {}", self.platform),
-            format!(" - Shell: {}", self.shell),
-            format!(" - OS Version: {}", self.os_version),
-        ];
-
-        // Model description.
-        let name = marketing_name(&self.model);
-        if let Some(name) = name {
-            lines.push(format!(
-                " - You are powered by the model named {name}. \
-                 The exact model ID is {}.",
+        let model_bullet = match marketing_name(&self.model) {
+            Some(name) => format!(
+                "- You are powered by the model named {name}. \
+                The exact model ID is {}.",
                 self.model
-            ));
-        } else {
-            lines.push(format!(" - You are powered by the model {}.", self.model));
+            ),
+            None => format!("- You are powered by the model {}.", self.model),
+        };
+        let cutoff_bullet = knowledge_cutoff(&self.model).map_or(String::new(), |c| {
+            format!("- Assistant knowledge cutoff is {c}.")
+        });
+
+        formatdoc! {"
+            # Environment
+
+            You have been invoked in the following environment:
+
+            - Primary working directory: {cwd}
+              - Is a git repository: {is_git}
+            - Platform: {platform}
+            - Shell: {shell}
+            - OS Version: {os_version}
+            {model_bullet}
+            {cutoff_bullet}",
+            cwd = self.cwd,
+            is_git = self.is_git,
+            platform = self.platform,
+            shell = self.shell,
+            os_version = self.os_version,
         }
-
-        // Knowledge cutoff.
-        if let Some(cutoff) = knowledge_cutoff(&self.model) {
-            lines.push(format!(" - Assistant knowledge cutoff is {cutoff}."));
-        }
-
-        // Model family information.
-        lines.push(
-            " - The most recent Claude model family is Claude 4.5/4.6. \
-             Model IDs \u{2014} Opus 4.6: 'claude-opus-4-6', \
-             Sonnet 4.6: 'claude-sonnet-4-6', \
-             Haiku 4.5: 'claude-haiku-4-5-20251001'. \
-             When building AI applications, default to the latest and most \
-             capable Claude models."
-                .to_owned(),
-        );
-
-        // Availability.
-        lines.push(
-            " - Claude Code is available as a CLI in the terminal, \
-             desktop app (Mac/Windows), web app (claude.ai/code), \
-             and IDE extensions (VS Code, JetBrains)."
-                .to_owned(),
-        );
-
-        // Fast mode.
-        let frontier = name.unwrap_or(FRONTIER_MODEL_NAME);
-        lines.push(format!(
-            " - Fast mode for Claude Code uses the same {frontier} model \
-             with faster output. It does NOT switch to a different model. \
-             It can be toggled with /fast."
-        ));
-
-        lines.join("\n")
     }
 }
 
@@ -131,12 +101,18 @@ fn marketing_name(model: &str) -> Option<&'static str> {
         Some("Claude Sonnet 4.6")
     } else if model.contains("claude-opus-4-5") {
         Some("Claude Opus 4.5")
-    } else if model.contains("claude-haiku-4") {
+    } else if model.contains("claude-sonnet-4-5") {
+        Some("Claude Sonnet 4.5")
+    } else if model.contains("claude-haiku-4-5") {
         Some("Claude Haiku 4.5")
+    } else if model.contains("claude-opus-4-1") {
+        Some("Claude Opus 4.1")
     } else if model.contains("claude-opus-4") {
         Some("Claude Opus 4")
     } else if model.contains("claude-sonnet-4") {
         Some("Claude Sonnet 4")
+    } else if model.contains("claude-haiku-4") {
+        Some("Claude Haiku 4")
     } else {
         None
     }
@@ -159,16 +135,17 @@ fn knowledge_cutoff(model: &str) -> Option<&'static str> {
 
 // ── Platform Detection ──
 
-/// Return the platform name matching Node's `process.platform` values.
+/// Map Rust's OS name to Node's `process.platform` values.
 ///
 /// Rust's `std::env::consts::OS` returns `"macos"` on macOS, but Claude
 /// Code (via Node) uses `"darwin"`. This mapping ensures the environment
 /// section matches the expected format.
-fn detect_platform() -> String {
-    match std::env::consts::OS {
-        "macos" => "darwin".to_owned(),
-        "windows" => "win32".to_owned(),
-        other => other.to_owned(),
+fn normalize_node_platform(os: &str) -> &'static str {
+    match os {
+        "macos" => "darwin",
+        "windows" => "win32",
+        "linux" => "linux",
+        _ => "unknown",
     }
 }
 
@@ -188,27 +165,20 @@ fn detect_shell() -> String {
 
 // ── OS Version Detection ──
 
-/// Detect the OS version via `uname -sr`.
+/// Detect the OS version via `platform_info::PlatformInfo`.
 ///
 /// Returns a string like `"Darwin 25.3.0"` on macOS or `"Linux 6.1.0"` on
-/// Linux. Falls back to the OS name when `uname` is unavailable.
-async fn detect_os_version() -> String {
-    let output = Command::new("uname")
-        .args(["-sr"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await;
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if s.is_empty() {
-                std::env::consts::OS.to_owned()
-            } else {
-                s
-            }
-        }
-        _ => std::env::consts::OS.to_owned(),
+/// Linux. Falls back to the OS name when detection fails.
+fn detect_os_version() -> String {
+    let Ok(info) = PlatformInfo::new() else {
+        return std::env::consts::OS.to_owned();
+    };
+    let sysname = info.sysname().to_string_lossy();
+    let release = info.release().to_string_lossy();
+    if sysname.is_empty() {
+        std::env::consts::OS.to_owned()
+    } else {
+        format!("{sysname} {release}")
     }
 }
 
@@ -234,17 +204,17 @@ mod tests {
 
     // ── Environment::detect ──
 
-    #[tokio::test]
-    async fn detect_inside_repo_sets_is_git_true() {
+    #[test]
+    fn detect_inside_repo_sets_is_git_true() {
         let cwd = std::env::current_dir().expect("cwd should be available");
-        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd)).await;
+        let env = Environment::detect("test-model", Some(&cwd), Some(&cwd));
         assert!(env.is_git);
     }
 
-    #[tokio::test]
-    async fn detect_with_cwd_but_no_git_root_sets_is_git_false() {
+    #[test]
+    fn detect_with_cwd_but_no_git_root_sets_is_git_false() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let env = Environment::detect("test-model", Some(tmp.path()), None).await;
+        let env = Environment::detect("test-model", Some(tmp.path()), None);
         assert!(!env.is_git);
         assert!(
             env.cwd
@@ -252,9 +222,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn detect_without_cwd_uses_unknown_and_skips_git() {
-        let env = Environment::detect("test-model", None, None).await;
+    #[test]
+    fn detect_without_cwd_uses_unknown_and_skips_git() {
+        let env = Environment::detect("test-model", None, None);
         assert_eq!(env.cwd, "(unknown)");
         assert!(!env.is_git);
     }
@@ -290,23 +260,18 @@ mod tests {
         };
         let rendered = env.render();
 
-        assert!(rendered.starts_with("# Environment\n"));
-        assert!(rendered.contains("You have been invoked in the following environment: \n"));
-        assert!(rendered.contains(" - Primary working directory: /home/user/project\n"));
-        assert!(rendered.contains("  - Is a git repository: true\n"));
-        assert!(rendered.contains(" - Platform: linux\n"));
-        assert!(rendered.contains(" - Shell: bash\n"));
-        assert!(rendered.contains(" - OS Version: Linux 6.1.0\n"));
+        assert!(rendered.starts_with("# Environment"));
+        assert!(rendered.contains("You have been invoked in the following environment:"));
+        assert!(rendered.contains("- Primary working directory: /home/user/project"));
+        assert!(rendered.contains("  - Is a git repository: true"));
+        assert!(rendered.contains("- Platform: linux"));
+        assert!(rendered.contains("- Shell: bash"));
+        assert!(rendered.contains("- OS Version: Linux 6.1.0"));
         assert!(rendered.contains(
-            " - You are powered by the model named Claude Opus 4.6. \
+            "- You are powered by the model named Claude Opus 4.6. \
              The exact model ID is claude-opus-4-6."
         ));
-        assert!(rendered.contains(" - Assistant knowledge cutoff is May 2025."));
-        assert!(rendered.contains(" - The most recent Claude model family"));
-        assert!(rendered.contains(" - Claude Code is available"));
-        assert!(
-            rendered.contains(" - Fast mode for Claude Code uses the same Claude Opus 4.6 model")
-        );
+        assert!(rendered.contains("- Assistant knowledge cutoff is May 2025."));
     }
 
     #[test]
@@ -316,7 +281,7 @@ mod tests {
             is_git: false,
             platform: "darwin".to_owned(),
             shell: "zsh".to_owned(),
-            os_version: "Darwin 25.3.0".to_owned(),
+            os_version: "Darwin 24.6.0".to_owned(),
             date: "2026-04-05".to_owned(),
             model: "test-model".to_owned(),
         };
@@ -336,44 +301,8 @@ mod tests {
             model: "custom-model-v1".to_owned(),
         };
         let rendered = env.render();
-        assert!(rendered.contains(" - You are powered by the model custom-model-v1."));
+        assert!(rendered.contains("- You are powered by the model custom-model-v1."));
         assert!(!rendered.contains("knowledge cutoff"));
-        // Fast mode falls back to FRONTIER_MODEL_NAME.
-        assert!(rendered.contains("same Claude Opus 4.6 model"));
-    }
-
-    #[test]
-    fn render_git_sub_item_has_two_space_indent() {
-        let env = Environment {
-            cwd: "/home/user/project".to_owned(),
-            is_git: true,
-            platform: "linux".to_owned(),
-            shell: "bash".to_owned(),
-            os_version: "Linux 6.1.0".to_owned(),
-            date: "2026-04-05".to_owned(),
-            model: "test-model".to_owned(),
-        };
-        let rendered = env.render();
-
-        // Git status is a sub-item: 2-space indent (prependBullets convention).
-        let git_line = rendered
-            .lines()
-            .find(|l| l.contains("Is a git repository"))
-            .expect("git line should exist");
-        assert!(
-            git_line.starts_with("  - "),
-            "git status should be a sub-item with 2-space indent, got: {git_line:?}"
-        );
-
-        // Other items are top-level: 1-space indent.
-        let platform_line = rendered
-            .lines()
-            .find(|l| l.contains("Platform:"))
-            .expect("platform line should exist");
-        assert!(
-            platform_line.starts_with(" - "),
-            "platform should be top-level with 1-space indent, got: {platform_line:?}"
-        );
     }
 
     // ── marketing_name ──
@@ -386,9 +315,15 @@ mod tests {
             Some("Claude Sonnet 4.6")
         );
         assert_eq!(marketing_name("claude-opus-4-5"), Some("Claude Opus 4.5"));
-        assert_eq!(marketing_name("claude-haiku-4"), Some("Claude Haiku 4.5"));
+        assert_eq!(
+            marketing_name("claude-sonnet-4-5"),
+            Some("Claude Sonnet 4.5")
+        );
+        assert_eq!(marketing_name("claude-haiku-4-5"), Some("Claude Haiku 4.5"));
+        assert_eq!(marketing_name("claude-opus-4-1"), Some("Claude Opus 4.1"));
         assert_eq!(marketing_name("claude-opus-4"), Some("Claude Opus 4"));
         assert_eq!(marketing_name("claude-sonnet-4"), Some("Claude Sonnet 4"));
+        assert_eq!(marketing_name("claude-haiku-4"), Some("Claude Haiku 4"));
     }
 
     #[test]
@@ -413,8 +348,11 @@ mod tests {
         assert_eq!(knowledge_cutoff("claude-sonnet-4-6"), Some("August 2025"));
         assert_eq!(knowledge_cutoff("claude-opus-4-6"), Some("May 2025"));
         assert_eq!(knowledge_cutoff("claude-opus-4-5"), Some("May 2025"));
+        assert_eq!(knowledge_cutoff("claude-haiku-4-5"), Some("February 2025"));
         assert_eq!(knowledge_cutoff("claude-haiku-4"), Some("February 2025"));
+        assert_eq!(knowledge_cutoff("claude-opus-4-1"), Some("January 2025"));
         assert_eq!(knowledge_cutoff("claude-opus-4"), Some("January 2025"));
+        assert_eq!(knowledge_cutoff("claude-sonnet-4-5"), Some("January 2025"));
         assert_eq!(knowledge_cutoff("claude-sonnet-4"), Some("January 2025"));
     }
 
@@ -423,39 +361,34 @@ mod tests {
         assert_eq!(knowledge_cutoff("custom-model"), None);
     }
 
-    // ── detect_platform ──
+    // ── normalize_node_platform ──
 
     #[test]
-    fn detect_platform_returns_node_style_names() {
-        let platform = detect_platform();
-        // On macOS this should be "darwin", not "macos".
-        if cfg!(target_os = "macos") {
-            assert_eq!(platform, "darwin");
-        } else if cfg!(target_os = "linux") {
-            assert_eq!(platform, "linux");
-        }
+    fn normalize_node_platform_known_values() {
+        assert_eq!(normalize_node_platform("macos"), "darwin");
+        assert_eq!(normalize_node_platform("linux"), "linux");
+        assert_eq!(normalize_node_platform("windows"), "win32");
+    }
+
+    #[test]
+    fn normalize_node_platform_unknown_value() {
+        assert_eq!(normalize_node_platform("haiku"), "unknown");
     }
 
     // ── detect_shell ──
 
     #[test]
-    fn detect_shell_simplifies_path() {
-        // The function reads $SHELL; we can at least verify it returns
-        // a non-empty string.
+    fn detect_shell_returns_basename() {
         let shell = detect_shell();
         assert!(!shell.is_empty());
-        // On typical CI / dev machines, it should be "zsh" or "bash".
-        assert!(
-            shell == "zsh" || shell == "bash" || !shell.contains('/'),
-            "shell should be simplified, got: {shell}"
-        );
+        assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
     }
 
     // ── detect_os_version ──
 
-    #[tokio::test]
-    async fn detect_os_version_returns_nonempty() {
-        let version = detect_os_version().await;
+    #[test]
+    fn detect_os_version_returns_nonempty() {
+        let version = detect_os_version();
         assert!(!version.is_empty());
     }
 
@@ -467,8 +400,12 @@ mod tests {
         assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got: {date}");
         assert_eq!(&date[4..5], "-");
         assert_eq!(&date[7..8], "-");
-        // Verify it represents a plausible year.
+
         let year: u32 = date[..4].parse().expect("year should be numeric");
+        let month: u32 = date[5..7].parse().expect("month should be numeric");
+        let day: u32 = date[8..10].parse().expect("day should be numeric");
         assert!((2025..=2100).contains(&year), "unexpected year: {year}");
+        assert!((1..=12).contains(&month), "unexpected month: {month}");
+        assert!((1..=31).contains(&day), "unexpected day: {day}");
     }
 }

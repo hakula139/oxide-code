@@ -207,10 +207,8 @@ pub(crate) async fn build_prompt(model: &str) -> PromptParts {
 /// identity body and static guidance sections go into `system`; CLAUDE.md
 /// and date go into `user_context` as a `<system-reminder>` block.
 async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> PromptParts {
-    let (env, claude_md) = tokio::join!(
-        Environment::detect(model, cwd, git_root),
-        instructions::load(cwd, git_root),
-    );
+    let env = Environment::detect(model, cwd, git_root);
+    let claude_md = instructions::load(cwd, git_root).await;
 
     let env_section = env.render();
     let system_sections: Vec<String> = [

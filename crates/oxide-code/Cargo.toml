@@ -21,6 +21,7 @@ futures.workspace = true
 globset.workspace = true
 ignore.workspace = true
 indoc.workspace = true
+platform-info.workspace = true
 ratatui.workspace = true
 regex.workspace = true
 reqwest.workspace = true
