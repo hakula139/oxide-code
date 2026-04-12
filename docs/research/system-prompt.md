@@ -1,6 +1,6 @@
 # System Prompt Architecture
 
-Research notes on how Claude Code and opencode construct their system prompts. Based on [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.87) and [`opencode`](https://github.com/anomalyco/opencode).
+Research notes on how Claude Code constructs its system prompt. Based on [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.101).
 
 ## Section-Based Assembly
 
@@ -146,19 +146,79 @@ The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. 
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
 
-## opencode Patterns
+## System Block Layout (`splitSysPromptPrefix`)
 
-opencode (TypeScript / Bun) uses a similar hierarchical approach:
+`splitSysPromptPrefix()` transforms the flat sections array into the block layout actually sent to the API. The boundary marker is consumed — it never appears in the request. Behavior depends on whether global cache scope is active:
 
-- **Provider-specific prompt templates**: Different base prompts for GPT, Claude, Gemini, etc. — selected by model at prompt assembly time.
-- **Instruction file hierarchy**: `AGENTS.md` → `CLAUDE.md` → `CONTEXT.md` (deprecated), first match wins. Walk-up from CWD with per-message claim tracking to prevent duplicate attachment.
-- **Per-turn rebuild**: System prompt assembled per user message (not per session), enabling dynamic skill updates and environment refresh.
-- **4-level config precedence**: Managed (macOS MDM) → global (`~/.opencode/`) → instance (project) → plugins. Instructions arrays are concatenated with deduplication, not replaced.
-- **Two-phase compaction**: Backward-walk pruning (truncate older tool outputs, protect recent 40K tokens) → manual summarization. Messages are never removed, only tool output is truncated.
+**Global cache mode** (first-party, boundary found) — 4 blocks:
+
+| #   | Content                          | `cache_control`                      |
+| --- | -------------------------------- | ------------------------------------ |
+| 0   | Attribution header               | —                                    |
+| 1   | Identity prefix                  | —                                    |
+| 2   | Static sections joined (`\n\n`)  | `{ type: ephemeral, scope: global }` |
+| 3   | Dynamic sections joined (`\n\n`) | —                                    |
+
+**Default mode** (third-party / boundary missing) — 3 blocks:
+
+| #   | Content                         | `cache_control`                   |
+| --- | ------------------------------- | --------------------------------- |
+| 0   | Attribution header              | —                                 |
+| 1   | Identity prefix                 | `{ type: ephemeral, scope: org }` |
+| 2   | Everything else joined (`\n\n`) | `{ type: ephemeral, scope: org }` |
+
+Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
+
+The attribution header is the billing `x-anthropic-billing-header` block; the identity prefix is `"You are Claude Code, Anthropic's official CLI for Claude."` — matched by `CLI_SYSPROMPT_PREFIXES`.
+
+## Request Headers
+
+Claude Code sends these headers on every Messages API request:
+
+| Header                                      | Value                                  | Notes                              |
+| ------------------------------------------- | -------------------------------------- | ---------------------------------- |
+| `User-Agent`                                | `claude-cli/{VERSION} (external, cli)` | `getUserAgent()` in http.ts        |
+| `x-app`                                     | `cli`                                  |                                    |
+| `x-claude-code-session-id`                  | UUID v4 per session                    |                                    |
+| `anthropic-version`                         | `2023-06-01`                           |                                    |
+| `anthropic-beta`                            | Comma-joined beta feature headers      | See below                          |
+| `anthropic-dangerous-direct-browser-access` | `true`                                 | From SDK `dangerouslyAllowBrowser` |
+| `x-stainless-lang`                          | `js`                                   | Anthropic SDK auto-injected        |
+| `x-stainless-os`                            | `MacOS` / `Linux` / etc.               | Anthropic SDK auto-injected        |
+| `x-stainless-arch`                          | `arm64` / `x64` / etc.                 | Anthropic SDK auto-injected        |
+
+Beta headers for a standard non-Haiku first-party model (e.g. `claude-opus-4-6`):
+
+```text
+claude-code-20250219
+context-1m-2025-08-07
+context-management-2025-06-27
+effort-2025-11-24
+interleaved-thinking-2025-05-14
+prompt-caching-scope-2026-01-05
+```
+
+Additional betas are added conditionally: `oauth-2025-04-20` for subscribers, tool-search headers when tool search is enabled, `redact-thinking-*` for thinking redaction, etc.
+
+The URL includes a `?beta=true` query parameter.
+
+## Third-Party Gateway Validation
+
+Third-party API gateways (proxies that forward to the Anthropic API) may perform request validation beyond standard API authentication. Observed checks:
+
+1. **Stainless SDK headers**: The gateway checks for `x-stainless-lang`, `x-stainless-os`, and `x-stainless-arch` headers. These are automatically added by the official Anthropic TypeScript SDK (generated by [stainless.com](https://stainless.com/)). Requests without them receive HTTP 403 with `"user agent not allowed"`. Non-SDK clients must add them manually.
+
+2. **System prompt content**: The gateway performs content-based filtering on system prompt blocks. The exact validation mechanism is opaque, but empirically:
+   - The identity prefix block (`"You are Claude Code..."`) is required.
+   - Static section text is accepted when it closely matches known Claude Code prompt content.
+   - Dynamic sections (after the boundary marker) are accepted alongside valid static content.
+   - The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker itself is never sent to the API — it is consumed by `splitSysPromptPrefix()`.
+
+3. **Beta headers**: The gateway expects the standard Claude Code beta header set. Missing or unexpected betas may trigger rejection.
+
+4. **Metadata**: The `metadata.user_id` field must be a stringified JSON object containing at least `session_id`.
 
 ## Sources
-
-### Claude Code
 
 - `claude-code/src/bootstrap/state.ts` — `getSessionId()`, UUID v4 session ID generation
 - `claude-code/src/constants/prompts.ts` — section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, `<system-reminder>` guidance
@@ -170,12 +230,7 @@ opencode (TypeScript / Bun) uses a similar hierarchical approach:
 - `claude-code/src/utils/api.ts` — `splitSysPromptPrefix`, `prependUserContext`, `appendSystemContext`, cache scope assignment
 - `claude-code/src/utils/claudemd.ts` — `getMemoryFiles`, `@include`, conditional rules
 - `claude-code/src/utils/context.ts` — token budgeting, `getUserContext`
+- `claude-code/src/utils/betas.ts` — `getAllModelBetas`, `getMergedBetas`, `shouldUseGlobalCacheScope`
+- `claude-code/src/utils/http.ts` — `getUserAgent()` (`claude-cli/VERSION (USER_TYPE, ENTRYPOINT)`)
 - `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
-
-### opencode
-
-- `opencode/packages/opencode/src/config/config.ts` — 4-level config layering, MDM support
-- `opencode/packages/opencode/src/session/compaction.ts` — pruning + summarization strategies
-- `opencode/packages/opencode/src/session/instruction.ts` — instruction file discovery, walk-up semantics
-- `opencode/packages/opencode/src/session/prompt.ts` — per-turn prompt assembly
-- `opencode/packages/opencode/src/session/system.ts` — provider-specific templates, environment detection
+- `claude-code/src/utils/userAgent.ts` — `getClaudeCodeUserAgent()` (`claude-code/VERSION`)

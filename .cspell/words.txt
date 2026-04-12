@@ -31,6 +31,7 @@ serie
 strum
 swatinem
 syntect
+SYSPROMPT
 thiserror
 throbber
 tokio
