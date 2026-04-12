@@ -3,6 +3,7 @@ use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::billing;
 use crate::config::{Auth, Config, ThinkingConfig};
@@ -29,6 +30,7 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    metadata: RequestMetadata,
     /// Serialized before `messages` so the billing header's `cch=00000`
     /// placeholder appears first in the JSON, making [`billing::inject_cch`]'s
     /// single-occurrence replacement safe even when tool results contain the
@@ -40,6 +42,16 @@ struct CreateMessageRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
     messages: &'a [Message],
+}
+
+/// Request metadata matching Claude Code's `getAPIMetadata()` format.
+///
+/// `user_id` is a stringified JSON object containing `session_id` (and
+/// optionally `device_id` / `account_uuid`). The API receives it as a
+/// flat string, not a nested object.
+#[derive(Serialize)]
+struct RequestMetadata {
+    user_id: String,
 }
 
 /// A text block in the system prompt array. The Anthropic API accepts `system`
@@ -194,6 +206,7 @@ pub struct ApiError {
 pub struct Client {
     http: reqwest::Client,
     config: Config,
+    session_id: String,
 }
 
 impl Client {
@@ -233,7 +246,19 @@ impl Client {
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self { http, config })
+        let session_id = Uuid::new_v4().to_string();
+
+        Ok(Self {
+            http,
+            config,
+            session_id,
+        })
+    }
+
+    /// Build the `metadata.user_id` field as a stringified JSON object.
+    fn build_metadata(&self) -> RequestMetadata {
+        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
+        RequestMetadata { user_id }
     }
 
     /// Returns the model name for use in the system prompt.
@@ -243,16 +268,33 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
+    /// `user_context` is a `<system-reminder>`-wrapped string that gets
+    /// prepended to the messages array as a synthetic user message,
+    /// matching Claude Code's `prependUserContext()` pattern. This keeps
+    /// dynamic content (CLAUDE.md) out of the `system` parameter.
+    ///
     /// Returns a channel receiver yielding [`StreamEvent`]s. The caller
     /// should recv events as they arrive for real-time output.
     pub fn stream_message(
         &self,
         messages: &[Message],
         system: Option<&str>,
+        user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        // Prepend user context as a synthetic user message (messages[0]).
+        let messages_with_context: Vec<Message>;
+        let effective_messages: &[Message] = if let Some(ctx) = user_context {
+            messages_with_context = std::iter::once(Message::user(ctx))
+                .chain(messages.iter().cloned())
+                .collect();
+            &messages_with_context
+        } else {
+            messages
+        };
+
         let billing_header = if matches!(self.config.auth, Auth::OAuth(_)) {
-            let first_text = first_user_text(messages);
+            let first_text = first_user_text(effective_messages);
             let fingerprint = billing::compute_fingerprint(first_text, CLAUDE_CLI_VERSION);
             Some(billing::build_billing_header(
                 CLAUDE_CLI_VERSION,
@@ -284,11 +326,12 @@ impl Client {
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
+            metadata: self.build_metadata(),
             system: system_blocks,
             stream: true,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
-            messages,
+            messages: effective_messages,
         })
         .context("failed to serialize request")?;
 
