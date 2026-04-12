@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
+use prompt::PromptParts;
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -117,10 +118,8 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 messages.push(Message::user(&text));
-                let system_prompt = prompt::build_system_prompt(client.model()).await;
-                if let Err(e) =
-                    agent_turn(&client, &tools, &mut messages, &system_prompt, &sink).await
-                {
+                let prompt = prompt::build_prompt(client.model()).await;
+                if let Err(e) = agent_turn(&client, &tools, &mut messages, &prompt, &sink).await {
                     _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
                 _ = sink.send(AgentEvent::TurnComplete);
@@ -159,8 +158,8 @@ async fn bare_repl(
         }
 
         messages.push(Message::user(&input));
-        let system_prompt = prompt::build_system_prompt(model).await;
-        agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
+        let prompt = prompt::build_prompt(model).await;
+        agent_turn(client, tools, &mut messages, &prompt, &sink).await?;
         _ = sink.send(AgentEvent::TurnComplete);
     }
 
@@ -178,8 +177,8 @@ async fn headless(
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
     let mut messages = vec![Message::user(prompt_text)];
-    let system_prompt = prompt::build_system_prompt(model).await;
-    agent_turn(client, tools, &mut messages, &system_prompt, &sink).await?;
+    let prompt = prompt::build_prompt(model).await;
+    agent_turn(client, tools, &mut messages, &prompt, &sink).await?;
     println!();
     Ok(())
 }
@@ -190,14 +189,14 @@ async fn agent_turn(
     client: &Client,
     tools: &ToolRegistry,
     messages: &mut Vec<Message>,
-    system_prompt: &str,
+    prompt: &PromptParts,
     sink: &dyn AgentSink,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        let blocks = stream_response(client, messages, &tool_defs, system_prompt, sink).await?;
+        let blocks = stream_response(client, messages, &tool_defs, prompt, sink).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -323,10 +322,15 @@ async fn stream_response(
     client: &Client,
     messages: &[Message],
     tools: &[ToolDefinition],
-    system_prompt: &str,
+    prompt: &PromptParts,
     sink: &dyn AgentSink,
 ) -> Result<Vec<ContentBlock>> {
-    let mut rx = client.stream_message(messages, Some(system_prompt), tools)?;
+    let mut rx = client.stream_message(
+        messages,
+        Some(&prompt.system),
+        prompt.user_context.as_deref(),
+        tools,
+    )?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
 

@@ -49,6 +49,11 @@ impl Environment {
         }
     }
 
+    /// The formatted date string (e.g., `"Today's date is 2026-04-12."`).
+    pub(super) fn date(&self) -> String {
+        format!("Today's date is {}.", self.date)
+    }
+
     /// Render the environment section for the system prompt.
     pub(super) fn render(&self) -> String {
         let mut lines = vec![
