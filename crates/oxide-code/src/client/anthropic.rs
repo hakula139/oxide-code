@@ -261,6 +261,10 @@ impl Client {
 
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            HeaderValue::from_static("true"),
+        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
@@ -270,10 +274,6 @@ impl Client {
         headers.insert(
             "x-claude-code-session-id",
             HeaderValue::from_str(&session_id)?,
-        );
-        headers.insert(
-            "anthropic-dangerous-direct-browser-access",
-            HeaderValue::from_static("true"),
         );
         // Stainless SDK headers — the Anthropic TypeScript SDK adds these
         // automatically. Third-party gateways may check for their presence.
