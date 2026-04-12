@@ -38,7 +38,6 @@ sha2 = "0.10"
 tempfile = "3"
 time = { version = "0.3", features = ["local-offset"] }
 toml = "0.8"
-uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = [
   "io-std",
   "io-util",
@@ -55,6 +54,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
+uuid = { version = "1", features = ["v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [profile.release]

@@ -164,7 +164,7 @@ const OUTPUT_EFFICIENCY: &str = indoc! {"
 /// Marker between static (globally cacheable) and dynamic (per-session)
 /// system prompt content. Third-party gateways use this to split the
 /// prompt for caching and content filtering.
-const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 /// Assembled prompt split into two API surfaces.
 ///
@@ -174,8 +174,8 @@ const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 /// prepended to the `messages` array as a `<system-reminder>`-wrapped
 /// user message — matching Claude Code's context injection pattern.
 pub(crate) struct PromptParts {
-    pub system_sections: Vec<String>,
-    pub user_context: Option<String>,
+    pub(crate) system_sections: Vec<String>,
+    pub(crate) user_context: Option<String>,
 }
 
 impl PromptParts {
@@ -312,17 +312,14 @@ mod tests {
     #[tokio::test]
     async fn build_prompt_system_contains_all_static_sections() {
         let parts = build_prompt("test-model").await;
-        assert!(parts.system_joined().contains("# System\n"));
-        assert!(parts.system_joined().contains("# Doing tasks\n"));
-        assert!(
-            parts
-                .system_joined()
-                .contains("# Executing actions with care")
-        );
-        assert!(parts.system_joined().contains("# Using your tools\n"));
-        assert!(parts.system_joined().contains("# Tone and style\n"));
-        assert!(parts.system_joined().contains("# Output efficiency"));
-        assert!(parts.system_joined().contains("# Environment\n"));
+        let joined = parts.system_joined();
+        assert!(joined.contains("# System\n"));
+        assert!(joined.contains("# Doing tasks\n"));
+        assert!(joined.contains("# Executing actions with care"));
+        assert!(joined.contains("# Using your tools\n"));
+        assert!(joined.contains("# Tone and style\n"));
+        assert!(joined.contains("# Output efficiency"));
+        assert!(joined.contains("# Environment\n"));
     }
 
     #[tokio::test]

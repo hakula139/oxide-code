@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::billing;
 use crate::config::{Auth, Config, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
@@ -79,10 +80,6 @@ struct CacheControl {
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'static str>,
 }
-
-/// Boundary marker between static (cacheable) and dynamic (per-session)
-/// system prompt sections. Filtered out before sending to the API.
-const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 // ── SSE response types ──
 
@@ -604,6 +601,32 @@ mod tests {
         let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
         let delta: Delta = serde_json::from_str(json).unwrap();
         assert!(matches!(delta, Delta::Unknown));
+    }
+
+    // ── split_at_boundary ──
+
+    #[test]
+    fn split_at_boundary_separates_static_and_dynamic() {
+        let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks"]);
+        assert_eq!(dynamic, vec!["env"]);
+    }
+
+    #[test]
+    fn split_at_boundary_without_marker_treats_all_as_static() {
+        let sections = &["intro", "tasks", "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks", "env"]);
+        assert!(dynamic.is_empty());
+    }
+
+    #[test]
+    fn split_at_boundary_filters_empty_sections() {
+        let sections = &["intro", "", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "", "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro"]);
+        assert_eq!(dynamic, vec!["env"]);
     }
 
     // ── first_user_text ──

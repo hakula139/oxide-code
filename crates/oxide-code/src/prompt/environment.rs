@@ -59,7 +59,6 @@ impl Environment {
     /// - Sub-items: `  - item` (2-space indent)
     pub(super) fn render(&self) -> String {
         // Note: the trailing space after "environment:" matches Claude Code.
-        // Note: the trailing space after "environment:" matches Claude Code.
         let mut lines = vec![
             "# Environment".to_owned(),
             "You have been invoked in the following environment: ".to_owned(),
@@ -120,6 +119,10 @@ impl Environment {
 // ── Model Metadata ──
 
 /// Map a model ID to its marketing name.
+///
+/// Arms are ordered most-specific-first because `contains()` would match
+/// e.g. `"claude-opus-4"` against `"claude-opus-4-6"`. When adding new
+/// models, keep more specific prefixes above less specific ones.
 fn marketing_name(model: &str) -> Option<&'static str> {
     if model.contains("claude-opus-4-6") {
         Some("Claude Opus 4.6")
@@ -172,16 +175,14 @@ fn detect_platform() -> String {
 
 /// Extract the shell name from `$SHELL`, matching Claude Code's format.
 ///
-/// Returns just the name (`"zsh"`, `"bash"`) rather than the full path.
+/// Returns just the basename (`"zsh"`, `"bash"`) rather than the full path.
 fn detect_shell() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".to_owned());
-    if shell.contains("zsh") {
-        "zsh".to_owned()
-    } else if shell.contains("bash") {
-        "bash".to_owned()
-    } else {
-        shell
-    }
+    std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&shell)
+        .to_owned()
 }
 
 // ── OS Version Detection ──
