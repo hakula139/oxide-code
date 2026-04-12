@@ -33,9 +33,15 @@ The project direction is simple:
 
 ### System Prompt
 
-- Section-based system prompt builder: identity (OAuth-required prefix), task guidance, tool usage guidance, tone / style.
+- Section-based system prompt builder with static / dynamic cache boundary: identity (OAuth-required prefix), system, task guidance, caution, tool usage, tone / style, output efficiency (static); environment (dynamic).
+- Two-channel context injection: static sections go in the API `system` parameter with `cache_control`; dynamic content (CLAUDE.md, date) goes in a synthetic `messages[0]` user message wrapped in `<system-reminder>`.
 - CLAUDE.md / AGENTS.md discovery and injection — user global (`~/.claude/`), project root to CWD walk (root-level and `.claude/` at each directory level). Fallback filename: first found wins per location.
-- Runtime environment detection — working directory, platform, shell, git info (branch, clean / dirty status), date, model name.
+- Runtime environment detection — working directory, platform, shell, git status, OS version, date, model marketing name, knowledge cutoff.
+- Custom prompt text — trimmed from Claude Code's original to remove references to unimplemented features. Sections to re-add when features ship:
+  - **Permission system**: "Tools are executed in a user-selected permission mode" (tool approval / deny flow).
+  - **Hooks**: shell commands that execute on tool call events (`<user-prompt-submit-hook>`).
+  - **Context compression**: "The system will automatically compress prior messages as it approaches context limits."
+  - **Security testing restrictions**: CTF / pentesting / DoS guardrails (re-evaluate when expanding user base).
 
 ### Terminal UI (Foundation)
 
@@ -75,7 +81,7 @@ The project direction is simple:
 - Agent team coordination with message passing.
 - Git worktree isolation for parallel agent work.
 - MCP client and server support.
-- Permission system and sandbox execution.
+- Permission system and sandbox execution (re-add prompt guidance when implemented).
 
 ## Not the Goal Right Now
 
