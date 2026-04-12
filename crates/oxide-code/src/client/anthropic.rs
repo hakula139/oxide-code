@@ -35,13 +35,13 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    stream: bool,
     metadata: RequestMetadata,
     /// Serialized before `messages` so the billing header's `cch=00000`
     /// placeholder appears first in the JSON, making [`billing::inject_cch`]'s
     /// single-occurrence replacement safe even when tool results contain the
     /// literal placeholder string.
     system: Vec<SystemBlock<'a>>,
-    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,10 +272,10 @@ impl Client {
         // Stainless SDK headers — the Anthropic TypeScript SDK adds these
         // automatically. Third-party gateways may check for their presence.
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
-        headers.insert("x-stainless-os", HeaderValue::from_static("MacOS"));
+        headers.insert("x-stainless-os", HeaderValue::from_static(stainless_os()));
         headers.insert(
             "x-stainless-arch",
-            HeaderValue::from_static(std::env::consts::ARCH),
+            HeaderValue::from_static(stainless_arch()),
         );
 
         let http = reqwest::Client::builder()
@@ -381,9 +381,9 @@ impl Client {
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
+            stream: true,
             metadata: self.build_metadata(),
             system: system_blocks,
-            stream: true,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             messages: effective_messages,
@@ -413,6 +413,31 @@ impl Client {
     fn build_metadata(&self) -> RequestMetadata {
         let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
         RequestMetadata { user_id }
+    }
+}
+
+/// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
+fn stainless_os() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "MacOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        "openbsd" => "OpenBSD",
+        "ios" => "iOS",
+        "android" => "Android",
+        _ => "Unknown",
+    }
+}
+
+/// Map `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
+fn stainless_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86" => "x32",
+        "x86_64" => "x64",
+        "arm" => "arm",
+        "aarch64" => "arm64",
+        _ => "unknown",
     }
 }
 
