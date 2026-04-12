@@ -3,6 +3,7 @@ use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::debug;
 use uuid::Uuid;
 
 use super::billing;
@@ -12,12 +13,15 @@ use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
-const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
+const CONTEXT_MANAGEMENT_BETA_HEADER: &str = "context-management-2025-06-27";
+const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
+const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
 
-/// Matches the referenced Claude Code version.
-const CLAUDE_CLI_VERSION: &str = "2.1.87";
+/// Matches the installed Claude Code version.
+const CLAUDE_CLI_VERSION: &str = "2.1.101";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
 /// models with OAuth tokens unless the system prompt starts with this exact
@@ -62,7 +66,23 @@ struct RequestMetadata {
 struct SystemBlock<'a> {
     r#type: &'static str,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
+
+/// Prompt caching control. The `scope` field determines the cache sharing
+/// level: `"global"` for static content identical across sessions, `"org"`
+/// for organization-scoped content.
+#[derive(Serialize)]
+struct CacheControl {
+    r#type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'static str>,
+}
+
+/// Boundary marker between static (cacheable) and dynamic (per-session)
+/// system prompt sections. Filtered out before sending to the API.
+const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 // ── SSE response types ──
 
@@ -211,12 +231,16 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: Config) -> Result<Self> {
+        let session_id = Uuid::new_v4().to_string();
         let mut headers = HeaderMap::new();
 
         let mut betas = vec![
             CLAUDE_CODE_BETA_HEADER,
-            INTERLEAVED_THINKING_BETA_HEADER,
             CONTEXT_1M_BETA_HEADER,
+            CONTEXT_MANAGEMENT_BETA_HEADER,
+            EFFORT_BETA_HEADER,
+            INTERLEAVED_THINKING_BETA_HEADER,
+            PROMPT_CACHING_SCOPE_BETA_HEADER,
         ];
 
         match &config.auth {
@@ -240,13 +264,27 @@ impl Client {
             HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
         );
         headers.insert("x-app", HeaderValue::from_static("cli"));
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_str(&session_id)?,
+        );
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            HeaderValue::from_static("true"),
+        );
+        // Stainless SDK headers — the Anthropic TypeScript SDK adds these
+        // automatically. Third-party gateways may check for their presence.
+        headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+        headers.insert("x-stainless-os", HeaderValue::from_static("MacOS"));
+        headers.insert(
+            "x-stainless-arch",
+            HeaderValue::from_static(std::env::consts::ARCH),
+        );
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .build()
             .context("failed to build HTTP client")?;
-
-        let session_id = Uuid::new_v4().to_string();
 
         Ok(Self {
             http,
@@ -268,6 +306,9 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
+    /// `system_sections` are the static system prompt sections (one text
+    /// block per section, matching Claude Code's multi-block layout).
+    ///
     /// `user_context` is a `<system-reminder>`-wrapped string that gets
     /// prepended to the messages array as a synthetic user message,
     /// matching Claude Code's `prependUserContext()` pattern. This keeps
@@ -278,7 +319,7 @@ impl Client {
     pub fn stream_message(
         &self,
         messages: &[Message],
-        system: Option<&str>,
+        system_sections: &[&str],
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
@@ -304,25 +345,48 @@ impl Client {
             None
         };
 
+        // Build system blocks matching Claude Code's `splitSysPromptPrefix`:
+        //   1. Billing header (no cache_control)
+        //   2. Identity prefix (no cache_control)
+        //   3. Static sections joined (cache_control: ephemeral, scope: global)
+        //   4. Dynamic sections joined (no cache_control)
+        // The boundary marker is filtered out before sending to the API.
+        let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
+        let static_joined = static_sections.join("\n\n");
+        let dynamic_joined = dynamic_sections.join("\n\n");
+
         let mut system_blocks = Vec::new();
         if let Some(ref header) = billing_header {
             system_blocks.push(SystemBlock {
                 r#type: "text",
                 text: header,
+                cache_control: None,
             });
         }
         system_blocks.push(SystemBlock {
             r#type: "text",
             text: SYSTEM_PROMPT_PREFIX,
+            cache_control: None,
         });
-        if let Some(s) = system {
+        if !static_joined.is_empty() {
             system_blocks.push(SystemBlock {
                 r#type: "text",
-                text: s,
+                text: &static_joined,
+                cache_control: Some(CacheControl {
+                    r#type: "ephemeral",
+                    scope: Some("global"),
+                }),
+            });
+        }
+        if !dynamic_joined.is_empty() {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: &dynamic_joined,
+                cache_control: None,
             });
         }
 
-        let url = format!("{}/v1/messages", self.config.base_url);
+        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
@@ -339,6 +403,8 @@ impl Client {
             body = billing::inject_cch(&body);
         }
 
+        debug!(body_len = body.len(), "sending API request");
+
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
 
@@ -350,6 +416,35 @@ impl Client {
         });
 
         Ok(rx)
+    }
+}
+
+/// Split system sections at the boundary marker into static and dynamic parts.
+///
+/// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
+/// is excluded from both. Sections before the boundary are static (globally
+/// cacheable); sections after are dynamic (per-session).
+fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let boundary_pos = sections
+        .iter()
+        .position(|&s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+
+    if let Some(pos) = boundary_pos {
+        let static_part = sections[..pos]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect();
+        let dynamic_part = sections[pos + 1..]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect();
+        (static_part, dynamic_part)
+    } else {
+        // No boundary — treat everything as static.
+        let all = sections.iter().filter(|s| !s.is_empty()).copied().collect();
+        (all, Vec::new())
     }
 }
 

@@ -325,9 +325,10 @@ async fn stream_response(
     prompt: &PromptParts,
     sink: &dyn AgentSink,
 ) -> Result<Vec<ContentBlock>> {
+    let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
     let mut rx = client.stream_message(
         messages,
-        Some(&prompt.system),
+        &section_refs,
         prompt.user_context.as_deref(),
         tools,
     )?;
