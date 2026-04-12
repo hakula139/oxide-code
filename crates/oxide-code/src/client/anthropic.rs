@@ -290,12 +290,6 @@ impl Client {
         })
     }
 
-    /// Build the `metadata.user_id` field as a stringified JSON object.
-    fn build_metadata(&self) -> RequestMetadata {
-        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
-        RequestMetadata { user_id }
-    }
-
     /// Returns the model name for use in the system prompt.
     pub fn model(&self) -> &str {
         &self.config.model
@@ -413,6 +407,12 @@ impl Client {
         });
 
         Ok(rx)
+    }
+
+    /// Build the `metadata.user_id` field as a stringified JSON object.
+    fn build_metadata(&self) -> RequestMetadata {
+        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
+        RequestMetadata { user_id }
     }
 }
 
@@ -627,6 +627,22 @@ mod tests {
         let (statics, dynamic) = split_at_boundary(sections);
         assert_eq!(statics, vec!["intro"]);
         assert_eq!(dynamic, vec!["env"]);
+    }
+
+    #[test]
+    fn split_at_boundary_at_start_yields_empty_static() {
+        let sections = &[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert!(statics.is_empty());
+        assert_eq!(dynamic, vec!["env", "lang"]);
+    }
+
+    #[test]
+    fn split_at_boundary_at_end_yields_empty_dynamic() {
+        let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks"]);
+        assert!(dynamic.is_empty());
     }
 
     // ── first_user_text ──

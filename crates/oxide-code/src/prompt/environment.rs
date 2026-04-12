@@ -70,7 +70,8 @@ impl Environment {
         ];
 
         // Model description.
-        if let Some(name) = marketing_name(&self.model) {
+        let name = marketing_name(&self.model);
+        if let Some(name) = name {
             lines.push(format!(
                 " - You are powered by the model named {name}. \
                  The exact model ID is {}.",
@@ -105,7 +106,7 @@ impl Environment {
         );
 
         // Fast mode.
-        let frontier = marketing_name(&self.model).unwrap_or(FRONTIER_MODEL_NAME);
+        let frontier = name.unwrap_or(FRONTIER_MODEL_NAME);
         lines.push(format!(
             " - Fast mode for Claude Code uses the same {frontier} model \
              with faster output. It does NOT switch to a different model. \
@@ -256,6 +257,22 @@ mod tests {
         let env = Environment::detect("test-model", None, None).await;
         assert_eq!(env.cwd, "(unknown)");
         assert!(!env.is_git);
+    }
+
+    // ── Environment::date ──
+
+    #[test]
+    fn date_returns_formatted_string() {
+        let env = Environment {
+            cwd: "/tmp".to_owned(),
+            is_git: false,
+            platform: "darwin".to_owned(),
+            shell: "zsh".to_owned(),
+            os_version: "Darwin 25.3.0".to_owned(),
+            date: "2026-04-12".to_owned(),
+            model: "test-model".to_owned(),
+        };
+        assert_eq!(env.date(), "Today's date is 2026-04-12.");
     }
 
     // ── Environment::render ──

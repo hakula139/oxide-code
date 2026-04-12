@@ -406,6 +406,16 @@ mod tests {
         assert!(joined.contains("Is a git repository: true"));
         assert!(joined.contains("test-model"));
 
+        // Boundary marker must be a distinct element in system_sections
+        // so the API client can split static from dynamic content.
+        assert!(
+            parts
+                .system_sections
+                .iter()
+                .any(|s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
+            "system_sections should contain the boundary marker"
+        );
+
         // CLAUDE.md goes into user_context as <system-reminder>.
         let ctx = parts
             .user_context
