@@ -4,7 +4,7 @@ mod sections;
 
 use std::path::{Path, PathBuf};
 
-use indoc::indoc;
+use indoc::formatdoc;
 use tokio::process::Command;
 
 use environment::Environment;
@@ -13,8 +13,8 @@ use sections::{
 };
 
 /// Marker between static (globally cacheable) and dynamic (per-session)
-/// system prompt content. Third-party gateways use this to split the
-/// prompt for caching and content filtering.
+/// system prompt sections. Used by the API client to apply `cache_control`
+/// scopes to the static portion.
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 /// Assembled prompt split into two API surfaces.
@@ -63,7 +63,7 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
 
     let env_section = env.render();
     let system_sections: Vec<String> = [
-        // Static content (globally cacheable).
+        // Static content (globally cacheable)
         INTRO,
         SYSTEM_SECTION,
         TASK_GUIDANCE,
@@ -71,10 +71,9 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
         TOOL_GUIDANCE,
         STYLE,
         OUTPUT_EFFICIENCY,
-        // Cache boundary — third-party gateways use this marker to split
-        // static (globally cacheable) from dynamic (per-session) content.
+        // Cache boundary
         SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-        // Dynamic content (per-session).
+        // Dynamic content (per-session)
         &env_section,
     ]
     .into_iter()
@@ -91,29 +90,29 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
 
 /// Build the `<system-reminder>` user message content from dynamic context.
 ///
-/// Mirrors Claude Code's `prependUserContext()` — CLAUDE.md and date are
-/// injected as a synthetic user message, not in the `system` parameter.
+/// CLAUDE.md and date are injected as a synthetic user message, not in the
+/// `system` parameter, matching Claude Code's `prependUserContext()`.
 fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
-    use std::fmt::Write;
-
     if claude_md.is_empty() {
         return None;
     }
 
-    let mut out = String::from(indoc! {"
+    Some(formatdoc! {"
         <system-reminder>
-        As you answer the user's questions, you can use the following context:"
-    });
-    _ = write!(out, "\n# claudeMd\n{claude_md}");
-    _ = write!(out, "\n# currentDate\n{date}");
-    out.push_str(indoc! {"
+        As you answer the user's questions, you can use the following context:
 
-        IMPORTANT: this context may or may not be relevant to your tasks. You should \
+        # CLAUDE.md
+
+        {claude_md}
+
+        # Current date
+
+        {date}
+
+        IMPORTANT: this context may or may not be relevant to your tasks. You should
         not respond to this context unless it is highly relevant to your task.
         </system-reminder>"
-    });
-
-    Some(out)
+    })
 }
 
 /// Find the git repository root from a working directory.
@@ -162,13 +161,13 @@ mod tests {
     async fn build_prompt_system_contains_all_static_sections() {
         let parts = build_prompt("test-model").await;
         let joined = parts.system_joined();
-        assert!(joined.contains("# System\n"));
-        assert!(joined.contains("# Doing tasks\n"));
+        assert!(joined.contains("# System"));
+        assert!(joined.contains("# Doing tasks"));
         assert!(joined.contains("# Executing actions with care"));
-        assert!(joined.contains("# Using your tools\n"));
-        assert!(joined.contains("# Tone and style\n"));
+        assert!(joined.contains("# Using your tools"));
+        assert!(joined.contains("# Tone and style"));
         assert!(joined.contains("# Output efficiency"));
-        assert!(joined.contains("# Environment\n"));
+        assert!(joined.contains("# Environment"));
     }
 
     #[tokio::test]
@@ -187,8 +186,8 @@ mod tests {
             .as_deref()
             .expect("expected user context from project CLAUDE.md");
         assert!(ctx.contains("<system-reminder>"));
-        assert!(ctx.contains("# claudeMd"));
-        assert!(ctx.contains("# currentDate"));
+        assert!(ctx.contains("# CLAUDE.md"));
+        assert!(ctx.contains("# Current date"));
         assert!(ctx.contains("</system-reminder>"));
     }
 
@@ -207,7 +206,7 @@ mod tests {
         // Each section boundary is a double newline. Verify the intro
         // section is separated from the next by exactly "\n\n".
         let joined = parts.system_joined();
-        let system_start = joined.find("# System\n").expect("system section missing");
+        let system_start = joined.find("# System").expect("system section missing");
         let before = &joined[..system_start];
         assert!(
             before.ends_with("\n\n"),
@@ -227,13 +226,13 @@ mod tests {
 
         let expected_system_sections = [
             "You are an interactive agent",
-            "# System\n",
-            "# Doing tasks\n",
+            "# System",
+            "# Doing tasks",
             "# Executing actions with care",
-            "# Using your tools\n",
-            "# Tone and style\n",
+            "# Using your tools",
+            "# Tone and style",
             "# Output efficiency",
-            "# Environment\n",
+            "# Environment",
         ];
         let joined = parts.system_joined();
         let mut prev_pos = 0;
@@ -265,7 +264,7 @@ mod tests {
             "system_sections should contain the boundary marker"
         );
 
-        // CLAUDE.md goes into user_context as <system-reminder>.
+        // CLAUDE.md goes into user_context as <system-reminder>
         let ctx = parts
             .user_context
             .as_deref()
@@ -325,8 +324,8 @@ mod tests {
             .expect("expected Some");
         assert!(ctx.starts_with("<system-reminder>"));
         assert!(ctx.ends_with("</system-reminder>"));
-        assert!(ctx.contains("# claudeMd\nProject rules."));
-        assert!(ctx.contains("# currentDate\nToday's date is 2026-04-12."));
+        assert!(ctx.contains("# CLAUDE.md\n\nProject rules."));
+        assert!(ctx.contains("# Current date\n\nToday's date is 2026-04-12."));
         assert!(ctx.contains("IMPORTANT: this context may or may not be relevant"));
     }
 
