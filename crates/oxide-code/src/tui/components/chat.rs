@@ -1077,12 +1077,14 @@ mod tests {
         let mut chat = test_chat();
         chat.push_user_message("hello".to_owned());
         chat.append_thinking_token("deep thought");
-        let lines_before_thinking = {
-            let mut c = test_chat();
-            c.push_user_message("hello".to_owned());
-            line_count(&c)
-        };
-        assert!(line_count(&chat) > lines_before_thinking + 1);
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let last_user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
+        let thinking = lines.iter().position(|l| l.contains("Thinking")).unwrap();
+        assert!(
+            (last_user + 1..thinking).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between user message and thinking block"
+        );
     }
 
     // ── push_streaming_lines ──
@@ -1181,7 +1183,7 @@ mod tests {
         chat.streaming_buffer = "first line\nincomplete".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(chat.streaming_rendered_boundary, "first line\n".len());
-        assert!(!chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_rendered.len(), 1);
     }
 
     #[test]
@@ -1207,7 +1209,7 @@ mod tests {
         chat.streaming_buffer.push_str("second\n");
         chat.advance_streaming_cache();
         assert!(chat.streaming_rendered_boundary > boundary1);
-        assert!(chat.streaming_rendered.len() >= cached1);
+        assert!(chat.streaming_rendered.len() > cached1);
     }
 
     #[test]

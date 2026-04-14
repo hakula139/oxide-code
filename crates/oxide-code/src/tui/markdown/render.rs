@@ -443,9 +443,13 @@ mod tests {
 
             Second paragraph
         "});
-        assert!(lines.contains(&String::new()));
-        assert!(lines.iter().any(|l| l.contains("First")));
-        assert!(lines.iter().any(|l| l.contains("Second")));
+        let first_pos = lines.iter().position(|l| l.contains("First")).unwrap();
+        let blank_pos = lines.iter().position(String::is_empty).unwrap();
+        let second_pos = lines.iter().position(|l| l.contains("Second")).unwrap();
+        assert!(
+            first_pos < blank_pos && blank_pos < second_pos,
+            "expected First < blank < Second, got {first_pos} < {blank_pos} < {second_pos}"
+        );
     }
 
     #[test]
@@ -466,9 +470,18 @@ mod tests {
             ## H2
             ### H3
         "});
-        assert!(lines.iter().any(|l| l.contains("# ") && l.contains("H1")));
-        assert!(lines.iter().any(|l| l.contains("## ") && l.contains("H2")));
-        assert!(lines.iter().any(|l| l.contains("### ") && l.contains("H3")));
+        assert!(
+            lines.iter().any(|l| l.starts_with("# H1")),
+            "H1 prefix: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("## H2")),
+            "H2 prefix: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("### H3")),
+            "H3 prefix: {lines:?}"
+        );
     }
 
     // ── Inline Styles ──

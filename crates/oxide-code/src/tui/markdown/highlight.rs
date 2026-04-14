@@ -128,6 +128,6 @@ mod tests {
     #[test]
     fn highlight_code_empty_code_returns_empty() {
         let lines = highlight_code("rust", "");
-        assert!(lines.is_empty() || all_text(&lines).trim().is_empty());
+        assert!(lines.is_empty(), "empty code should produce no lines");
     }
 }
