@@ -668,4 +668,100 @@ mod tests {
         "});
         assert!(lines.iter().any(|l| l.contains('─')));
     }
+
+    // ── Combined Inline Styles ──
+
+    #[test]
+    fn bold_italic_combined() {
+        let text = render_markdown("***bold italic***");
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("bold italic"))
+            .unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    // ── Nested Blockquotes ──
+
+    #[test]
+    fn nested_blockquote() {
+        let lines = rendered_text(indoc! {"
+            > Outer
+            > > Inner
+        "});
+        assert!(lines.iter().any(|l| l.contains("Outer")));
+        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
+        assert!(
+            inner.matches("> ").count() >= 2,
+            "inner blockquote should have nested > markers: {inner:?}"
+        );
+    }
+
+    // ── Inline Elements in Lists ──
+
+    #[test]
+    fn inline_code_in_list_item() {
+        let text = render_markdown("- Use `foo()` here");
+        let has_code_span = text.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.contains("foo()") && s.style.fg == Some(CODE_FG))
+        });
+        assert!(has_code_span, "inline code should be styled in list items");
+    }
+
+    #[test]
+    fn link_in_list_item() {
+        let lines = rendered_text("- [Click](https://example.com)");
+        assert!(lines.iter().any(|l| l.contains("Click")));
+        assert!(lines.iter().any(|l| l.contains("https://example.com")));
+    }
+
+    // ── Link Style ──
+
+    #[test]
+    fn link_url_has_underline_style() {
+        let text = render_markdown("[text](https://example.com)");
+        let url_span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("https://example.com"))
+            .unwrap();
+        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    // ── HTML ──
+
+    #[test]
+    fn html_block_rendered_as_text() {
+        let lines = rendered_text("<div>hello</div>\n");
+        assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
+    }
+
+    #[test]
+    fn inline_html_preserved() {
+        let lines = rendered_text("text <br> more");
+        let joined: String = lines.join("");
+        assert!(joined.contains("<br>"));
+    }
+
+    // ── Multi-Digit Ordered List ──
+
+    #[test]
+    fn ordered_list_double_digit_alignment() {
+        let mut input = String::new();
+        for i in 1..=12 {
+            use std::fmt::Write;
+            writeln!(input, "{i}. Item {i}").unwrap();
+        }
+        let lines = rendered_text(&input);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("10.") && l.contains("Item 10")),
+            "marker and content on same line for item 10: {lines:?}"
+        );
+    }
 }
