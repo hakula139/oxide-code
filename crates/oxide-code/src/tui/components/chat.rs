@@ -810,7 +810,8 @@ mod tests {
                 chat.render(frame, frame.area());
             })
             .unwrap();
-        assert!(chat.content_height.get() > 0);
+        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
+        assert_eq!(chat.content_height.get(), 4);
     }
 
     // ── scroll_to_bottom ──
@@ -938,6 +939,14 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("❯ You"));
         assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn push_user_message_enables_auto_scroll() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+        chat.push_user_message("hello".to_owned());
+        assert!(chat.auto_scroll);
     }
 
     #[test]
@@ -1203,13 +1212,14 @@ mod tests {
 
         chat.streaming_buffer = "first\n".to_owned();
         chat.advance_streaming_cache();
-        let boundary1 = chat.streaming_rendered_boundary;
+        assert_eq!(chat.streaming_rendered_boundary, 6); // "first\n".len()
         let cached1 = chat.streaming_rendered.len();
+        assert_eq!(cached1, 1);
 
         chat.streaming_buffer.push_str("second\n");
         chat.advance_streaming_cache();
-        assert!(chat.streaming_rendered_boundary > boundary1);
-        assert!(chat.streaming_rendered.len() > cached1);
+        assert_eq!(chat.streaming_rendered_boundary, 13); // "first\nsecond\n".len()
+        assert_eq!(chat.streaming_rendered.len(), 2);
     }
 
     #[test]
