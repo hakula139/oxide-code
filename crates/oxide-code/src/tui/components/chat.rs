@@ -34,6 +34,10 @@ enum ChatEntry {
 /// Maximum lines of tool output shown inline before truncation.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
+/// Tab stop width for expanding `\t` in tool output. Ratatui renders each
+/// character into fixed-width cells, so tabs must be expanded to spaces.
+const TAB_WIDTH: usize = 4;
+
 /// Scrollable chat message list with markdown rendering, tool call display,
 /// and thinking block support.
 ///
@@ -425,7 +429,7 @@ impl ChatView {
         for line in visible {
             lines.push(Line::from(vec![
                 Span::styled("  ┃     ", border_style),
-                Span::styled(*line, text_style),
+                Span::styled(expand_tabs(line), text_style),
             ]));
         }
 
@@ -547,6 +551,30 @@ impl ChatView {
 
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
     }
+}
+
+// ── Tab Expansion ──
+
+/// Expand tab characters to spaces, aligning to [`TAB_WIDTH`]-column stops.
+fn expand_tabs(s: &str) -> String {
+    if !s.contains('\t') {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut col = 0;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1189,5 +1217,25 @@ mod tests {
         chat.streaming_buffer = "\n".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(chat.streaming_rendered_boundary, 1);
+    }
+
+    // ── expand_tabs ──
+
+    #[test]
+    fn expand_tabs_no_tabs_unchanged() {
+        assert_eq!(expand_tabs("hello world"), "hello world");
+    }
+
+    #[test]
+    fn expand_tabs_line_number_format() {
+        assert_eq!(expand_tabs("1\tuse std::io;"), "1   use std::io;");
+        assert_eq!(expand_tabs("10\tuse std::io;"), "10  use std::io;");
+        assert_eq!(expand_tabs("100\tuse std::io;"), "100 use std::io;");
+    }
+
+    #[test]
+    fn expand_tabs_mid_line_aligns_to_stop() {
+        assert_eq!(expand_tabs("ab\tcd"), "ab  cd");
+        assert_eq!(expand_tabs("abcd\tx"), "abcd    x");
     }
 }
