@@ -368,9 +368,7 @@ impl ChatView {
 
         let rendered = render_markdown(content);
         for line in rendered.lines {
-            let mut spans = vec![Span::raw("    ")];
-            spans.extend(line.spans);
-            lines.push(Line::from(spans));
+            lines.push(indent_markdown_line(line));
         }
     }
 
@@ -505,9 +503,7 @@ impl ChatView {
             if !new_committed.is_empty() {
                 let rendered = render_markdown(new_committed);
                 for line in rendered.lines {
-                    let mut spans = vec![Span::raw("    ")];
-                    spans.extend(line.spans);
-                    lines.push(Line::from(spans));
+                    lines.push(indent_markdown_line(line));
                 }
             }
 
@@ -539,18 +535,21 @@ impl ChatView {
         if !new_committed.is_empty() {
             let rendered = render_markdown(new_committed);
             for line in rendered.lines {
-                let mut spans: Vec<Span<'static>> = vec![Span::raw("    ")];
-                spans.extend(
-                    line.spans
-                        .into_iter()
-                        .map(|s| Span::styled(s.content.into_owned(), s.style)),
-                );
-                self.streaming_rendered.push(Line::from(spans));
+                self.streaming_rendered.push(indent_markdown_line(line));
             }
         }
 
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
     }
+}
+
+// ── Markdown Indent ──
+
+/// Prepend a 4-space indent to a markdown-rendered line.
+fn indent_markdown_line(line: Line<'static>) -> Line<'static> {
+    let mut spans = vec![Span::raw("    ")];
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 // ── Tab Expansion ──
