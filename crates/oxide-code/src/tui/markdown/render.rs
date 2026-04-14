@@ -92,7 +92,7 @@ where
             Event::HardBreak => self.hard_break(),
             Event::Rule => self.rule(),
             Event::Html(ref html) => self.html(html),
-            Event::InlineHtml(html) => self.inline_html(&html),
+            Event::InlineHtml(ref html) => self.inline_html(html),
             Event::FootnoteReference(_)
             | Event::TaskListMarker(_)
             | Event::InlineMath(_)
