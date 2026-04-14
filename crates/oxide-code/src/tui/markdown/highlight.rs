@@ -97,6 +97,14 @@ mod tests {
     }
 
     #[test]
+    fn highlight_code_multiline_preserves_lines() {
+        let lines = highlight_code("rust", "fn a() {}\nfn b() {}");
+        assert_eq!(lines.len(), 2);
+        assert!(all_text(&lines).contains("fn a()"));
+        assert!(all_text(&lines).contains("fn b()"));
+    }
+
+    #[test]
     fn highlight_code_unknown_language_uses_teal_fallback() {
         let lines = highlight_code("nonexistent_lang_xyz", "hello");
         assert_eq!(lines.len(), 1);
@@ -115,14 +123,6 @@ mod tests {
     fn highlight_code_whitespace_only_language_uses_fallback() {
         let lines = highlight_code("   ", "code");
         assert_eq!(lines[0].style.fg, Some(CODE_FG));
-    }
-
-    #[test]
-    fn highlight_code_multiline_preserves_lines() {
-        let lines = highlight_code("rust", "fn a() {}\nfn b() {}");
-        assert_eq!(lines.len(), 2);
-        assert!(all_text(&lines).contains("fn a()"));
-        assert!(all_text(&lines).contains("fn b()"));
     }
 
     #[test]

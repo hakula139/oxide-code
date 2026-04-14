@@ -491,6 +491,18 @@ mod tests {
     }
 
     #[test]
+    fn bold_italic_combined() {
+        let text = render_markdown("***bold italic***");
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("bold italic"))
+            .unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
     fn strikethrough() {
         let text = render_markdown("~~struck~~");
         let span = text.lines[0]
@@ -518,6 +530,17 @@ mod tests {
     fn link_appends_url() {
         let lines = rendered_text("[Click](https://example.com)");
         assert_eq!(lines, vec!["Click (https://example.com)"]);
+    }
+
+    #[test]
+    fn link_url_has_underline_style() {
+        let text = render_markdown("[text](https://example.com)");
+        let url_span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("https://example.com"))
+            .unwrap();
+        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     // ── Code Blocks ──
@@ -596,6 +619,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ordered_list_double_digit_alignment() {
+        let mut input = String::new();
+        for i in 1..=12 {
+            use std::fmt::Write;
+            writeln!(input, "{i}. Item {i}").unwrap();
+        }
+        let lines = rendered_text(&input);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("10.") && l.contains("Item 10")),
+            "marker and content on same line for item 10: {lines:?}"
+        );
+    }
+
     // ── Unordered Lists ──
 
     #[test]
@@ -643,62 +682,6 @@ mod tests {
         );
     }
 
-    // ── Blockquotes ──
-
-    #[test]
-    fn blockquote() {
-        let lines = rendered_text("> Quoted text");
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("> ") && l.contains("Quoted"))
-        );
-    }
-
-    // ── Horizontal Rule ──
-
-    #[test]
-    fn horizontal_rule() {
-        let lines = rendered_text(indoc! {"
-            Above
-
-            ---
-
-            Below
-        "});
-        assert!(lines.iter().any(|l| l.contains('─')));
-    }
-
-    // ── Combined Inline Styles ──
-
-    #[test]
-    fn bold_italic_combined() {
-        let text = render_markdown("***bold italic***");
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("bold italic"))
-            .unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
-    }
-
-    // ── Nested Blockquotes ──
-
-    #[test]
-    fn nested_blockquote() {
-        let lines = rendered_text(indoc! {"
-            > Outer
-            > > Inner
-        "});
-        assert!(lines.iter().any(|l| l.contains("Outer")));
-        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        assert!(
-            inner.matches("> ").count() >= 2,
-            "inner blockquote should have nested > markers: {inner:?}"
-        );
-    }
-
     // ── Inline Elements in Lists ──
 
     #[test]
@@ -719,17 +702,44 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("https://example.com")));
     }
 
-    // ── Link Style ──
+    // ── Blockquotes ──
 
     #[test]
-    fn link_url_has_underline_style() {
-        let text = render_markdown("[text](https://example.com)");
-        let url_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("https://example.com"))
-            .unwrap();
-        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+    fn blockquote() {
+        let lines = rendered_text("> Quoted text");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("> ") && l.contains("Quoted"))
+        );
+    }
+
+    #[test]
+    fn nested_blockquote() {
+        let lines = rendered_text(indoc! {"
+            > Outer
+            > > Inner
+        "});
+        assert!(lines.iter().any(|l| l.contains("Outer")));
+        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
+        assert!(
+            inner.matches("> ").count() >= 2,
+            "inner blockquote should have nested > markers: {inner:?}"
+        );
+    }
+
+    // ── Horizontal Rule ──
+
+    #[test]
+    fn horizontal_rule() {
+        let lines = rendered_text(indoc! {"
+            Above
+
+            ---
+
+            Below
+        "});
+        assert!(lines.iter().any(|l| l.contains('─')));
     }
 
     // ── HTML ──
@@ -745,23 +755,5 @@ mod tests {
         let lines = rendered_text("text <br> more");
         let joined: String = lines.join("");
         assert!(joined.contains("<br>"));
-    }
-
-    // ── Multi-Digit Ordered List ──
-
-    #[test]
-    fn ordered_list_double_digit_alignment() {
-        let mut input = String::new();
-        for i in 1..=12 {
-            use std::fmt::Write;
-            writeln!(input, "{i}. Item {i}").unwrap();
-        }
-        let lines = rendered_text(&input);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("10.") && l.contains("Item 10")),
-            "marker and content on same line for item 10: {lines:?}"
-        );
     }
 }
