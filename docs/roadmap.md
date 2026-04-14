@@ -48,8 +48,8 @@ The project direction is simple:
 - ratatui + crossterm TUI with `tokio::select!` event loop, 60 FPS render coalescing, and synchronized output (DEC 2026) for flicker prevention.
 - `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
 - Component architecture: `ChatView` (scrollable message list), `InputArea` (multi-line textarea), `StatusBar` (model + spinner + status + cwd).
-- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, tool borders, thinking, semantic accents).
-- Markdown rendering for assistant messages via pulldown-cmark + syntect, with streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
+- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, headings, code, links, blockquotes, list markers, tool borders, thinking, semantic accents).
+- Markdown rendering for assistant messages via pulldown-cmark + syntect, fully themed through `Theme` — no hardcoded colors. Streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
 - Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, success / error result indicators, and truncated output body (5 lines with overflow count).
 - Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
 - Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text.
@@ -66,8 +66,10 @@ The project direction is simple:
 
 ### Test Coverage
 
-- Integration test infrastructure — `insta` snapshot tests for TUI render methods, `temp-env` for config env var testing, `wiremock` for Anthropic SSE streaming client. See `.claude/plans/integration-tests.md`.
-- Logic extraction for testability — pure reducers from `app.rs`, key interpretation from `input.rs`, config merge from `config.rs`.
+- Integration test infrastructure — `insta` snapshot tests for TUI render methods, `temp-env` for config env var testing, `wiremock` for Anthropic SSE streaming client.
+- Unit tests for `App::handle_action` / `App::handle_agent_event` — pure reducer logic extracted for testability.
+- `TestBackend`-based render tests for `InputArea::render` — border style, cursor placement, hint line content.
+- `StdioSink::send` formatting tests — extract per-variant formatting into a testable helper, then unit-test ANSI escapes, title display, and trimmed output.
 
 ### Tool & Prompt Enhancements
 
