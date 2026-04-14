@@ -1,9 +1,15 @@
+mod highlight;
+mod render;
+
+use pulldown_cmark::{Options, Parser};
 use ratatui::text::Text;
 
+use render::MarkdownRenderer;
+
 /// Convert a markdown string to styled ratatui [`Text`].
-///
-/// Uses `tui_markdown` (pulldown-cmark + syntect) for full markdown
-/// rendering including syntax-highlighted code blocks.
-pub(crate) fn render_markdown(input: &str) -> Text<'_> {
-    tui_markdown::from_str(input)
+pub(crate) fn render_markdown(input: &str) -> Text<'static> {
+    let parser = Parser::new_ext(input, Options::ENABLE_STRIKETHROUGH);
+    let mut renderer = MarkdownRenderer::new(parser);
+    renderer.run();
+    Text::from(renderer.lines)
 }
