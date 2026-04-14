@@ -436,7 +436,7 @@ impl ChatView {
                 Span::styled("  ┃     ", border_style),
                 Span::styled(
                     format!(
-                        "… {} more lines",
+                        "... {} more lines",
                         output_lines.len() - MAX_TOOL_OUTPUT_LINES
                     ),
                     self.theme.dim(),
@@ -461,7 +461,7 @@ impl ChatView {
         }
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Thinking…", self.theme.thinking()),
+            Span::styled("Thinking...", self.theme.thinking()),
         ]));
         for line in self.thinking_buffer.lines() {
             lines.push(Line::from(vec![
@@ -1014,7 +1014,7 @@ mod tests {
         assert!(text.contains("line 0"));
         assert!(text.contains("line 4"));
         assert!(!text.contains("line 5"));
-        assert!(text.contains("… 5 more lines"));
+        assert!(text.contains("... 5 more lines"));
     }
 
     #[test]
@@ -1049,7 +1049,7 @@ mod tests {
             .collect();
         chat.push_tool_result("result", &output.join("\n"), false);
         let text = all_text(&chat);
-        assert!(text.contains("… 1 more lines"));
+        assert!(text.contains("... 1 more lines"));
     }
 
     // ── push_thinking_lines ──
@@ -1059,7 +1059,7 @@ mod tests {
         let mut chat = test_chat();
         chat.append_thinking_token("pondering...");
         let text = all_text(&chat);
-        assert!(text.contains("Thinking…"));
+        assert!(text.contains("Thinking..."));
         assert!(text.contains("pondering..."));
     }
 
@@ -1068,7 +1068,7 @@ mod tests {
         let mut chat = ChatView::new(Theme::default(), false);
         chat.append_thinking_token("pondering...");
         let text = all_text(&chat);
-        assert!(!text.contains("Thinking…"));
+        assert!(!text.contains("Thinking..."));
         assert!(!text.contains("pondering..."));
     }
 

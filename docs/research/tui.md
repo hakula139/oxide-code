@@ -34,7 +34,7 @@ Full-screen redraw on every React state change causes severe flickering in long 
 `AssistantThinkingMessage.tsx`
 
 - Collapsed by default: shows `"∴ Thinking"` in dim italic as a single line, with a `Ctrl+O` expand hint. Only expanded in verbose / transcript mode.
-- When expanded: `"∴ Thinking…"` header, then full thinking content rendered via `<Markdown dimColor>` with `paddingLeft={2}`.
+- When expanded: `"∴ Thinking..."` header, then full thinking content rendered via `<Markdown dimColor>` with `paddingLeft={2}`.
 
 #### Tool Display
 
