@@ -1,35 +1,16 @@
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tracing::{debug, warn};
 
-use super::highlight::{CODE_FG, highlight_code};
-
-// ── Style Constants ──
-
-const HEADING_H1: Style = Style::new()
-    .fg(Color::White)
-    .add_modifier(Modifier::BOLD)
-    .add_modifier(Modifier::UNDERLINED);
-const HEADING_H2: Style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
-const HEADING_H3: Style = Style::new()
-    .fg(Color::White)
-    .add_modifier(Modifier::BOLD)
-    .add_modifier(Modifier::ITALIC);
-const HEADING_H456: Style = Style::new().fg(Color::White).add_modifier(Modifier::ITALIC);
-
-const CODE_STYLE: Style = Style::new().fg(CODE_FG);
-const LINK_STYLE: Style = Style::new()
-    .fg(Color::Rgb(137, 180, 250)) // Catppuccin Blue
-    .add_modifier(Modifier::UNDERLINED);
-const BLOCKQUOTE_STYLE: Style = Style::new().fg(Color::Rgb(166, 227, 161)); // Catppuccin Green
-const LIST_MARKER_STYLE: Style = Style::new().fg(Color::Rgb(137, 180, 250)); // Catppuccin Blue
-const RULE_STYLE: Style = Style::new().fg(Color::Rgb(88, 91, 112)); // Catppuccin Overlay0
+use super::highlight::highlight_code;
+use crate::tui::theme::Theme;
 
 // ── Renderer ──
 
 pub(super) struct MarkdownRenderer<I> {
     iter: I,
+    theme: Theme,
     pub(super) lines: Vec<Line<'static>>,
 
     /// Nested inline style stack (bold, italic, strikethrough).
@@ -60,9 +41,10 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I) -> Self {
+    pub(super) fn new(iter: I, theme: Theme) -> Self {
         Self {
             iter,
+            theme,
             lines: Vec::new(),
             inline_styles: Vec::new(),
             list_stack: Vec::new(),
@@ -176,10 +158,10 @@ where
             self.push_blank_line();
         }
         let style = match level {
-            HeadingLevel::H1 => HEADING_H1,
-            HeadingLevel::H2 => HEADING_H2,
-            HeadingLevel::H3 => HEADING_H3,
-            HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => HEADING_H456,
+            HeadingLevel::H1 => self.theme.heading_h1(),
+            HeadingLevel::H2 => self.theme.heading_h2(),
+            HeadingLevel::H3 => self.theme.heading_h3(),
+            HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => self.theme.heading_minor(),
         };
         let prefix = format!("{} ", "#".repeat(level as usize));
         self.push_line(Line::from(vec![Span::styled(prefix, style)]));
@@ -198,7 +180,7 @@ where
             self.needs_newline = false;
         }
         self.indent_stack
-            .push(vec![Span::styled("> ", BLOCKQUOTE_STYLE)]);
+            .push(vec![Span::styled("> ", self.theme.blockquote())]);
     }
 
     fn end_blockquote(&mut self) {
@@ -210,7 +192,10 @@ where
         if self.needs_newline {
             self.push_blank_line();
         }
-        self.push_line(Line::styled("───", RULE_STYLE));
+        self.push_line(Line::from(vec![Span::styled(
+            "───",
+            self.theme.horizontal_rule(),
+        )]));
         self.needs_newline = true;
     }
 
@@ -246,7 +231,7 @@ where
         };
 
         let continuation = vec![Span::raw(" ".repeat(marker.len()))];
-        self.pending_marker = Some(vec![Span::styled(marker, LIST_MARKER_STYLE)]);
+        self.pending_marker = Some(vec![Span::styled(marker, self.theme.list_marker())]);
         self.indent_stack.push(continuation);
         self.needs_newline = false;
     }
@@ -273,7 +258,11 @@ where
         let code = std::mem::take(&mut self.code_buf);
         let lang = self.code_lang.take();
 
-        let highlighted = highlight_code(lang.as_deref().unwrap_or(""), &code);
+        let highlighted = highlight_code(
+            lang.as_deref().unwrap_or(""),
+            &code,
+            self.theme.inline_code(),
+        );
         for line in highlighted {
             self.lines.push(line);
         }
@@ -310,7 +299,7 @@ where
         if self.pending_marker.is_some() {
             self.push_line(Line::default());
         }
-        self.push_span(Span::styled(code.into_string(), CODE_STYLE));
+        self.push_span(Span::styled(code.into_string(), self.theme.inline_code()));
     }
 
     fn html(&mut self, html: &str) {
@@ -341,7 +330,7 @@ where
     fn pop_link(&mut self) {
         if let Some(url) = self.link_url.take() {
             self.push_span(Span::raw(" ("));
-            self.push_span(Span::styled(url, LINK_STYLE));
+            self.push_span(Span::styled(url, self.theme.link()));
             self.push_span(Span::raw(")"));
         }
     }
@@ -412,14 +401,17 @@ where
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use ratatui::style::Color;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     use super::super::render_markdown;
-    use super::*;
+    use crate::tui::theme::Theme;
+
+    fn theme() -> Theme {
+        Theme::default()
+    }
 
     fn rendered_text(input: &str) -> Vec<String> {
-        render_markdown(input)
+        render_markdown(input, &theme())
             .lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -464,31 +456,59 @@ mod tests {
     // ── Headings ──
 
     #[test]
-    fn heading_levels() {
-        let lines = rendered_text(indoc! {"
-            # H1
-            ## H2
-            ### H3
-        "});
-        assert!(
-            lines.iter().any(|l| l.starts_with("# H1")),
-            "H1 prefix: {lines:?}"
+    fn heading_levels_text_and_styles() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                # H1
+                ## H2
+                ### H3
+                #### H4
+            "},
+            &t,
         );
+
+        let find_heading = |prefix: &str| {
+            text.lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.starts_with(prefix)))
+                .unwrap_or_else(|| panic!("no line starting with {prefix}"))
+                .clone()
+        };
+
+        let h1 = find_heading("# ");
+        assert!(h1.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert!(
-            lines.iter().any(|l| l.starts_with("## H2")),
-            "H2 prefix: {lines:?}"
+            h1.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
         );
+        assert_eq!(h1.spans[0].style.fg, Some(t.fg));
+
+        let h2 = find_heading("## ");
+        assert!(h2.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert!(
-            lines.iter().any(|l| l.starts_with("### H3")),
-            "H3 prefix: {lines:?}"
+            !h2.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
         );
+
+        let h3 = find_heading("### ");
+        assert!(h3.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(h3.spans[0].style.add_modifier.contains(Modifier::ITALIC));
+
+        let h4 = find_heading("#### ");
+        assert!(h4.spans[0].style.add_modifier.contains(Modifier::ITALIC));
+        assert!(!h4.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
     // ── Inline Styles ──
 
     #[test]
     fn bold_and_italic() {
-        let text = render_markdown("**bold** and *italic*");
+        let text = render_markdown("**bold** and *italic*", &theme());
         let bold_span = text.lines[0]
             .spans
             .iter()
@@ -505,7 +525,7 @@ mod tests {
 
     #[test]
     fn bold_italic_combined() {
-        let text = render_markdown("***bold italic***");
+        let text = render_markdown("***bold italic***", &theme());
         let span = text.lines[0]
             .spans
             .iter()
@@ -517,7 +537,7 @@ mod tests {
 
     #[test]
     fn strikethrough() {
-        let text = render_markdown("~~struck~~");
+        let text = render_markdown("~~struck~~", &theme());
         let span = text.lines[0]
             .spans
             .iter()
@@ -528,13 +548,14 @@ mod tests {
 
     #[test]
     fn inline_code() {
-        let text = render_markdown("Use `foo()` here");
+        let t = theme();
+        let text = render_markdown("Use `foo()` here", &t);
         let span = text.lines[0]
             .spans
             .iter()
             .find(|s| s.content.contains("foo()"))
             .unwrap();
-        assert_eq!(span.style.fg, Some(CODE_FG));
+        assert_eq!(span.style.fg, Some(t.code));
     }
 
     // ── Links ──
@@ -546,14 +567,16 @@ mod tests {
     }
 
     #[test]
-    fn link_url_has_underline_style() {
-        let text = render_markdown("[text](https://example.com)");
+    fn link_url_has_accent_underline_style() {
+        let t = theme();
+        let text = render_markdown("[text](https://example.com)", &t);
         let url_span = text.lines[0]
             .spans
             .iter()
             .find(|s| s.content.contains("https://example.com"))
             .unwrap();
         assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(url_span.style.fg, Some(t.accent));
     }
 
     // ── Code Blocks ──
@@ -570,11 +593,14 @@ mod tests {
 
     #[test]
     fn fenced_code_block_with_lang_highlights() {
-        let text = render_markdown(indoc! {"
-            ```rust
-            fn main() {}
-            ```
-        "});
+        let text = render_markdown(
+            indoc! {"
+                ```rust
+                fn main() {}
+                ```
+            "},
+            &theme(),
+        );
         let has_rgb = text.lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -699,11 +725,12 @@ mod tests {
 
     #[test]
     fn inline_code_in_list_item() {
-        let text = render_markdown("- Use `foo()` here");
+        let t = theme();
+        let text = render_markdown("- Use `foo()` here", &t);
         let has_code_span = text.lines.iter().any(|line| {
             line.spans
                 .iter()
-                .any(|s| s.content.contains("foo()") && s.style.fg == Some(CODE_FG))
+                .any(|s| s.content.contains("foo()") && s.style.fg == Some(t.code))
         });
         assert!(has_code_span, "inline code should be styled in list items");
     }
@@ -718,13 +745,20 @@ mod tests {
     // ── Blockquotes ──
 
     #[test]
-    fn blockquote() {
-        let lines = rendered_text("> Quoted text");
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("> ") && l.contains("Quoted"))
-        );
+    fn blockquote_text_and_style() {
+        let t = theme();
+        let text = render_markdown("> Quoted text", &t);
+        let bq_line = text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
+            .expect("blockquote line not found");
+        let marker_span = bq_line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("> "))
+            .expect("> marker not found");
+        assert_eq!(marker_span.style.fg, Some(t.success));
     }
 
     #[test]
@@ -744,15 +778,38 @@ mod tests {
     // ── Horizontal Rule ──
 
     #[test]
-    fn horizontal_rule() {
-        let lines = rendered_text(indoc! {"
-            Above
+    fn horizontal_rule_text_and_style() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                Above
 
-            ---
+                ---
 
-            Below
-        "});
-        assert!(lines.iter().any(|l| l.contains('─')));
+                Below
+            "},
+            &t,
+        );
+        let rule_span = text
+            .lines
+            .iter()
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
+            .expect("rule span not found");
+        assert_eq!(rule_span.style.fg, Some(t.fg_dim));
+    }
+
+    // ── List Marker Style ──
+
+    #[test]
+    fn list_marker_uses_accent_color() {
+        let t = theme();
+        let text = render_markdown("- Item", &t);
+        let marker_span = text
+            .lines
+            .iter()
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
+        let span = marker_span.expect("list marker span not found");
+        assert_eq!(span.style.fg, Some(t.accent));
     }
 
     // ── HTML ──

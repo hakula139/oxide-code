@@ -33,6 +33,10 @@ pub(crate) struct Theme {
     /// Assistant role labels, focused elements.
     pub(crate) secondary: Color,
 
+    // Code
+    /// Inline code, code block fallback.
+    pub(crate) code: Color,
+
     // Status indicators (ascending severity)
     /// Informational highlights, cost display.
     pub(crate) info: Color,
@@ -53,6 +57,7 @@ impl Default for Theme {
             fg_dim: Color::from_u32(0x0058_5b70),    // Surface2
             surface: Color::from_u32(0x0031_3244),   // Surface0
             code_bg: Color::from_u32(0x001e_1e2e),   // Base
+            code: Color::from_u32(0x0094_e2d5),      // Teal
             accent: Color::from_u32(0x0089_b4fa),    // Blue
             secondary: Color::from_u32(0x00b4_befe), // Lavender
             info: Color::from_u32(0x0089_dceb),      // Sky
@@ -161,6 +166,52 @@ impl Theme {
     pub(crate) fn border_unfocused(&self) -> Style {
         Style::default().fg(self.fg_dim)
     }
+
+    // Markdown rendering
+
+    pub(crate) fn heading_h1(&self) -> Style {
+        Style::default()
+            .fg(self.fg)
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+
+    pub(crate) fn heading_h2(&self) -> Style {
+        Style::default().fg(self.fg).add_modifier(Modifier::BOLD)
+    }
+
+    pub(crate) fn heading_h3(&self) -> Style {
+        Style::default()
+            .fg(self.fg)
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::ITALIC)
+    }
+
+    pub(crate) fn heading_minor(&self) -> Style {
+        Style::default().fg(self.fg).add_modifier(Modifier::ITALIC)
+    }
+
+    pub(crate) fn inline_code(&self) -> Style {
+        Style::default().fg(self.code)
+    }
+
+    pub(crate) fn link(&self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+
+    pub(crate) fn blockquote(&self) -> Style {
+        Style::default().fg(self.success)
+    }
+
+    pub(crate) fn list_marker(&self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    pub(crate) fn horizontal_rule(&self) -> Style {
+        Style::default().fg(self.fg_dim)
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +243,7 @@ mod tests {
         assert_eq!(t.success().fg, Some(t.success));
         assert_eq!(t.warning().fg, Some(t.warning));
         assert_eq!(t.error().fg, Some(t.error));
+        assert_eq!(t.inline_code().fg, Some(t.code));
     }
 
     #[test]
@@ -236,5 +288,58 @@ mod tests {
     fn border_unfocused_uses_dim() {
         let t = Theme::default();
         assert_eq!(t.border_unfocused().fg, Some(t.fg_dim));
+    }
+
+    // ── Markdown rendering ──
+
+    #[test]
+    fn heading_styles_use_fg_with_expected_modifiers() {
+        let t = Theme::default();
+
+        let h1 = t.heading_h1();
+        assert_eq!(h1.fg, Some(t.fg));
+        assert!(h1.add_modifier.contains(Modifier::BOLD));
+        assert!(h1.add_modifier.contains(Modifier::UNDERLINED));
+
+        let h2 = t.heading_h2();
+        assert_eq!(h2.fg, Some(t.fg));
+        assert!(h2.add_modifier.contains(Modifier::BOLD));
+        assert!(!h2.add_modifier.contains(Modifier::UNDERLINED));
+
+        let h3 = t.heading_h3();
+        assert_eq!(h3.fg, Some(t.fg));
+        assert!(h3.add_modifier.contains(Modifier::BOLD));
+        assert!(h3.add_modifier.contains(Modifier::ITALIC));
+
+        let h4 = t.heading_minor();
+        assert_eq!(h4.fg, Some(t.fg));
+        assert!(h4.add_modifier.contains(Modifier::ITALIC));
+        assert!(!h4.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn link_uses_accent_with_underline() {
+        let t = Theme::default();
+        let link = t.link();
+        assert_eq!(link.fg, Some(t.accent));
+        assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn blockquote_uses_success_color() {
+        let t = Theme::default();
+        assert_eq!(t.blockquote().fg, Some(t.success));
+    }
+
+    #[test]
+    fn list_marker_uses_accent_color() {
+        let t = Theme::default();
+        assert_eq!(t.list_marker().fg, Some(t.accent));
+    }
+
+    #[test]
+    fn horizontal_rule_uses_dim_color() {
+        let t = Theme::default();
+        assert_eq!(t.horizontal_rule().fg, Some(t.fg_dim));
     }
 }

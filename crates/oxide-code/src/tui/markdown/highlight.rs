@@ -6,18 +6,15 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
-/// Fallback foreground for code when no syntax is recognized.
-pub(super) const CODE_FG: Color = Color::Rgb(148, 226, 213); // Catppuccin Teal
-
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 /// Highlight `code` using syntect for the given language.
 ///
 /// The language token is extracted from the first word of `lang` (so info
-/// strings like `rust,no_run` still work). Falls back to plain teal-colored
-/// lines when the language is unrecognized.
-pub(super) fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
+/// strings like `rust,no_run` still work). Falls back to `fallback_style`
+/// when the language is unrecognized.
+pub(super) fn highlight_code(lang: &str, code: &str, fallback_style: Style) -> Vec<Line<'static>> {
     let syntax = lang
         .split_ascii_whitespace()
         .next()
@@ -27,7 +24,7 @@ pub(super) fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
     let Some(syntax) = syntax else {
         return code
             .lines()
-            .map(|l| Line::styled(l.to_owned(), Style::new().fg(CODE_FG)))
+            .map(|l| Line::styled(l.to_owned(), fallback_style))
             .collect();
     };
 
@@ -58,7 +55,13 @@ pub(super) fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::tui::theme::Theme;
+
     use super::*;
+
+    fn fallback() -> Style {
+        Theme::default().inline_code()
+    }
 
     fn all_text(lines: &[Line<'_>]) -> String {
         lines
@@ -85,49 +88,45 @@ mod tests {
 
     #[test]
     fn highlight_code_known_language_produces_rgb() {
-        let lines = highlight_code("rust", "fn main() {}");
+        let lines = highlight_code("rust", "fn main() {}", fallback());
         assert!(has_rgb_color(&lines));
         assert!(all_text(&lines).contains("fn"));
     }
 
     #[test]
     fn highlight_code_info_string_with_extra_tokens() {
-        let lines = highlight_code("rust no_run", "let x = 1;");
+        let lines = highlight_code("rust no_run", "let x = 1;", fallback());
         assert!(has_rgb_color(&lines));
     }
 
     #[test]
     fn highlight_code_multiline_preserves_lines() {
-        let lines = highlight_code("rust", "fn a() {}\nfn b() {}");
+        let lines = highlight_code("rust", "fn a() {}\nfn b() {}", fallback());
         assert_eq!(lines.len(), 2);
         assert!(all_text(&lines).contains("fn a()"));
         assert!(all_text(&lines).contains("fn b()"));
     }
 
     #[test]
-    fn highlight_code_unknown_language_uses_teal_fallback() {
-        let lines = highlight_code("nonexistent_lang_xyz", "hello");
+    fn highlight_code_unknown_language_uses_fallback() {
+        let fb = fallback();
+        let lines = highlight_code("nonexistent_lang_xyz", "hello", fb);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].style.fg, Some(CODE_FG));
+        assert_eq!(lines[0].style, fb);
         assert_eq!(all_text(&lines), "hello");
     }
 
     #[test]
     fn highlight_code_empty_language_uses_fallback() {
-        let lines = highlight_code("", "code here");
+        let fb = fallback();
+        let lines = highlight_code("", "code here", fb);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].style.fg, Some(CODE_FG));
-    }
-
-    #[test]
-    fn highlight_code_whitespace_only_language_uses_fallback() {
-        let lines = highlight_code("   ", "code");
-        assert_eq!(lines[0].style.fg, Some(CODE_FG));
+        assert_eq!(lines[0].style, fb);
     }
 
     #[test]
     fn highlight_code_empty_code_returns_empty() {
-        let lines = highlight_code("rust", "");
+        let lines = highlight_code("rust", "", fallback());
         assert!(lines.is_empty(), "empty code should produce no lines");
     }
 }

@@ -366,7 +366,7 @@ impl ChatView {
             Span::styled("⟡ Assistant", self.theme.secondary()),
         ]));
 
-        let rendered = render_markdown(content);
+        let rendered = render_markdown(content, &self.theme);
         for line in rendered.lines {
             lines.push(indent_markdown_line(line));
         }
@@ -501,7 +501,7 @@ impl ChatView {
             let trailing = &tail[rel_boundary + 1..];
 
             if !new_committed.is_empty() {
-                let rendered = render_markdown(new_committed);
+                let rendered = render_markdown(new_committed, &self.theme);
                 for line in rendered.lines {
                     lines.push(indent_markdown_line(line));
                 }
@@ -533,7 +533,7 @@ impl ChatView {
 
         let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
         if !new_committed.is_empty() {
-            let rendered = render_markdown(new_committed);
+            let rendered = render_markdown(new_committed, &self.theme);
             for line in rendered.lines {
                 self.streaming_rendered.push(indent_markdown_line(line));
             }
