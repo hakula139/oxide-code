@@ -93,12 +93,15 @@ impl Component for InputArea {
             modifiers,
             ..
         }) = event
-            && !modifiers.contains(KeyModifiers::SHIFT)
         {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                self.textarea.insert_newline();
+                return None;
+            }
             return self.submit();
         }
 
-        // Delegate to textarea for all other input (including Shift+Enter).
+        // Delegate to textarea for all other input.
         self.textarea.input(event.clone());
         None
     }
