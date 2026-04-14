@@ -55,3 +55,79 @@ pub(super) fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn has_rgb_color(lines: &[Line<'_>]) -> bool {
+        lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| matches!(s.style.fg, Some(Color::Rgb(..))))
+        })
+    }
+
+    // ── highlight_code ──
+
+    #[test]
+    fn highlight_code_known_language_produces_rgb() {
+        let lines = highlight_code("rust", "fn main() {}");
+        assert!(has_rgb_color(&lines));
+        assert!(all_text(&lines).contains("fn"));
+    }
+
+    #[test]
+    fn highlight_code_info_string_with_extra_tokens() {
+        let lines = highlight_code("rust no_run", "let x = 1;");
+        assert!(has_rgb_color(&lines));
+    }
+
+    #[test]
+    fn highlight_code_unknown_language_uses_teal_fallback() {
+        let lines = highlight_code("nonexistent_lang_xyz", "hello");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].style.fg, Some(CODE_FG));
+        assert_eq!(all_text(&lines), "hello");
+    }
+
+    #[test]
+    fn highlight_code_empty_language_uses_fallback() {
+        let lines = highlight_code("", "code here");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].style.fg, Some(CODE_FG));
+    }
+
+    #[test]
+    fn highlight_code_whitespace_only_language_uses_fallback() {
+        let lines = highlight_code("   ", "code");
+        assert_eq!(lines[0].style.fg, Some(CODE_FG));
+    }
+
+    #[test]
+    fn highlight_code_multiline_preserves_lines() {
+        let lines = highlight_code("rust", "fn a() {}\nfn b() {}");
+        assert_eq!(lines.len(), 2);
+        assert!(all_text(&lines).contains("fn a()"));
+        assert!(all_text(&lines).contains("fn b()"));
+    }
+
+    #[test]
+    fn highlight_code_empty_code_returns_empty() {
+        let lines = highlight_code("rust", "");
+        assert!(lines.is_empty() || all_text(&lines).trim().is_empty());
+    }
+}
