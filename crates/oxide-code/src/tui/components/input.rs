@@ -94,7 +94,10 @@ impl Component for InputArea {
             ..
         }) = event
         {
-            if modifiers.contains(KeyModifiers::SHIFT) {
+            // Native Kitty protocol: terminal reports SHIFT directly.
+            // VS Code / Cursor keybinding: Shift+Enter sends \x1b\r (ESC CR),
+            // which crossterm parses as Alt+Enter.
+            if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
                 self.textarea.insert_newline();
                 return None;
             }
@@ -280,6 +283,21 @@ mod tests {
         )));
 
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines().len(), 2);
+    }
+
+    #[test]
+    fn handle_event_alt_enter_inserts_newline() {
+        // VS Code / Cursor keybinding sends \x1b\r for Shift+Enter,
+        // which crossterm parses as ALT+Enter.
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::ALT));
         assert!(action.is_none());
         assert_eq!(input.textarea.lines().len(), 2);
     }

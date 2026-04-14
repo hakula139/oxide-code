@@ -1,7 +1,10 @@
 use std::io::{self, Stdout, Write};
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -16,6 +19,8 @@ pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// - Enters raw mode (no line buffering, no echo).
 /// - Switches to the alternate screen buffer (preserves the user's scrollback).
 /// - Enables mouse capture for scroll and click events.
+/// - Pushes `DISAMBIGUATE_ESCAPE_CODES` (Kitty keyboard protocol) so
+///   Shift+Enter is distinguishable from Enter on supporting terminals.
 /// - Clears the screen.
 ///
 /// Returns a [`Terminal`] ready for rendering. The caller must ensure
@@ -27,6 +32,7 @@ pub(crate) fn init() -> Result<Tui> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         terminal::Clear(terminal::ClearType::All),
     )?;
 
@@ -47,6 +53,7 @@ pub(crate) fn restore() {
     _ = execute!(
         io::stdout(),
         DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::cursor::Show,
     );
