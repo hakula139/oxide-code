@@ -178,3 +178,166 @@ impl InputArea {
         Some(Action::SubmitPrompt(trimmed))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn test_input() -> InputArea {
+        InputArea::new(Theme::default())
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    // ── set_enabled ──
+
+    #[test]
+    fn set_enabled_toggles_state() {
+        let mut input = test_input();
+        assert!(input.is_enabled());
+
+        input.set_enabled(false);
+        assert!(!input.is_enabled());
+
+        input.set_enabled(true);
+        assert!(input.is_enabled());
+    }
+
+    #[test]
+    fn set_enabled_same_value_is_noop() {
+        let mut input = test_input();
+        input.set_enabled(true);
+        assert!(input.is_enabled());
+    }
+
+    // ── height ──
+
+    #[test]
+    fn height_empty_input_is_three() {
+        let input = test_input();
+        assert_eq!(input.height(), 3); // 1 content + 1 border + 1 hint
+    }
+
+    #[test]
+    fn height_grows_with_content() {
+        let mut input = test_input();
+        input.textarea.insert_newline();
+        input.textarea.insert_newline();
+        assert_eq!(input.height(), 5); // 3 content + 1 border + 1 hint
+    }
+
+    #[test]
+    fn height_capped_at_max() {
+        let mut input = test_input();
+        for _ in 0..10 {
+            input.textarea.insert_newline();
+        }
+        assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
+    }
+
+    // ── handle_event ──
+
+    #[test]
+    fn handle_event_ctrl_c_returns_quit() {
+        let mut input = test_input();
+        let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    #[test]
+    fn handle_event_ctrl_d_returns_quit() {
+        let mut input = test_input();
+        let action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    #[test]
+    fn handle_event_ctrl_c_quits_even_when_disabled() {
+        let mut input = test_input();
+        input.set_enabled(false);
+        let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    #[test]
+    fn handle_event_disabled_ignores_input() {
+        let mut input = test_input();
+        input.set_enabled(false);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn handle_event_shift_enter_inserts_newline() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines().len(), 2);
+    }
+
+    #[test]
+    fn handle_event_enter_submits_nonempty() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        )));
+
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SubmitPrompt(s)) if s == "hi"));
+    }
+
+    // ── submit ──
+
+    #[test]
+    fn submit_empty_returns_none() {
+        let mut input = test_input();
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn submit_clears_textarea() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+
+        input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(input.textarea.lines(), vec![""]);
+    }
+
+    #[test]
+    fn submit_trims_whitespace() {
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SubmitPrompt(s)) if s == "a"));
+    }
+}
