@@ -232,31 +232,21 @@ where
         let depth = self.list_stack.len();
         let indent_width = depth * 4 - 3;
 
-        let marker_spans = if let Some(last) = self.list_stack.last_mut() {
+        let marker = if let Some(last) = self.list_stack.last_mut() {
             match last {
-                None => {
-                    let marker =
-                        " ".repeat(indent_width.saturating_sub(1)) + "- ";
-                    vec![Span::styled(marker, LIST_MARKER_STYLE)]
-                }
+                None => " ".repeat(indent_width.saturating_sub(1)) + "- ",
                 Some(index) => {
-                    let marker = format!("{:indent_width$}. ", *index);
+                    let m = format!("{:indent_width$}. ", *index);
                     *index += 1;
-                    vec![Span::styled(marker, LIST_MARKER_STYLE)]
+                    m
                 }
             }
         } else {
-            vec![Span::styled("- ", LIST_MARKER_STYLE)]
+            "- ".to_owned()
         };
 
-        let continuation_width = if self.list_stack.last().is_some_and(Option::is_some) {
-            indent_width + 2
-        } else {
-            indent_width + 1
-        };
-        let continuation = vec![Span::raw(" ".repeat(continuation_width))];
-
-        self.pending_marker = Some(marker_spans);
+        let continuation = vec![Span::raw(" ".repeat(marker.len()))];
+        self.pending_marker = Some(vec![Span::styled(marker, LIST_MARKER_STYLE)]);
         self.indent_stack.push(continuation);
         self.needs_newline = false;
     }
