@@ -281,14 +281,7 @@ where
         let code = std::mem::take(&mut self.code_buf);
         let lang = self.code_lang.take();
 
-        let highlighted = if let Some(ref lang) = lang {
-            highlight_code(lang, &code)
-        } else {
-            code.lines()
-                .map(|l| Line::styled(l.to_owned(), Style::new().fg(CODE_FG)))
-                .collect()
-        };
-
+        let highlighted = highlight_code(lang.as_deref().unwrap_or(""), &code);
         for line in highlighted {
             self.lines.push(line);
         }
