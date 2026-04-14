@@ -3,20 +3,26 @@ use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::debug;
+use uuid::Uuid;
 
 use super::billing;
 use crate::config::{Auth, Config, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 
 const API_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
-const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
+const CONTEXT_MANAGEMENT_BETA_HEADER: &str = "context-management-2025-06-27";
+const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
+const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
 
-/// Matches the referenced Claude Code version.
-const CLAUDE_CLI_VERSION: &str = "2.1.87";
+/// Matches the installed Claude Code version.
+const CLAUDE_CLI_VERSION: &str = "2.1.101";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
 /// models with OAuth tokens unless the system prompt starts with this exact
@@ -29,17 +35,28 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 struct CreateMessageRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    stream: bool,
+    metadata: RequestMetadata,
     /// Serialized before `messages` so the billing header's `cch=00000`
     /// placeholder appears first in the JSON, making [`billing::inject_cch`]'s
     /// single-occurrence replacement safe even when tool results contain the
     /// literal placeholder string.
     system: Vec<SystemBlock<'a>>,
-    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
     messages: &'a [Message],
+}
+
+/// Request metadata matching Claude Code's `getAPIMetadata()` format.
+///
+/// `user_id` is a stringified JSON object containing `session_id` (and
+/// optionally `device_id` / `account_uuid`). The API receives it as a
+/// flat string, not a nested object.
+#[derive(Serialize)]
+struct RequestMetadata {
+    user_id: String,
 }
 
 /// A text block in the system prompt array. The Anthropic API accepts `system`
@@ -50,13 +67,28 @@ struct CreateMessageRequest<'a> {
 struct SystemBlock<'a> {
     r#type: &'static str,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+/// Prompt caching control. The `scope` field determines the cache sharing
+/// level: `"global"` for static content identical across sessions, `"org"`
+/// for organization-scoped content.
+#[derive(Serialize)]
+struct CacheControl {
+    r#type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'static str>,
 }
 
 // ── SSE response types ──
 
-#[expect(
-    dead_code,
-    reason = "fields are populated by serde and used in downstream matching"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "fields are populated by serde and used in downstream matching"
+    )
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -157,9 +189,12 @@ pub enum Delta {
     Unknown,
 }
 
-#[expect(
-    dead_code,
-    reason = "fields populated by serde, defined for full SSE protocol coverage"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "fields populated by serde, defined for full SSE protocol coverage"
+    )
 )]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageDeltaBody {
@@ -194,16 +229,21 @@ pub struct ApiError {
 pub struct Client {
     http: reqwest::Client,
     config: Config,
+    session_id: String,
 }
 
 impl Client {
     pub fn new(config: Config) -> Result<Self> {
+        let session_id = Uuid::new_v4().to_string();
         let mut headers = HeaderMap::new();
 
         let mut betas = vec![
             CLAUDE_CODE_BETA_HEADER,
-            INTERLEAVED_THINKING_BETA_HEADER,
             CONTEXT_1M_BETA_HEADER,
+            CONTEXT_MANAGEMENT_BETA_HEADER,
+            EFFORT_BETA_HEADER,
+            INTERLEAVED_THINKING_BETA_HEADER,
+            PROMPT_CACHING_SCOPE_BETA_HEADER,
         ];
 
         match &config.auth {
@@ -221,19 +261,42 @@ impl Client {
 
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            HeaderValue::from_static("true"),
+        );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
             HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
         );
         headers.insert("x-app", HeaderValue::from_static("cli"));
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_str(&session_id)?,
+        );
+        // Stainless SDK headers — the Anthropic TypeScript SDK adds these
+        // automatically. Third-party gateways may check for their presence.
+        headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+        headers.insert(
+            "x-stainless-os",
+            HeaderValue::from_static(normalize_platform(std::env::consts::OS)),
+        );
+        headers.insert(
+            "x-stainless-arch",
+            HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
+        );
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            session_id,
+        })
     }
 
     /// Returns the model name for use in the system prompt.
@@ -243,16 +306,36 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
+    /// `system_sections` are the static system prompt sections (one text
+    /// block per section, matching Claude Code's multi-block layout).
+    ///
+    /// `user_context` is a `<system-reminder>`-wrapped string that gets
+    /// prepended to the messages array as a synthetic user message,
+    /// matching Claude Code's `prependUserContext()` pattern. This keeps
+    /// dynamic content (CLAUDE.md) out of the `system` parameter.
+    ///
     /// Returns a channel receiver yielding [`StreamEvent`]s. The caller
     /// should recv events as they arrive for real-time output.
     pub fn stream_message(
         &self,
         messages: &[Message],
-        system: Option<&str>,
+        system_sections: &[&str],
+        user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+        // Prepend user context as a synthetic user message (messages[0]).
+        let messages_with_context: Vec<Message>;
+        let effective_messages: &[Message] = if let Some(ctx) = user_context {
+            messages_with_context = std::iter::once(Message::user(ctx))
+                .chain(messages.iter().cloned())
+                .collect();
+            &messages_with_context
+        } else {
+            messages
+        };
+
         let billing_header = if matches!(self.config.auth, Auth::OAuth(_)) {
-            let first_text = first_user_text(messages);
+            let first_text = first_user_text(effective_messages);
             let fingerprint = billing::compute_fingerprint(first_text, CLAUDE_CLI_VERSION);
             Some(billing::build_billing_header(
                 CLAUDE_CLI_VERSION,
@@ -262,39 +345,65 @@ impl Client {
             None
         };
 
+        // Build system blocks matching Claude Code's `splitSysPromptPrefix`:
+        //   1. Billing header (no cache_control)
+        //   2. Identity prefix (no cache_control)
+        //   3. Static sections joined (cache_control: ephemeral, scope: global)
+        //   4. Dynamic sections joined (no cache_control)
+        // The boundary marker is filtered out before sending to the API.
+        let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
+        let static_joined = static_sections.join("\n\n");
+        let dynamic_joined = dynamic_sections.join("\n\n");
+
         let mut system_blocks = Vec::new();
         if let Some(ref header) = billing_header {
             system_blocks.push(SystemBlock {
                 r#type: "text",
                 text: header,
+                cache_control: None,
             });
         }
         system_blocks.push(SystemBlock {
             r#type: "text",
             text: SYSTEM_PROMPT_PREFIX,
+            cache_control: None,
         });
-        if let Some(s) = system {
+        if !static_joined.is_empty() {
             system_blocks.push(SystemBlock {
                 r#type: "text",
-                text: s,
+                text: &static_joined,
+                cache_control: Some(CacheControl {
+                    r#type: "ephemeral",
+                    scope: Some("global"),
+                }),
+            });
+        }
+        if !dynamic_joined.is_empty() {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: &dynamic_joined,
+                cache_control: None,
             });
         }
 
-        let url = format!("{}/v1/messages", self.config.base_url);
+        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             model: &self.config.model,
             max_tokens: self.config.max_tokens,
-            system: system_blocks,
             stream: true,
+            metadata: self.build_metadata(),
+            system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
-            messages,
+            messages: effective_messages,
         })
         .context("failed to serialize request")?;
 
         if billing_header.is_some() {
             body = billing::inject_cch(&body);
         }
+
+        debug!(body_len = body.len(), "sending API request");
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
@@ -307,6 +416,66 @@ impl Client {
         });
 
         Ok(rx)
+    }
+
+    /// Build the `metadata.user_id` field as a stringified JSON object.
+    fn build_metadata(&self) -> RequestMetadata {
+        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
+        RequestMetadata { user_id }
+    }
+}
+
+/// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
+fn normalize_platform(os: &str) -> &'static str {
+    match os {
+        "macos" => "MacOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        "openbsd" => "OpenBSD",
+        "ios" => "iOS",
+        "android" => "Android",
+        _ => "Unknown",
+    }
+}
+
+/// Map `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
+fn normalize_arch(arch: &str) -> &'static str {
+    match arch {
+        "x86" => "x32",
+        "x86_64" => "x64",
+        "arm" => "arm",
+        "aarch64" => "arm64",
+        _ => "unknown",
+    }
+}
+
+/// Split system sections at the boundary marker into static and dynamic parts.
+///
+/// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
+/// is excluded from both. Sections before the boundary are static (globally
+/// cacheable); sections after are dynamic (per-session).
+fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let boundary_pos = sections
+        .iter()
+        .position(|&s| s == SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+
+    if let Some(pos) = boundary_pos {
+        let static_part = sections[..pos]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect();
+        let dynamic_part = sections[pos + 1..]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect();
+        (static_part, dynamic_part)
+    } else {
+        // No boundary — treat everything as static.
+        let all = sections.iter().filter(|s| !s.is_empty()).copied().collect();
+        (all, Vec::new())
     }
 }
 
@@ -394,31 +563,75 @@ mod tests {
 
     use super::*;
 
-    // ── ContentBlockInfo ──
+    // ── StreamEvent ──
 
     #[test]
-    fn content_block_info_thinking() {
-        let json = r#"{"type":"thinking","thinking":"","signature":""}"#;
-        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        let ContentBlockInfo::Thinking {
-            thinking,
-            signature,
-        } = info
+    fn stream_event_content_block_start_text() {
+        let json =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        let StreamEvent::ContentBlockStart {
+            index,
+            content_block,
+        } = event
         else {
-            panic!("expected Thinking");
+            panic!("expected ContentBlockStart");
         };
-        assert_eq!(thinking, "");
-        assert_eq!(signature, "");
+        assert_eq!(index, 0);
+        assert!(matches!(content_block, ContentBlockInfo::Text { text } if text.is_empty()));
     }
 
     #[test]
-    fn content_block_info_redacted_thinking() {
-        let json = r#"{"type":"redacted_thinking","data":"base64data=="}"#;
-        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        let ContentBlockInfo::RedactedThinking { data } = info else {
-            panic!("expected RedactedThinking");
+    fn stream_event_content_block_stop() {
+        let json = r#"{"type":"content_block_stop","index":2}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        let StreamEvent::ContentBlockStop { index } = event else {
+            panic!("expected ContentBlockStop");
         };
-        assert_eq!(data, "base64data==");
+        assert_eq!(index, 2);
+    }
+
+    #[test]
+    fn stream_event_message_delta_with_usage() {
+        let json = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        let StreamEvent::MessageDelta { delta, usage } = event else {
+            panic!("expected MessageDelta");
+        };
+        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
+        let usage = usage.expect("expected usage");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 42);
+    }
+
+    #[test]
+    fn stream_event_message_stop() {
+        let json = r#"{"type":"message_stop"}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, StreamEvent::MessageStop));
+    }
+
+    // ── ContentBlockInfo ──
+
+    #[test]
+    fn content_block_info_text() {
+        let json = r#"{"type":"text","text":"Hello world"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::Text { text } = info else {
+            panic!("expected Text");
+        };
+        assert_eq!(text, "Hello world");
+    }
+
+    #[test]
+    fn content_block_info_tool_use() {
+        let json = r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::ToolUse { id, name } = info else {
+            panic!("expected ToolUse");
+        };
+        assert_eq!(id, "toolu_01");
+        assert_eq!(name, "bash");
     }
 
     #[test]
@@ -433,6 +646,31 @@ mod tests {
     }
 
     #[test]
+    fn content_block_info_thinking() {
+        let json = r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::Thinking {
+            thinking,
+            signature,
+        } = info
+        else {
+            panic!("expected Thinking");
+        };
+        assert_eq!(thinking, "Let me analyze this");
+        assert_eq!(signature, "sig_xyz");
+    }
+
+    #[test]
+    fn content_block_info_redacted_thinking() {
+        let json = r#"{"type":"redacted_thinking","data":"base64data=="}"#;
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        let ContentBlockInfo::RedactedThinking { data } = info else {
+            panic!("expected RedactedThinking");
+        };
+        assert_eq!(data, "base64data==");
+    }
+
+    #[test]
     fn content_block_info_unknown_type() {
         let json = r#"{"type":"some_future_block","data":"opaque"}"#;
         let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
@@ -440,6 +678,26 @@ mod tests {
     }
 
     // ── Delta ──
+
+    #[test]
+    fn delta_text() {
+        let json = r#"{"type":"text_delta","text":"Hello"}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        let Delta::TextDelta { text } = delta else {
+            panic!("expected TextDelta");
+        };
+        assert_eq!(text, "Hello");
+    }
+
+    #[test]
+    fn delta_input_json() {
+        let json = r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        let Delta::InputJsonDelta { partial_json } = delta else {
+            panic!("expected InputJsonDelta");
+        };
+        assert_eq!(partial_json, r#"{"key":"#);
+    }
 
     #[test]
     fn delta_thinking() {
@@ -466,6 +724,81 @@ mod tests {
         let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
         let delta: Delta = serde_json::from_str(json).unwrap();
         assert!(matches!(delta, Delta::Unknown));
+    }
+
+    // ── normalize_platform ──
+
+    #[test]
+    fn normalize_platform_known_values() {
+        assert_eq!(normalize_platform("macos"), "MacOS");
+        assert_eq!(normalize_platform("linux"), "Linux");
+        assert_eq!(normalize_platform("windows"), "Windows");
+        assert_eq!(normalize_platform("freebsd"), "FreeBSD");
+        assert_eq!(normalize_platform("openbsd"), "OpenBSD");
+        assert_eq!(normalize_platform("ios"), "iOS");
+        assert_eq!(normalize_platform("android"), "Android");
+    }
+
+    #[test]
+    fn normalize_platform_unknown_value() {
+        assert_eq!(normalize_platform("haiku"), "Unknown");
+    }
+
+    // ── normalize_arch ──
+
+    #[test]
+    fn normalize_arch_known_values() {
+        assert_eq!(normalize_arch("x86"), "x32");
+        assert_eq!(normalize_arch("x86_64"), "x64");
+        assert_eq!(normalize_arch("arm"), "arm");
+        assert_eq!(normalize_arch("aarch64"), "arm64");
+    }
+
+    #[test]
+    fn normalize_arch_unknown_value() {
+        assert_eq!(normalize_arch("riscv64gc"), "unknown");
+    }
+
+    // ── split_at_boundary ──
+
+    #[test]
+    fn split_at_boundary_separates_static_and_dynamic() {
+        let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks"]);
+        assert_eq!(dynamic, vec!["env"]);
+    }
+
+    #[test]
+    fn split_at_boundary_without_marker_treats_all_as_static() {
+        let sections = &["intro", "tasks", "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks", "env"]);
+        assert!(dynamic.is_empty());
+    }
+
+    #[test]
+    fn split_at_boundary_filters_empty_sections() {
+        let sections = &["intro", "", SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "", "env"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro"]);
+        assert_eq!(dynamic, vec!["env"]);
+    }
+
+    #[test]
+    fn split_at_boundary_at_start_yields_empty_static() {
+        let sections = &[SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "env", "lang"];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert!(statics.is_empty());
+        assert_eq!(dynamic, vec!["env", "lang"]);
+    }
+
+    #[test]
+    fn split_at_boundary_at_end_yields_empty_dynamic() {
+        let sections = &["intro", "tasks", SYSTEM_PROMPT_DYNAMIC_BOUNDARY];
+        let (statics, dynamic) = split_at_boundary(sections);
+        assert_eq!(statics, vec!["intro", "tasks"]);
+        assert!(dynamic.is_empty());
     }
 
     // ── first_user_text ──

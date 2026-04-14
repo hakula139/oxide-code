@@ -24,6 +24,7 @@ futures = "0.3"
 globset = "0.4"
 ignore = "0.4"
 indoc = "2"
+platform-info = "2"
 ratatui = "0.30"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -54,6 +55,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }
+uuid = { version = "1", features = ["v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [profile.release]

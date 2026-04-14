@@ -20,6 +20,8 @@ dirs.workspace = true
 futures.workspace = true
 globset.workspace = true
 ignore.workspace = true
+indoc.workspace = true
+platform-info.workspace = true
 ratatui.workspace = true
 regex.workspace = true
 reqwest.workspace = true
@@ -31,11 +33,11 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true
 
 [dev-dependencies]
-indoc.workspace = true
 tempfile.workspace = true

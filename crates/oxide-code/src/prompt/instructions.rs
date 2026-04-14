@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use indoc::indoc;
 use tokio::fs;
 
 /// Instruction filenames to check at each project location, in priority order.
@@ -144,11 +145,12 @@ async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
 fn render(files: &[MemoryFile]) -> String {
     use std::fmt::Write;
 
-    let mut out = String::from(
-        "# User instructions\n\n\
-         Codebase and user instructions are shown below. \
-         Be sure to adhere to these instructions.",
-    );
+    let mut out = String::from(indoc! {"
+        # User instructions
+
+        Codebase and user instructions are shown below.
+        Be sure to adhere to these instructions."
+    });
 
     for file in files {
         _ = write!(

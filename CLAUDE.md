@@ -33,10 +33,11 @@ ox     # Start an interactive session
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
 ├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
 ├── message.rs                  # Conversation message types
-├── prompt.rs                   # System prompt builder (section assembly, static content)
+├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs          # Runtime environment detection (platform, git, date)
-│   └── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
+│   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
+│   └── sections.rs             # Static prompt section constants (intro, guidance, style)
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout
@@ -106,6 +107,7 @@ ox     # Start an interactive session
 ### String Literals
 
 - Prefer raw strings (`r"..."`) when the string contains characters that would need escaping. Always use the minimum delimiter level needed (`r"..."` → `r#"..."#` → `r##"..."##`).
+- Use `indoc!` / `formatdoc!` for multiline string content so the literal can be indented with surrounding code. Inline at the call site when the string is used once; use a named constant only when it is shared or very large. Avoid `\n` escapes and `\x20` workarounds for multiline content.
 
 ### Enum String Mappings
 

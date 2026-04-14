@@ -155,7 +155,7 @@ async fn read_file(
         let last_shown = offset + num_shown - 1;
         _ = write!(
             output,
-            "\n\n(Showing lines {offset}\u{2013}{last_shown} of {total_lines} total)"
+            "\n\n(Showing lines {offset}–{last_shown} of {total_lines} total)"
         );
     }
 
@@ -218,10 +218,7 @@ mod tests {
         let result = read_file(path.to_str().unwrap(), Some(2), Some(2))
             .await
             .unwrap();
-        assert_eq!(
-            result,
-            "2\tb\n3\tc\n\n(Showing lines 2\u{2013}3 of 5 total)"
-        );
+        assert_eq!(result, "2\tb\n3\tc\n\n(Showing lines 2–3 of 5 total)");
     }
 
     #[tokio::test]
