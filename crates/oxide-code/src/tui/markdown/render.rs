@@ -235,7 +235,9 @@ where
         let marker_spans = if let Some(last) = self.list_stack.last_mut() {
             match last {
                 None => {
-                    vec![Span::raw(" ".repeat(indent_width.saturating_sub(1)) + "- ")]
+                    let marker =
+                        " ".repeat(indent_width.saturating_sub(1)) + "- ";
+                    vec![Span::styled(marker, LIST_MARKER_STYLE)]
                 }
                 Some(index) => {
                     let marker = format!("{:indent_width$}. ", *index);
@@ -244,7 +246,7 @@ where
                 }
             }
         } else {
-            vec![Span::raw("- ")]
+            vec![Span::styled("- ", LIST_MARKER_STYLE)]
         };
 
         let continuation_width = if self.list_stack.last().is_some_and(Option::is_some) {
