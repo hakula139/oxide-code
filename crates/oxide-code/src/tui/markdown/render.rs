@@ -1097,6 +1097,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn table_mismatched_column_counts() {
+        let lines = rendered_text(indoc! {"
+            | A | B | C |
+            |---|---|---|
+            | 1 | 2 |
+        "});
+        // Short row should be padded to 3 columns.
+        let body_row = lines
+            .iter()
+            .find(|l| l.contains('1') && l.contains('2'))
+            .expect("body row not found");
+        let pipe_count = body_row.matches('│').count();
+        assert_eq!(
+            pipe_count, 4,
+            "short row should still have 4 borders (3 columns): {body_row:?}"
+        );
+    }
+
+    #[test]
+    fn table_header_only() {
+        let lines = rendered_text(indoc! {"
+            | A | B |
+            |---|---|
+        "});
+        // Should render top border, header row, bottom border (no separator
+        // since there are no body rows).
+        assert!(
+            lines.iter().any(|l| l.contains('┌')),
+            "top border missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains('A') && l.contains('B')),
+            "header row missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains('└')),
+            "bottom border missing: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains('├')),
+            "separator should not appear with no body rows: {lines:?}"
+        );
+    }
+
     // ── Inline Content ──
 
     #[test]
