@@ -39,14 +39,17 @@ const MAX_TOOL_OUTPUT_LINES: usize = 5;
 /// Maximum characters per tool output line before horizontal truncation.
 const MAX_TOOL_OUTPUT_LINE_CHARS: usize = 512;
 
-/// Indent prefix prepended to every markdown line in assistant messages.
-const CHAT_INDENT: &str = "    ";
-
-/// Left bar character for bordered content (user, tool, thinking).
+/// Left bar character for bordered content.
 const BAR: &str = "▎";
 
-/// Border prefix for user messages, tool calls, and thinking blocks.
+/// Border prefix for continuation lines and non-first content lines.
 const BORDER_PREFIX: &str = "  ▎ ";
+
+/// Icon prefix for the first line of user messages.
+const USER_PREFIX: &str = "❯ ▎ ";
+
+/// Icon prefix for the first line of assistant messages.
+const ASSISTANT_PREFIX: &str = "⟡ ▎ ";
 
 /// Border prefix for tool result status lines (indicator + label).
 const TOOL_RESULT_PREFIX: &str = "  ▎   ";
@@ -363,10 +366,11 @@ impl ChatView {
         content: &'a str,
         width: usize,
     ) {
-        push_section_header(lines, "❯ You", self.theme.accent());
+        push_section_gap(lines);
         push_bordered_lines(
             lines,
             content.trim(),
+            USER_PREFIX,
             self.theme.accent(),
             self.theme.text(),
             width,
@@ -381,14 +385,22 @@ impl ChatView {
         content: &'a str,
         width: usize,
     ) {
-        push_section_header(lines, "⟡ Assistant", self.theme.secondary());
+        push_section_gap(lines);
 
-        // The markdown renderer wraps to (width - 4) so the 4-space
-        // chat indent doesn't push content past the terminal edge.
-        let md_width = width.saturating_sub(CHAT_INDENT.len());
+        // The markdown renderer wraps to (width - 4) so the 4-char
+        // border prefix doesn't push content past the terminal edge.
+        let bar_style = self.theme.secondary();
+        let md_width = width.saturating_sub(BORDER_PREFIX.len());
         let rendered = render_markdown(content, &self.theme, md_width);
+        let mut first = true;
         for line in rendered.lines {
-            lines.push(indent_markdown_line(line));
+            let prefix = if first {
+                ASSISTANT_PREFIX
+            } else {
+                BORDER_PREFIX
+            };
+            first = false;
+            lines.push(border_markdown_line(line, prefix, bar_style));
         }
     }
 
@@ -485,6 +497,7 @@ impl ChatView {
         push_bordered_lines(
             lines,
             &self.thinking_buffer,
+            BORDER_PREFIX,
             self.theme.dim(),
             self.theme.thinking(),
             width,
@@ -494,20 +507,20 @@ impl ChatView {
     // ── Streaming ──
 
     fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
-        if !lines.is_empty()
-            && !self
-                .entries
-                .last()
-                .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)))
-        {
+        let bar_style = self.theme.secondary();
+
+        // Show icon + separator only when this is a new assistant turn
+        // (not a continuation of a committed assistant entry).
+        let is_new_turn = !self
+            .entries
+            .last()
+            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
+        if is_new_turn && !lines.is_empty() {
             lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("⟡ Assistant", self.theme.secondary()),
-            ]));
         }
 
         // Emit cached lines from the stable prefix (already rendered).
+        // The first cached line already carries the icon from advance_streaming_cache.
         for line in &self.streaming_rendered {
             lines.push(line.clone());
         }
@@ -515,7 +528,11 @@ impl ChatView {
         // Render only the new chunk beyond the cached boundary.
         let buf = &self.streaming_buffer;
         let tail = &buf[self.streaming_rendered_boundary..];
-        let md_width = width.saturating_sub(CHAT_INDENT.len());
+        let md_width = width.saturating_sub(BORDER_PREFIX.len());
+
+        // Determine whether the next rendered line is the very first
+        // line of this assistant turn (needs icon prefix).
+        let needs_icon = is_new_turn && self.streaming_rendered.is_empty();
 
         if let Some(rel_boundary) = tail.rfind('\n') {
             let new_committed = &tail[..rel_boundary];
@@ -523,22 +540,41 @@ impl ChatView {
 
             if !new_committed.is_empty() {
                 let rendered = render_markdown(new_committed, &self.theme, md_width);
+                let mut first = needs_icon;
                 for line in rendered.lines {
-                    lines.push(indent_markdown_line(line));
+                    let prefix = if first {
+                        ASSISTANT_PREFIX
+                    } else {
+                        BORDER_PREFIX
+                    };
+                    first = false;
+                    lines.push(border_markdown_line(line, prefix, bar_style));
                 }
             }
 
             if !trailing.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::raw(CHAT_INDENT),
-                    Span::styled(trailing.to_owned(), self.theme.text()),
-                ]));
+                let prefix = if needs_icon && new_committed.is_empty() {
+                    ASSISTANT_PREFIX
+                } else {
+                    BORDER_PREFIX
+                };
+                lines.push(border_markdown_line(
+                    Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
+                    prefix,
+                    bar_style,
+                ));
             }
         } else if !tail.is_empty() {
-            lines.push(Line::from(vec![
-                Span::raw(CHAT_INDENT),
-                Span::styled(tail.to_owned(), self.theme.text()),
-            ]));
+            let prefix = if needs_icon {
+                ASSISTANT_PREFIX
+            } else {
+                BORDER_PREFIX
+            };
+            lines.push(border_markdown_line(
+                Line::from(Span::styled(tail.to_owned(), self.theme.text())),
+                prefix,
+                bar_style,
+            ));
         }
     }
 
@@ -554,10 +590,26 @@ impl ChatView {
 
         let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
         if !new_committed.is_empty() {
-            let md_width = usize::from(self.viewport_width).saturating_sub(CHAT_INDENT.len());
+            let bar_style = self.theme.secondary();
+            let md_width = usize::from(self.viewport_width).saturating_sub(BORDER_PREFIX.len());
             let rendered = render_markdown(new_committed, &self.theme, md_width);
+
+            // The first cached line of a new assistant turn gets the icon prefix.
+            let is_new_turn = !self
+                .entries
+                .last()
+                .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
+            let mut first = is_new_turn && self.streaming_rendered.is_empty();
+
             for line in rendered.lines {
-                self.streaming_rendered.push(indent_markdown_line(line));
+                let prefix = if first {
+                    ASSISTANT_PREFIX
+                } else {
+                    BORDER_PREFIX
+                };
+                first = false;
+                self.streaming_rendered
+                    .push(border_markdown_line(line, prefix, bar_style));
             }
         }
 
@@ -567,31 +619,44 @@ impl ChatView {
 
 // ── Free Helpers ──
 
-/// Push a blank separator (when lines exist) and a styled section label.
-fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
+/// Push a blank line separator when `lines` is non-empty.
+fn push_section_gap(lines: &mut Vec<Line<'_>>) {
     if !lines.is_empty() {
         lines.push(Line::raw(""));
     }
+}
+
+/// Push a blank separator (when lines exist) and a styled section label.
+fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
+    push_section_gap(lines);
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(label, style),
     ]));
 }
 
-/// Emit bordered lines: each content line gets [`BORDER_PREFIX`] with the
-/// given `bar_style`, then text in `text_style`, wrapped with a styled
-/// continuation prefix that preserves the `▎` bar on continuation lines.
+/// Emit bordered lines: the first content line uses `first_prefix` (with
+/// an icon like `"❯ ▎ "`), subsequent lines use [`BORDER_PREFIX`]. All
+/// lines are wrapped with a styled continuation prefix preserving the bar.
 fn push_bordered_lines(
     lines: &mut Vec<Line<'_>>,
     content: &str,
+    first_prefix: &str,
     bar_style: Style,
     text_style: Style,
     width: usize,
 ) {
     let cont_prefix = border_continuation_prefix(BORDER_PREFIX, bar_style);
+    let mut is_first = true;
     for text_line in content.lines() {
+        let prefix = if is_first {
+            first_prefix
+        } else {
+            BORDER_PREFIX
+        };
+        is_first = false;
         let line = Line::from(vec![
-            Span::styled(BORDER_PREFIX, bar_style),
+            Span::styled(prefix.to_owned(), bar_style),
             Span::styled(text_line.to_owned(), text_style),
         ]);
         for wrapped in wrap_line_styled(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
@@ -618,6 +683,13 @@ fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'stati
     }
 }
 
+/// Prepend a styled border prefix to a markdown-rendered line.
+fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> Line<'static> {
+    let mut spans = vec![Span::styled(prefix.to_owned(), bar_style)];
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
 /// Truncate a string to `max_chars` characters, appending `...` if cut.
 fn truncate_line(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
@@ -626,13 +698,6 @@ fn truncate_line(s: &str, max_chars: usize) -> String {
     // Find a char boundary at or before max_chars.
     let boundary = s.floor_char_boundary(max_chars);
     format!("{}...", &s[..boundary])
-}
-
-/// Prepend [`CHAT_INDENT`] to a markdown-rendered line.
-fn indent_markdown_line(line: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw(CHAT_INDENT)];
-    spans.extend(line.spans);
-    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -972,7 +1037,8 @@ mod tests {
         assert!(text.contains("The answer is 4."));
         assert!(text.contains("python -c 'print(2+2)'"));
         assert!(text.contains("You're welcome"));
-        assert_eq!(text.matches("❯ You").count(), 2);
+        // Two user messages → two user icon prefixes.
+        assert_eq!(text.matches('❯').count(), 2);
     }
 
     // ── push_welcome ──
@@ -992,11 +1058,11 @@ mod tests {
     // ── push_user_message_lines ──
 
     #[test]
-    fn push_user_message_lines_has_label_and_content() {
+    fn push_user_message_lines_has_icon_and_content() {
         let mut chat = test_chat();
         chat.push_user_message("hello world".to_owned());
         let text = all_text(&chat);
-        assert!(text.contains("❯ You"));
+        assert!(text.contains('❯'));
         assert!(text.contains("hello world"));
     }
 
@@ -1021,12 +1087,12 @@ mod tests {
     // ── push_assistant_message_lines ──
 
     #[test]
-    fn push_assistant_message_lines_has_label() {
+    fn push_assistant_message_lines_has_icon_and_content() {
         let mut chat = test_chat();
         chat.entries
             .push(ChatEntry::Assistant("response".to_owned()));
         let text = all_text(&chat);
-        assert!(text.contains("⟡ Assistant"));
+        assert!(text.contains('⟡'));
         assert!(text.contains("response"));
     }
 
@@ -1184,7 +1250,7 @@ mod tests {
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("partial response");
         let text = all_text(&chat);
-        assert!(text.contains("⟡ Assistant"));
+        assert!(text.contains('⟡'), "should show assistant icon");
         assert!(text.contains("partial response"));
     }
 
@@ -1212,25 +1278,25 @@ mod tests {
     }
 
     #[test]
-    fn push_streaming_lines_without_prior_assistant_shows_header() {
+    fn push_streaming_lines_without_prior_assistant_shows_icon() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.streaming_buffer = "response".to_owned();
 
         let text = all_text(&chat);
-        assert!(text.contains("⟡ Assistant"));
+        assert!(text.contains('⟡'), "new turn should show assistant icon");
     }
 
     #[test]
-    fn push_streaming_lines_after_assistant_omits_duplicate_header() {
+    fn push_streaming_lines_after_assistant_omits_duplicate_icon() {
         let mut chat = test_chat();
         chat.entries
             .push(ChatEntry::Assistant("committed".to_owned()));
         chat.streaming_buffer = "streaming".to_owned();
 
         let text = all_text(&chat);
-        let count = text.matches("⟡ Assistant").count();
-        assert_eq!(count, 1, "header should appear once, not duplicated");
+        let count = text.matches('⟡').count();
+        assert_eq!(count, 1, "icon should appear once, not duplicated");
     }
 
     #[test]
