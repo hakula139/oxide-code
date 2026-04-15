@@ -1,6 +1,6 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Wrap a line to fit within `max_width`, preserving visual indentation
 /// on continuation lines.
@@ -54,15 +54,7 @@ pub(crate) fn wrap_line(
 
 /// Measure the display width of a line's spans.
 fn line_width(line: &Line<'_>) -> usize {
-    line.spans
-        .iter()
-        .map(|s| {
-            s.content
-                .chars()
-                .map(|c| c.width().unwrap_or(0))
-                .sum::<usize>()
-        })
-        .sum()
+    line.spans.iter().map(|s| s.content.width()).sum()
 }
 
 // ── Word Wrap Algorithm ──
