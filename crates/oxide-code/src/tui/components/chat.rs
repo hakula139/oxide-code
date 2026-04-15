@@ -280,24 +280,24 @@ impl ChatView {
     }
 
     fn build_text(&self, width: u16) -> Text<'_> {
-        let w = usize::from(width);
+        let width = usize::from(width);
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         if self.entries.is_empty()
             && self.streaming_buffer.is_empty()
             && self.thinking_buffer.is_empty()
         {
-            self.push_welcome(&mut lines, w);
+            self.push_welcome(&mut lines, width);
             return Text::from(lines);
         }
 
         for entry in &self.entries {
             match entry {
                 ChatEntry::User(content) => {
-                    self.push_user_message_lines(&mut lines, content, w);
+                    self.push_user_message_lines(&mut lines, content, width);
                 }
                 ChatEntry::Assistant(content) => {
-                    self.push_assistant_message_lines(&mut lines, content, w);
+                    self.push_assistant_message_lines(&mut lines, content, width);
                 }
                 ChatEntry::ToolCall { icon, label } => {
                     self.push_tool_call_line(&mut lines, icon, label);
@@ -308,7 +308,7 @@ impl ChatView {
                     is_error,
                 } => {
                     self.push_tool_result_line(&mut lines, label, *is_error);
-                    self.push_tool_output_lines(&mut lines, content, *is_error, w);
+                    self.push_tool_output_lines(&mut lines, content, *is_error, width);
                 }
                 ChatEntry::Error(msg) => {
                     self.push_tool_result_line(&mut lines, msg, true);
@@ -318,12 +318,12 @@ impl ChatView {
 
         // Thinking buffer (ephemeral — not stored in history).
         if self.show_thinking && !self.thinking_buffer.is_empty() {
-            self.push_thinking_lines(&mut lines, w);
+            self.push_thinking_lines(&mut lines, width);
         }
 
         // Streaming buffer (not yet committed).
         if !self.streaming_buffer.is_empty() {
-            self.push_streaming_lines(&mut lines, w);
+            self.push_streaming_lines(&mut lines, width);
         }
 
         Text::from(lines)
@@ -558,7 +558,7 @@ impl ChatView {
     }
 }
 
-// ── Markdown Indent ──
+// ── Free Helpers ──
 
 /// Push a blank separator (when lines exist) and a styled section label.
 fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
@@ -1006,8 +1006,10 @@ mod tests {
         assert!(text.contains("error details"));
     }
 
+    // ── push_error ──
+
     #[test]
-    fn push_tool_result_line_push_error() {
+    fn push_error_shows_error_indicator() {
         let mut chat = test_chat();
         chat.push_error("something broke");
         let text = all_text(&chat);
