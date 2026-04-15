@@ -773,9 +773,10 @@ mod tests {
         "});
         assert!(lines.iter().any(|l| l.contains("Outer")));
         let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        assert!(
-            inner.matches("> ").count() >= 2,
-            "inner blockquote should have nested > markers: {inner:?}"
+        assert_eq!(
+            inner.matches("> ").count(),
+            2,
+            "inner blockquote should have exactly 2 nested > markers: {inner:?}"
         );
     }
 
@@ -901,13 +902,13 @@ mod tests {
             - Outer
               - Inner
         "});
-        assert!(lines.iter().any(|l| l.contains("Outer")));
-        assert!(lines.iter().any(|l| l.contains("Inner")));
         let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
         let outer = lines.iter().find(|l| l.contains("Outer")).unwrap();
+        let inner_indent = inner.len() - inner.trim_start().len();
+        let outer_indent = outer.len() - outer.trim_start().len();
         assert!(
-            inner.len() > outer.len(),
-            "inner should have more indent than outer"
+            inner_indent > outer_indent,
+            "inner indent ({inner_indent}) should exceed outer ({outer_indent})"
         );
     }
 
