@@ -196,6 +196,7 @@ where
     }
 
     fn end_paragraph(&mut self) {
+        self.wrap_last_line();
         self.needs_newline = true;
     }
 
@@ -217,6 +218,7 @@ where
 
     fn end_heading(&mut self) {
         self.pop_inline_style();
+        self.wrap_last_line();
         self.needs_newline = true;
     }
 
@@ -549,6 +551,25 @@ where
             line.push_span(span);
         } else {
             self.push_line(Line::from(vec![span]));
+        }
+    }
+
+    /// Word-wrap the last accumulated line in place.
+    ///
+    /// Inline content (paragraphs, headings) is built by appending spans to
+    /// the last line via [`push_span`](Self::push_span), bypassing the
+    /// wrapping in [`push_line`](Self::push_line). This method retroactively
+    /// wraps the completed line so it respects the width budget.
+    fn wrap_last_line(&mut self) {
+        if self.width == 0 {
+            return;
+        }
+        let Some(line) = self.lines.pop() else {
+            return;
+        };
+        let indent = self.continuation_indent_width();
+        for wrapped in wrap_line(line, self.width, indent) {
+            self.lines.push(wrapped);
         }
     }
 
@@ -1265,12 +1286,24 @@ mod tests {
     // ── Word Wrapping ──
 
     #[test]
-    fn render_with_nonzero_width_produces_output() {
-        // The width parameter is threaded to push_line for wrapping.
-        // Inline content is assembled incrementally via push_span (not
-        // wrapped at this level), but the path must not panic.
+    fn paragraph_wraps_at_width() {
         let t = theme();
-        let text = render_markdown("Hello world", &t, 20);
-        assert!(!text.lines.is_empty());
+        let text = render_markdown("one two three four five six", &t, 15);
+        assert!(
+            text.lines.len() >= 2,
+            "long paragraph should wrap into multiple lines, got {} line(s)",
+            text.lines.len()
+        );
+    }
+
+    #[test]
+    fn heading_wraps_at_width() {
+        let t = theme();
+        let text = render_markdown("# one two three four five six", &t, 15);
+        assert!(
+            text.lines.len() >= 2,
+            "long heading should wrap into multiple lines, got {} line(s)",
+            text.lines.len()
+        );
     }
 }
