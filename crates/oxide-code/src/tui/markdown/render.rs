@@ -281,15 +281,18 @@ where
         if self.needs_newline {
             self.push_blank_line();
         }
-        self.code_block.active = true;
-        self.code_block.lang = match kind {
+        let lang = match kind {
             CodeBlockKind::Fenced(lang) => {
                 let l = lang.to_string();
                 if l.is_empty() { None } else { Some(l) }
             }
             CodeBlockKind::Indented => None,
         };
-        self.code_block.buf.clear();
+        self.code_block = CodeBlockState {
+            active: true,
+            lang,
+            ..Default::default()
+        };
     }
 
     fn end_code_block(&mut self) {
