@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::tui::component::{Action, Component};
 use crate::tui::markdown::render_markdown;
@@ -260,13 +260,15 @@ impl ChatView {
 
     fn render_inner(&self, frame: &mut Frame, area: Rect) {
         let text = self.build_text(area.width);
+        let paragraph = Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll_offset, 0));
         #[expect(
             clippy::cast_possible_truncation,
             reason = "line count fits in u16 for any realistic conversation"
         )]
-        let height = text.lines.len() as u16;
+        let height = paragraph.line_count(area.width) as u16;
         self.content_height.set(height);
-        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
     }
 
