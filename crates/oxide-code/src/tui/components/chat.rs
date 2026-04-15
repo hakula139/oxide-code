@@ -35,15 +35,17 @@ enum ChatEntry {
 /// Maximum lines of tool output shown inline before truncation.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
-/// Display width of the chat-level indent prefix (`"    "`) prepended to
-/// every markdown line. Used to size the markdown renderer's wrap budget.
-const CHAT_INDENT_WIDTH: usize = 4;
+/// Indent prefix prepended to every markdown line in assistant messages.
+const CHAT_INDENT: &str = "    ";
 
-/// Display width of the user message / tool call border prefix (`"  ┃ "`).
-const BORDER_INDENT_WIDTH: usize = 4;
+/// Border prefix for user messages, tool calls, and thinking blocks.
+const BORDER_PREFIX: &str = "  ┃ ";
 
-/// Display width of the tool output body prefix (`"  ┃     "`).
-const TOOL_OUTPUT_INDENT_WIDTH: usize = 8;
+/// Border prefix for tool result status lines (indicator + label).
+const TOOL_RESULT_PREFIX: &str = "  ┃   ";
+
+/// Border prefix for tool output body lines.
+const TOOL_OUTPUT_PREFIX: &str = "  ┃     ";
 
 /// Scrollable chat message list with markdown rendering, tool call display,
 /// and thinking block support.
@@ -365,10 +367,10 @@ impl ChatView {
         let w = usize::from(width);
         for text_line in content.trim().lines() {
             let line = Line::from(vec![
-                Span::styled("  ┃ ", self.theme.tool_border()),
+                Span::styled(BORDER_PREFIX, self.theme.tool_border()),
                 Span::styled(text_line.to_owned(), self.theme.text()),
             ]);
-            for wrapped in wrap_line(line, w, BORDER_INDENT_WIDTH) {
+            for wrapped in wrap_line(line, w, BORDER_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -392,7 +394,7 @@ impl ChatView {
 
         // The markdown renderer wraps to (width - 4) so the 4-space
         // chat indent doesn't push content past the terminal edge.
-        let md_width = usize::from(width).saturating_sub(CHAT_INDENT_WIDTH);
+        let md_width = usize::from(width).saturating_sub(CHAT_INDENT.len());
         let rendered = render_markdown(content, &self.theme, md_width);
         for line in rendered.lines {
             lines.push(indent_markdown_line(line));
@@ -403,7 +405,7 @@ impl ChatView {
 
     fn push_tool_call_line<'a>(&'a self, lines: &mut Vec<Line<'a>>, icon: &'a str, label: &'a str) {
         lines.push(Line::from(vec![
-            Span::styled("  ┃ ", self.theme.tool_border()),
+            Span::styled(BORDER_PREFIX, self.theme.tool_border()),
             Span::styled(icon, self.theme.tool_icon()),
             Span::raw(" "),
             Span::styled(label, self.theme.text()),
@@ -422,7 +424,7 @@ impl ChatView {
             ("✓", self.theme.success())
         };
         lines.push(Line::from(vec![
-            Span::styled("  ┃   ", self.tool_border_style(is_error)),
+            Span::styled(TOOL_RESULT_PREFIX, self.tool_border_style(is_error)),
             Span::styled(indicator, indicator_style),
             Span::raw(" "),
             Span::styled(label, self.theme.muted()),
@@ -455,10 +457,10 @@ impl ChatView {
 
         for text_line in visible {
             let line = Line::from(vec![
-                Span::styled("  ┃     ", border_style),
+                Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(expand_tabs(text_line), text_style),
             ]);
-            for wrapped in wrap_line(line, w, TOOL_OUTPUT_INDENT_WIDTH) {
+            for wrapped in wrap_line(line, w, TOOL_OUTPUT_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -467,7 +469,7 @@ impl ChatView {
             let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
             let label = if n == 1 { "line" } else { "lines" };
             lines.push(Line::from(vec![
-                Span::styled("  ┃     ", border_style),
+                Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(format!("... {n} more {label}"), self.theme.dim()),
             ]));
         }
@@ -494,10 +496,10 @@ impl ChatView {
         let w = usize::from(width);
         for text_line in self.thinking_buffer.lines() {
             let line = Line::from(vec![
-                Span::styled("  ┃ ", self.theme.dim()),
+                Span::styled(BORDER_PREFIX, self.theme.dim()),
                 Span::styled(text_line.to_owned(), self.theme.thinking()),
             ]);
-            for wrapped in wrap_line(line, w, BORDER_INDENT_WIDTH) {
+            for wrapped in wrap_line(line, w, BORDER_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -527,7 +529,7 @@ impl ChatView {
         // Render only the new chunk beyond the cached boundary.
         let buf = &self.streaming_buffer;
         let tail = &buf[self.streaming_rendered_boundary..];
-        let md_width = usize::from(width).saturating_sub(CHAT_INDENT_WIDTH);
+        let md_width = usize::from(width).saturating_sub(CHAT_INDENT.len());
 
         if let Some(rel_boundary) = tail.rfind('\n') {
             let new_committed = &tail[..rel_boundary];
@@ -542,13 +544,13 @@ impl ChatView {
 
             if !trailing.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::raw("    "),
+                    Span::raw(CHAT_INDENT),
                     Span::styled(trailing.to_owned(), self.theme.text()),
                 ]));
             }
         } else if !tail.is_empty() {
             lines.push(Line::from(vec![
-                Span::raw("    "),
+                Span::raw(CHAT_INDENT),
                 Span::styled(tail.to_owned(), self.theme.text()),
             ]));
         }
@@ -566,7 +568,7 @@ impl ChatView {
 
         let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
         if !new_committed.is_empty() {
-            let md_width = usize::from(self.viewport_width).saturating_sub(CHAT_INDENT_WIDTH);
+            let md_width = usize::from(self.viewport_width).saturating_sub(CHAT_INDENT.len());
             let rendered = render_markdown(new_committed, &self.theme, md_width);
             for line in rendered.lines {
                 self.streaming_rendered.push(indent_markdown_line(line));
@@ -579,9 +581,9 @@ impl ChatView {
 
 // ── Markdown Indent ──
 
-/// Prepend a 4-space indent to a markdown-rendered line.
+/// Prepend [`CHAT_INDENT`] to a markdown-rendered line.
 fn indent_markdown_line(line: Line<'static>) -> Line<'static> {
-    let mut spans = vec![Span::raw("    ")];
+    let mut spans = vec![Span::raw(CHAT_INDENT)];
     spans.extend(line.spans);
     Line::from(spans)
 }
