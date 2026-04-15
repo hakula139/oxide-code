@@ -53,7 +53,7 @@ struct TableState {
     in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
-    /// Completed rows. Each row is a vec of cells; each cell is a vec of spans.
+    /// Completed rows (each row is a vec of cells; each cell is a vec of spans)
     rows: Vec<Vec<Vec<Span<'static>>>>,
     /// Row being accumulated (cells pushed on `End(TableCell)`)
     current_row: Vec<Vec<Span<'static>>>,
@@ -723,79 +723,199 @@ mod tests {
         assert!(!h4.spans[0].style.add_modifier.contains(Modifier::BOLD));
     }
 
-    // ── Inline Styles ──
+    // ── Blockquotes ──
 
     #[test]
-    fn bold_and_italic() {
-        let text = render_markdown("**bold** and *italic*", &theme());
-        let bold_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("bold"))
-            .unwrap();
-        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
-        let italic_span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("italic"))
-            .unwrap();
-        assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn bold_italic_combined() {
-        let text = render_markdown("***bold italic***", &theme());
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("bold italic"))
-            .unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
-    }
-
-    #[test]
-    fn strikethrough() {
-        let text = render_markdown("~~struck~~", &theme());
-        let span = text.lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("struck"))
-            .unwrap();
-        assert!(span.style.add_modifier.contains(Modifier::CROSSED_OUT));
-    }
-
-    #[test]
-    fn inline_code() {
+    fn blockquote_text_and_style() {
         let t = theme();
-        let text = render_markdown("Use `foo()` here", &t);
-        let span = text.lines[0]
+        let text = render_markdown("> Quoted text", &t);
+        let bq_line = text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
+            .expect("blockquote line not found");
+        let marker_span = bq_line
             .spans
             .iter()
-            .find(|s| s.content.contains("foo()"))
-            .unwrap();
-        assert_eq!(span.style.fg, Some(t.code));
-    }
-
-    // ── Links ──
-
-    #[test]
-    fn link_appends_url() {
-        let lines = rendered_text("[Click](https://example.com)");
-        assert_eq!(lines, vec!["Click (https://example.com)"]);
+            .find(|s| s.content.contains("> "))
+            .expect("> marker not found");
+        assert_eq!(marker_span.style.fg, Some(t.success));
     }
 
     #[test]
-    fn link_url_has_accent_underline_style() {
+    fn nested_blockquote() {
+        let lines = rendered_text(indoc! {"
+            > Outer
+            > > Inner
+        "});
+        assert!(lines.iter().any(|l| l.contains("Outer")));
+        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
+        assert!(
+            inner.matches("> ").count() >= 2,
+            "inner blockquote should have nested > markers: {inner:?}"
+        );
+    }
+
+    // ── Horizontal Rule ──
+
+    #[test]
+    fn horizontal_rule_text_and_style() {
         let t = theme();
-        let text = render_markdown("[text](https://example.com)", &t);
-        let url_span = text.lines[0]
-            .spans
+        let text = render_markdown(
+            indoc! {"
+                Above
+
+                ---
+
+                Below
+            "},
+            &t,
+        );
+        let rule_span = text
+            .lines
             .iter()
-            .find(|s| s.content.contains("https://example.com"))
-            .unwrap();
-        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(url_span.style.fg, Some(t.accent));
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
+            .expect("rule span not found");
+        assert_eq!(rule_span.style.fg, Some(t.fg_dim));
+    }
+
+    // ── Lists ──
+
+    #[test]
+    fn tight_ordered_list() {
+        let lines = rendered_text(indoc! {"
+            1. First
+            2. Second
+            3. Third
+        "});
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("1.") && l.contains("First"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("2.") && l.contains("Second"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("3.") && l.contains("Third"))
+        );
+    }
+
+    #[test]
+    fn loose_ordered_list() {
+        let lines = rendered_text(indoc! {"
+            1. First
+
+            2. Second
+
+            3. Third
+        "});
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("1.") && l.contains("First")),
+            "loose list marker and content should be on the same line: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("2.") && l.contains("Second")),
+            "second item: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn ordered_list_double_digit_alignment() {
+        let mut input = String::new();
+        for i in 1..=12 {
+            use std::fmt::Write;
+            writeln!(input, "{i}. Item {i}").unwrap();
+        }
+        let lines = rendered_text(&input);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("10.") && l.contains("Item 10")),
+            "marker and content on same line for item 10: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn tight_unordered_list() {
+        let lines = rendered_text(indoc! {"
+            - Alpha
+            - Beta
+        "});
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("- ") && l.contains("Alpha"))
+        );
+        assert!(lines.iter().any(|l| l.contains("- ") && l.contains("Beta")));
+    }
+
+    #[test]
+    fn loose_unordered_list() {
+        let lines = rendered_text(indoc! {"
+            - Alpha
+
+            - Beta
+        "});
+        assert!(
+            lines.iter().any(|l| l.contains('-') && l.contains("Alpha")),
+            "loose unordered: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn nested_list() {
+        let lines = rendered_text(indoc! {"
+            - Outer
+              - Inner
+        "});
+        assert!(lines.iter().any(|l| l.contains("Outer")));
+        assert!(lines.iter().any(|l| l.contains("Inner")));
+        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
+        let outer = lines.iter().find(|l| l.contains("Outer")).unwrap();
+        assert!(
+            inner.len() > outer.len(),
+            "inner should have more indent than outer"
+        );
+    }
+
+    #[test]
+    fn list_marker_uses_accent_color() {
+        let t = theme();
+        let text = render_markdown("- Item", &t);
+        let marker_span = text
+            .lines
+            .iter()
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
+        let span = marker_span.expect("list marker span not found");
+        assert_eq!(span.style.fg, Some(t.accent));
+    }
+
+    #[test]
+    fn inline_code_in_list_item() {
+        let t = theme();
+        let text = render_markdown("- Use `foo()` here", &t);
+        let has_code_span = text.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.contains("foo()") && s.style.fg == Some(t.code))
+        });
+        assert!(has_code_span, "inline code should be styled in list items");
+    }
+
+    #[test]
+    fn link_in_list_item() {
+        let lines = rendered_text("- [Click](https://example.com)");
+        assert!(lines.iter().any(|l| l.contains("Click")));
+        assert!(lines.iter().any(|l| l.contains("https://example.com")));
     }
 
     // ── Code Blocks ──
@@ -889,7 +1009,7 @@ mod tests {
             .find(|l| l.contains('a') && l.contains('b') && l.contains('c'))
             .expect("body row not found");
 
-        // "a" should be left-aligned (near left pipe), "c" right-aligned (near right pipe)
+        // "a" should be left-aligned (near left pipe), "c" right-aligned (near right pipe).
         let a_pos = body_row.find('a').unwrap();
         let c_pos = body_row.find('c').unwrap();
         assert!(
@@ -897,7 +1017,7 @@ mod tests {
             "left-aligned 'a' should appear before right-aligned 'c'"
         );
 
-        // For center alignment, 'b' should have padding on both sides
+        // For center alignment, 'b' should have padding on both sides.
         let b_segment: String = body_row
             .split('│')
             .nth(2)
@@ -910,25 +1030,6 @@ mod tests {
             !trimmed.is_empty() && left_pad > 0 && right_pad > 0,
             "center-aligned cell should have padding on both sides: {body_row:?}"
         );
-    }
-
-    #[test]
-    fn table_inline_styles() {
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
-                | Header |
-                |--------|
-                | `code` |
-            "},
-            &t,
-        );
-        let has_code = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("code") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code, "inline code should be styled inside table cells");
     }
 
     #[test]
@@ -959,6 +1060,25 @@ mod tests {
     }
 
     #[test]
+    fn table_inline_styles() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                | Header |
+                |--------|
+                | `code` |
+            "},
+            &t,
+        );
+        let has_code = text.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.contains("code") && s.style.fg == Some(t.code))
+        });
+        assert!(has_code, "inline code should be styled inside table cells");
+    }
+
+    #[test]
     fn table_empty_cells() {
         let lines = rendered_text(indoc! {"
             | A | B |
@@ -969,7 +1089,7 @@ mod tests {
             .iter()
             .find(|l| l.contains('x'))
             .expect("body row not found");
-        // Row should still have 3 pipe characters (left, middle, right)
+        // Row should still have 3 pipe characters (left, middle, right).
         let pipe_count = body_row.matches('│').count();
         assert_eq!(
             pipe_count, 3,
@@ -977,207 +1097,79 @@ mod tests {
         );
     }
 
-    // ── Ordered Lists ──
+    // ── Inline Content ──
 
     #[test]
-    fn tight_ordered_list() {
-        let lines = rendered_text(indoc! {"
-            1. First
-            2. Second
-            3. Third
-        "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("1.") && l.contains("First"))
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("2.") && l.contains("Second"))
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("3.") && l.contains("Third"))
-        );
-    }
-
-    #[test]
-    fn loose_ordered_list() {
-        let lines = rendered_text(indoc! {"
-            1. First
-
-            2. Second
-
-            3. Third
-        "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("1.") && l.contains("First")),
-            "loose list marker and content should be on the same line: {lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("2.") && l.contains("Second")),
-            "second item: {lines:?}"
-        );
-    }
-
-    #[test]
-    fn ordered_list_double_digit_alignment() {
-        let mut input = String::new();
-        for i in 1..=12 {
-            use std::fmt::Write;
-            writeln!(input, "{i}. Item {i}").unwrap();
-        }
-        let lines = rendered_text(&input);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("10.") && l.contains("Item 10")),
-            "marker and content on same line for item 10: {lines:?}"
-        );
-    }
-
-    // ── Unordered Lists ──
-
-    #[test]
-    fn tight_unordered_list() {
-        let lines = rendered_text(indoc! {"
-            - Alpha
-            - Beta
-        "});
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("- ") && l.contains("Alpha"))
-        );
-        assert!(lines.iter().any(|l| l.contains("- ") && l.contains("Beta")));
-    }
-
-    #[test]
-    fn loose_unordered_list() {
-        let lines = rendered_text(indoc! {"
-            - Alpha
-
-            - Beta
-        "});
-        assert!(
-            lines.iter().any(|l| l.contains('-') && l.contains("Alpha")),
-            "loose unordered: {lines:?}"
-        );
-    }
-
-    // ── Nested Lists ──
-
-    #[test]
-    fn nested_list() {
-        let lines = rendered_text(indoc! {"
-            - Outer
-              - Inner
-        "});
-        assert!(lines.iter().any(|l| l.contains("Outer")));
-        assert!(lines.iter().any(|l| l.contains("Inner")));
-        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        let outer = lines.iter().find(|l| l.contains("Outer")).unwrap();
-        assert!(
-            inner.len() > outer.len(),
-            "inner should have more indent than outer"
-        );
-    }
-
-    // ── Inline Elements in Lists ──
-
-    #[test]
-    fn inline_code_in_list_item() {
-        let t = theme();
-        let text = render_markdown("- Use `foo()` here", &t);
-        let has_code_span = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("foo()") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code_span, "inline code should be styled in list items");
-    }
-
-    #[test]
-    fn link_in_list_item() {
-        let lines = rendered_text("- [Click](https://example.com)");
-        assert!(lines.iter().any(|l| l.contains("Click")));
-        assert!(lines.iter().any(|l| l.contains("https://example.com")));
-    }
-
-    // ── Blockquotes ──
-
-    #[test]
-    fn blockquote_text_and_style() {
-        let t = theme();
-        let text = render_markdown("> Quoted text", &t);
-        let bq_line = text
-            .lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("Quoted")))
-            .expect("blockquote line not found");
-        let marker_span = bq_line
+    fn bold_and_italic() {
+        let text = render_markdown("**bold** and *italic*", &theme());
+        let bold_span = text.lines[0]
             .spans
             .iter()
-            .find(|s| s.content.contains("> "))
-            .expect("> marker not found");
-        assert_eq!(marker_span.style.fg, Some(t.success));
-    }
-
-    #[test]
-    fn nested_blockquote() {
-        let lines = rendered_text(indoc! {"
-            > Outer
-            > > Inner
-        "});
-        assert!(lines.iter().any(|l| l.contains("Outer")));
-        let inner = lines.iter().find(|l| l.contains("Inner")).unwrap();
-        assert!(
-            inner.matches("> ").count() >= 2,
-            "inner blockquote should have nested > markers: {inner:?}"
-        );
-    }
-
-    // ── Horizontal Rule ──
-
-    #[test]
-    fn horizontal_rule_text_and_style() {
-        let t = theme();
-        let text = render_markdown(
-            indoc! {"
-                Above
-
-                ---
-
-                Below
-            "},
-            &t,
-        );
-        let rule_span = text
-            .lines
+            .find(|s| s.content.contains("bold"))
+            .unwrap();
+        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
+        let italic_span = text.lines[0]
+            .spans
             .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
-            .expect("rule span not found");
-        assert_eq!(rule_span.style.fg, Some(t.fg_dim));
+            .find(|s| s.content.contains("italic"))
+            .unwrap();
+        assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
     }
 
-    // ── List Marker Style ──
+    #[test]
+    fn bold_italic_combined() {
+        let text = render_markdown("***bold italic***", &theme());
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("bold italic"))
+            .unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+    }
 
     #[test]
-    fn list_marker_uses_accent_color() {
-        let t = theme();
-        let text = render_markdown("- Item", &t);
-        let marker_span = text
-            .lines
+    fn strikethrough() {
+        let text = render_markdown("~~struck~~", &theme());
+        let span = text.lines[0]
+            .spans
             .iter()
-            .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
-        let span = marker_span.expect("list marker span not found");
-        assert_eq!(span.style.fg, Some(t.accent));
+            .find(|s| s.content.contains("struck"))
+            .unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn inline_code() {
+        let t = theme();
+        let text = render_markdown("Use `foo()` here", &t);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("foo()"))
+            .unwrap();
+        assert_eq!(span.style.fg, Some(t.code));
+    }
+
+    // ── Links ──
+
+    #[test]
+    fn link_appends_url() {
+        let lines = rendered_text("[Click](https://example.com)");
+        assert_eq!(lines, vec!["Click (https://example.com)"]);
+    }
+
+    #[test]
+    fn link_url_has_accent_underline_style() {
+        let t = theme();
+        let text = render_markdown("[text](https://example.com)", &t);
+        let url_span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("https://example.com"))
+            .unwrap();
+        assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(url_span.style.fg, Some(t.accent));
     }
 
     // ── HTML ──
