@@ -32,7 +32,9 @@ pub(crate) fn wrap_line(
         .flat_map(|s| s.content.chars().map(move |ch| (ch, s.style)))
         .collect();
 
-    let cont_content_width = max_width.saturating_sub(continuation_indent);
+    // Ensure at least 1 column for content on continuation lines so that
+    // deeply nested indents don't produce degenerate one-char-per-line output.
+    let cont_content_width = max_width.saturating_sub(continuation_indent).max(1);
     let wrapped = greedy_word_wrap(&styled, max_width, cont_content_width);
 
     wrapped
