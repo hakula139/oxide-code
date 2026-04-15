@@ -55,9 +55,8 @@ pub(super) fn highlight_code(lang: &str, code: &str, fallback_style: Style) -> V
 
 #[cfg(test)]
 mod tests {
-    use crate::tui::theme::Theme;
-
     use super::*;
+    use crate::tui::theme::Theme;
 
     fn fallback() -> Style {
         Theme::default().inline_code()
