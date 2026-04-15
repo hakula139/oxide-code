@@ -212,6 +212,14 @@ impl Theme {
     pub(crate) fn horizontal_rule(&self) -> Style {
         Style::default().fg(self.fg_dim)
     }
+
+    pub(crate) fn table_header(&self) -> Style {
+        Style::default().fg(self.fg).add_modifier(Modifier::BOLD)
+    }
+
+    pub(crate) fn table_border(&self) -> Style {
+        Style::default().fg(self.fg_dim)
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +349,19 @@ mod tests {
     fn horizontal_rule_uses_dim_color() {
         let t = Theme::default();
         assert_eq!(t.horizontal_rule().fg, Some(t.fg_dim));
+    }
+
+    #[test]
+    fn table_header_is_bold_fg() {
+        let t = Theme::default();
+        let style = t.table_header();
+        assert_eq!(style.fg, Some(t.fg));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn table_border_uses_dim_color() {
+        let t = Theme::default();
+        assert_eq!(t.table_border().fg, Some(t.fg_dim));
     }
 }

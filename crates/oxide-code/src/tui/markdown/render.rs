@@ -1,13 +1,18 @@
-use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tracing::{debug, warn};
+use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::theme::Theme;
 
 // ── Renderer ──
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "table + code block state flags; will extract sub-structs in a follow-up refactor"
+)]
 pub(super) struct MarkdownRenderer<I> {
     iter: I,
     theme: Theme,
@@ -35,6 +40,20 @@ pub(super) struct MarkdownRenderer<I> {
 
     /// Stored link destination, appended at `End(Link)`.
     link_url: Option<String>,
+
+    // Table buffering state
+    in_table: bool,
+    table_alignments: Vec<Alignment>,
+    /// Rows of cells. Each cell is a vec of styled spans.
+    table_rows: Vec<Vec<Vec<Span<'static>>>>,
+    /// Current row being accumulated.
+    table_current_row: Vec<Vec<Span<'static>>>,
+    /// Spans accumulated for the current cell.
+    table_cell_buf: Vec<Span<'static>>,
+    /// Whether the current row belongs to the header.
+    in_table_head: bool,
+    /// Number of header rows (for styling).
+    table_head_rows: usize,
 }
 
 impl<'a, I> MarkdownRenderer<I>
@@ -55,6 +74,13 @@ where
             code_lang: None,
             code_buf: String::new(),
             link_url: None,
+            in_table: false,
+            table_alignments: Vec::new(),
+            table_rows: Vec::new(),
+            table_current_row: Vec::new(),
+            table_cell_buf: Vec::new(),
+            in_table_head: false,
+            table_head_rows: 0,
         }
     }
 
@@ -102,11 +128,11 @@ where
             Tag::Link { dest_url, .. } => {
                 self.link_url = Some(dest_url.to_string());
             }
+            Tag::Table(alignments) => self.start_table(alignments),
+            Tag::TableHead => self.in_table_head = true,
+            Tag::TableRow => {}
+            Tag::TableCell => self.table_cell_buf.clear(),
             Tag::HtmlBlock
-            | Tag::Table(_)
-            | Tag::TableHead
-            | Tag::TableRow
-            | Tag::TableCell
             | Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
             | Tag::MetadataBlock(_)
@@ -135,6 +161,25 @@ where
                 self.pop_inline_style();
             }
             TagEnd::Link => self.pop_link(),
+            TagEnd::Table => self.end_table(),
+            TagEnd::TableHead => {
+                // pulldown-cmark 0.13 puts header cells directly inside
+                // TableHead without a wrapping TableRow, so flush here.
+                if !self.table_current_row.is_empty() {
+                    let row = std::mem::take(&mut self.table_current_row);
+                    self.table_rows.push(row);
+                }
+                self.in_table_head = false;
+                self.table_head_rows = self.table_rows.len();
+            }
+            TagEnd::TableRow => {
+                let row = std::mem::take(&mut self.table_current_row);
+                self.table_rows.push(row);
+            }
+            TagEnd::TableCell => {
+                let cell = std::mem::take(&mut self.table_cell_buf);
+                self.table_current_row.push(cell);
+            }
             _ => {}
         }
     }
@@ -269,11 +314,100 @@ where
         self.needs_newline = true;
     }
 
+    // ── Tables ──
+
+    fn start_table(&mut self, alignments: Vec<Alignment>) {
+        if self.needs_newline {
+            self.push_blank_line();
+        }
+        self.in_table = true;
+        self.table_alignments = alignments;
+        self.table_rows.clear();
+        self.table_current_row.clear();
+        self.table_cell_buf.clear();
+        self.in_table_head = false;
+        self.table_head_rows = 0;
+    }
+
+    fn end_table(&mut self) {
+        self.in_table = false;
+
+        let rows = std::mem::take(&mut self.table_rows);
+        let alignments = std::mem::take(&mut self.table_alignments);
+        let head_rows = self.table_head_rows;
+
+        if rows.is_empty() {
+            return;
+        }
+
+        let col_count = alignments
+            .len()
+            .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+        let col_widths = compute_column_widths(&rows, col_count);
+
+        let border_style = self.theme.table_border();
+        let header_style = self.theme.table_header();
+
+        // Top border: ┌─┬─┐
+        self.lines.push(build_horizontal_rule(
+            &col_widths,
+            border_style,
+            '┌',
+            '┬',
+            '┐',
+        ));
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            // Data row: │ cell │ cell │
+            let cell_style = if row_idx < head_rows {
+                header_style
+            } else {
+                Style::default()
+            };
+            self.lines.push(build_data_row(
+                row,
+                &col_widths,
+                &alignments,
+                col_count,
+                border_style,
+                cell_style,
+            ));
+
+            // Separator after header: ├─┼─┤
+            if row_idx + 1 == head_rows && head_rows < rows.len() {
+                self.lines.push(build_horizontal_rule(
+                    &col_widths,
+                    border_style,
+                    '├',
+                    '┼',
+                    '┤',
+                ));
+            }
+        }
+
+        // Bottom border: └─┴─┘
+        self.lines.push(build_horizontal_rule(
+            &col_widths,
+            border_style,
+            '└',
+            '┴',
+            '┘',
+        ));
+
+        self.needs_newline = true;
+    }
+
     // ── Inline Content ──
 
     fn text(&mut self, text: &str) {
         if self.in_code_block {
             self.code_buf.push_str(text);
+            return;
+        }
+        if self.in_table {
+            let style = self.current_inline_style();
+            self.table_cell_buf
+                .push(Span::styled(text.to_owned(), style));
             return;
         }
 
@@ -296,6 +430,11 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
+        if self.in_table {
+            self.table_cell_buf
+                .push(Span::styled(code.into_string(), self.theme.inline_code()));
+            return;
+        }
         if self.pending_marker.is_some() {
             self.push_line(Line::default());
         }
@@ -396,6 +535,90 @@ where
     fn push_blank_line(&mut self) {
         self.lines.push(Line::default());
     }
+}
+
+// ── Table Helpers ──
+
+/// Measure the display width of a cell's spans.
+fn cell_width(cell: &[Span<'_>]) -> usize {
+    cell.iter().map(|s| s.content.width()).sum()
+}
+
+/// Compute the max display width for each column across all rows.
+fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<usize> {
+    let mut widths = vec![0_usize; col_count];
+    for row in rows {
+        for (col, cell) in row.iter().enumerate() {
+            widths[col] = widths[col].max(cell_width(cell));
+        }
+    }
+    widths
+}
+
+/// Build a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
+fn build_horizontal_rule(
+    col_widths: &[usize],
+    style: Style,
+    left: char,
+    mid: char,
+    right: char,
+) -> Line<'static> {
+    let mut buf = String::with_capacity(col_widths.len() * 6);
+    buf.push(left);
+    for (i, &w) in col_widths.iter().enumerate() {
+        // +2 for the padding spaces around cell content
+        for _ in 0..w + 2 {
+            buf.push('─');
+        }
+        buf.push(if i + 1 < col_widths.len() { mid } else { right });
+    }
+    Line::from(Span::styled(buf, style))
+}
+
+/// Build a data row: `│ cell │ cell │`, applying alignment and cell style.
+fn build_data_row(
+    row: &[Vec<Span<'static>>],
+    col_widths: &[usize],
+    alignments: &[Alignment],
+    col_count: usize,
+    border_style: Style,
+    cell_style: Style,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let pipe = Span::styled("│", border_style);
+
+    spans.push(pipe.clone());
+    for col in 0..col_count {
+        let cell = row.get(col).map_or(&[][..], Vec::as_slice);
+        let content_width = cell_width(cell);
+        let target_width = col_widths.get(col).copied().unwrap_or(0);
+        let pad = target_width.saturating_sub(content_width);
+
+        let alignment = alignments.get(col).copied().unwrap_or(Alignment::None);
+        let (pad_left, pad_right) = match alignment {
+            Alignment::Center => (pad / 2, pad - pad / 2),
+            Alignment::Right => (pad, 0),
+            Alignment::Left | Alignment::None => (0, pad),
+        };
+
+        // Left padding (always at least 1 space)
+        spans.push(Span::raw(" ".repeat(1 + pad_left)));
+
+        // Cell content with optional style override for headers
+        for span in cell {
+            let styled = if cell_style == Style::default() {
+                span.clone()
+            } else {
+                Span::styled(span.content.clone(), span.style.patch(cell_style))
+            };
+            spans.push(styled);
+        }
+
+        // Right padding (always at least 1 space)
+        spans.push(Span::raw(" ".repeat(1 + pad_right)));
+        spans.push(pipe.clone());
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -607,6 +830,155 @@ mod tests {
                 .any(|s| matches!(s.style.fg, Some(Color::Rgb(..))))
         });
         assert!(has_rgb, "syntax highlighting should produce RGB colors");
+    }
+
+    // ── Tables ──
+
+    #[test]
+    fn table_basic() {
+        let lines = rendered_text(indoc! {"
+            | A | B |
+            |---|---|
+            | 1 | 2 |
+            | 3 | 4 |
+        "});
+        // Top border
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains('┌') && l.contains('┬') && l.contains('┐')),
+            "top border missing: {lines:?}"
+        );
+        // Header cells
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains('A') && l.contains('B') && l.contains('│')),
+            "header row missing: {lines:?}"
+        );
+        // Header separator
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains('├') && l.contains('┼') && l.contains('┤')),
+            "header separator missing: {lines:?}"
+        );
+        // Body cells
+        assert!(
+            lines.iter().any(|l| l.contains('1') && l.contains('2')),
+            "first body row missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains('3') && l.contains('4')),
+            "second body row missing: {lines:?}"
+        );
+        // Bottom border
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains('└') && l.contains('┴') && l.contains('┘')),
+            "bottom border missing: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn table_alignment() {
+        let lines = rendered_text(indoc! {"
+            | Left | Center | Right |
+            |:-----|:------:|------:|
+            | a    |   b    |     c |
+        "});
+        let body_row = lines
+            .iter()
+            .find(|l| l.contains('a') && l.contains('b') && l.contains('c'))
+            .expect("body row not found");
+
+        // "a" should be left-aligned (near left pipe), "c" right-aligned (near right pipe)
+        let a_pos = body_row.find('a').unwrap();
+        let c_pos = body_row.find('c').unwrap();
+        assert!(
+            a_pos < c_pos,
+            "left-aligned 'a' should appear before right-aligned 'c'"
+        );
+
+        // For center alignment, 'b' should have padding on both sides
+        let b_segment: String = body_row
+            .split('│')
+            .nth(2)
+            .expect("center column not found")
+            .to_owned();
+        let trimmed = b_segment.trim();
+        let left_pad = b_segment.len() - b_segment.trim_start().len();
+        let right_pad = b_segment.len() - b_segment.trim_end().len();
+        assert!(
+            !trimmed.is_empty() && left_pad > 0 && right_pad > 0,
+            "center-aligned cell should have padding on both sides: {body_row:?}"
+        );
+    }
+
+    #[test]
+    fn table_inline_styles() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                | Header |
+                |--------|
+                | `code` |
+            "},
+            &t,
+        );
+        let has_code = text.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.contains("code") && s.style.fg == Some(t.code))
+        });
+        assert!(has_code, "inline code should be styled inside table cells");
+    }
+
+    #[test]
+    fn table_header_style() {
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                | Name |
+                |------|
+                | val  |
+            "},
+            &t,
+        );
+        let header_line = text
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Name")))
+            .expect("header line not found");
+        let name_span = header_line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Name"))
+            .unwrap();
+        assert!(
+            name_span.style.add_modifier.contains(Modifier::BOLD),
+            "header cells should be bold: {name_span:?}"
+        );
+    }
+
+    #[test]
+    fn table_empty_cells() {
+        let lines = rendered_text(indoc! {"
+            | A | B |
+            |---|---|
+            |   | x |
+        "});
+        let body_row = lines
+            .iter()
+            .find(|l| l.contains('x'))
+            .expect("body row not found");
+        // Row should still have 3 pipe characters (left, middle, right)
+        let pipe_count = body_row.matches('│').count();
+        assert_eq!(
+            pipe_count, 3,
+            "row with empty cell should have 3 borders: {body_row:?}"
+        );
     }
 
     // ── Ordered Lists ──
