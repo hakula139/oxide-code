@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 
 use crate::tui::component::{Action, Component};
 use crate::tui::theme::Theme;
@@ -35,6 +35,7 @@ impl InputArea {
         textarea.set_style(theme.text());
         textarea.set_placeholder_text("Ask anything...");
         textarea.set_placeholder_style(theme.dim());
+        textarea.set_wrap_mode(WrapMode::Word);
         textarea.set_block(Block::default());
 
         Self {
@@ -131,20 +132,21 @@ impl Component for InputArea {
         frame.render_widget(&self.textarea, chunks[0]);
 
         if self.enabled {
-            // Place cursor inside the textarea area.
-            let (row, col) = self.textarea.cursor();
+            // Use screen_cursor for visual position that accounts for
+            // word-wrap (logical cursor may differ from visual position).
+            let sc = self.textarea.screen_cursor();
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
-            let cursor_y = chunks[0].y + row as u16;
+            let cursor_y = chunks[0].y + sc.row as u16;
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
             let cursor_x = chunks[0]
                 .x
-                .saturating_add(col as u16)
+                .saturating_add(sc.col as u16)
                 .min(chunks[0].right().saturating_sub(1));
             frame.set_cursor_position((cursor_x, cursor_y));
         }
