@@ -357,13 +357,7 @@ impl ChatView {
         content: &'a str,
         width: u16,
     ) {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("❯ You", self.theme.accent()),
-        ]));
+        push_section_header(lines, "❯ You", self.theme.accent());
         let w = usize::from(width);
         for text_line in content.trim().lines() {
             let line = Line::from(vec![
@@ -384,13 +378,7 @@ impl ChatView {
         content: &'a str,
         width: u16,
     ) {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("⟡ Assistant", self.theme.secondary()),
-        ]));
+        push_section_header(lines, "⟡ Assistant", self.theme.secondary());
 
         // The markdown renderer wraps to (width - 4) so the 4-space
         // chat indent doesn't push content past the terminal edge.
@@ -486,13 +474,7 @@ impl ChatView {
     // ── Thinking ──
 
     fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: u16) {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Thinking...", self.theme.thinking()),
-        ]));
+        push_section_header(lines, "Thinking...", self.theme.thinking());
         let w = usize::from(width);
         for text_line in self.thinking_buffer.lines() {
             let line = Line::from(vec![
@@ -580,6 +562,17 @@ impl ChatView {
 }
 
 // ── Markdown Indent ──
+
+/// Push a blank separator (when lines exist) and a styled section label.
+fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(label, style),
+    ]));
+}
 
 /// Prepend [`CHAT_INDENT`] to a markdown-rendered line.
 fn indent_markdown_line(line: Line<'static>) -> Line<'static> {
