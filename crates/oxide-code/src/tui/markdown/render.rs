@@ -9,51 +9,56 @@ use crate::tui::theme::Theme;
 
 // ── Renderer ──
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "table + code block state flags; will extract sub-structs in a follow-up refactor"
-)]
 pub(super) struct MarkdownRenderer<I> {
+    // Core
     iter: I,
     theme: Theme,
     pub(super) lines: Vec<Line<'static>>,
 
-    /// Nested inline style stack (bold, italic, strikethrough).
-    inline_styles: Vec<Style>,
-
-    /// Ordered (`Some(index)`) or unordered (`None`) per nesting level.
-    list_stack: Vec<Option<u64>>,
-
-    /// Deferred list marker spans, emitted on the next `push_line`.
-    pending_marker: Option<Vec<Span<'static>>>,
-
-    /// Indent prefix per nesting level (list continuation or blockquote).
-    indent_stack: Vec<Vec<Span<'static>>>,
-
+    // Block-level spacing
     /// Insert a blank line before the next block element.
     needs_newline: bool,
 
-    // Code block state
-    in_code_block: bool,
-    code_lang: Option<String>,
-    code_buf: String,
+    // Block nesting (lists + blockquotes)
+    /// Indent prefix per nesting level (list continuation or blockquote)
+    indent_stack: Vec<Vec<Span<'static>>>,
+    /// Ordered (`Some(index)`) or unordered (`None`) per nesting level
+    list_stack: Vec<Option<u64>>,
+    /// Deferred list marker spans, emitted on the next `push_line`
+    pending_marker: Option<Vec<Span<'static>>>,
 
-    /// Stored link destination, appended at `End(Link)`.
+    // Inline state
+    /// Nested inline style stack (bold, italic, strikethrough)
+    inline_styles: Vec<Style>,
+    /// Stored link destination, appended at `End(Link)`
     link_url: Option<String>,
 
-    // Table buffering state
-    in_table: bool,
-    table_alignments: Vec<Alignment>,
-    /// Rows of cells. Each cell is a vec of styled spans.
-    table_rows: Vec<Vec<Vec<Span<'static>>>>,
-    /// Current row being accumulated.
-    table_current_row: Vec<Vec<Span<'static>>>,
-    /// Spans accumulated for the current cell.
-    table_cell_buf: Vec<Span<'static>>,
-    /// Whether the current row belongs to the header.
-    in_table_head: bool,
-    /// Number of header rows (for styling).
-    table_head_rows: usize,
+    // Buffered blocks
+    code_block: CodeBlockState,
+    table: TableState,
+}
+
+/// Buffered state for a fenced / indented code block
+#[derive(Default)]
+struct CodeBlockState {
+    active: bool,
+    lang: Option<String>,
+    buf: String,
+}
+
+/// Buffered state for a table (header + body rows)
+#[derive(Default)]
+struct TableState {
+    active: bool,
+    in_head: bool,
+    alignments: Vec<Alignment>,
+    head_rows: usize,
+    /// Completed rows. Each row is a vec of cells; each cell is a vec of spans.
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    /// Row being accumulated (cells pushed on `End(TableCell)`)
+    current_row: Vec<Vec<Span<'static>>>,
+    /// Spans accumulated for the current cell
+    cell_buf: Vec<Span<'static>>,
 }
 
 impl<'a, I> MarkdownRenderer<I>
@@ -65,22 +70,14 @@ where
             iter,
             theme,
             lines: Vec::new(),
-            inline_styles: Vec::new(),
+            needs_newline: false,
+            indent_stack: Vec::new(),
             list_stack: Vec::new(),
             pending_marker: None,
-            indent_stack: Vec::new(),
-            needs_newline: false,
-            in_code_block: false,
-            code_lang: None,
-            code_buf: String::new(),
+            inline_styles: Vec::new(),
             link_url: None,
-            in_table: false,
-            table_alignments: Vec::new(),
-            table_rows: Vec::new(),
-            table_current_row: Vec::new(),
-            table_cell_buf: Vec::new(),
-            in_table_head: false,
-            table_head_rows: 0,
+            code_block: CodeBlockState::default(),
+            table: TableState::default(),
         }
     }
 
@@ -129,9 +126,9 @@ where
                 self.link_url = Some(dest_url.to_string());
             }
             Tag::Table(alignments) => self.start_table(alignments),
-            Tag::TableHead => self.in_table_head = true,
+            Tag::TableHead => self.table.in_head = true,
             Tag::TableRow => {}
-            Tag::TableCell => self.table_cell_buf.clear(),
+            Tag::TableCell => self.table.cell_buf.clear(),
             Tag::HtmlBlock
             | Tag::Image { .. }
             | Tag::FootnoteDefinition(_)
@@ -165,20 +162,20 @@ where
             TagEnd::TableHead => {
                 // pulldown-cmark 0.13 puts header cells directly inside
                 // TableHead without a wrapping TableRow, so flush here.
-                if !self.table_current_row.is_empty() {
-                    let row = std::mem::take(&mut self.table_current_row);
-                    self.table_rows.push(row);
+                if !self.table.current_row.is_empty() {
+                    let row = std::mem::take(&mut self.table.current_row);
+                    self.table.rows.push(row);
                 }
-                self.in_table_head = false;
-                self.table_head_rows = self.table_rows.len();
+                self.table.in_head = false;
+                self.table.head_rows = self.table.rows.len();
             }
             TagEnd::TableRow => {
-                let row = std::mem::take(&mut self.table_current_row);
-                self.table_rows.push(row);
+                let row = std::mem::take(&mut self.table.current_row);
+                self.table.rows.push(row);
             }
             TagEnd::TableCell => {
-                let cell = std::mem::take(&mut self.table_cell_buf);
-                self.table_current_row.push(cell);
+                let cell = std::mem::take(&mut self.table.cell_buf);
+                self.table.current_row.push(cell);
             }
             _ => {}
         }
@@ -287,21 +284,21 @@ where
         if !self.lines.is_empty() {
             self.push_blank_line();
         }
-        self.in_code_block = true;
-        self.code_lang = match kind {
+        self.code_block.active = true;
+        self.code_block.lang = match kind {
             CodeBlockKind::Fenced(lang) => {
                 let l = lang.to_string();
                 if l.is_empty() { None } else { Some(l) }
             }
             CodeBlockKind::Indented => None,
         };
-        self.code_buf.clear();
+        self.code_block.buf.clear();
     }
 
     fn end_code_block(&mut self) {
-        self.in_code_block = false;
-        let code = std::mem::take(&mut self.code_buf);
-        let lang = self.code_lang.take();
+        self.code_block.active = false;
+        let code = std::mem::take(&mut self.code_block.buf);
+        let lang = self.code_block.lang.take();
 
         let highlighted = highlight_code(
             lang.as_deref().unwrap_or(""),
@@ -320,21 +317,18 @@ where
         if self.needs_newline {
             self.push_blank_line();
         }
-        self.in_table = true;
-        self.table_alignments = alignments;
-        self.table_rows.clear();
-        self.table_current_row.clear();
-        self.table_cell_buf.clear();
-        self.in_table_head = false;
-        self.table_head_rows = 0;
+        self.table = TableState {
+            active: true,
+            alignments,
+            ..Default::default()
+        };
     }
 
     fn end_table(&mut self) {
-        self.in_table = false;
-
-        let rows = std::mem::take(&mut self.table_rows);
-        let alignments = std::mem::take(&mut self.table_alignments);
-        let head_rows = self.table_head_rows;
+        let table = std::mem::take(&mut self.table);
+        let rows = table.rows;
+        let alignments = table.alignments;
+        let head_rows = table.head_rows;
 
         if rows.is_empty() {
             return;
@@ -400,13 +394,14 @@ where
     // ── Inline Content ──
 
     fn text(&mut self, text: &str) {
-        if self.in_code_block {
-            self.code_buf.push_str(text);
+        if self.code_block.active {
+            self.code_block.buf.push_str(text);
             return;
         }
-        if self.in_table {
+        if self.table.active {
             let style = self.current_inline_style();
-            self.table_cell_buf
+            self.table
+                .cell_buf
                 .push(Span::styled(text.to_owned(), style));
             return;
         }
@@ -430,8 +425,9 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
-        if self.in_table {
-            self.table_cell_buf
+        if self.table.active {
+            self.table
+                .cell_buf
                 .push(Span::styled(code.into_string(), self.theme.inline_code()));
             return;
         }

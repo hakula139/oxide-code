@@ -14,37 +14,37 @@ use ratatui::text::Span;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Theme {
     // Text hierarchy
-    /// Primary text.
+    /// Primary text
     pub(crate) fg: Color,
-    /// Secondary text, labels, borders.
+    /// Secondary text, labels, borders
     pub(crate) fg_muted: Color,
-    /// Dimmed metadata, timestamps.
+    /// Dimmed metadata, timestamps
     pub(crate) fg_dim: Color,
 
     // Surfaces
-    /// Elevated surfaces, tool call backgrounds.
+    /// Elevated surfaces, tool call backgrounds
     pub(crate) surface: Color,
-    /// Code block background.
+    /// Code block background
     pub(crate) code_bg: Color,
 
     // Semantic accents (UI roles)
-    /// User messages, highlights, active borders.
+    /// User messages, highlights, active borders
     pub(crate) accent: Color,
-    /// Assistant role labels, focused elements.
+    /// Assistant role labels, focused elements
     pub(crate) secondary: Color,
 
     // Code
-    /// Inline code, code block fallback.
+    /// Inline code, code block fallback
     pub(crate) code: Color,
 
     // Status indicators (ascending severity)
-    /// Informational highlights, cost display.
+    /// Informational highlights, cost display
     pub(crate) info: Color,
-    /// Successful tool results, normal status.
+    /// Successful tool results, normal status
     pub(crate) success: Color,
-    /// Warnings, caution status.
+    /// Warnings, caution status
     pub(crate) warning: Color,
-    /// Errors, failed tools, critical status.
+    /// Errors, failed tools, critical status
     pub(crate) error: Color,
 }
 
@@ -73,38 +73,38 @@ impl Default for Theme {
 impl Theme {
     // Text styles
 
-    /// Primary text style (no background override).
+    /// Primary text style (no background override)
     pub(crate) fn text(&self) -> Style {
         Style::default().fg(self.fg)
     }
 
-    /// Muted / secondary text.
+    /// Muted / secondary text
     pub(crate) fn muted(&self) -> Style {
         Style::default().fg(self.fg_muted)
     }
 
-    /// Dimmed metadata.
+    /// Dimmed metadata
     pub(crate) fn dim(&self) -> Style {
         Style::default().fg(self.fg_dim)
     }
 
     // Semantic accents
 
-    /// Bold accent (user messages, highlights).
+    /// Bold accent (user messages, highlights)
     pub(crate) fn accent(&self) -> Style {
         Style::default()
             .fg(self.accent)
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Secondary accent (assistant labels).
+    /// Secondary accent (assistant labels)
     pub(crate) fn secondary(&self) -> Style {
         Style::default().fg(self.secondary)
     }
 
     // Status indicators
 
-    /// Info / cost indicator.
+    /// Info / cost indicator
     #[expect(
         dead_code,
         reason = "part of the theme API; no component reads this slot"
@@ -113,56 +113,56 @@ impl Theme {
         Style::default().fg(self.info)
     }
 
-    /// Success indicator.
+    /// Success indicator
     pub(crate) fn success(&self) -> Style {
         Style::default().fg(self.success)
     }
 
-    /// Warning indicator.
+    /// Warning indicator
     pub(crate) fn warning(&self) -> Style {
         Style::default().fg(self.warning)
     }
 
-    /// Error indicator.
+    /// Error indicator
     pub(crate) fn error(&self) -> Style {
         Style::default().fg(self.error)
     }
 
     // Composite helpers
 
-    /// Left border for tool call blocks.
+    /// Left border for tool call blocks
     pub(crate) fn tool_border(&self) -> Style {
         Style::default().fg(self.fg_muted)
     }
 
-    /// Tool icon accent (non-bold).
+    /// Tool icon accent (non-bold)
     pub(crate) fn tool_icon(&self) -> Style {
         Style::default().fg(self.accent)
     }
 
-    /// Thinking text (dimmed italic).
+    /// Thinking text (dimmed italic)
     pub(crate) fn thinking(&self) -> Style {
         Style::default()
             .fg(self.fg_dim)
             .add_modifier(Modifier::ITALIC)
     }
 
-    /// Styled pipe separator span (`" │ "`).
+    /// Styled pipe separator span (`" │ "`)
     pub(crate) fn separator_span(&self) -> Span<'static> {
         Span::styled(" │ ", self.separator())
     }
 
-    /// Status bar separator style (dimmed pipe).
+    /// Status bar separator style (dimmed pipe)
     pub(crate) fn separator(&self) -> Style {
         Style::default().fg(self.fg_dim)
     }
 
-    /// Border style for focused components.
+    /// Border style for focused components
     pub(crate) fn border_focused(&self) -> Style {
         Style::default().fg(self.accent)
     }
 
-    /// Border style for unfocused components.
+    /// Border style for unfocused components
     pub(crate) fn border_unfocused(&self) -> Style {
         Style::default().fg(self.fg_dim)
     }
