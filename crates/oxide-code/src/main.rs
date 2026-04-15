@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
-use prompt::PromptParts;
+use prompt::{PromptParts, environment::marketing_name};
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -99,8 +99,13 @@ async fn run_tui(
         })
         .unwrap_or_default();
 
+    let display_model = match marketing_name(model) {
+        Some(name) => name.to_owned(),
+        None => model.to_owned(),
+    };
+
     let mut terminal = tui::terminal::init()?;
-    let mut app = tui::app::App::new(model.to_owned(), show_thinking, cwd, agent_rx, user_tx);
+    let mut app = tui::app::App::new(display_model, show_thinking, cwd, agent_rx, user_tx);
 
     let agent_handle = {
         let client = client.clone();

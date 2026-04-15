@@ -94,7 +94,7 @@ impl Environment {
 /// Arms are ordered most-specific-first because `contains()` would match
 /// e.g. `"claude-opus-4"` against `"claude-opus-4-6"`. When adding new
 /// models, keep more specific prefixes above less specific ones.
-fn marketing_name(model: &str) -> Option<&'static str> {
+pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
     if model.contains("claude-opus-4-6") {
         Some("Claude Opus 4.6")
     } else if model.contains("claude-sonnet-4-6") {
