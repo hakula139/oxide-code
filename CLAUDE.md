@@ -61,7 +61,8 @@ ox     # Start an interactive session
     │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
     │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
     ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
-    └── theme.rs                # Catppuccin Mocha palette, style helpers
+    ├── theme.rs                # Catppuccin Mocha palette, style helpers
+    └── wrap.rs                 # Word-wrap with continuation indent for styled lines
 ```
 
 ## Coding Conventions
