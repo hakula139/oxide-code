@@ -468,15 +468,11 @@ impl ChatView {
         }
 
         if truncated {
+            let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
+            let label = if n == 1 { "line" } else { "lines" };
             lines.push(Line::from(vec![
                 Span::styled("  ┃     ", border_style),
-                Span::styled(
-                    format!(
-                        "... {} more lines",
-                        output_lines.len() - MAX_TOOL_OUTPUT_LINES
-                    ),
-                    self.theme.dim(),
-                ),
+                Span::styled(format!("... {n} more {label}"), self.theme.dim()),
             ]));
         }
     }
@@ -1100,7 +1096,8 @@ mod tests {
             .collect();
         chat.push_tool_result("result", &output.join("\n"), false);
         let text = all_text(&chat);
-        assert!(text.contains("... 1 more lines"));
+        assert!(text.contains("... 1 more line"));
+        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
     }
 
     // ── push_thinking_lines ──
