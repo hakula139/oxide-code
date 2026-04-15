@@ -260,17 +260,13 @@ where
     }
 
     fn start_item(&mut self) {
-        let marker = if let Some(last) = self.list_stack.last_mut() {
-            match last {
-                None => "- ".to_owned(),
-                Some(index) => {
-                    let m = format!("{}. ", *index);
-                    *index += 1;
-                    m
-                }
+        let marker = match self.list_stack.last_mut() {
+            Some(Some(index)) => {
+                let m = format!("{}. ", *index);
+                *index += 1;
+                m
             }
-        } else {
-            "- ".to_owned()
+            _ => "- ".to_owned(),
         };
 
         let continuation = vec![Span::raw(" ".repeat(marker.len()))];
