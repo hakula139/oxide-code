@@ -36,6 +36,9 @@ enum ChatEntry {
 /// Maximum lines of tool output shown inline before truncation.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
+/// Maximum characters per tool output line before horizontal truncation.
+const MAX_TOOL_OUTPUT_LINE_CHARS: usize = 512;
+
 /// Indent prefix prepended to every markdown line in assistant messages.
 const CHAT_INDENT: &str = "    ";
 
@@ -444,9 +447,11 @@ impl ChatView {
         };
 
         for text_line in visible {
+            let expanded = expand_tabs(text_line);
+            let display_text = truncate_line(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
             let line = Line::from(vec![
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
-                Span::styled(expand_tabs(text_line), text_style),
+                Span::styled(display_text, text_style),
             ]);
             for wrapped in
                 wrap_line_styled(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix))
@@ -611,6 +616,16 @@ fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'stati
     } else {
         vec![Span::raw(" ".repeat(prefix.len()))]
     }
+}
+
+/// Truncate a string to `max_chars` characters, appending `...` if cut.
+fn truncate_line(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_owned();
+    }
+    // Find a char boundary at or before max_chars.
+    let boundary = s.floor_char_boundary(max_chars);
+    format!("{}...", &s[..boundary])
 }
 
 /// Prepend [`CHAT_INDENT`] to a markdown-rendered line.
@@ -1108,6 +1123,22 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("... 1 more line"));
         assert!(!text.contains("lines"), "singular 'line' expected: {text}");
+    }
+
+    #[test]
+    fn push_tool_output_lines_long_line_truncated() {
+        let mut chat = test_chat();
+        let long_line = "x".repeat(MAX_TOOL_OUTPUT_LINE_CHARS + 100);
+        chat.push_tool_result("result", &long_line, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("..."),
+            "long line should be truncated with ..."
+        );
+        assert!(
+            !text.contains(&long_line),
+            "full long line should not appear"
+        );
     }
 
     // ── push_thinking_lines ──
