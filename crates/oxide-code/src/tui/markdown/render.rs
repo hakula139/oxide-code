@@ -6,6 +6,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::highlight::highlight_code;
 use crate::tui::theme::Theme;
+use crate::tui::wrap::wrap_line;
 
 // ── Renderer ──
 
@@ -13,6 +14,8 @@ pub(super) struct MarkdownRenderer<I> {
     // Core
     iter: I,
     theme: Theme,
+    /// Max line width for word-wrapping (0 = no wrapping).
+    width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
     // Block-level spacing
@@ -65,10 +68,11 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: Theme) -> Self {
+    pub(super) fn new(iter: I, theme: Theme, width: usize) -> Self {
         Self {
             iter,
             theme,
+            width,
             lines: Vec::new(),
             needs_newline: false,
             indent_stack: Vec::new(),
@@ -490,6 +494,10 @@ where
     // ── Line Building ──
 
     /// Start a new output line with indent prefixes and any pending list marker.
+    ///
+    /// When `self.width` is set, lines that exceed the width budget are
+    /// word-wrapped with continuation lines indented to the current
+    /// `indent_stack` depth (using spaces, not markers).
     fn push_line(&mut self, line: Line<'static>) {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -513,7 +521,25 @@ where
         }
 
         spans.extend(line.spans);
-        self.lines.push(Line::from(spans));
+
+        if self.width > 0 {
+            let indent = self.continuation_indent_width();
+            for wrapped in wrap_line(Line::from(spans), self.width, indent) {
+                self.lines.push(wrapped);
+            }
+        } else {
+            self.lines.push(Line::from(spans));
+        }
+    }
+
+    /// Total display width of the continuation indent (all `indent_stack`
+    /// entries, using continuation widths rather than markers).
+    fn continuation_indent_width(&self) -> usize {
+        self.indent_stack
+            .iter()
+            .flat_map(|prefix| prefix.iter())
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     /// Append a span to the last line, creating one if needed.
@@ -627,7 +653,7 @@ mod tests {
     }
 
     fn rendered_text(input: &str) -> Vec<String> {
-        render_markdown(input, &theme())
+        render_markdown(input, &theme(), 0)
             .lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -682,6 +708,7 @@ mod tests {
                 #### H4
             "},
             &t,
+            0,
         );
 
         let find_heading = |prefix: &str| {
@@ -725,7 +752,7 @@ mod tests {
     #[test]
     fn blockquote_text_and_style() {
         let t = theme();
-        let text = render_markdown("> Quoted text", &t);
+        let text = render_markdown("> Quoted text", &t, 0);
         let bq_line = text
             .lines
             .iter()
@@ -767,6 +794,7 @@ mod tests {
                 Below
             "},
             &t,
+            0,
         );
         let rule_span = text
             .lines
@@ -887,7 +915,7 @@ mod tests {
     #[test]
     fn list_marker_uses_accent_color() {
         let t = theme();
-        let text = render_markdown("- Item", &t);
+        let text = render_markdown("- Item", &t, 0);
         let marker_span = text
             .lines
             .iter()
@@ -899,7 +927,7 @@ mod tests {
     #[test]
     fn inline_code_in_list_item() {
         let t = theme();
-        let text = render_markdown("- Use `foo()` here", &t);
+        let text = render_markdown("- Use `foo()` here", &t, 0);
         let has_code_span = text.lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -936,6 +964,7 @@ mod tests {
                 ```
             "},
             &theme(),
+            0,
         );
         let has_rgb = text.lines.iter().any(|line| {
             line.spans
@@ -1039,6 +1068,7 @@ mod tests {
                 | val  |
             "},
             &t,
+            0,
         );
         let header_line = text
             .lines
@@ -1066,6 +1096,7 @@ mod tests {
                 | `code` |
             "},
             &t,
+            0,
         );
         let has_code = text.lines.iter().any(|line| {
             line.spans
@@ -1143,7 +1174,7 @@ mod tests {
 
     #[test]
     fn bold_and_italic() {
-        let text = render_markdown("**bold** and *italic*", &theme());
+        let text = render_markdown("**bold** and *italic*", &theme(), 0);
         let bold_span = text.lines[0]
             .spans
             .iter()
@@ -1160,7 +1191,7 @@ mod tests {
 
     #[test]
     fn bold_italic_combined() {
-        let text = render_markdown("***bold italic***", &theme());
+        let text = render_markdown("***bold italic***", &theme(), 0);
         let span = text.lines[0]
             .spans
             .iter()
@@ -1172,7 +1203,7 @@ mod tests {
 
     #[test]
     fn strikethrough() {
-        let text = render_markdown("~~struck~~", &theme());
+        let text = render_markdown("~~struck~~", &theme(), 0);
         let span = text.lines[0]
             .spans
             .iter()
@@ -1184,7 +1215,7 @@ mod tests {
     #[test]
     fn inline_code() {
         let t = theme();
-        let text = render_markdown("Use `foo()` here", &t);
+        let text = render_markdown("Use `foo()` here", &t, 0);
         let span = text.lines[0]
             .spans
             .iter()
@@ -1204,7 +1235,7 @@ mod tests {
     #[test]
     fn link_url_has_accent_underline_style() {
         let t = theme();
-        let text = render_markdown("[text](https://example.com)", &t);
+        let text = render_markdown("[text](https://example.com)", &t, 0);
         let url_span = text.lines[0]
             .spans
             .iter()
