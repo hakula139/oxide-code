@@ -282,7 +282,7 @@ where
     // ── Code Blocks ──
 
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
-        if !self.lines.is_empty() {
+        if self.needs_newline {
             self.push_blank_line();
         }
         self.code_block.active = true;
