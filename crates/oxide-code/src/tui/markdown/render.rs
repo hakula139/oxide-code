@@ -325,10 +325,12 @@ where
     }
 
     fn end_table(&mut self) {
-        let table = std::mem::take(&mut self.table);
-        let rows = table.rows;
-        let alignments = table.alignments;
-        let head_rows = table.head_rows;
+        let TableState {
+            rows,
+            alignments,
+            head_rows,
+            ..
+        } = std::mem::take(&mut self.table);
 
         if rows.is_empty() {
             return;
@@ -557,11 +559,6 @@ where
 
 // ── Table Helpers ──
 
-/// Measure the display width of a cell's spans.
-fn cell_width(cell: &[Span<'_>]) -> usize {
-    cell.iter().map(|s| s.content.width()).sum()
-}
-
 /// Compute the max display width for each column across all rows.
 fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<usize> {
     let mut widths = vec![0_usize; col_count];
@@ -637,6 +634,11 @@ fn build_data_row(
         spans.push(pipe.clone());
     }
     Line::from(spans)
+}
+
+/// Measure the display width of a cell's spans.
+fn cell_width(cell: &[Span<'_>]) -> usize {
+    cell.iter().map(|s| s.content.width()).sum()
 }
 
 #[cfg(test)]
@@ -1224,6 +1226,21 @@ mod tests {
         assert_eq!(span.style.fg, Some(t.code));
     }
 
+    // ── HTML ──
+
+    #[test]
+    fn html_block_rendered_as_text() {
+        let lines = rendered_text("<div>hello</div>\n");
+        assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
+    }
+
+    #[test]
+    fn inline_html_preserved() {
+        let lines = rendered_text("text <br> more");
+        let joined: String = lines.join("");
+        assert!(joined.contains("<br>"));
+    }
+
     // ── Links ──
 
     #[test]
@@ -1243,21 +1260,6 @@ mod tests {
             .unwrap();
         assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(url_span.style.fg, Some(t.accent));
-    }
-
-    // ── HTML ──
-
-    #[test]
-    fn html_block_rendered_as_text() {
-        let lines = rendered_text("<div>hello</div>\n");
-        assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
-    }
-
-    #[test]
-    fn inline_html_preserved() {
-        let lines = rendered_text("text <br> more");
-        let joined: String = lines.join("");
-        assert!(joined.contains("<br>"));
     }
 
     // ── Word Wrapping ──
