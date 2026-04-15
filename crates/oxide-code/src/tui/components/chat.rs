@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 use crate::tui::component::{Action, Component};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs, wrap_line};
+use crate::tui::wrap::{expand_tabs, wrap_line_styled};
 
 // ── Chat Entry ──
 
@@ -39,14 +39,17 @@ const MAX_TOOL_OUTPUT_LINES: usize = 5;
 /// Indent prefix prepended to every markdown line in assistant messages.
 const CHAT_INDENT: &str = "    ";
 
+/// Left bar character for bordered content (user, tool, thinking).
+const BAR: &str = "▎";
+
 /// Border prefix for user messages, tool calls, and thinking blocks.
-const BORDER_PREFIX: &str = "  ┃ ";
+const BORDER_PREFIX: &str = "  ▎ ";
 
 /// Border prefix for tool result status lines (indicator + label).
-const TOOL_RESULT_PREFIX: &str = "  ┃   ";
+const TOOL_RESULT_PREFIX: &str = "  ▎   ";
 
 /// Border prefix for tool output body lines.
-const TOOL_OUTPUT_PREFIX: &str = "  ┃     ";
+const TOOL_OUTPUT_PREFIX: &str = "  ▎     ";
 
 /// Scrollable chat message list with markdown rendering, tool call display,
 /// and thinking block support.
@@ -358,15 +361,13 @@ impl ChatView {
         width: usize,
     ) {
         push_section_header(lines, "❯ You", self.theme.accent());
-        for text_line in content.trim().lines() {
-            let line = Line::from(vec![
-                Span::styled(BORDER_PREFIX, self.theme.tool_border()),
-                Span::styled(text_line.to_owned(), self.theme.text()),
-            ]);
-            for wrapped in wrap_line(line, width, BORDER_PREFIX.len()) {
-                lines.push(wrapped);
-            }
-        }
+        push_bordered_lines(
+            lines,
+            content.trim(),
+            self.theme.accent(),
+            self.theme.text(),
+            width,
+        );
     }
 
     // ── Assistant Messages ──
@@ -432,6 +433,7 @@ impl ChatView {
 
         let border_style = self.tool_border_style(is_error);
         let text_style = self.theme.dim();
+        let cont_prefix = border_continuation_prefix(TOOL_OUTPUT_PREFIX, border_style);
 
         let output_lines: Vec<&str> = trimmed.lines().collect();
         let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
@@ -446,7 +448,9 @@ impl ChatView {
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(expand_tabs(text_line), text_style),
             ]);
-            for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len()) {
+            for wrapped in
+                wrap_line_styled(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix))
+            {
                 lines.push(wrapped);
             }
         }
@@ -473,15 +477,13 @@ impl ChatView {
 
     fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
         push_section_header(lines, "Thinking...", self.theme.thinking());
-        for text_line in self.thinking_buffer.lines() {
-            let line = Line::from(vec![
-                Span::styled(BORDER_PREFIX, self.theme.dim()),
-                Span::styled(text_line.to_owned(), self.theme.thinking()),
-            ]);
-            for wrapped in wrap_line(line, width, BORDER_PREFIX.len()) {
-                lines.push(wrapped);
-            }
-        }
+        push_bordered_lines(
+            lines,
+            &self.thinking_buffer,
+            self.theme.dim(),
+            self.theme.thinking(),
+            width,
+        );
     }
 
     // ── Streaming ──
@@ -569,6 +571,46 @@ fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Sty
         Span::raw("  "),
         Span::styled(label, style),
     ]));
+}
+
+/// Emit bordered lines: each content line gets [`BORDER_PREFIX`] with the
+/// given `bar_style`, then text in `text_style`, wrapped with a styled
+/// continuation prefix that preserves the `▎` bar on continuation lines.
+fn push_bordered_lines(
+    lines: &mut Vec<Line<'_>>,
+    content: &str,
+    bar_style: Style,
+    text_style: Style,
+    width: usize,
+) {
+    let cont_prefix = border_continuation_prefix(BORDER_PREFIX, bar_style);
+    for text_line in content.lines() {
+        let line = Line::from(vec![
+            Span::styled(BORDER_PREFIX, bar_style),
+            Span::styled(text_line.to_owned(), text_style),
+        ]);
+        for wrapped in wrap_line_styled(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
+            lines.push(wrapped);
+        }
+    }
+}
+
+/// Build a continuation prefix that keeps the `▎` bar aligned under the
+/// original prefix. For a prefix like `"  ▎ "` (4 cols), produces spans
+/// `["  ", "▎", " "]` where the bar span is styled.
+fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
+    // Split at the bar character to determine left padding and right padding.
+    if let Some(bar_pos) = prefix.find(BAR) {
+        let left = &prefix[..bar_pos];
+        let right = &prefix[bar_pos + BAR.len()..];
+        vec![
+            Span::raw(left.to_owned()),
+            Span::styled(BAR, bar_style),
+            Span::raw(right.to_owned()),
+        ]
+    } else {
+        vec![Span::raw(" ".repeat(prefix.len()))]
+    }
 }
 
 /// Prepend [`CHAT_INDENT`] to a markdown-rendered line.

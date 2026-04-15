@@ -5,16 +5,26 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Wrap a line to fit within `max_width`, preserving visual indentation
 /// on continuation lines.
 ///
-/// `continuation_indent` is the number of leading spaces prepended to
-/// each continuation line. The first line is output as-is (it already
-/// contains whatever indent the caller placed). Subsequent lines get
-/// `continuation_indent` spaces consumed from the width budget.
+/// `continuation_indent` is the number of leading columns consumed by
+/// the continuation prefix. Each continuation line is prefixed with the
+/// spans returned by `continuation_prefix` (if provided) or plain spaces.
 ///
 /// Returns the original line unchanged when it fits within `max_width`.
 pub(crate) fn wrap_line(
     line: Line<'static>,
     max_width: usize,
     continuation_indent: usize,
+) -> Vec<Line<'static>> {
+    wrap_line_styled(line, max_width, continuation_indent, None)
+}
+
+/// Like [`wrap_line`], but emits `continuation_prefix` spans on each
+/// continuation line instead of plain spaces.
+pub(crate) fn wrap_line_styled(
+    line: Line<'static>,
+    max_width: usize,
+    continuation_indent: usize,
+    continuation_prefix: Option<&[Span<'static>]>,
 ) -> Vec<Line<'static>> {
     if max_width == 0 {
         return vec![line];
@@ -42,7 +52,11 @@ pub(crate) fn wrap_line(
         .enumerate()
         .map(|(i, chars)| {
             let mut spans = if i > 0 && continuation_indent > 0 {
-                vec![Span::raw(" ".repeat(continuation_indent))]
+                if let Some(prefix) = continuation_prefix {
+                    prefix.to_vec()
+                } else {
+                    vec![Span::raw(" ".repeat(continuation_indent))]
+                }
             } else {
                 Vec::new()
             };
