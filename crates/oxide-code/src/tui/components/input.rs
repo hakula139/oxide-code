@@ -212,13 +212,6 @@ mod tests {
         assert!(input.is_enabled());
     }
 
-    #[test]
-    fn set_enabled_same_value_is_noop() {
-        let mut input = test_input();
-        input.set_enabled(true);
-        assert!(input.is_enabled());
-    }
-
     // ── height ──
 
     #[test]

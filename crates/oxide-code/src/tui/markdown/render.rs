@@ -1259,4 +1259,16 @@ mod tests {
         let joined: String = lines.join("");
         assert!(joined.contains("<br>"));
     }
+
+    // ── Word Wrapping ──
+
+    #[test]
+    fn render_with_nonzero_width_produces_output() {
+        // The width parameter is threaded to push_line for wrapping.
+        // Inline content is assembled incrementally via push_span (not
+        // wrapped at this level), but the path must not panic.
+        let t = theme();
+        let text = render_markdown("Hello world", &t, 20);
+        assert!(!text.lines.is_empty());
+    }
 }
