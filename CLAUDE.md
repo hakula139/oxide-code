@@ -59,7 +59,7 @@ ox     # Start an interactive session
     ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
     ├── markdown/
     │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
-    │   └── render.rs           # pulldown-cmark event walker, inline / block / list rendering
+    │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
     ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
     └── theme.rs                # Catppuccin Mocha palette, style helpers
 ```
