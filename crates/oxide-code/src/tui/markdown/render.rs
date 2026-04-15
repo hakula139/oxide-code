@@ -256,14 +256,11 @@ where
     }
 
     fn start_item(&mut self) {
-        let depth = self.list_stack.len();
-        let indent_width = depth * 4 - 3;
-
         let marker = if let Some(last) = self.list_stack.last_mut() {
             match last {
-                None => " ".repeat(indent_width.saturating_sub(1)) + "- ",
+                None => "- ".to_owned(),
                 Some(index) => {
-                    let m = format!("{:indent_width$}. ", *index);
+                    let m = format!("{}. ", *index);
                     *index += 1;
                     m
                 }
