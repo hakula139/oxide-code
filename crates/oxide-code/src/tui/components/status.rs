@@ -82,13 +82,13 @@ impl Component for StatusBar {
 
         let status_span = match self.status {
             Status::Idle => Span::styled("ready", self.theme.success()),
-            Status::Streaming => {
+            Status::Streaming | Status::ToolRunning => {
                 let spinner = SPINNER_FRAMES[self.spinner_frame];
-                Span::styled(format!("{spinner} streaming..."), self.theme.warning())
-            }
-            Status::ToolRunning => {
-                let spinner = SPINNER_FRAMES[self.spinner_frame];
-                Span::styled(format!("{spinner} running tool..."), self.theme.warning())
+                let label = match self.status {
+                    Status::Streaming => "streaming...",
+                    _ => "running tool...",
+                };
+                Span::styled(format!("{spinner} {label}"), self.theme.warning())
             }
         };
 

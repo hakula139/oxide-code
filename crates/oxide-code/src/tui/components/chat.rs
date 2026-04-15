@@ -28,6 +28,7 @@ enum ChatEntry {
         content: String,
         is_error: bool,
     },
+    Error(String),
 }
 
 // ── Chat View ──
@@ -161,11 +162,7 @@ impl ChatView {
 
     /// Append an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
-        self.entries.push(ChatEntry::ToolResult {
-            label: msg.to_owned(),
-            content: String::new(),
-            is_error: true,
-        });
+        self.entries.push(ChatEntry::Error(msg.to_owned()));
     }
 
     /// Update cached viewport height and sync scroll position. Called by
@@ -312,6 +309,9 @@ impl ChatView {
                 } => {
                     self.push_tool_result_line(&mut lines, label, *is_error);
                     self.push_tool_output_lines(&mut lines, content, *is_error, w);
+                }
+                ChatEntry::Error(msg) => {
+                    self.push_tool_result_line(&mut lines, msg, true);
                 }
             }
         }
@@ -984,7 +984,7 @@ mod tests {
         assert!(text.contains("ls -la"));
     }
 
-    // ── push_tool_result_line / push_tool_output_lines ──
+    // ── push_tool_result_line ──
 
     #[test]
     fn push_tool_result_line_success() {
@@ -1014,6 +1014,8 @@ mod tests {
         assert!(text.contains("✗"));
         assert!(text.contains("something broke"));
     }
+
+    // ── push_tool_output_lines ──
 
     #[test]
     fn push_tool_output_lines_truncation() {
