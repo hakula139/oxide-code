@@ -283,23 +283,24 @@ impl ChatView {
     }
 
     fn build_text(&self, width: u16) -> Text<'_> {
+        let w = usize::from(width);
         let mut lines: Vec<Line<'_>> = Vec::new();
 
         if self.entries.is_empty()
             && self.streaming_buffer.is_empty()
             && self.thinking_buffer.is_empty()
         {
-            self.push_welcome(&mut lines, width);
+            self.push_welcome(&mut lines, w);
             return Text::from(lines);
         }
 
         for entry in &self.entries {
             match entry {
                 ChatEntry::User(content) => {
-                    self.push_user_message_lines(&mut lines, content, width);
+                    self.push_user_message_lines(&mut lines, content, w);
                 }
                 ChatEntry::Assistant(content) => {
-                    self.push_assistant_message_lines(&mut lines, content, width);
+                    self.push_assistant_message_lines(&mut lines, content, w);
                 }
                 ChatEntry::ToolCall { icon, label } => {
                     self.push_tool_call_line(&mut lines, icon, label);
@@ -310,19 +311,19 @@ impl ChatView {
                     is_error,
                 } => {
                     self.push_tool_result_line(&mut lines, label, *is_error);
-                    self.push_tool_output_lines(&mut lines, content, *is_error, width);
+                    self.push_tool_output_lines(&mut lines, content, *is_error, w);
                 }
             }
         }
 
         // Thinking buffer (ephemeral — not stored in history).
         if self.show_thinking && !self.thinking_buffer.is_empty() {
-            self.push_thinking_lines(&mut lines, width);
+            self.push_thinking_lines(&mut lines, w);
         }
 
         // Streaming buffer (not yet committed).
         if !self.streaming_buffer.is_empty() {
-            self.push_streaming_lines(&mut lines, width);
+            self.push_streaming_lines(&mut lines, w);
         }
 
         Text::from(lines)
@@ -330,12 +331,11 @@ impl ChatView {
 
     // ── Welcome ──
 
-    fn push_welcome(&self, lines: &mut Vec<Line<'_>>, width: u16) {
-        let w = usize::from(width);
+    fn push_welcome(&self, lines: &mut Vec<Line<'_>>, width: usize) {
         let title = "Welcome to ox";
         let subtitle = "Ask anything to begin.";
-        let title_pad = w.saturating_sub(title.len()) / 2;
-        let subtitle_pad = w.saturating_sub(subtitle.len()) / 2;
+        let title_pad = width.saturating_sub(title.len()) / 2;
+        let subtitle_pad = width.saturating_sub(subtitle.len()) / 2;
 
         lines.push(Line::raw(""));
         lines.push(Line::raw(""));
@@ -355,16 +355,15 @@ impl ChatView {
         &'a self,
         lines: &mut Vec<Line<'a>>,
         content: &'a str,
-        width: u16,
+        width: usize,
     ) {
         push_section_header(lines, "❯ You", self.theme.accent());
-        let w = usize::from(width);
         for text_line in content.trim().lines() {
             let line = Line::from(vec![
                 Span::styled(BORDER_PREFIX, self.theme.tool_border()),
                 Span::styled(text_line.to_owned(), self.theme.text()),
             ]);
-            for wrapped in wrap_line(line, w, BORDER_PREFIX.len()) {
+            for wrapped in wrap_line(line, width, BORDER_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -376,13 +375,13 @@ impl ChatView {
         &'a self,
         lines: &mut Vec<Line<'a>>,
         content: &'a str,
-        width: u16,
+        width: usize,
     ) {
         push_section_header(lines, "⟡ Assistant", self.theme.secondary());
 
         // The markdown renderer wraps to (width - 4) so the 4-space
         // chat indent doesn't push content past the terminal edge.
-        let md_width = usize::from(width).saturating_sub(CHAT_INDENT.len());
+        let md_width = width.saturating_sub(CHAT_INDENT.len());
         let rendered = render_markdown(content, &self.theme, md_width);
         for line in rendered.lines {
             lines.push(indent_markdown_line(line));
@@ -424,7 +423,7 @@ impl ChatView {
         lines: &mut Vec<Line<'a>>,
         content: &'a str,
         is_error: bool,
-        width: u16,
+        width: usize,
     ) {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -433,7 +432,6 @@ impl ChatView {
 
         let border_style = self.tool_border_style(is_error);
         let text_style = self.theme.dim();
-        let w = usize::from(width);
 
         let output_lines: Vec<&str> = trimmed.lines().collect();
         let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
@@ -448,7 +446,7 @@ impl ChatView {
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(expand_tabs(text_line), text_style),
             ]);
-            for wrapped in wrap_line(line, w, TOOL_OUTPUT_PREFIX.len()) {
+            for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -473,15 +471,14 @@ impl ChatView {
 
     // ── Thinking ──
 
-    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: u16) {
+    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
         push_section_header(lines, "Thinking...", self.theme.thinking());
-        let w = usize::from(width);
         for text_line in self.thinking_buffer.lines() {
             let line = Line::from(vec![
                 Span::styled(BORDER_PREFIX, self.theme.dim()),
                 Span::styled(text_line.to_owned(), self.theme.thinking()),
             ]);
-            for wrapped in wrap_line(line, w, BORDER_PREFIX.len()) {
+            for wrapped in wrap_line(line, width, BORDER_PREFIX.len()) {
                 lines.push(wrapped);
             }
         }
@@ -489,7 +486,7 @@ impl ChatView {
 
     // ── Streaming ──
 
-    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: u16) {
+    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
         if !lines.is_empty()
             && !self
                 .entries
@@ -511,7 +508,7 @@ impl ChatView {
         // Render only the new chunk beyond the cached boundary.
         let buf = &self.streaming_buffer;
         let tail = &buf[self.streaming_rendered_boundary..];
-        let md_width = usize::from(width).saturating_sub(CHAT_INDENT.len());
+        let md_width = width.saturating_sub(CHAT_INDENT.len());
 
         if let Some(rel_boundary) = tail.rfind('\n') {
             let new_committed = &tail[..rel_boundary];
