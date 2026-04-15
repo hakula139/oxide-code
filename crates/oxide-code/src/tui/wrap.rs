@@ -191,7 +191,7 @@ pub(crate) fn expand_tabs(s: &str) -> String {
             col += spaces;
         } else {
             out.push(ch);
-            col += 1;
+            col += ch.width().unwrap_or(0);
         }
     }
     out
