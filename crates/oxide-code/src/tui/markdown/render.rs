@@ -619,7 +619,7 @@ fn build_data_row(
         // Left padding (always at least 1 space)
         spans.push(Span::raw(" ".repeat(1 + pad_left)));
 
-        // Cell content with optional style override for headers
+        // Cell content with optional style override for headers.
         for span in cell {
             let styled = if cell_style == Style::default() {
                 span.clone()

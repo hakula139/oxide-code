@@ -292,7 +292,7 @@ mod tests {
         assert!(content.contains("lines truncated"));
         assert!(content.len() <= MAX_OUTPUT_BYTES + 100);
         assert!(content.len() >= MAX_OUTPUT_BYTES / 2);
-        // Separator sits between head and tail, not at the edges
+        // Separator sits between head and tail, not at the edges.
         let sep_pos = content.find("lines truncated").unwrap();
         assert!(sep_pos > head.len());
         assert!(sep_pos < content.len() - tail.len());

@@ -245,7 +245,7 @@ mod tests {
         let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
         let result = wrap_line(line, 16, 4);
         assert!(result.len() >= 2, "should wrap: {result:?}");
-        // Continuation lines start with 4-space indent
+        // Continuation lines start with 4-space indent.
         let cont = &result[1];
         assert!(
             cont.spans[0].content.starts_with("    "),
@@ -262,7 +262,7 @@ mod tests {
         ]);
         let result = wrap_line(line, 20, 0);
         assert!(result.len() >= 2, "should wrap: {result:?}");
-        // First span on first line should preserve bold
+        // First span on first line should preserve bold.
         let first_span = &result[0].spans[0];
         assert!(
             first_span.style.add_modifier.contains(Modifier::BOLD),
@@ -286,14 +286,14 @@ mod tests {
         ]);
         let result = wrap_line(line, 14, 2);
         assert!(result.len() >= 2, "should wrap: {result:?}");
-        // Check that continuation has 2-space prefix
+        // Check that continuation has 2-space prefix.
         let cont = &result[1];
         assert_eq!(
             cont.spans[0].content.as_ref(),
             "  ",
             "2-space continuation indent"
         );
-        // The remaining spans should still have green color
+        // The remaining spans should still have green color.
         let has_green = cont.spans.iter().any(|s| s.style.fg == Some(Color::Green));
         assert!(has_green, "style should be preserved on continuation");
     }
