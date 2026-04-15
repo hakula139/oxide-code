@@ -276,9 +276,9 @@ impl ChatView {
         let text = self.build_text(area.width);
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "line count fits in u16 for any realistic conversation"
+            reason = "clamped to u16::MAX; truncation cannot occur"
         )]
-        let height = text.lines.len() as u16;
+        let height = text.lines.len().min(u16::MAX as usize) as u16;
         self.content_height.set(height);
         let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
