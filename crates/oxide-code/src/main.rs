@@ -104,6 +104,13 @@ async fn main() -> Result<()> {
 
 // ── Session Helpers ──
 
+/// Log session I/O errors without aborting the agent loop.
+fn log_session_err(result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        warn!("session write failed: {e}");
+    }
+}
+
 /// Print a table of recent sessions and exit.
 fn list_sessions() -> Result<()> {
     let store = SessionStore::open()?;
@@ -268,7 +275,7 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
-                session.record_message(&user_msg).ok();
+                log_session_err(session.record_message(&user_msg));
                 messages.push(user_msg);
                 let prompt = prompt::build_prompt(client.model()).await;
                 if let Err(e) =
@@ -282,7 +289,7 @@ async fn agent_loop_task(
         }
     }
 
-    session.finish().ok();
+    log_session_err(session.finish());
     Ok(())
 }
 
@@ -315,14 +322,14 @@ async fn bare_repl(
         }
 
         let user_msg = Message::user(&input);
-        session.record_message(&user_msg).ok();
+        log_session_err(session.record_message(&user_msg));
         messages.push(user_msg);
         let prompt = prompt::build_prompt(model).await;
         agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
         _ = sink.send(AgentEvent::TurnComplete);
     }
 
-    session.finish().ok();
+    log_session_err(session.finish());
     Ok(())
 }
 
@@ -342,7 +349,7 @@ async fn headless(
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
     agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
-    session.finish().ok();
+    log_session_err(session.finish());
     println!();
     Ok(())
 }
@@ -377,7 +384,7 @@ async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        session.record_message(&assistant_msg).ok();
+        log_session_err(session.record_message(&assistant_msg));
         messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
@@ -419,7 +426,7 @@ async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        session.record_message(&tool_result_msg).ok();
+        log_session_err(session.record_message(&tool_result_msg));
         messages.push(tool_result_msg);
     }
 
