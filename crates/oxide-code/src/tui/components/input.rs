@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -5,6 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::component::{Action, Component};
 use crate::tui::theme::Theme;
@@ -26,6 +29,14 @@ pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
     enabled: bool,
+    /// Last render width for visual line count estimation. Updated each
+    /// frame by `render()`, used by `height()` on the *next* frame.
+    /// `Cell` because `render(&self)` is immutable.
+    last_width: Cell<u16>,
+    /// Tracked viewport scroll offset (screen line index of the topmost
+    /// visible row). Mirrors ratatui-textarea's internal `viewport` which
+    /// is not publicly accessible.
+    scroll_top: Cell<u16>,
 }
 
 impl InputArea {
@@ -42,6 +53,8 @@ impl InputArea {
             theme,
             textarea,
             enabled: true,
+            last_width: Cell::new(0),
+            scroll_top: Cell::new(0),
         }
     }
 
@@ -62,12 +75,8 @@ impl InputArea {
     }
 
     /// Returns the height this component needs (content lines + border + hint).
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "line count fits in u16 for any practical input"
-    )]
     pub(crate) fn height(&self) -> u16 {
-        let content_lines = (self.textarea.lines().len() as u16).max(1);
+        let content_lines = self.visual_line_count();
         // content + top border (1) + hint line (1)
         content_lines.min(MAX_VISIBLE_LINES) + 2
     }
@@ -131,15 +140,31 @@ impl Component for InputArea {
 
         frame.render_widget(&self.textarea, chunks[0]);
 
+        // Store width for visual line count estimation on the next frame.
+        self.last_width.set(chunks[0].width);
+
         if self.enabled {
-            // Use screen_cursor for visual position that accounts for
-            // word-wrap (logical cursor may differ from visual position).
+            // screen_cursor().row is an absolute screen-line index across
+            // all wrapped lines, not viewport-relative. Replicate the
+            // scroll logic from ratatui-textarea's `next_scroll_top` to
+            // convert to a position within the rendered area.
             let sc = self.textarea.screen_cursor();
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
-            let cursor_y = chunks[0].y + sc.row as u16;
+            let cursor_row = sc.row as u16;
+            let height = chunks[0].height;
+            let prev = self.scroll_top.get();
+            let top = if cursor_row < prev {
+                cursor_row
+            } else if height > 0 && prev + height <= cursor_row {
+                cursor_row + 1 - height
+            } else {
+                prev
+            };
+            self.scroll_top.set(top);
+
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
@@ -148,6 +173,7 @@ impl Component for InputArea {
                 .x
                 .saturating_add(sc.col as u16)
                 .min(chunks[0].right().saturating_sub(1));
+            let cursor_y = chunks[0].y + cursor_row - top;
             frame.set_cursor_position((cursor_x, cursor_y));
         }
 
@@ -169,6 +195,34 @@ impl Component for InputArea {
 // ── Private Helpers ──
 
 impl InputArea {
+    /// Estimate the number of visual (screen) lines after word-wrap.
+    ///
+    /// Uses `last_width` from the previous render frame. Falls back to
+    /// logical line count when no width is known yet (first frame).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "line count fits in u16 for any practical input"
+    )]
+    fn visual_line_count(&self) -> u16 {
+        let width = self.last_width.get() as usize;
+        if width == 0 {
+            return (self.textarea.lines().len() as u16).max(1);
+        }
+        self.textarea
+            .lines()
+            .iter()
+            .map(|line| {
+                let w = UnicodeWidthStr::width(line.as_str());
+                if w <= width {
+                    1u16
+                } else {
+                    w.div_ceil(width) as u16
+                }
+            })
+            .sum::<u16>()
+            .max(1)
+    }
+
     fn submit(&mut self) -> Option<Action> {
         let content: String = self.textarea.lines().join("\n");
         let trimmed = content.trim().to_owned();
@@ -176,9 +230,10 @@ impl InputArea {
             return None;
         }
 
-        // Clear the textarea.
+        // Clear the textarea and reset scroll state.
         self.textarea.select_all();
         self.textarea.cut();
+        self.scroll_top.set(0);
 
         Some(Action::SubmitPrompt(trimmed))
     }
@@ -235,6 +290,69 @@ mod tests {
             input.textarea.insert_newline();
         }
         assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
+    }
+
+    // ── visual_line_count ──
+
+    #[test]
+    fn visual_line_count_no_width_falls_back_to_logical() {
+        let mut input = test_input();
+        // last_width is 0 (no render yet), so falls back to logical count.
+        assert_eq!(input.visual_line_count(), 1);
+
+        input.textarea.insert_newline();
+        assert_eq!(input.visual_line_count(), 2);
+    }
+
+    #[test]
+    fn visual_line_count_wraps_long_line() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Insert a 25-char line: wraps to ceil(25/10) = 3 visual lines.
+        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(input.visual_line_count(), 3);
+    }
+
+    #[test]
+    fn visual_line_count_mixed_logical_and_wrapped() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Line 1: 5 chars (fits in 10) -> 1 visual line.
+        for ch in "hello".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        input.textarea.insert_newline();
+        // Line 2: 15 chars -> ceil(15/10) = 2 visual lines.
+        for ch in "abcdefghijklmno".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(input.visual_line_count(), 3);
+    }
+
+    #[test]
+    fn height_accounts_for_visual_wrapping() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Single logical line, 25 chars -> 3 visual lines.
+        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        // 3 content + 1 border + 1 hint = 5
+        assert_eq!(input.height(), 5);
     }
 
     // ── handle_event ──
