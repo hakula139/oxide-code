@@ -182,6 +182,34 @@ mod tests {
         assert_eq!(manager.message_count, 0);
     }
 
+    // ── resume ──
+
+    #[test]
+    fn resume_loads_parent_messages_and_creates_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let parent_id = original.session_id().to_owned();
+        original.record_message(&Message::user("hello")).unwrap();
+        original.record_message(&Message::assistant("hi")).unwrap();
+        original.finish().unwrap();
+
+        let (resumed, messages) =
+            SessionManager::resume(&test_store(dir.path()), &parent_id, "m").unwrap();
+        assert_ne!(resumed.session_id(), parent_id);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(resumed.message_count, 2);
+    }
+
+    #[test]
+    fn resume_empty_session_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let parent_id = original.session_id().to_owned();
+        original.finish().unwrap();
+
+        assert!(SessionManager::resume(&test_store(dir.path()), &parent_id, "m").is_err());
+    }
+
     // ── record_message ──
 
     #[test]
@@ -237,32 +265,29 @@ mod tests {
         assert_eq!(session.message_count, Some(0));
     }
 
-    // ── resume ──
+    // ── extract_user_text ──
 
     #[test]
-    fn resume_loads_parent_messages_and_creates_new_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
-        let parent_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
-        original.record_message(&Message::assistant("hi")).unwrap();
-        original.finish().unwrap();
-
-        let (resumed, messages) =
-            SessionManager::resume(&test_store(dir.path()), &parent_id, "m").unwrap();
-        assert_ne!(resumed.session_id(), parent_id);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(resumed.message_count, 2);
+    fn extract_user_text_from_user_message() {
+        let msg = Message::user("hello");
+        assert_eq!(extract_user_text(&msg), Some("hello"));
     }
 
     #[test]
-    fn resume_empty_session_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
-        let parent_id = original.session_id().to_owned();
-        original.finish().unwrap();
+    fn extract_user_text_skips_assistant() {
+        let msg = Message::assistant("hello");
+        assert_eq!(extract_user_text(&msg), None);
+    }
 
-        assert!(SessionManager::resume(&test_store(dir.path()), &parent_id, "m").is_err());
+    #[test]
+    fn extract_user_text_skips_empty() {
+        let msg = Message {
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::Text {
+                text: "  ".to_owned(),
+            }],
+        };
+        assert_eq!(extract_user_text(&msg), None);
     }
 
     // ── truncate_title ──
@@ -288,30 +313,5 @@ mod tests {
     #[test]
     fn truncate_title_trims_whitespace() {
         assert_eq!(truncate_title("  padded  ", 60), "padded");
-    }
-
-    // ── extract_user_text ──
-
-    #[test]
-    fn extract_user_text_from_user_message() {
-        let msg = Message::user("hello");
-        assert_eq!(extract_user_text(&msg), Some("hello"));
-    }
-
-    #[test]
-    fn extract_user_text_skips_assistant() {
-        let msg = Message::assistant("hello");
-        assert_eq!(extract_user_text(&msg), None);
-    }
-
-    #[test]
-    fn extract_user_text_skips_empty() {
-        let msg = Message {
-            role: crate::message::Role::User,
-            content: vec![ContentBlock::Text {
-                text: "  ".to_owned(),
-            }],
-        };
-        assert_eq!(extract_user_text(&msg), None);
     }
 }

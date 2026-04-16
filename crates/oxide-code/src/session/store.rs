@@ -254,41 +254,6 @@ mod tests {
         }
     }
 
-    // ── resolve_sessions_dir ──
-
-    #[test]
-    fn resolve_sessions_dir_prefers_xdg() {
-        let xdg = PathBuf::from("/custom/data");
-        let result = resolve_sessions_dir(Some(xdg), Some(PathBuf::from("/home/u")));
-        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
-    }
-
-    #[test]
-    fn resolve_sessions_dir_falls_back_to_home() {
-        let result = resolve_sessions_dir(None, Some(PathBuf::from("/home/u")));
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_ignores_relative_xdg() {
-        let result = resolve_sessions_dir(
-            Some(PathBuf::from("relative")),
-            Some(PathBuf::from("/home/u")),
-        );
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_returns_none_without_home_or_xdg() {
-        assert!(resolve_sessions_dir(None, None).is_none());
-    }
-
     // ── create ──
 
     #[test]
@@ -311,23 +276,6 @@ mod tests {
         let entry = sample_message_entry("hi");
 
         assert!(store.create(&entry).is_err());
-    }
-
-    // ── SessionWriter::append ──
-
-    #[test]
-    fn append_writes_multiple_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let header = sample_header("multi");
-        let mut writer = store.create(&header).unwrap();
-
-        writer.append(&sample_message_entry("hello")).unwrap();
-        writer.append(&sample_message_entry("world")).unwrap();
-
-        let content = fs::read_to_string(dir.path().join("multi.jsonl")).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 3); // header + 2 messages
     }
 
     // ── load_messages ──
@@ -495,5 +443,57 @@ not valid json
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(store.latest_session_id().unwrap().is_none());
+    }
+
+    // ── SessionWriter::append ──
+
+    #[test]
+    fn append_writes_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let header = sample_header("multi");
+        let mut writer = store.create(&header).unwrap();
+
+        writer.append(&sample_message_entry("hello")).unwrap();
+        writer.append(&sample_message_entry("world")).unwrap();
+
+        let content = fs::read_to_string(dir.path().join("multi.jsonl")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3); // header + 2 messages
+    }
+
+    // ── resolve_sessions_dir ──
+
+    #[test]
+    fn resolve_sessions_dir_prefers_xdg() {
+        let xdg = PathBuf::from("/custom/data");
+        let result = resolve_sessions_dir(Some(xdg), Some(PathBuf::from("/home/u")));
+        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
+    }
+
+    #[test]
+    fn resolve_sessions_dir_falls_back_to_home() {
+        let result = resolve_sessions_dir(None, Some(PathBuf::from("/home/u")));
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
+        );
+    }
+
+    #[test]
+    fn resolve_sessions_dir_ignores_relative_xdg() {
+        let result = resolve_sessions_dir(
+            Some(PathBuf::from("relative")),
+            Some(PathBuf::from("/home/u")),
+        );
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
+        );
+    }
+
+    #[test]
+    fn resolve_sessions_dir_returns_none_without_home_or_xdg() {
+        assert!(resolve_sessions_dir(None, None).is_none());
     }
 }
