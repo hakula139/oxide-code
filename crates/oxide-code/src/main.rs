@@ -45,7 +45,12 @@ struct Cli {
         clippy::option_option,
         reason = "clap uses Option<Option<T>> for optional flag values"
     )]
-    #[arg(short = 'c', long = "continue", value_name = "SESSION_ID")]
+    #[arg(
+        short = 'c',
+        long = "continue",
+        value_name = "SESSION_ID",
+        conflicts_with = "prompt"
+    )]
     resume: Option<Option<String>>,
 
     /// List recent sessions and exit.
