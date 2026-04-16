@@ -10,7 +10,7 @@ use super::component::{Action, Component};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::event::{AgentEvent, UserAction, tool_call_title};
+use super::event::{AgentEvent, UserAction, tool_call_icon, tool_call_title};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 
@@ -32,13 +32,15 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(
         model: String,
+        show_thinking: bool,
+        cwd: String,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
     ) -> Self {
         let theme = Theme::default();
         Self {
-            status_bar: StatusBar::new(theme, model),
-            chat: ChatView::new(theme),
+            status_bar: StatusBar::new(theme, model, cwd),
+            chat: ChatView::new(theme, show_thinking),
             input: InputArea::new(theme),
             agent_rx,
             user_tx,
@@ -74,8 +76,11 @@ impl App {
                         }
                     }
                 }
-                // Tick — coalesce renders.
+                // Tick — coalesce renders and advance spinner.
                 _ = tick.tick() => {
+                    if self.status_bar.tick() {
+                        self.dirty = true;
+                    }
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -119,6 +124,7 @@ impl App {
             Action::SubmitPrompt(text) => {
                 self.chat.push_user_message(text.clone());
                 self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Streaming);
                 _ = self.user_tx.send(UserAction::SubmitPrompt(text));
             }
             Action::Quit => {
@@ -135,26 +141,33 @@ impl App {
                 self.status_bar.set_status(Status::Streaming);
                 self.input.set_enabled(false);
             }
-            AgentEvent::ThinkingToken(_) => {
-                // TODO: Render thinking in a dimmed / collapsible block.
+            AgentEvent::ThinkingToken(token) => {
+                self.chat.append_thinking_token(&token);
                 self.status_bar.set_status(Status::Streaming);
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
                 self.chat.commit_streaming();
+                let icon = tool_call_icon(&name);
                 let title = tool_call_title(&name, &input);
-                self.chat.push_tool_call(&name, title);
+                let label = title.map_or_else(|| name.clone(), str::to_owned);
+                self.chat.push_tool_call(icon, &label);
                 self.status_bar.set_status(Status::ToolRunning);
             }
-            AgentEvent::ToolCallEnd { title, .. } => {
+            AgentEvent::ToolCallEnd {
+                title,
+                content,
+                is_error,
+                ..
+            } => {
                 if let Some(title) = &title {
-                    self.chat.push_tool_call("result", Some(title));
+                    self.chat.push_tool_result(title, &content, is_error);
                 }
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
             }
             AgentEvent::Error(msg) => {
-                self.chat.push_tool_call("error", Some(&msg));
+                self.chat.push_error(&msg);
                 self.finish_turn();
             }
         }

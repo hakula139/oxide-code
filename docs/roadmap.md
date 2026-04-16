@@ -43,22 +43,34 @@ The project direction is simple:
   - **Context compression**: "The system will automatically compress prior messages as it approaches context limits."
   - **Security testing restrictions**: CTF / pentesting / DoS guardrails (re-evaluate when expanding user base).
 
-### Terminal UI (Foundation)
+### Terminal UI
 
 - ratatui + crossterm TUI with `tokio::select!` event loop, 60 FPS render coalescing, and synchronized output (DEC 2026) for flicker prevention.
 - `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
-- Component architecture: `ChatView` (scrollable message list with streaming buffer), `InputArea` (single-line input with cursor), `StatusBar` (model + status).
-- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct for user-defined palettes.
+- Component architecture: `ChatView` (scrollable message list), `InputArea` (multi-line textarea), `StatusBar` (model + spinner + status + cwd).
+- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, headings, code, links, blockquotes, list markers, tool borders, thinking, semantic accents). User messages use Peach, assistant messages use Lavender for clear visual distinction.
+- Markdown rendering for assistant messages via pulldown-cmark + syntect, fully themed through `Theme` — no hardcoded colors. Supports headings, inline styles, code blocks (syntax-highlighted), lists (ordered / unordered / nested), blockquotes, links, horizontal rules, and tables (box-drawing borders with column alignment). Long paragraph / heading lines wrap to terminal width at block boundaries. Streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
+- Compact icon-on-bar prefixes (`❯ ▎` / `⟡ ▎`) distinguish user and assistant messages without full-line role labels.
+- Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, success / error result indicators, and truncated output body (5 lines with overflow count).
+- Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
+- Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text. Visual line count estimation via `unicode-width` for correct height under word-wrap. Viewport-relative cursor positioning via tracked scroll offset.
+- Marketing model name in status bar (e.g., "Claude Opus 4.6" instead of raw API ID). Braille spinner animation (~80 ms per frame) during streaming and tool execution, starts immediately on prompt submit.
+- Right-aligned working directory in status bar with `~/` home prefix.
+- Empty-state welcome screen.
 - Alternate screen, panic-safe terminal restore.
 
 ## Current Focus
 
-### Terminal UI (Polish)
+### Terminal UI (Remaining)
 
-- Markdown rendering for assistant messages (syntax-highlighted code blocks).
-- Multi-line input editor (`tui-textarea`).
-- Tool call / result display with collapsible sections.
 - Viewport virtualization for long conversations.
+
+### Test Coverage
+
+- Integration test infrastructure — `insta` snapshot tests for TUI render methods, `temp-env` for config env var testing, `wiremock` for Anthropic SSE streaming client.
+- Unit tests for `App::handle_action` / `App::handle_agent_event` — pure reducer logic extracted for testability.
+- `TestBackend`-based render tests for `InputArea::render` — border style, cursor placement, hint line content.
+- `StdioSink::send` formatting tests — extract per-variant formatting into a testable helper, then unit-test ANSI escapes, title display, and trimmed output.
 
 ### Tool & Prompt Enhancements
 

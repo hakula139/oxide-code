@@ -35,7 +35,7 @@ ox     # Start an interactive session
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
-│   ├── environment.rs          # Runtime environment detection (platform, git, date)
+│   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
 │   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs             # Static prompt section constants (intro, guidance, style)
 ├── tool.rs                     # Tool trait, registry, definitions
@@ -52,12 +52,17 @@ ox     # Start an interactive session
     ├── component.rs            # Component trait and Action enum
     ├── components.rs           # Components module root
     ├── components/
-    │   ├── chat.rs             # Scrollable chat message list with streaming buffer
-    │   ├── input.rs            # Single-line input area with cursor navigation
-    │   └── status.rs           # Status bar (model, status indicator)
+    │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
+    │   ├── input.rs            # Multi-line input area (ratatui-textarea)
+    │   └── status.rs           # Status bar (model, spinner, status, working directory)
     ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
+    ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
+    ├── markdown/
+    │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
+    │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
     ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
-    └── theme.rs                # Catppuccin Mocha palette, style helpers
+    ├── theme.rs                # Catppuccin Mocha palette, style helpers
+    └── wrap.rs                 # Word-wrap with continuation indent for styled lines
 ```
 
 ## Coding Conventions

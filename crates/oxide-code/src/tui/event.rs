@@ -18,7 +18,7 @@ pub(crate) enum AgentEvent {
     ToolCallStart {
         #[expect(
             dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
+            reason = "carried for structural completeness; no consumer reads this field"
         )]
         id: String,
         name: String,
@@ -28,15 +28,11 @@ pub(crate) enum AgentEvent {
     ToolCallEnd {
         #[expect(
             dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
+            reason = "carried for structural completeness; no consumer reads this field"
         )]
         id: String,
         title: Option<String>,
         content: String,
-        #[expect(
-            dead_code,
-            reason = "carried for structural completeness; not yet read by any consumer"
-        )]
         is_error: bool,
     },
     /// The current assistant turn is complete (text-only response, no more
@@ -152,11 +148,29 @@ impl AgentSink for StdioSink {
 
 /// Returns the display title for a tool call start event.
 ///
-/// Bash tools show their command; other tools return `None`.
+/// Each tool type extracts the most relevant field from its input for a
+/// concise one-line summary.
 pub(crate) fn tool_call_title<'a>(name: &str, input: &'a serde_json::Value) -> Option<&'a str> {
-    (name == "bash")
-        .then(|| input.get("command").and_then(serde_json::Value::as_str))
-        .flatten()
+    let key = match name {
+        "bash" => "command",
+        "read" | "write" | "edit" => "file_path",
+        "glob" | "grep" => "pattern",
+        _ => return None,
+    };
+    input.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// Returns a per-tool icon character for display.
+pub(crate) fn tool_call_icon(name: &str) -> &'static str {
+    match name {
+        "bash" => "$",
+        "read" => "→",
+        "write" => "←",
+        "edit" => "✎",
+        "glob" => "✱",
+        "grep" => "⌕",
+        _ => "⟡",
+    }
 }
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and
@@ -164,4 +178,103 @@ pub(crate) fn tool_call_title<'a>(name: &str, input: &'a serde_json::Value) -> O
 pub(crate) fn channel() -> (ChannelSink, mpsc::UnboundedReceiver<AgentEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
     (ChannelSink::new(tx), rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    // ── tool_call_title ──
+
+    #[test]
+    fn tool_call_title_bash_extracts_command() {
+        let input = json!({"command": "ls -la"});
+        assert_eq!(tool_call_title("bash", &input), Some("ls -la"));
+    }
+
+    #[test]
+    fn tool_call_title_read_extracts_file_path() {
+        let input = json!({"file_path": "/tmp/foo.rs"});
+        assert_eq!(tool_call_title("read", &input), Some("/tmp/foo.rs"));
+    }
+
+    #[test]
+    fn tool_call_title_write_extracts_file_path() {
+        let input = json!({"file_path": "/tmp/out.txt", "content": "hello"});
+        assert_eq!(tool_call_title("write", &input), Some("/tmp/out.txt"));
+    }
+
+    #[test]
+    fn tool_call_title_edit_extracts_file_path() {
+        let input = json!({"file_path": "src/main.rs"});
+        assert_eq!(tool_call_title("edit", &input), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn tool_call_title_glob_extracts_pattern() {
+        let input = json!({"pattern": "**/*.rs"});
+        assert_eq!(tool_call_title("glob", &input), Some("**/*.rs"));
+    }
+
+    #[test]
+    fn tool_call_title_grep_extracts_pattern() {
+        let input = json!({"pattern": "TODO"});
+        assert_eq!(tool_call_title("grep", &input), Some("TODO"));
+    }
+
+    #[test]
+    fn tool_call_title_unknown_tool_returns_none() {
+        let input = json!({"foo": "bar"});
+        assert_eq!(tool_call_title("unknown", &input), None);
+    }
+
+    #[test]
+    fn tool_call_title_missing_key_returns_none() {
+        let input = json!({"other_field": "value"});
+        assert_eq!(tool_call_title("bash", &input), None);
+    }
+
+    #[test]
+    fn tool_call_title_non_string_value_returns_none() {
+        let input = json!({"command": 42});
+        assert_eq!(tool_call_title("bash", &input), None);
+    }
+
+    // ── tool_call_icon ──
+
+    #[test]
+    fn tool_call_icon_known_tools() {
+        assert_eq!(tool_call_icon("bash"), "$");
+        assert_eq!(tool_call_icon("read"), "→");
+        assert_eq!(tool_call_icon("write"), "←");
+        assert_eq!(tool_call_icon("edit"), "✎");
+        assert_eq!(tool_call_icon("glob"), "✱");
+        assert_eq!(tool_call_icon("grep"), "⌕");
+    }
+
+    #[test]
+    fn tool_call_icon_unknown_tool_returns_default() {
+        assert_eq!(tool_call_icon("unknown"), "⟡");
+        assert_eq!(tool_call_icon(""), "⟡");
+    }
+
+    // ── channel ──
+
+    #[tokio::test]
+    async fn channel_sink_delivers_events() {
+        let (sink, mut rx) = channel();
+        sink.send(AgentEvent::StreamToken("hello".to_owned()))
+            .unwrap();
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event, AgentEvent::StreamToken(s) if s == "hello"));
+    }
+
+    #[test]
+    fn channel_sink_closed_receiver_returns_error() {
+        let (sink, rx) = channel();
+        drop(rx);
+        assert!(sink.send(AgentEvent::TurnComplete).is_err());
+    }
 }

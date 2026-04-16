@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
-use prompt::PromptParts;
+use prompt::{PromptParts, environment::marketing_name};
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         return bare_repl(&client, &tools, &model, show_thinking).await;
     }
 
-    run_tui(&client, &model, tools).await
+    run_tui(&client, &model, show_thinking, tools).await
 }
 
 fn create_tool_registry() -> ToolRegistry {
@@ -76,14 +76,36 @@ fn create_tool_registry() -> ToolRegistry {
 
 // ── TUI Mode ──
 
-async fn run_tui(client: &Client, model: &str, tools: ToolRegistry) -> Result<()> {
+async fn run_tui(
+    client: &Client,
+    model: &str,
+    show_thinking: bool,
+    tools: ToolRegistry,
+) -> Result<()> {
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
     let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
 
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| {
+            dirs::home_dir()
+                .and_then(|home| p.strip_prefix(&home).ok().map(ToOwned::to_owned))
+                .map_or_else(
+                    || p.display().to_string(),
+                    |rel| format!("~/{}", rel.display()),
+                )
+        })
+        .unwrap_or_default();
+
+    let display_model = match marketing_name(model) {
+        Some(name) => name.to_owned(),
+        None => model.to_owned(),
+    };
+
     let mut terminal = tui::terminal::init()?;
-    let mut app = tui::app::App::new(model.to_owned(), agent_rx, user_tx);
+    let mut app = tui::app::App::new(display_model, show_thinking, cwd, agent_rx, user_tx);
 
     let agent_handle = {
         let client = client.clone();

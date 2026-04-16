@@ -1,4 +1,4 @@
-mod environment;
+pub(crate) mod environment;
 mod instructions;
 mod sections;
 
