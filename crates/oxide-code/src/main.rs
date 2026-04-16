@@ -7,11 +7,12 @@ mod tool;
 mod tui;
 
 use std::io::{IsTerminal, Write};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
 use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
@@ -239,8 +240,11 @@ async fn run_tui(
     let mut terminal = tui::terminal::init()?;
     let mut app = tui::app::App::new(display_model, show_thinking, cwd, agent_rx, user_tx);
 
+    let session = Arc::new(Mutex::new(session));
+
     let agent_handle = {
         let client = client.clone();
+        let session = Arc::clone(&session);
         tokio::spawn(async move {
             agent_loop_task(
                 client,
@@ -267,6 +271,9 @@ async fn run_tui(
         _ => {}
     }
 
+    // Write the session summary after abort to guarantee it runs.
+    log_session_err(session.lock().await.finish());
+
     result
 }
 
@@ -275,7 +282,7 @@ async fn agent_loop_task(
     tools: ToolRegistry,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::UnboundedReceiver<UserAction>,
-    mut session: SessionManager,
+    session: Arc<Mutex<SessionManager>>,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
     let mut messages: Vec<Message> = resumed_messages;
@@ -284,12 +291,14 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
-                log_session_err(session.record_message(&user_msg));
+                log_session_err(session.lock().await.record_message(&user_msg));
                 messages.push(user_msg);
                 let prompt = prompt::build_prompt(client.model()).await;
-                if let Err(e) =
-                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &mut session).await
-                {
+                let turn_result = {
+                    let mut s = session.lock().await;
+                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &mut s).await
+                };
+                if let Err(e) = turn_result {
                     _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
                 _ = sink.send(AgentEvent::TurnComplete);
@@ -298,7 +307,7 @@ async fn agent_loop_task(
         }
     }
 
-    log_session_err(session.finish());
+    // Summary is written by run_tui after abort, not here.
     Ok(())
 }
 
