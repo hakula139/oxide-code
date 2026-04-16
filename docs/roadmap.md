@@ -48,12 +48,13 @@ The project direction is simple:
 - ratatui + crossterm TUI with `tokio::select!` event loop, 60 FPS render coalescing, and synchronized output (DEC 2026) for flicker prevention.
 - `AgentSink` trait decouples the agent loop from display — same code drives TUI (`ChannelSink`), bare REPL (`--no-tui`, `StdioSink`), and headless mode (`-p`).
 - Component architecture: `ChatView` (scrollable message list), `InputArea` (multi-line textarea), `StatusBar` (model + spinner + status + cwd).
-- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, headings, code, links, blockquotes, list markers, tool borders, thinking, semantic accents).
-- Markdown rendering for assistant messages via pulldown-cmark + syntect, fully themed through `Theme` — no hardcoded colors. Supports headings, inline styles, code blocks (syntax-highlighted), lists (ordered / unordered / nested), blockquotes, links, horizontal rules, and tables (box-drawing borders with column alignment). Long lines wrap to terminal width. Streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
+- Catppuccin Mocha theme with transparent background. Extensible `Theme` struct with role-specific style helpers (text, headings, code, links, blockquotes, list markers, tool borders, thinking, semantic accents). User messages use Peach, assistant messages use Lavender for clear visual distinction.
+- Markdown rendering for assistant messages via pulldown-cmark + syntect, fully themed through `Theme` — no hardcoded colors. Supports headings, inline styles, code blocks (syntax-highlighted), lists (ordered / unordered / nested), blockquotes, links, horizontal rules, and tables (box-drawing borders with column alignment). Long paragraph / heading lines wrap to terminal width at block boundaries. Streaming-aware line-based commit boundary and stable-prefix cache for O(new lines) per-token cost.
+- Compact icon-on-bar prefixes (`❯ ▎` / `⟡ ▎`) distinguish user and assistant messages without full-line role labels.
 - Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, success / error result indicators, and truncated output body (5 lines with overflow count).
 - Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
-- Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text.
-- Braille spinner animation (~80 ms per frame) during streaming and tool execution.
+- Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text. Visual line count estimation via `unicode-width` for correct height under word-wrap. Viewport-relative cursor positioning via tracked scroll offset.
+- Marketing model name in status bar (e.g., "Claude Opus 4.6" instead of raw API ID). Braille spinner animation (~80 ms per frame) during streaming and tool execution, starts immediately on prompt submit.
 - Right-aligned working directory in status bar with `~/` home prefix.
 - Empty-state welcome screen.
 - Alternate screen, panic-safe terminal restore.

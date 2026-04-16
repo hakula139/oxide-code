@@ -35,7 +35,7 @@ ox     # Start an interactive session
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
-│   ├── environment.rs          # Runtime environment detection (platform, git, date)
+│   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
 │   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs             # Static prompt section constants (intro, guidance, style)
 ├── tool.rs                     # Tool trait, registry, definitions
