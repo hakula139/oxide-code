@@ -38,6 +38,11 @@ ox     # Start an interactive session
 │   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
 │   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs             # Static prompt section constants (intro, guidance, style)
+├── session.rs                  # Session module root
+├── session/
+│   ├── entry.rs                # JSONL entry types (Header, Message, Summary) and SessionInfo
+│   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
+│   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout

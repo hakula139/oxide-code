@@ -59,6 +59,14 @@ The project direction is simple:
 - Empty-state welcome screen.
 - Alternate screen, panic-safe terminal restore.
 
+### Session Persistence
+
+- JSONL-based conversation logs — append-only, one entry per line, immediate flush. Discriminated entry types: `header` (session metadata), `message` (conversation), `summary` (for fast listing).
+- Session resume via `ox -c` (most recent) or `ox -c <id-prefix>` (specific session). Creates a new session file with `parent_id` link; old sessions are immutable.
+- Session listing via `ox --list` — reads first line (header) and tail (summary) of each `.jsonl` file. Shows session ID prefix, creation time, model, message count, and title (derived from first user prompt).
+- Storage at `$XDG_DATA_HOME/ox/sessions/` (`~/.local/share/ox/sessions/`). One `{uuid}.jsonl` file per session.
+- Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header.
+
 ## Current Focus
 
 ### Terminal UI (Remaining)
@@ -78,10 +86,8 @@ The project direction is simple:
 - File-change tracking — track read files and their modification times. Return a stub on re-read when content hasn't changed (saves tokens). Enable read-before-write guards to prevent blind overwrites.
 - Configurable instruction directories — allow users to specify additional directories to scan for instruction files (e.g., `.codex/`, `.opencode/`) beyond the hardcoded `.claude/`.
 
-### Session Persistence & Context
+### Context Compression
 
-- JSONL-based conversation logs for session resume.
-- Session listing and management.
 - Context compression — summarize older messages when approaching the context limit. Preserve critical context (task state, modified files, decisions).
 
 ## Later
