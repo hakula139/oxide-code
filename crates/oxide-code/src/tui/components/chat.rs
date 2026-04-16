@@ -304,9 +304,11 @@ impl ChatView {
             match entry {
                 ChatEntry::User(content) => {
                     self.push_user_message_lines(&mut lines, content, width);
+                    lines.push(Line::raw(""));
                 }
                 ChatEntry::Assistant(content) => {
                     self.push_assistant_message_lines(&mut lines, content, width);
+                    lines.push(Line::raw(""));
                 }
                 ChatEntry::ToolCall { icon, label } => {
                     self.push_tool_call_line(&mut lines, icon, label);
@@ -619,9 +621,11 @@ impl ChatView {
 
 // ── Free Helpers ──
 
-/// Push a blank line separator when `lines` is non-empty.
+/// Push a blank line separator unless `lines` is empty or already ends
+/// with a blank line.
 fn push_section_gap(lines: &mut Vec<Line<'_>>) {
-    if !lines.is_empty() {
+    let needs_gap = lines.last().is_some_and(|last| last.width() > 0);
+    if needs_gap {
         lines.push(Line::raw(""));
     }
 }
@@ -1067,6 +1071,39 @@ mod tests {
     }
 
     #[test]
+    fn push_user_message_lines_has_trailing_blank() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.push_tool_call("$", "ls");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
+        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
+        assert!(
+            (user + 1..tool).any(|i| lines[i].trim().is_empty()),
+            "expected blank line after user message"
+        );
+    }
+
+    #[test]
+    fn push_user_message_no_double_blank_before_assistant() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.entries.push(ChatEntry::Assistant("reply".to_owned()));
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        // Count consecutive blank lines — should never exceed 1.
+        let max_consecutive_blanks = lines
+            .windows(2)
+            .filter(|w| w[0].trim().is_empty() && w[1].trim().is_empty())
+            .count();
+        assert_eq!(
+            max_consecutive_blanks, 0,
+            "no double blank lines between user and assistant: {lines:?}"
+        );
+    }
+
+    #[test]
     fn push_user_message_enables_auto_scroll() {
         let mut chat = test_chat();
         chat.auto_scroll = false;
@@ -1105,6 +1142,38 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains('$'));
         assert!(text.contains("ls -la"));
+    }
+
+    #[test]
+    fn push_tool_call_line_after_assistant_has_blank_separator() {
+        let mut chat = test_chat();
+        chat.entries
+            .push(ChatEntry::Assistant("some text".to_owned()));
+        chat.push_tool_call("$", "ls");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let assistant = lines.iter().rposition(|l| l.contains("some text")).unwrap();
+        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
+        assert!(
+            (assistant + 1..tool).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between assistant text and tool call"
+        );
+    }
+
+    #[test]
+    fn push_tool_call_line_consecutive_no_extra_gap() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.push_tool_call("$", "cat foo");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let ls_line = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let cat_line = lines.iter().position(|l| l.contains("cat foo")).unwrap();
+        assert_eq!(
+            cat_line,
+            ls_line + 1,
+            "consecutive tool calls should have no blank gap"
+        );
     }
 
     // ── push_tool_result_line ──
