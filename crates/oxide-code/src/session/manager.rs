@@ -143,14 +143,13 @@ fn extract_user_text(message: &Message) -> Option<&str> {
 /// Truncate a title to `max_len` characters, adding "..." if truncated.
 fn truncate_title(s: &str, max_len: usize) -> String {
     let trimmed = s.lines().next().unwrap_or(s).trim();
-    if trimmed.len() <= max_len {
+    if trimmed.chars().count() <= max_len {
         trimmed.to_owned()
     } else {
         let boundary = trimmed
             .char_indices()
-            .take_while(|(i, _)| *i < max_len.saturating_sub(3))
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
+            .nth(max_len.saturating_sub(3))
+            .map_or(trimmed.len(), |(i, _)| i);
         format!("{}...", &trimmed[..boundary])
     }
 }
