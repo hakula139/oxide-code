@@ -28,14 +28,11 @@ impl SessionManager {
     /// Start a new session. Writes the header entry immediately.
     pub(crate) fn start(store: &SessionStore, model: &str) -> Result<Self> {
         let session_id = Uuid::new_v4().to_string();
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
 
         let header = Entry::Header {
             session_id: session_id.clone(),
             parent_id: None,
-            cwd,
+            cwd: current_dir_string(),
             model: model.to_owned(),
             created_at: OffsetDateTime::now_utc(),
         };
@@ -62,14 +59,11 @@ impl SessionManager {
         }
 
         let session_id = Uuid::new_v4().to_string();
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
 
         let header = Entry::Header {
             session_id: session_id.clone(),
             parent_id: Some(parent_id.to_owned()),
-            cwd,
+            cwd: current_dir_string(),
             model: model.to_owned(),
             created_at: OffsetDateTime::now_utc(),
         };
@@ -104,7 +98,7 @@ impl SessionManager {
             message: message.clone(),
             timestamp: OffsetDateTime::now_utc(),
         })?;
-        self.message_count += 1;
+        self.message_count = self.message_count.saturating_add(1);
         Ok(())
     }
 
@@ -128,6 +122,12 @@ impl SessionManager {
 }
 
 // ── Helpers ──
+
+fn current_dir_string() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
 
 /// Extract the first text content from a user message.
 fn extract_user_text(message: &Message) -> Option<&str> {
