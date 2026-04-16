@@ -233,8 +233,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(config: Config) -> Result<Self> {
-        let session_id = Uuid::new_v4().to_string();
+    pub fn new(config: Config, session_id: Option<String>) -> Result<Self> {
+        let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
         let mut betas = vec![
