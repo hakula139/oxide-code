@@ -19,9 +19,9 @@ Early development. What works today:
 - Agent loop with streaming and extended thinking
 - File and search tools (read, write, edit, glob, grep, bash)
 - System prompt with CLAUDE.md / AGENTS.md injection
-- Session persistence with JSONL conversation logs, resume, and listing
 - Authentication (API key and Claude Code OAuth)
 - TOML config file with layered loading
+- Session persistence with JSONL conversation logs, resume, and listing
 
 See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 

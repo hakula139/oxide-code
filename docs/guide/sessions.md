@@ -23,7 +23,7 @@ Prints a table of recent sessions (newest first):
 ```text
 ID         Created               Model                Msgs   Title
 a1b2c3d4   2026-04-16T12:00      Claude Opus 4.6      12     Fix authentication bug
-e5f6g7h8   2026-04-15T09:30      Claude Opus 4.6      5      Add session persistence
+e5f6a7b8   2026-04-15T09:30      Claude Opus 4.6      5      Add session persistence
 ```
 
 ## Resuming a Session
@@ -31,7 +31,8 @@ e5f6g7h8   2026-04-15T09:30      Claude Opus 4.6      5      Add session persist
 Resume the most recent session:
 
 ```bash
-ox -c
+ox -c              # short form
+ox --continue      # long form
 ```
 
 Resume a specific session by ID prefix:
@@ -40,7 +41,9 @@ Resume a specific session by ID prefix:
 ox -c a1b2
 ```
 
-When resuming, the full conversation history is loaded and sent to the model as context. A new session file is created (the old one is never modified), so the resumed conversation has its own session ID.
+When resuming, the full conversation history is loaded and sent to the model as context. A new session file is created (the old one is never modified), so the resumed conversation has its own session ID. The new file's header includes a `parent_id` field linking back to the original session.
+
+If no sessions exist, or if the prefix matches zero or multiple sessions, `ox` prints an error and exits.
 
 ## Session Files
 
@@ -54,7 +57,7 @@ Each file contains:
 
 1. A **header** line with session metadata (ID, working directory, model, timestamp).
 2. **Message** lines with the full conversation (user and assistant turns, tool calls and results).
-3. A **summary** line with the session title and message count (written on exit).
+3. A **summary** line with the session title and message count (written on exit; missing if the session was interrupted).
 
 ## Headless and REPL Modes
 
