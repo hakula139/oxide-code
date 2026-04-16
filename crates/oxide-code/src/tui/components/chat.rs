@@ -707,6 +707,7 @@ fn truncate_line(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use indoc::indoc;
 
     use super::*;
 
@@ -1114,7 +1115,14 @@ mod tests {
     #[test]
     fn push_user_message_lines_multiline() {
         let mut chat = test_chat();
-        chat.push_user_message("line1\nline2\nline3".to_owned());
+        chat.push_user_message(
+            indoc! {"
+                line1
+                line2
+                line3
+            "}
+            .to_owned(),
+        );
         let text = all_text(&chat);
         assert!(text.contains("line1"));
         assert!(text.contains("line2"));

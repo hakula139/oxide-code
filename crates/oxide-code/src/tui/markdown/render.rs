@@ -1251,7 +1251,7 @@ mod tests {
 
     #[test]
     fn html_block_rendered_as_text() {
-        let lines = rendered_text("<div>hello</div>\n");
+        let lines = rendered_text("<div>hello</div>");
         assert!(lines.iter().any(|l| l.contains("<div>hello</div>")));
     }
 

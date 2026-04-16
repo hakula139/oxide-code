@@ -55,6 +55,8 @@ pub(super) fn highlight_code(lang: &str, code: &str, fallback_style: Style) -> V
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -100,7 +102,14 @@ mod tests {
 
     #[test]
     fn highlight_code_multiline_preserves_lines() {
-        let lines = highlight_code("rust", "fn a() {}\nfn b() {}", fallback());
+        let lines = highlight_code(
+            "rust",
+            indoc! {"
+                fn a() {}
+                fn b() {}
+            "},
+            fallback(),
+        );
         assert_eq!(lines.len(), 2);
         assert!(all_text(&lines).contains("fn a()"));
         assert!(all_text(&lines).contains("fn b()"));
