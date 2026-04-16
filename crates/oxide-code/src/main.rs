@@ -164,6 +164,15 @@ fn resolve_session(
             debug!("resuming session {parent_id}");
             Ok((session, messages))
         }
+        Some(Some(prefix)) if prefix.trim().is_empty() => {
+            // Treat `--continue ""` the same as `--continue` (resume latest).
+            let parent_id = store
+                .latest_session_id()?
+                .context("no sessions to resume")?;
+            let (session, messages) = SessionManager::resume(store, &parent_id, model)?;
+            debug!("resuming session {parent_id}");
+            Ok((session, messages))
+        }
         Some(Some(prefix)) => {
             let sessions = store.list()?;
             let matched: Vec<_> = sessions
