@@ -102,7 +102,11 @@ impl SessionStore {
             })
             .collect();
 
-        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sessions.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.session_id.cmp(&a.session_id))
+        });
         Ok(sessions)
     }
 
@@ -178,7 +182,9 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         bail!("first line is not a header");
     };
 
-    // Scan the tail for a summary entry.
+    // Scan the tail for a summary entry. The explicit seek in
+    // `read_tail_summary` is required because `BufReader` above may have
+    // read ahead past the first line, advancing the file position.
     let (title, updated_at, message_count) = read_tail_summary(&mut file)?;
 
     Ok(SessionInfo {
