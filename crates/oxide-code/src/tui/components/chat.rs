@@ -371,7 +371,7 @@ impl ChatView {
             lines,
             content.trim(),
             USER_PREFIX,
-            self.theme.accent(),
+            self.theme.user(),
             self.theme.text(),
             width,
         );

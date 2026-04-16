@@ -28,9 +28,11 @@ pub(crate) struct Theme {
     pub(crate) code_bg: Color,
 
     // Semantic accents (UI roles)
-    /// User messages, highlights, active borders
+    /// Highlights, active borders, links, list markers
     pub(crate) accent: Color,
-    /// Assistant role labels, focused elements
+    /// User messages and icon
+    pub(crate) user: Color,
+    /// Assistant messages and icon
     pub(crate) secondary: Color,
 
     // Code
@@ -59,6 +61,7 @@ impl Default for Theme {
             code_bg: Color::from_u32(0x001e_1e2e),   // Base
             code: Color::from_u32(0x0094_e2d5),      // Teal
             accent: Color::from_u32(0x0089_b4fa),    // Blue
+            user: Color::from_u32(0x00fa_b387),      // Peach
             secondary: Color::from_u32(0x00b4_befe), // Lavender
             info: Color::from_u32(0x0089_dceb),      // Sky
             success: Color::from_u32(0x00a6_e3a1),   // Green
@@ -90,14 +93,19 @@ impl Theme {
 
     // Semantic accents
 
-    /// Bold accent (user messages, highlights)
+    /// Bold accent (highlights, active borders)
     pub(crate) fn accent(&self) -> Style {
         Style::default()
             .fg(self.accent)
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Secondary accent (assistant labels)
+    /// User message bar and icon
+    pub(crate) fn user(&self) -> Style {
+        Style::default().fg(self.user)
+    }
+
+    /// Assistant message bar and icon
     pub(crate) fn secondary(&self) -> Style {
         Style::default().fg(self.secondary)
     }
@@ -234,6 +242,7 @@ mod tests {
         assert_ne!(t.fg, t.fg_muted);
         assert_ne!(t.fg_muted, t.fg_dim);
         assert_ne!(t.accent, t.secondary);
+        assert_ne!(t.user, t.secondary);
         assert_ne!(t.success, t.error);
     }
 
@@ -247,6 +256,7 @@ mod tests {
         assert_eq!(t.muted().fg, Some(t.fg_muted));
         assert_eq!(t.dim().fg, Some(t.fg_dim));
         assert_eq!(t.accent().fg, Some(t.accent));
+        assert_eq!(t.user().fg, Some(t.user));
         assert_eq!(t.secondary().fg, Some(t.secondary));
         assert_eq!(t.success().fg, Some(t.success));
         assert_eq!(t.warning().fg, Some(t.warning));
