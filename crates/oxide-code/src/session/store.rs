@@ -278,6 +278,21 @@ mod tests {
         assert!(store.create(&entry).is_err());
     }
 
+    #[test]
+    fn create_fails_when_file_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        fs::write(dir.path().join("existing.jsonl"), "{}").unwrap();
+        let header = Entry::Header {
+            session_id: "existing".to_owned(),
+            parent_id: None,
+            cwd: "/".to_owned(),
+            model: "m".to_owned(),
+            created_at: datetime!(2026-01-01 0:00 UTC),
+        };
+        assert!(store.create(&header).is_err());
+    }
+
     // ── load_messages ──
 
     #[test]
@@ -330,6 +345,50 @@ not valid json
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(store.load_messages("nonexistent").is_err());
+    }
+
+    #[test]
+    fn load_messages_skips_empty_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blanks.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"header","session_id":"blanks","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+
+"#,
+        )
+        .unwrap();
+        let store = test_store(dir.path());
+
+        let messages = store.load_messages("blanks").unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn load_messages_skips_unknown_entry_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"header","session_id":"future","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+{"type":"new_fancy_type","data":"something"}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+"#,
+        )
+        .unwrap();
+        let store = test_store(dir.path());
+
+        let messages = store.load_messages("future").unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn load_messages_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        assert!(store.load_messages("../etc/passwd").is_err());
     }
 
     // ── list ──
@@ -405,6 +464,18 @@ not valid json
     fn list_ignores_non_jsonl_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.txt"), "not a session").unwrap();
+        let store = test_store(dir.path());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_skips_jsonl_with_non_header_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("bad.jsonl"),
+            r#"{"type":"message","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
         let store = test_store(dir.path());
         assert!(store.list().unwrap().is_empty());
     }

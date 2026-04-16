@@ -222,4 +222,10 @@ mod tests {
         assert!(matches!(&entries[1], Entry::Message { .. }));
         assert!(matches!(&entries[2], Entry::Summary { title, .. } if title == "Greeting"));
     }
+
+    #[test]
+    fn unknown_type_discriminator_returns_deserialization_error() {
+        let json = r#"{"type":"future_type","data":"something"}"#;
+        assert!(serde_json::from_str::<Entry>(json).is_err());
+    }
 }

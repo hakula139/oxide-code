@@ -290,6 +290,37 @@ mod tests {
         assert_eq!(extract_user_text(&msg), None);
     }
 
+    #[test]
+    fn extract_user_text_returns_none_for_tool_result_only() {
+        let msg = Message {
+            role: crate::message::Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_owned(),
+                content: "output".to_owned(),
+                is_error: false,
+            }],
+        };
+        assert_eq!(extract_user_text(&msg), None);
+    }
+
+    #[test]
+    fn extract_user_text_finds_text_after_tool_result() {
+        let msg = Message {
+            role: crate::message::Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "output".to_owned(),
+                    is_error: false,
+                },
+                ContentBlock::Text {
+                    text: "follow-up".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(extract_user_text(&msg), Some("follow-up"));
+    }
+
     // ── truncate_title ──
 
     #[test]
@@ -298,11 +329,31 @@ mod tests {
     }
 
     #[test]
+    fn truncate_title_exact_max_len_unchanged() {
+        let s = "a".repeat(60);
+        assert_eq!(truncate_title(&s, 60), s);
+    }
+
+    #[test]
     fn truncate_title_long_string_adds_ellipsis() {
         let long = "a".repeat(100);
         let result = truncate_title(&long, 20);
-        assert!(result.len() <= 20);
+        assert!(result.chars().count() <= 20);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_title_multibyte_respects_character_count() {
+        // 61 two-byte characters → should truncate to 57 chars + "...".
+        let s = "\u{00e9}".repeat(61);
+        let result = truncate_title(&s, 60);
+        assert!(result.chars().count() <= 60);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_title_empty_string() {
+        assert_eq!(truncate_title("", 60), "");
     }
 
     #[test]
