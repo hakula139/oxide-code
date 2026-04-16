@@ -1,0 +1,65 @@
+# Sessions
+
+oxide-code automatically saves every conversation to disk. You can list past sessions and resume where you left off.
+
+## How It Works
+
+Each time you start `ox`, a new session file is created in `~/.local/share/ox/sessions/`. Every message (yours and the assistant's) is appended to this file in real time. When you quit, a summary entry is written so future listings can display the session title without reading the full conversation.
+
+The storage directory follows XDG conventions:
+
+| Variable         | Default          | Path                          |
+| ---------------- | ---------------- | ----------------------------- |
+| `$XDG_DATA_HOME` | `~/.local/share` | `$XDG_DATA_HOME/ox/sessions/` |
+
+## Listing Sessions
+
+```bash
+ox --list
+```
+
+Prints a table of recent sessions (newest first):
+
+```text
+ID         Created               Model                Msgs   Title
+a1b2c3d4   2026-04-16T12:00      Claude Opus 4.6      12     Fix authentication bug
+e5f6g7h8   2026-04-15T09:30      Claude Opus 4.6      5      Add session persistence
+```
+
+## Resuming a Session
+
+Resume the most recent session:
+
+```bash
+ox -c
+```
+
+Resume a specific session by ID prefix:
+
+```bash
+ox -c a1b2
+```
+
+When resuming, the full conversation history is loaded and sent to the model as context. A new session file is created (the old one is never modified), so the resumed conversation has its own session ID.
+
+## Session Files
+
+Session files are plain JSONL (one JSON object per line). You can inspect them directly:
+
+```bash
+head -1 ~/.local/share/ox/sessions/*.jsonl   # view session headers
+```
+
+Each file contains:
+
+1. A **header** line with session metadata (ID, working directory, model, timestamp).
+2. **Message** lines with the full conversation (user and assistant turns, tool calls and results).
+3. A **summary** line with the session title and message count (written on exit).
+
+## Headless and REPL Modes
+
+Sessions are recorded across all modes:
+
+- **TUI** (`ox`): session saved automatically.
+- **Bare REPL** (`ox --no-tui`): session saved automatically.
+- **Headless** (`ox -p "prompt"`): single-turn session saved (useful for audit trails).
