@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod message;
 mod prompt;
+mod session;
 mod tool;
 mod tui;
 
@@ -17,6 +18,8 @@ use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use prompt::{PromptParts, environment::marketing_name};
+use session::manager::SessionManager;
+use session::store::SessionStore;
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
@@ -35,6 +38,19 @@ struct Cli {
     /// Run in headless mode: send a single prompt and print the response.
     #[arg(short, long, value_name = "PROMPT")]
     prompt: Option<String>,
+
+    /// Resume a session. Without a value, resumes the most recent session.
+    /// With a session ID prefix, resumes that specific session.
+    #[expect(
+        clippy::option_option,
+        reason = "clap uses Option<Option<T>> for optional flag values"
+    )]
+    #[arg(short = 'c', long = "continue", value_name = "SESSION_ID")]
+    resume: Option<Option<String>>,
+
+    /// List recent sessions and exit.
+    #[arg(long)]
+    list: bool,
 }
 
 #[tokio::main]
@@ -45,22 +61,115 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // Handle --list before loading config (no API access needed).
+    if cli.list {
+        return list_sessions();
+    }
+
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
-    let client = Client::new(config)?;
+
+    // Resolve which session to resume (if any) before creating the client,
+    // so we can pass the session ID to the API headers.
+    let store = SessionStore::open()?;
+    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref())?;
+    let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
     let tools = create_tool_registry();
 
     if let Some(prompt_text) = cli.prompt {
-        return headless(&client, &tools, &model, show_thinking, &prompt_text).await;
+        return headless(
+            &client,
+            &tools,
+            &model,
+            show_thinking,
+            &prompt_text,
+            session,
+        )
+        .await;
     }
 
     if cli.no_tui || !std::io::stdout().is_terminal() {
-        return bare_repl(&client, &tools, &model, show_thinking).await;
+        return bare_repl(&client, &tools, &model, show_thinking, session, messages).await;
     }
 
-    run_tui(&client, &model, show_thinking, tools).await
+    run_tui(&client, &model, show_thinking, tools, session, messages).await
+}
+
+// ── Session Helpers ──
+
+/// Print a table of recent sessions and exit.
+fn list_sessions() -> Result<()> {
+    let store = SessionStore::open()?;
+    let sessions = store.list()?;
+
+    if sessions.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<21} {:<20} {:<6} Title",
+        "ID", "Created", "Model", "Msgs"
+    );
+    for s in &sessions {
+        let id_prefix = &s.session_id[..s.session_id.len().min(8)];
+        let created = s
+            .created_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let created_short = &created[..created.len().min(16)];
+        let model = marketing_name(&s.model).unwrap_or(&s.model);
+        let msgs = s.message_count.map_or("-".to_owned(), |n| n.to_string());
+        let title = s.title.as_deref().unwrap_or("(untitled)");
+        println!("{id_prefix:<10} {created_short:<21} {model:<20} {msgs:<6} {title}");
+    }
+
+    Ok(())
+}
+
+/// Create or resume a session based on CLI flags.
+///
+/// - `None`: no `--continue` flag → new session.
+/// - `Some(None)`: `--continue` without value → resume latest.
+/// - `Some(Some(id))`: `--continue <id>` → resume specific session.
+fn resolve_session(
+    store: &SessionStore,
+    model: &str,
+    resume: Option<&Option<String>>,
+) -> Result<(SessionManager, Vec<Message>)> {
+    match resume {
+        None => {
+            let session = SessionManager::start(store, model)?;
+            Ok((session, Vec::new()))
+        }
+        Some(None) => {
+            let parent_id = store
+                .latest_session_id()?
+                .context("no sessions to resume")?;
+            let (session, messages) = SessionManager::resume(store, &parent_id, model)?;
+            debug!("resuming session {parent_id}");
+            Ok((session, messages))
+        }
+        Some(Some(prefix)) => {
+            let sessions = store.list()?;
+            let matched: Vec<_> = sessions
+                .iter()
+                .filter(|s| s.session_id.starts_with(prefix.as_str()))
+                .collect();
+            match matched.len() {
+                0 => bail!("no session matching prefix '{prefix}'"),
+                1 => {
+                    let parent_id = &matched[0].session_id;
+                    let (session, messages) = SessionManager::resume(store, parent_id, model)?;
+                    debug!("resuming session {parent_id}");
+                    Ok((session, messages))
+                }
+                n => bail!("ambiguous prefix '{prefix}' matches {n} sessions"),
+            }
+        }
+    }
 }
 
 fn create_tool_registry() -> ToolRegistry {
@@ -81,6 +190,8 @@ async fn run_tui(
     model: &str,
     show_thinking: bool,
     tools: ToolRegistry,
+    session: SessionManager,
+    resumed_messages: Vec<Message>,
 ) -> Result<()> {
     tui::terminal::install_panic_hook();
 
@@ -109,7 +220,17 @@ async fn run_tui(
 
     let agent_handle = {
         let client = client.clone();
-        tokio::spawn(async move { agent_loop_task(client, tools, agent_sink, user_rx).await })
+        tokio::spawn(async move {
+            agent_loop_task(
+                client,
+                tools,
+                agent_sink,
+                user_rx,
+                session,
+                resumed_messages,
+            )
+            .await
+        })
     };
 
     // Run the TUI on the main thread (it needs terminal access).
@@ -133,15 +254,21 @@ async fn agent_loop_task(
     tools: ToolRegistry,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::UnboundedReceiver<UserAction>,
+    mut session: SessionManager,
+    resumed_messages: Vec<Message>,
 ) -> Result<()> {
-    let mut messages: Vec<Message> = Vec::new();
+    let mut messages: Vec<Message> = resumed_messages;
 
     while let Some(action) = user_rx.recv().await {
         match action {
             UserAction::SubmitPrompt(text) => {
-                messages.push(Message::user(&text));
+                let user_msg = Message::user(&text);
+                session.record_message(&user_msg).ok();
+                messages.push(user_msg);
                 let prompt = prompt::build_prompt(client.model()).await;
-                if let Err(e) = agent_turn(&client, &tools, &mut messages, &prompt, &sink).await {
+                if let Err(e) =
+                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &mut session).await
+                {
                     _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
                 _ = sink.send(AgentEvent::TurnComplete);
@@ -150,6 +277,7 @@ async fn agent_loop_task(
         }
     }
 
+    session.finish().ok();
     Ok(())
 }
 
@@ -160,11 +288,13 @@ async fn bare_repl(
     tools: &ToolRegistry,
     model: &str,
     show_thinking: bool,
+    mut session: SessionManager,
+    resumed_messages: Vec<Message>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
-    let mut messages: Vec<Message> = Vec::new();
+    let mut messages: Vec<Message> = resumed_messages;
 
     loop {
         eprint!("> ");
@@ -179,12 +309,15 @@ async fn bare_repl(
             continue;
         }
 
-        messages.push(Message::user(&input));
+        let user_msg = Message::user(&input);
+        session.record_message(&user_msg).ok();
+        messages.push(user_msg);
         let prompt = prompt::build_prompt(model).await;
-        agent_turn(client, tools, &mut messages, &prompt, &sink).await?;
+        agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
         _ = sink.send(AgentEvent::TurnComplete);
     }
 
+    session.finish().ok();
     Ok(())
 }
 
@@ -196,11 +329,15 @@ async fn headless(
     model: &str,
     show_thinking: bool,
     prompt_text: &str,
+    mut session: SessionManager,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
-    let mut messages = vec![Message::user(prompt_text)];
+    let user_msg = Message::user(prompt_text);
+    session.record_message(&user_msg).ok();
+    let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
-    agent_turn(client, tools, &mut messages, &prompt, &sink).await?;
+    agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
+    session.finish().ok();
     println!();
     Ok(())
 }
@@ -213,6 +350,7 @@ async fn agent_turn(
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
     sink: &dyn AgentSink,
+    session: &mut SessionManager,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
@@ -230,10 +368,12 @@ async fn agent_turn(
             })
             .collect();
 
-        messages.push(Message {
+        let assistant_msg = Message {
             role: Role::Assistant,
             content: blocks,
-        });
+        };
+        session.record_message(&assistant_msg).ok();
+        messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
             return Ok(());
@@ -270,10 +410,12 @@ async fn agent_turn(
             });
         }
 
-        messages.push(Message {
+        let tool_result_msg = Message {
             role: Role::User,
             content: results,
-        });
+        };
+        session.record_message(&tool_result_msg).ok();
+        messages.push(tool_result_msg);
     }
 
     bail!("exceeded {MAX_TOOL_ROUNDS} tool rounds")
