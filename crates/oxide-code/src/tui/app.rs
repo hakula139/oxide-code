@@ -124,6 +124,7 @@ impl App {
             Action::SubmitPrompt(text) => {
                 self.chat.push_user_message(text.clone());
                 self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Streaming);
                 _ = self.user_tx.send(UserAction::SubmitPrompt(text));
             }
             Action::Quit => {
