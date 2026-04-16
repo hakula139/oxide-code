@@ -48,7 +48,7 @@ impl SessionStore {
         let Entry::Header { session_id, .. } = header else {
             bail!("expected Header entry");
         };
-        let path = self.session_path(session_id);
+        let path = self.session_path(session_id)?;
         let file = File::create_new(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
         let mut writer = SessionWriter { file };
@@ -58,7 +58,7 @@ impl SessionStore {
 
     /// Load all messages from a session file, skipping non-message entries.
     pub(crate) fn load_messages(&self, session_id: &str) -> Result<Vec<Message>> {
-        let path = self.session_path(session_id);
+        let path = self.session_path(session_id)?;
         let file =
             File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
         let reader = BufReader::new(file);
@@ -120,8 +120,11 @@ impl SessionStore {
         Ok(Self { sessions_dir })
     }
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("{session_id}.jsonl"))
+    fn session_path(&self, session_id: &str) -> Result<PathBuf> {
+        if session_id.contains(['/', '\\']) || session_id.contains("..") {
+            bail!("invalid session ID: {session_id}");
+        }
+        Ok(self.sessions_dir.join(format!("{session_id}.jsonl")))
     }
 }
 
