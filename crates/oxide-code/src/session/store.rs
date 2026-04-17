@@ -191,24 +191,22 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     // Scan the tail for a summary entry. The explicit seek in
     // `read_tail_summary` is required because `BufReader` above may have
     // read ahead past the first line, advancing the file position.
-    let (title, updated_at, message_count) = read_tail_summary(&mut file)?;
+    let summary = read_tail_summary(&mut file)?;
 
     Ok(SessionInfo {
         session_id,
         cwd,
         model,
         created_at,
-        title,
-        updated_at,
-        message_count,
+        title: summary.as_ref().map(|(t, _, _)| t.clone()),
+        updated_at: summary.as_ref().map(|(_, u, _)| *u),
+        message_count: summary.as_ref().map(|(_, _, c)| *c),
     })
 }
 
 /// Read the last `TAIL_BUF_SIZE` bytes of a file and scan for the final
-/// summary entry. Returns `(title, updated_at, message_count)`.
-fn read_tail_summary(
-    file: &mut File,
-) -> Result<(Option<String>, Option<time::OffsetDateTime>, Option<u32>)> {
+/// summary entry.
+fn read_tail_summary(file: &mut File) -> Result<Option<(String, time::OffsetDateTime, u32)>> {
     let len = file.metadata()?.len();
     let offset = len.saturating_sub(TAIL_BUF_SIZE);
     file.seek(SeekFrom::Start(offset))?;
@@ -216,7 +214,6 @@ fn read_tail_summary(
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
 
-    // Scan lines in reverse to find the last summary.
     for line in buf.lines().rev() {
         if let Ok(Entry::Summary {
             title,
@@ -224,11 +221,11 @@ fn read_tail_summary(
             message_count,
         }) = serde_json::from_str(line)
         {
-            return Ok((Some(title), Some(updated_at), Some(message_count)));
+            return Ok(Some((title, updated_at, message_count)));
         }
     }
 
-    Ok((None, None, None))
+    Ok(None)
 }
 
 #[cfg(test)]

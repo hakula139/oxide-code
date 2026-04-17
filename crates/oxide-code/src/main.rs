@@ -130,13 +130,14 @@ fn list_sessions() -> Result<()> {
         let id_prefix = &s.session_id[..s.session_id.len().min(8)];
         let created = s
             .created_at
-            .format(&time::format_description::well_known::Rfc3339)
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]"
+            ))
             .unwrap_or_default();
-        let created_short = &created[..created.len().min(16)];
         let model = marketing_name(&s.model).unwrap_or(&s.model);
         let msgs = s.message_count.map_or("-".to_owned(), |n| n.to_string());
         let title = s.title.as_deref().unwrap_or("(untitled)");
-        println!("{id_prefix:<10} {created_short:<21} {model:<20} {msgs:<6} {title}");
+        println!("{id_prefix:<10} {created:<21} {model:<20} {msgs:<6} {title}");
     }
 
     Ok(())
