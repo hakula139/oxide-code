@@ -232,6 +232,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::message::ContentBlock;
 
     fn test_store(dir: &Path) -> SessionStore {
         SessionStore {
@@ -321,7 +322,11 @@ mod tests {
         let messages = store.load_messages("load-test").unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, crate::message::Role::User);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hello"));
         assert_eq!(messages[1].role, crate::message::Role::Assistant);
+        assert!(
+            matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hi there")
+        );
     }
 
     #[test]
@@ -391,6 +396,13 @@ not valid json
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(store.load_messages("../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn load_messages_rejects_backslash_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        assert!(store.load_messages("..\\..\\etc\\passwd").is_err());
     }
 
     // ── list ──

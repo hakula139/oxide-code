@@ -210,6 +210,29 @@ mod tests {
         assert!(SessionManager::resume(&test_store(dir.path()), &parent_id, "m").is_err());
     }
 
+    #[test]
+    fn resume_carries_parent_title_into_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let parent_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("Fix the auth bug"))
+            .unwrap();
+        original.finish().unwrap();
+
+        let (mut resumed, _) = SessionManager::resume(&store, &parent_id, "m").unwrap();
+        let resumed_id = resumed.session_id().to_owned();
+        resumed.finish().unwrap();
+
+        let sessions = store.list().unwrap();
+        let session = sessions
+            .iter()
+            .find(|s| s.session_id == resumed_id)
+            .unwrap();
+        assert_eq!(session.title.as_deref(), Some("Fix the auth bug"));
+    }
+
     // ── record_message ──
 
     #[test]
@@ -338,8 +361,8 @@ mod tests {
     fn truncate_title_long_string_adds_ellipsis() {
         let long = "a".repeat(100);
         let result = truncate_title(&long, 20);
-        assert!(result.chars().count() <= 20);
-        assert!(result.ends_with("..."));
+        // 17 a's + "..." = 20 characters exactly.
+        assert_eq!(result, format!("{}...", "a".repeat(17)));
     }
 
     #[test]
