@@ -22,6 +22,7 @@ pub(crate) struct SessionManager {
     message_count: u32,
     /// Captured from the first user message for the session title.
     first_user_prompt: Option<String>,
+    finished: bool,
 }
 
 impl SessionManager {
@@ -35,6 +36,7 @@ impl SessionManager {
             session_id,
             message_count: 0,
             first_user_prompt: None,
+            finished: false,
         })
     }
 
@@ -53,11 +55,11 @@ impl SessionManager {
         let (session_id, header) = new_header(Some(parent_id), model);
         let writer = store.create(&header)?;
 
-        // Capture title from the first user message of the parent session.
         let first_user_prompt = messages
             .iter()
             .find_map(extract_user_text)
             .map(String::from);
+        // Total conversation length (parent + child), not just messages in this file.
         let message_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
         let manager = Self {
@@ -65,13 +67,13 @@ impl SessionManager {
             session_id,
             message_count,
             first_user_prompt,
+            finished: false,
         };
         Ok((manager, messages))
     }
 
     /// Record a conversation message to the session file.
     pub(crate) fn record_message(&mut self, message: &Message) -> Result<()> {
-        // Capture the first user prompt for the session title.
         if self.first_user_prompt.is_none()
             && let Some(text) = extract_user_text(message)
         {
@@ -86,8 +88,13 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write the summary entry. Call this before the session ends.
+    /// Write the summary entry. No-op if already called.
     pub(crate) fn finish(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+
         let title = self.first_user_prompt.as_deref().map_or_else(
             || "(empty session)".to_owned(),
             |s| truncate_title(s, MAX_TITLE_LEN),
@@ -168,17 +175,11 @@ mod tests {
     // ── start ──
 
     #[test]
-    fn start_creates_session_file() {
+    fn start_creates_session_file_with_zero_count() {
         let dir = tempfile::tempdir().unwrap();
         let manager = SessionManager::start(&test_store(dir.path()), "test-model").unwrap();
         let path = dir.path().join(format!("{}.jsonl", manager.session_id()));
         assert!(path.exists());
-    }
-
-    #[test]
-    fn start_initializes_with_zero_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = SessionManager::start(&test_store(dir.path()), "claude-opus-4-6").unwrap();
         assert_eq!(manager.message_count, 0);
     }
 
@@ -230,7 +231,7 @@ mod tests {
             .iter()
             .find(|s| s.session_id == resumed_id)
             .unwrap();
-        assert_eq!(session.title.as_deref(), Some("Fix the auth bug"));
+        assert_eq!(session.summary.as_ref().unwrap().title, "Fix the auth bug");
     }
 
     // ── record_message ──
@@ -271,8 +272,9 @@ mod tests {
         let store = test_store(dir.path());
         let sessions = store.list().unwrap();
         let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
-        assert_eq!(session.title.as_deref(), Some("Fix the auth bug"));
-        assert_eq!(session.message_count, Some(1));
+        let summary = session.summary.as_ref().unwrap();
+        assert_eq!(summary.title, "Fix the auth bug");
+        assert_eq!(summary.message_count, 1);
     }
 
     #[test]
@@ -284,8 +286,28 @@ mod tests {
 
         let sessions = test_store(dir.path()).list().unwrap();
         let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
-        assert_eq!(session.title.as_deref(), Some("(empty session)"));
-        assert_eq!(session.message_count, Some(0));
+        let summary = session.summary.as_ref().unwrap();
+        assert_eq!(summary.title, "(empty session)");
+        assert_eq!(summary.message_count, 0);
+    }
+
+    #[test]
+    fn finish_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let sid = manager.session_id().to_owned();
+        manager.record_message(&Message::user("hi")).unwrap();
+        manager.finish().unwrap();
+        manager.finish().unwrap(); // second call is a no-op
+
+        // Only one summary entry should exist in the file.
+        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let summary_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"summary""#))
+            .count();
+        assert_eq!(summary_count, 1);
     }
 
     // ── extract_user_text ──
