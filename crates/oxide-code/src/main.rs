@@ -44,7 +44,7 @@ struct Cli {
     /// With a session ID prefix, resumes that specific session.
     #[expect(
         clippy::option_option,
-        reason = "clap uses Option<Option<T>> for optional flag values"
+        reason = "encodes three CLI states: absent (None), flag only (Some(None)), flag with value (Some(Some))"
     )]
     #[arg(
         short = 'c',
@@ -128,8 +128,14 @@ fn list_sessions() -> Result<()> {
             ))
             .unwrap_or_default();
         let model = marketing_name(&s.model).unwrap_or(&s.model);
-        let msgs = s.message_count.map_or("-".to_owned(), |n| n.to_string());
-        let title = s.title.as_deref().unwrap_or("(untitled)");
+        let msgs = s
+            .summary
+            .as_ref()
+            .map_or("-".to_owned(), |sum| sum.message_count.to_string());
+        let title = s
+            .summary
+            .as_ref()
+            .map_or("(untitled)", |sum| sum.title.as_str());
         println!("{id_prefix:<10} {created:<21} {model:<20} {msgs:<6} {title}");
     }
 
@@ -302,7 +308,8 @@ async fn agent_loop_task(
         }
     }
 
-    // Summary is written by run_tui after abort, not here.
+    // Summary is written by the caller (run_tui) to guarantee it runs
+    // regardless of how this task exits.
     Ok(())
 }
 
@@ -321,29 +328,33 @@ async fn bare_repl(
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
 
-    loop {
-        eprint!("> ");
-        std::io::stderr().flush()?;
+    let result: Result<()> = async {
+        loop {
+            eprint!("> ");
+            std::io::stderr().flush()?;
 
-        let Some(line) = lines.next_line().await? else {
-            break; // EOF
-        };
+            let Some(line) = lines.next_line().await? else {
+                break; // EOF
+            };
 
-        let input = line.trim().to_owned();
-        if input.is_empty() {
-            continue;
+            let input = line.trim().to_owned();
+            if input.is_empty() {
+                continue;
+            }
+
+            let user_msg = Message::user(&input);
+            log_session_err(session.record_message(&user_msg));
+            messages.push(user_msg);
+            let prompt = prompt::build_prompt(model).await;
+            agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
+            _ = sink.send(AgentEvent::TurnComplete);
         }
-
-        let user_msg = Message::user(&input);
-        log_session_err(session.record_message(&user_msg));
-        messages.push(user_msg);
-        let prompt = prompt::build_prompt(model).await;
-        agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
-        _ = sink.send(AgentEvent::TurnComplete);
+        Ok(())
     }
+    .await;
 
     log_session_err(session.finish());
-    Ok(())
+    result
 }
 
 // ── Headless Mode ──
@@ -361,8 +372,9 @@ async fn headless(
     log_session_err(session.record_message(&user_msg));
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
-    agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
+    let result = agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await;
     log_session_err(session.finish());
+    result?;
     println!();
     Ok(())
 }
