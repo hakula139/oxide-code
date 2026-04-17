@@ -6,8 +6,6 @@ use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
-use crate::message::Message;
-
 use super::component::{Action, Component};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
@@ -15,6 +13,7 @@ use super::components::status::{Status, StatusBar};
 use super::event::{AgentEvent, UserAction, tool_call_icon, tool_call_title};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
+use crate::message::Message;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
