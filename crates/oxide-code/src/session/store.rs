@@ -551,17 +551,6 @@ mod tests {
         assert!(err.contains("already in use"), "unexpected error: {err}");
     }
 
-    #[test]
-    fn create_rejects_concurrent_access() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("locked")).unwrap();
-
-        // open_append while create holds the lock.
-        let result = store.open_append("locked");
-        assert!(result.is_err());
-    }
-
     // ── resolve_sessions_dir ──
 
     #[test]
