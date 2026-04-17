@@ -229,6 +229,7 @@ fn read_tail_summary(file: &mut File) -> Result<Option<(String, time::OffsetDate
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
     use time::macros::datetime;
 
     use super::*;
@@ -335,10 +336,11 @@ mod tests {
         let path = dir.path().join("corrupt.jsonl");
         fs::write(
             &path,
-            r#"{"type":"header","session_id":"c","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
-not valid json
-{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
-"#,
+            indoc! {r#"
+                {"type":"header","session_id":"c","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+                not valid json
+                {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+            "#},
         )
         .unwrap();
         let store = test_store(dir.path());
@@ -360,11 +362,12 @@ not valid json
         let path = dir.path().join("blanks.jsonl");
         fs::write(
             &path,
-            r#"{"type":"header","session_id":"blanks","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+            indoc! {r#"
+                {"type":"header","session_id":"blanks","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
 
-{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+                {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
 
-"#,
+            "#},
         )
         .unwrap();
         let store = test_store(dir.path());
@@ -379,10 +382,11 @@ not valid json
         let path = dir.path().join("future.jsonl");
         fs::write(
             &path,
-            r#"{"type":"header","session_id":"future","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
-{"type":"new_fancy_type","data":"something"}
-{"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
-"#,
+            indoc! {r#"
+                {"type":"header","session_id":"future","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+                {"type":"new_fancy_type","data":"something"}
+                {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+            "#},
         )
         .unwrap();
         let store = test_store(dir.path());
@@ -402,7 +406,7 @@ not valid json
     fn load_messages_rejects_backslash_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        assert!(store.load_messages("..\\..\\etc\\passwd").is_err());
+        assert!(store.load_messages(r"..\..\etc\passwd").is_err());
     }
 
     // ── list ──
