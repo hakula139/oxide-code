@@ -19,6 +19,11 @@ const MAX_TITLE_LEN: usize = 60;
 pub(crate) struct SessionManager {
     writer: SessionWriter,
     session_id: String,
+    /// Message count at the time this manager was created. For new
+    /// sessions this is 0; for resumed sessions it equals the number
+    /// of loaded messages. Used by `finish()` to skip writing a
+    /// duplicate summary when no new messages were recorded.
+    initial_message_count: u32,
     message_count: u32,
     /// Captured from the first user message for the session title.
     first_user_prompt: Option<String>,
@@ -34,6 +39,7 @@ impl SessionManager {
         Ok(Self {
             writer,
             session_id,
+            initial_message_count: 0,
             message_count: 0,
             first_user_prompt: None,
             finished: false,
@@ -66,6 +72,7 @@ impl SessionManager {
         let manager = Self {
             writer,
             session_id: session_id.to_owned(),
+            initial_message_count: message_count,
             message_count,
             first_user_prompt,
             finished: false,
@@ -89,9 +96,15 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write the summary entry. No-op if already called.
+    /// Write the summary entry. No-op if already called or if no new
+    /// messages were recorded since resume (avoids accumulating duplicate
+    /// summaries on empty resume cycles).
     pub(crate) fn finish(&mut self) -> Result<()> {
-        if self.finished {
+        // Skip if already written, or if this is a resumed session with no
+        // new messages (avoids accumulating duplicate summary entries).
+        if self.finished
+            || (self.initial_message_count > 0 && self.message_count == self.initial_message_count)
+        {
             return Ok(());
         }
         self.finished = true;
@@ -332,6 +345,32 @@ mod tests {
 
         // Only one summary entry should exist in the file.
         let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let summary_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"summary""#))
+            .count();
+        assert_eq!(summary_count, 1);
+    }
+
+    #[test]
+    fn finish_skips_summary_on_empty_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("hello")).unwrap();
+        original.finish().unwrap();
+        drop(original);
+
+        // Resume but record no new messages.
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        resumed.finish().unwrap();
+        drop(resumed);
+
+        // Only one summary entry should exist — the original. The empty
+        // resume should not have appended a duplicate.
+        let content =
+            std::fs::read_to_string(dir.path().join(format!("{session_id}.jsonl"))).unwrap();
         let summary_count = content
             .lines()
             .filter(|l| l.contains(r#""type":"summary""#))
