@@ -152,6 +152,9 @@ fn resolve_session(
     model: &str,
     resume: Option<&Option<String>>,
 ) -> Result<(SessionManager, Vec<Message>)> {
+    // Normalize: treat empty / whitespace-only prefixes as "resume latest".
+    let resume = resume.map(|opt| opt.as_deref().filter(|s| !s.trim().is_empty()));
+
     match resume {
         None => {
             let session = SessionManager::start(store, model)?;
@@ -165,20 +168,11 @@ fn resolve_session(
             debug!("resuming session {parent_id}");
             Ok((session, messages))
         }
-        Some(Some(prefix)) if prefix.trim().is_empty() => {
-            // Treat `--continue ""` the same as `--continue` (resume latest).
-            let parent_id = store
-                .latest_session_id()?
-                .context("no sessions to resume")?;
-            let (session, messages) = SessionManager::resume(store, &parent_id, model)?;
-            debug!("resuming session {parent_id}");
-            Ok((session, messages))
-        }
         Some(Some(prefix)) => {
             let sessions = store.list()?;
             let matched: Vec<_> = sessions
                 .iter()
-                .filter(|s| s.session_id.starts_with(prefix.as_str()))
+                .filter(|s| s.session_id.starts_with(prefix))
                 .collect();
             match matched.len() {
                 0 => bail!("no session matching prefix '{prefix}'"),

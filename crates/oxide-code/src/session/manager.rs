@@ -27,15 +27,7 @@ pub(crate) struct SessionManager {
 impl SessionManager {
     /// Start a new session. Writes the header entry immediately.
     pub(crate) fn start(store: &SessionStore, model: &str) -> Result<Self> {
-        let session_id = Uuid::new_v4().to_string();
-
-        let header = Entry::Header {
-            session_id: session_id.clone(),
-            parent_id: None,
-            cwd: current_dir_string(),
-            model: model.to_owned(),
-            created_at: OffsetDateTime::now_utc(),
-        };
+        let (session_id, header) = new_header(None, model);
         let writer = store.create(&header)?;
 
         Ok(Self {
@@ -58,15 +50,7 @@ impl SessionManager {
             bail!("session {parent_id} has no messages to resume");
         }
 
-        let session_id = Uuid::new_v4().to_string();
-
-        let header = Entry::Header {
-            session_id: session_id.clone(),
-            parent_id: Some(parent_id.to_owned()),
-            cwd: current_dir_string(),
-            model: model.to_owned(),
-            created_at: OffsetDateTime::now_utc(),
-        };
+        let (session_id, header) = new_header(Some(parent_id), model);
         let writer = store.create(&header)?;
 
         // Capture title from the first user message of the parent session.
@@ -122,6 +106,18 @@ impl SessionManager {
 }
 
 // ── Helpers ──
+
+fn new_header(parent_id: Option<&str>, model: &str) -> (String, Entry) {
+    let session_id = Uuid::new_v4().to_string();
+    let header = Entry::Header {
+        session_id: session_id.clone(),
+        parent_id: parent_id.map(str::to_owned),
+        cwd: current_dir_string(),
+        model: model.to_owned(),
+        created_at: OffsetDateTime::now_utc(),
+    };
+    (session_id, header)
+}
 
 fn current_dir_string() -> String {
     std::env::current_dir()
