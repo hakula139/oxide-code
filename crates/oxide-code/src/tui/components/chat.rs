@@ -781,6 +781,74 @@ mod tests {
         })
     }
 
+    // ── load_history ──
+
+    #[test]
+    fn load_history_populates_user_and_assistant_entries() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message::user("hello"), Message::assistant("hi there")]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "hello"));
+        assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "hi there"));
+    }
+
+    #[test]
+    fn load_history_skips_tool_result_only_messages() {
+        let mut chat = test_chat();
+        chat.load_history(&[
+            Message::user("ask"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "output".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("reply"),
+        ]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "ask"));
+        assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "reply"));
+    }
+
+    #[test]
+    fn load_history_joins_multiple_text_blocks() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "first".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "second".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(&chat.entries[0], ChatEntry::Assistant(t) if t == "first\nsecond"));
+    }
+
+    #[test]
+    fn load_history_skips_whitespace_only_text() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "  \n  ".to_owned(),
+            }],
+        }]);
+        assert!(chat.entries.is_empty());
+    }
+
+    #[test]
+    fn load_history_empty_slice_is_noop() {
+        let mut chat = test_chat();
+        chat.load_history(&[]);
+        assert!(chat.entries.is_empty());
+    }
+
     // ── append_stream_token ──
 
     #[test]
