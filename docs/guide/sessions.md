@@ -15,15 +15,15 @@ The storage directory follows XDG conventions:
 ## Listing Sessions
 
 ```bash
-ox --list
+ox --list   # or ox -l
 ```
 
-Prints a table of recent sessions (newest first):
+Prints a table of recent sessions (newest first, local time):
 
 ```text
-ID         Created               Model                Msgs   Title
-a1b2c3d4   2026-04-16T12:00      Claude Opus 4.6      12     Fix authentication bug
-e5f6a7b8   2026-04-15T09:30      Claude Opus 4.6      5      Add session persistence
+ID         Created             Msgs   Title
+a1b2c3d4   2026-04-16 20:00    12     Fix authentication bug
+e5f6a7b8   2026-04-15 17:30    5      Add session persistence
 ```
 
 ## Resuming a Session

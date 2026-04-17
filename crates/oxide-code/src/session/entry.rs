@@ -51,6 +51,7 @@ pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
     #[expect(dead_code, reason = "populated during listing but not yet displayed")]
     pub(crate) cwd: String,
+    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
     pub(crate) model: String,
     pub(crate) created_at: OffsetDateTime,
     /// Present when the session file contains a summary entry (written on

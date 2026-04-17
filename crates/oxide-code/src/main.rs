@@ -55,7 +55,7 @@ struct Cli {
     resume: Option<Option<String>>,
 
     /// List recent sessions and exit.
-    #[arg(long, conflicts_with_all = ["prompt", "resume"])]
+    #[arg(short, long, conflicts_with_all = ["prompt", "resume"])]
     list: bool,
 }
 
@@ -115,19 +115,18 @@ fn list_sessions() -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<10} {:<21} {:<20} {:<6} Title",
-        "ID", "Created", "Model", "Msgs"
-    );
+    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+
+    println!("{:<10} {:<19} {:<6} Title", "ID", "Created", "Msgs");
     for s in &sessions {
         let id_prefix = &s.session_id[..s.session_id.len().min(8)];
         let created = s
             .created_at
+            .to_offset(local_offset)
             .format(time::macros::format_description!(
-                "[year]-[month]-[day]T[hour]:[minute]"
+                "[year]-[month]-[day] [hour]:[minute]"
             ))
             .unwrap_or_default();
-        let model = marketing_name(&s.model).unwrap_or(&s.model);
         let msgs = s
             .summary
             .as_ref()
@@ -136,7 +135,7 @@ fn list_sessions() -> Result<()> {
             .summary
             .as_ref()
             .map_or("(untitled)", |sum| sum.title.as_str());
-        println!("{id_prefix:<10} {created:<21} {model:<20} {msgs:<6} {title}");
+        println!("{id_prefix:<10} {created:<19} {msgs:<6} {title}");
     }
 
     Ok(())
