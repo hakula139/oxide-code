@@ -55,7 +55,7 @@ struct Cli {
     resume: Option<Option<String>>,
 
     /// List recent sessions and exit.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["prompt", "resume"])]
     list: bool,
 }
 
@@ -363,7 +363,7 @@ async fn headless(
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
     let user_msg = Message::user(prompt_text);
-    session.record_message(&user_msg).ok();
+    log_session_err(session.record_message(&user_msg));
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
     agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
