@@ -238,7 +238,14 @@ async fn run_tui(
     };
 
     let mut terminal = tui::terminal::init()?;
-    let mut app = tui::app::App::new(display_model, show_thinking, cwd, agent_rx, user_tx);
+    let mut app = tui::app::App::new(
+        display_model,
+        show_thinking,
+        cwd,
+        agent_rx,
+        user_tx,
+        &resumed_messages,
+    );
 
     let session = Arc::new(Mutex::new(session));
 

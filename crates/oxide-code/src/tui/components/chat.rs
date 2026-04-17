@@ -7,6 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use crate::message::{ContentBlock, Message, Role};
 use crate::tui::component::{Action, Component};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
@@ -112,6 +113,33 @@ impl ChatView {
             viewport_height: 0,
             viewport_width: 0,
             auto_scroll: true,
+        }
+    }
+
+    /// Populate the chat history from resumed session messages.
+    ///
+    /// Extracts user text and assistant text from each message. Tool
+    /// calls, tool results, and thinking blocks are skipped — they were
+    /// part of the original session but would add noise to the history
+    /// view.
+    pub(crate) fn load_history(&mut self, messages: &[Message]) {
+        for msg in messages {
+            let text: String = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            match msg.role {
+                Role::User => self.entries.push(ChatEntry::User(text)),
+                Role::Assistant => self.entries.push(ChatEntry::Assistant(text)),
+            }
         }
     }
 

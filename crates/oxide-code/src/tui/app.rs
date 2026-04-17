@@ -6,6 +6,8 @@ use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
+use crate::message::Message;
+
 use super::component::{Action, Component};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
@@ -36,11 +38,14 @@ impl App {
         cwd: String,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
+        history: &[Message],
     ) -> Self {
         let theme = Theme::default();
+        let mut chat = ChatView::new(theme, show_thinking);
+        chat.load_history(history);
         Self {
             status_bar: StatusBar::new(theme, model, cwd),
-            chat: ChatView::new(theme, show_thinking),
+            chat,
             input: InputArea::new(theme),
             agent_rx,
             user_tx,

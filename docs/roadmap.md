@@ -76,7 +76,6 @@ The project direction is simple:
 ### Session Enhancements
 
 - AI-generated session titles — after the first assistant response, make a background API call (Haiku) to generate a descriptive title from the conversation opening. Update the summary entry asynchronously without blocking the main conversation. Fall back to the current first-prompt truncation if the title call fails.
-- Display resumed conversation history in TUI — when resuming a session, replay the loaded messages into the chat view so users can see the prior conversation. Currently messages are loaded into the API context but not shown in the TUI.
 
 ### Test Coverage
 
