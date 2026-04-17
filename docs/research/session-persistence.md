@@ -93,4 +93,4 @@ The original session ID flows through to the `x-claude-code-session-id` API head
 | Listing           | Head + tail extraction  | O(n_sessions) but avoids full-file parse                                                                               |
 | Concurrent access | Advisory flock (`fs2`)  | Prevents interleaved writes; released on crash. Small TOCTOU between read and lock in resume (acceptable for CLI tool) |
 | Write batching    | None (immediate flush)  | CLI workload is low-frequency; premature optimization                                                                  |
-| Context compress. | Deferred                | Separate phase per roadmap                                                                                             |
+| Compression       | Deferred                | Separate phase per roadmap                                                                                             |
