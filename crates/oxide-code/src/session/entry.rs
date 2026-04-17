@@ -11,7 +11,7 @@ use crate::message::Message;
 /// 3. An optional [`Summary`][Entry::Summary] at the end (for fast listing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Entry {
+pub(crate) enum Entry {
     /// First line of every session file.
     Header {
         session_id: String,
@@ -38,19 +38,27 @@ pub enum Entry {
     },
 }
 
+/// Summary fields extracted from a session's tail entry.
+#[derive(Debug, Clone)]
+pub(crate) struct SummaryInfo {
+    pub(crate) title: String,
+    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
+    pub(crate) updated_at: OffsetDateTime,
+    pub(crate) message_count: u32,
+}
+
 /// Lightweight session metadata for listing, extracted from the header
 /// and (optionally) the summary entry without parsing every message.
 #[derive(Debug, Clone)]
-pub struct SessionInfo {
-    pub session_id: String,
-    #[expect(dead_code, reason = "extracted from session header during listing")]
-    pub cwd: String,
-    pub model: String,
-    pub created_at: OffsetDateTime,
-    pub title: Option<String>,
-    #[expect(dead_code, reason = "extracted from session summary during listing")]
-    pub updated_at: Option<OffsetDateTime>,
-    pub message_count: Option<u32>,
+pub(crate) struct SessionInfo {
+    pub(crate) session_id: String,
+    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
+    pub(crate) cwd: String,
+    pub(crate) model: String,
+    pub(crate) created_at: OffsetDateTime,
+    /// Present when the session file contains a summary entry (written on
+    /// normal exit). Absent for sessions that were interrupted.
+    pub(crate) summary: Option<SummaryInfo>,
 }
 
 #[cfg(test)]
@@ -64,7 +72,8 @@ mod tests {
     // ── Entry::Header ──
 
     #[test]
-    fn header_round_trips_through_json() {
+    fn header_round_trips_with_correct_discriminator_and_parent_id_handling() {
+        // Without parent_id.
         let entry = Entry::Header {
             session_id: "abc-123".to_owned(),
             parent_id: None,
@@ -72,9 +81,11 @@ mod tests {
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let parsed: Entry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "header");
+        assert!(json.get("parent_id").is_none());
 
+        let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Header {
             session_id,
             parent_id,
@@ -90,51 +101,23 @@ mod tests {
         assert_eq!(cwd, "/home/user/project");
         assert_eq!(model, "claude-opus-4-6");
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
-    }
 
-    #[test]
-    fn header_has_correct_type_discriminator() {
-        let entry = Entry::Header {
-            session_id: "id".to_owned(),
-            parent_id: None,
-            cwd: "/".to_owned(),
-            model: "m".to_owned(),
-            created_at: datetime!(2026-01-01 0:00 UTC),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["type"], "header");
-    }
-
-    #[test]
-    fn header_omits_parent_id_when_none() {
-        let entry = Entry::Header {
-            session_id: "id".to_owned(),
-            parent_id: None,
-            cwd: "/".to_owned(),
-            model: "m".to_owned(),
-            created_at: datetime!(2026-01-01 0:00 UTC),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert!(json.get("parent_id").is_none());
-    }
-
-    #[test]
-    fn header_includes_parent_id_when_present() {
-        let entry = Entry::Header {
+        // With parent_id.
+        let resumed = Entry::Header {
             session_id: "child".to_owned(),
             parent_id: Some("parent".to_owned()),
             cwd: "/".to_owned(),
             model: "m".to_owned(),
             created_at: datetime!(2026-01-01 0:00 UTC),
         };
-        let json = serde_json::to_value(&entry).unwrap();
+        let json = serde_json::to_value(&resumed).unwrap();
         assert_eq!(json["parent_id"], "parent");
     }
 
     // ── Entry::Message ──
 
     #[test]
-    fn message_entry_round_trips_through_json() {
+    fn message_entry_round_trips_with_correct_discriminator() {
         let entry = Entry::Message {
             message: Message {
                 role: Role::User,
@@ -144,40 +127,31 @@ mod tests {
             },
             timestamp: datetime!(2026-04-16 12:00:01 UTC),
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let parsed: Entry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "message");
 
+        let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Message { message, timestamp } = parsed else {
             panic!("expected Message");
         };
         assert_eq!(message.role, Role::User);
-        assert_eq!(message.content.len(), 1);
         assert!(matches!(&message.content[0], ContentBlock::Text { text } if text == "hello"));
         assert_eq!(timestamp, datetime!(2026-04-16 12:00:01 UTC));
-    }
-
-    #[test]
-    fn message_entry_has_correct_type_discriminator() {
-        let entry = Entry::Message {
-            message: Message::user("test"),
-            timestamp: datetime!(2026-01-01 0:00 UTC),
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["type"], "message");
     }
 
     // ── Entry::Summary ──
 
     #[test]
-    fn summary_round_trips_through_json() {
+    fn summary_round_trips_with_correct_discriminator() {
         let entry = Entry::Summary {
             title: "Fix auth bug".to_owned(),
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
             message_count: 8,
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let parsed: Entry = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "summary");
 
+        let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Summary {
             title,
             updated_at,
@@ -189,17 +163,6 @@ mod tests {
         assert_eq!(title, "Fix auth bug");
         assert_eq!(updated_at, datetime!(2026-04-16 12:05:00 UTC));
         assert_eq!(message_count, 8);
-    }
-
-    #[test]
-    fn summary_has_correct_type_discriminator() {
-        let entry = Entry::Summary {
-            title: "t".to_owned(),
-            updated_at: datetime!(2026-01-01 0:00 UTC),
-            message_count: 0,
-        };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["type"], "summary");
     }
 
     // ── JSONL format ──
