@@ -13,9 +13,9 @@ const MAX_TITLE_LEN: usize = 60;
 
 /// High-level session lifecycle, owned by the agent loop.
 ///
-/// Wraps a [`SessionStore`] and [`SessionWriter`] to provide a simple
-/// record-oriented API: start or resume a session, record each message,
-/// and write a summary on exit.
+/// Wraps a [`SessionWriter`] to provide a simple record-oriented API:
+/// start or resume a session, record each message, and write a summary
+/// on exit.
 pub(crate) struct SessionManager {
     writer: SessionWriter,
     session_id: String,
@@ -129,7 +129,7 @@ fn current_dir_string() -> String {
     }
 }
 
-/// Extract the first text content from a user message.
+/// Extract the first non-empty text content from a user message.
 fn extract_user_text(message: &Message) -> Option<&str> {
     if message.role != crate::message::Role::User {
         return None;

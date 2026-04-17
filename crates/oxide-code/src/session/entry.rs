@@ -43,12 +43,12 @@ pub enum Entry {
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub session_id: String,
-    #[expect(dead_code, reason = "populated by store, only read in tests")]
+    #[expect(dead_code, reason = "extracted from session header during listing")]
     pub cwd: String,
     pub model: String,
     pub created_at: OffsetDateTime,
     pub title: Option<String>,
-    #[expect(dead_code, reason = "populated by store, only read in tests")]
+    #[expect(dead_code, reason = "extracted from session summary during listing")]
     pub updated_at: Option<OffsetDateTime>,
     pub message_count: Option<u32>,
 }

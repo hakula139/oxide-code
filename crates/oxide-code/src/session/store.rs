@@ -173,7 +173,6 @@ fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
 
-    // Read the header (first line).
     let mut first_line = String::new();
     BufReader::new(&file).read_line(&mut first_line)?;
     let header: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;

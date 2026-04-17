@@ -47,7 +47,7 @@ File naming: `{session_id}.jsonl` where session ID is a UUID v4.
 
 - **Header** → session ID, CWD, model, created timestamp.
 - **Summary** → title (derived from first user prompt), updated timestamp, message count.
-- Sessions without a summary line (e.g., crash before exit) still list — they show "(untitled)" with no message count.
+- Sessions without a summary line (e.g., crash before exit) still list — they show "(untitled)" with no message count. Sessions with a summary but no user messages show "(empty session)" as the title.
 
 ## Session Resume
 
