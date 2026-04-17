@@ -25,7 +25,7 @@ Each line is a discriminated union with a `type` field:
 Example file:
 
 ```jsonl
-{"type":"header","session_id":"a1b2c3d4","cwd":"/home/user/project","model":"claude-opus-4-6","created_at":"2026-04-16T12:00:00Z"}
+{"type":"header","session_id":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","cwd":"/home/user/project","model":"claude-opus-4-6","created_at":"2026-04-16T12:00:00Z"}
 {"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-04-16T12:00:01Z"}
 {"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-04-16T12:00:02Z"}
 {"type":"summary","title":"Greeting conversation","updated_at":"2026-04-16T12:00:02Z","message_count":2}

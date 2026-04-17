@@ -4,7 +4,7 @@ oxide-code automatically saves every conversation to disk. You can list past ses
 
 ## How It Works
 
-Each time you start `ox`, a new session file is created in `~/.local/share/ox/sessions/`. Every message (yours and the assistant's) is appended to this file in real time. When you quit, a summary entry is written so future listings can display the session title without reading the full conversation.
+Each time you start `ox`, a new session file is created under `$XDG_DATA_HOME/ox/sessions/` (see table below). Every message (yours and the assistant's) is appended to this file in real time. When you quit, a summary entry is written so future listings can display the session title without reading the full conversation.
 
 The storage directory follows XDG conventions:
 
