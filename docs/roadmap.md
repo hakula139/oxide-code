@@ -92,12 +92,31 @@ The project direction is simple:
 
 ## Later
 
+### Slash Commands
+
+Interactive commands typed in the REPL / TUI input, processed locally before reaching the model. Requires a command parser, registry, and per-command handlers.
+
+**Session**: `/resume` (resume a previous session from within the REPL), `/compact` (trigger context compression), `/clear` (reset conversation history).
+
+**Info**: `/help` (list available commands), `/cost` (token usage and cost breakdown), `/status` (session info, model, context usage).
+
+**Config**: `/model` (switch model mid-session), `/config` (view / modify settings).
+
+**Workflow / Skills**: `/init` (create / update CLAUDE.md), `/review` (review code changes), `/commit` (stage and commit). These are user-extensible "skills" — slash commands backed by prompt templates, not hardcoded handlers.
+
+**Auth**: `/login`, `/logout` (manage API credentials).
+
+### Agent Infrastructure
+
 - Task management (task board, dependency tracking).
 - Plan mode with approval workflow.
 - Subagent spawning with isolated context.
 - Background task execution.
 - Agent team coordination with message passing.
 - Git worktree isolation for parallel agent work.
+
+### Platform
+
 - MCP client and server support.
 - Permission system and sandbox execution (re-add prompt guidance when implemented).
 
