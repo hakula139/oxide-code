@@ -91,7 +91,13 @@ impl SessionStore {
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?;
 
         let mut sessions: Vec<SessionInfo> = entries
-            .filter_map(Result::ok)
+            .filter_map(|entry| match entry {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    warn!("skipping directory entry: {e}");
+                    None
+                }
+            })
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
             .filter_map(|e| match read_session_info(&e.path()) {
                 Ok(info) => Some(info),

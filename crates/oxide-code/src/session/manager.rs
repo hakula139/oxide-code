@@ -120,9 +120,13 @@ fn new_header(parent_id: Option<&str>, model: &str) -> (String, Entry) {
 }
 
 fn current_dir_string() -> String {
-    std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
+    match std::env::current_dir() {
+        Ok(p) => p.display().to_string(),
+        Err(e) => {
+            tracing::warn!("failed to read current directory: {e}");
+            String::new()
+        }
+    }
 }
 
 /// Extract the first text content from a user message.
