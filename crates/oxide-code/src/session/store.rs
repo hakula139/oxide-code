@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, warn};
 
-use super::entry::{Entry, SessionInfo};
+use super::entry::{Entry, SessionInfo, SummaryInfo};
 use crate::message::Message;
 
 const DATA_DIR: &str = "ox";
@@ -123,7 +123,7 @@ impl SessionStore {
     }
 
     fn session_path(&self, session_id: &str) -> Result<PathBuf> {
-        if session_id.contains(['/', '\\']) || session_id.contains("..") {
+        if session_id.contains(['/', '\\', '\0']) || session_id.contains("..") {
             bail!("invalid session ID: {session_id}");
         }
         Ok(self.sessions_dir.join(format!("{session_id}.jsonl")))
@@ -187,25 +187,21 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         bail!("first line is not a header");
     };
 
-    // Scan the tail for a summary entry. The explicit seek in
-    // `read_tail_summary` is required because `BufReader` above may have
-    // read ahead past the first line, advancing the file position.
-    let summary = read_tail_summary(&mut file)?;
-
+    // BufReader's internal buffering may have advanced the underlying file
+    // position past the first line. read_tail_summary seeks explicitly to
+    // the tail region.
     Ok(SessionInfo {
         session_id,
         cwd,
         model,
         created_at,
-        title: summary.as_ref().map(|(t, _, _)| t.clone()),
-        updated_at: summary.as_ref().map(|(_, u, _)| *u),
-        message_count: summary.as_ref().map(|(_, _, c)| *c),
+        summary: read_tail_summary(&mut file)?,
     })
 }
 
 /// Read the last `TAIL_BUF_SIZE` bytes of a file and scan for the final
 /// summary entry.
-fn read_tail_summary(file: &mut File) -> Result<Option<(String, time::OffsetDateTime, u32)>> {
+fn read_tail_summary(file: &mut File) -> Result<Option<SummaryInfo>> {
     let len = file.metadata()?.len();
     let offset = len.saturating_sub(TAIL_BUF_SIZE);
     file.seek(SeekFrom::Start(offset))?;
@@ -220,7 +216,11 @@ fn read_tail_summary(file: &mut File) -> Result<Option<(String, time::OffsetDate
             message_count,
         }) = serde_json::from_str(line)
         {
-            return Ok(Some((title, updated_at, message_count)));
+            return Ok(Some(SummaryInfo {
+                title,
+                updated_at,
+                message_count,
+            }));
         }
     }
 
@@ -236,9 +236,7 @@ mod tests {
     use crate::message::ContentBlock;
 
     fn test_store(dir: &Path) -> SessionStore {
-        SessionStore {
-            sessions_dir: dir.to_path_buf(),
-        }
+        SessionStore::open_at(dir.to_path_buf()).unwrap()
     }
 
     fn sample_header(session_id: &str) -> Entry {
@@ -331,21 +329,23 @@ mod tests {
     }
 
     #[test]
-    fn load_messages_skips_corrupt_lines() {
+    fn load_messages_skips_corrupt_empty_and_unknown_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("corrupt.jsonl");
+        let path = dir.path().join("messy.jsonl");
         fs::write(
             &path,
             indoc! {r#"
-                {"type":"header","session_id":"c","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
+                {"type":"header","session_id":"messy","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
                 not valid json
+                {"type":"new_fancy_type","data":"something"}
+
                 {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
             "#},
         )
         .unwrap();
         let store = test_store(dir.path());
 
-        let messages = store.load_messages("corrupt").unwrap();
+        let messages = store.load_messages("messy").unwrap();
         assert_eq!(messages.len(), 1);
     }
 
@@ -357,56 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn load_messages_skips_empty_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blanks.jsonl");
-        fs::write(
-            &path,
-            indoc! {r#"
-                {"type":"header","session_id":"blanks","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
-
-                {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
-
-            "#},
-        )
-        .unwrap();
-        let store = test_store(dir.path());
-
-        let messages = store.load_messages("blanks").unwrap();
-        assert_eq!(messages.len(), 1);
-    }
-
-    #[test]
-    fn load_messages_skips_unknown_entry_types() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("future.jsonl");
-        fs::write(
-            &path,
-            indoc! {r#"
-                {"type":"header","session_id":"future","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z"}
-                {"type":"new_fancy_type","data":"something"}
-                {"type":"message","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
-            "#},
-        )
-        .unwrap();
-        let store = test_store(dir.path());
-
-        let messages = store.load_messages("future").unwrap();
-        assert_eq!(messages.len(), 1);
-    }
-
-    #[test]
-    fn load_messages_rejects_path_traversal() {
+    fn load_messages_rejects_malicious_session_ids() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(store.load_messages("../etc/passwd").is_err());
-    }
-
-    #[test]
-    fn load_messages_rejects_backslash_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
         assert!(store.load_messages(r"..\..\etc\passwd").is_err());
+        assert!(store.load_messages("session\0evil").is_err());
     }
 
     // ── list ──
@@ -453,8 +409,9 @@ mod tests {
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_id, "bbb");
-        assert_eq!(sessions[0].title.as_deref(), Some("Newer"));
-        assert_eq!(sessions[0].message_count, Some(5));
+        let summary = sessions[0].summary.as_ref().unwrap();
+        assert_eq!(summary.title, "Newer");
+        assert_eq!(summary.message_count, 5);
         assert_eq!(sessions[1].session_id, "aaa");
     }
 
@@ -467,28 +424,15 @@ mod tests {
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "no-summary");
-        assert!(sessions[0].title.is_none());
-        assert!(sessions[0].message_count.is_none());
+        assert!(sessions[0].summary.is_none());
     }
 
     #[test]
-    fn list_empty_directory_returns_empty() {
+    fn list_skips_non_session_files_and_malformed_jsonl() {
         let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn list_ignores_non_jsonl_files() {
-        let dir = tempfile::tempdir().unwrap();
+        // Non-JSONL file.
         fs::write(dir.path().join("notes.txt"), "not a session").unwrap();
-        let store = test_store(dir.path());
-        assert!(store.list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn list_skips_jsonl_with_non_header_first_line() {
-        let dir = tempfile::tempdir().unwrap();
+        // JSONL without a header as first line.
         fs::write(
             dir.path().join("bad.jsonl"),
             r#"{"type":"message","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
