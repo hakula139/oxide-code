@@ -53,9 +53,11 @@ File naming: `{session_id}.jsonl` where session ID is a UUID v4.
 
 `ox -c` resumes the most recent session. `ox -c <prefix>` resumes by session ID prefix match.
 
-Resume creates a **new** session file with its own UUID and a `parent_id` field pointing to the original. The old file is never modified. Messages are loaded from the parent and injected into the agent loop's `Vec<Message>`.
+Resume reopens the **existing** session file in append mode. Messages are loaded into memory and sent to the model as context. New messages are appended to the same file, and a new summary entry supersedes the old one (the tail scanner always finds the last summary).
 
-The new session ID flows through to the `x-claude-code-session-id` API header so each API session is uniquely identified.
+An advisory file lock (`flock` via the `fs2` crate) prevents two processes from writing to the same session simultaneously. The lock is held for the lifetime of the writer and released automatically on process exit or crash.
+
+The original session ID flows through to the `x-claude-code-session-id` API header.
 
 ## Reference Implementations
 
@@ -82,12 +84,13 @@ The new session ID flows through to the `x-claude-code-session-id` API header so
 
 ## Design Choices
 
-| Decision            | Choice                    | Rationale                                             |
-| ------------------- | ------------------------- | ----------------------------------------------------- |
-| Storage format      | JSONL                     | Proven, append-only, no dependencies                  |
-| Location            | XDG_DATA_HOME             | Proper XDG separation from config                     |
-| File naming         | `{UUID}.jsonl`            | Simple, globally unique, no path encoding             |
-| Session resume      | New file with `parent_id` | Old sessions are immutable; no corruption risk        |
-| Listing             | Head + tail extraction    | O(n_sessions) but avoids full-file parse              |
-| Write batching      | None (immediate flush)    | CLI workload is low-frequency; premature optimization |
-| Context compression | Deferred                  | Separate phase per roadmap                            |
+| Decision            | Choice                  | Rationale                                                |
+| ------------------- | ----------------------- | -------------------------------------------------------- |
+| Storage format      | JSONL                   | Proven, append-only, no dependencies                     |
+| Location            | XDG_DATA_HOME           | Proper XDG separation from config                        |
+| File naming         | `{UUID}.jsonl`          | Simple, globally unique, no path encoding                |
+| Session resume      | Append to existing file | Same file is self-contained; matches claude-code / Codex |
+| Listing             | Head + tail extraction  | O(n_sessions) but avoids full-file parse                 |
+| Concurrent access   | Advisory flock (`fs2`)  | Prevents interleaved writes; released on crash           |
+| Write batching      | None (immediate flush)  | CLI workload is low-frequency; premature optimization    |
+| Context compression | Deferred                | Separate phase per roadmap                               |

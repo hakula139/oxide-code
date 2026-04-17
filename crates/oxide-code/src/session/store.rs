@@ -1,8 +1,9 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use tracing::{debug, warn};
 
 use super::entry::{Entry, SessionInfo, SummaryInfo};
@@ -44,6 +45,9 @@ impl SessionStore {
     }
 
     /// Create a new session file and write the header entry.
+    ///
+    /// Takes an exclusive advisory lock on the file to prevent concurrent
+    /// access. The lock is held for the lifetime of the returned writer.
     pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
         let Entry::Header { session_id, .. } = header else {
             bail!("expected Header entry");
@@ -51,9 +55,26 @@ impl SessionStore {
         let path = self.session_path(session_id)?;
         let file = File::create_new(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
+        file.try_lock_exclusive()
+            .with_context(|| format!("session {session_id} is already in use"))?;
         let mut writer = SessionWriter { file };
         writer.append(header)?;
         Ok(writer)
+    }
+
+    /// Open an existing session file in append mode.
+    ///
+    /// Takes an exclusive advisory lock on the file to prevent concurrent
+    /// access. The lock is held for the lifetime of the returned writer.
+    pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
+        let path = self.session_path(session_id)?;
+        let file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("session not found: {}", path.display()))?;
+        file.try_lock_exclusive()
+            .with_context(|| format!("session {session_id} is already in use"))?;
+        Ok(SessionWriter { file })
     }
 
     /// Load all messages from a session file, skipping non-message entries.
@@ -141,6 +162,7 @@ impl SessionStore {
 // ── SessionWriter ──
 
 /// Handle for appending entries to an open session file.
+#[derive(Debug)]
 pub(crate) struct SessionWriter {
     file: File,
 }
@@ -242,7 +264,6 @@ mod tests {
     fn sample_header(session_id: &str) -> Entry {
         Entry::Header {
             session_id: session_id.to_owned(),
-            parent_id: None,
             cwd: "/tmp/project".to_owned(),
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
@@ -287,7 +308,6 @@ mod tests {
         fs::write(dir.path().join("existing.jsonl"), "{}").unwrap();
         let header = Entry::Header {
             session_id: "existing".to_owned(),
-            parent_id: None,
             cwd: "/".to_owned(),
             model: "m".to_owned(),
             created_at: datetime!(2026-01-01 0:00 UTC),
@@ -376,7 +396,6 @@ mod tests {
         let mut wa = store
             .create(&Entry::Header {
                 session_id: "aaa".to_owned(),
-                parent_id: None,
                 cwd: "/a".to_owned(),
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
@@ -393,7 +412,6 @@ mod tests {
         let mut wb = store
             .create(&Entry::Header {
                 session_id: "bbb".to_owned(),
-                parent_id: None,
                 cwd: "/b".to_owned(),
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
@@ -452,7 +470,6 @@ mod tests {
         let _wa = store
             .create(&Entry::Header {
                 session_id: "old".to_owned(),
-                parent_id: None,
                 cwd: "/".to_owned(),
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
@@ -461,7 +478,6 @@ mod tests {
         let _wb = store
             .create(&Entry::Header {
                 session_id: "new".to_owned(),
-                parent_id: None,
                 cwd: "/".to_owned(),
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
@@ -493,6 +509,57 @@ mod tests {
         let content = fs::read_to_string(dir.path().join("multi.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
+    }
+
+    // ── open_append ──
+
+    #[test]
+    fn open_append_writes_to_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("append-test")).unwrap();
+        writer.append(&sample_message_entry("first")).unwrap();
+        drop(writer); // release lock
+
+        let mut writer = store.open_append("append-test").unwrap();
+        writer.append(&sample_message_entry("second")).unwrap();
+        drop(writer);
+
+        let messages = store.load_messages("append-test").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "first"));
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "second"));
+    }
+
+    #[test]
+    fn open_append_fails_for_nonexistent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        assert!(store.open_append("no-such-session").is_err());
+    }
+
+    #[test]
+    fn open_append_rejects_concurrent_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("locked")).unwrap();
+
+        // First writer still holds the lock.
+        let result = store.open_append("locked");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("already in use"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn create_rejects_concurrent_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("locked")).unwrap();
+
+        // open_append while create holds the lock.
+        let result = store.open_append("locked");
+        assert!(result.is_err());
     }
 
     // ── resolve_sessions_dir ──

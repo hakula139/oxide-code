@@ -161,11 +161,11 @@ fn resolve_session(
             Ok((session, Vec::new()))
         }
         Some(None) => {
-            let parent_id = store
+            let session_id = store
                 .latest_session_id()?
                 .context("no sessions to resume")?;
-            let (session, messages) = SessionManager::resume(store, &parent_id, model)?;
-            debug!("resuming session {parent_id}");
+            let (session, messages) = SessionManager::resume(store, &session_id)?;
+            debug!("resuming session {session_id}");
             Ok((session, messages))
         }
         Some(Some(prefix)) => {
@@ -177,9 +177,9 @@ fn resolve_session(
             match matched.len() {
                 0 => bail!("no session matching prefix '{prefix}'"),
                 1 => {
-                    let parent_id = &matched[0].session_id;
-                    let (session, messages) = SessionManager::resume(store, parent_id, model)?;
-                    debug!("resuming session {parent_id}");
+                    let session_id = &matched[0].session_id;
+                    let (session, messages) = SessionManager::resume(store, session_id)?;
+                    debug!("resuming session {session_id}");
                     Ok((session, messages))
                 }
                 n => bail!("ambiguous prefix '{prefix}' matches {n} sessions"),

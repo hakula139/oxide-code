@@ -15,9 +15,6 @@ pub(crate) enum Entry {
     /// First line of every session file.
     Header {
         session_id: String,
-        /// If this session was resumed from another, the parent session ID.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_id: Option<String>,
         cwd: String,
         model: String,
         #[serde(with = "time::serde::rfc3339")]
@@ -72,23 +69,19 @@ mod tests {
     // ── Entry::Header ──
 
     #[test]
-    fn header_round_trips_with_correct_discriminator_and_parent_id_handling() {
-        // Without parent_id.
+    fn header_round_trips_with_correct_discriminator() {
         let entry = Entry::Header {
             session_id: "abc-123".to_owned(),
-            parent_id: None,
             cwd: "/home/user/project".to_owned(),
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "header");
-        assert!(json.get("parent_id").is_none());
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         let Entry::Header {
             session_id,
-            parent_id,
             cwd,
             model,
             created_at,
@@ -97,21 +90,9 @@ mod tests {
             panic!("expected Header");
         };
         assert_eq!(session_id, "abc-123");
-        assert!(parent_id.is_none());
         assert_eq!(cwd, "/home/user/project");
         assert_eq!(model, "claude-opus-4-6");
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
-
-        // With parent_id.
-        let resumed = Entry::Header {
-            session_id: "child".to_owned(),
-            parent_id: Some("parent".to_owned()),
-            cwd: "/".to_owned(),
-            model: "m".to_owned(),
-            created_at: datetime!(2026-01-01 0:00 UTC),
-        };
-        let json = serde_json::to_value(&resumed).unwrap();
-        assert_eq!(json["parent_id"], "parent");
     }
 
     // ── Entry::Message ──

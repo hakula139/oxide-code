@@ -62,7 +62,7 @@ The project direction is simple:
 ### Session Persistence
 
 - JSONL-based conversation logs — append-only, one entry per line, immediate flush. Discriminated entry types: `header` (session metadata), `message` (conversation), `summary` (for fast listing).
-- Session resume via `ox -c` (most recent) or `ox -c <id-prefix>` (specific session). Creates a new session file with `parent_id` link; old sessions are immutable.
+- Session resume via `ox -c` (most recent) or `ox -c <id-prefix>` (specific session). Reopens the existing session file in append mode. Advisory file lock (`flock`) prevents concurrent access.
 - Session listing via `ox --list` — reads first line (header) and tail (summary) of each `.jsonl` file. Shows session ID prefix, creation time, model, message count, and title (derived from first user prompt).
 - Storage at `$XDG_DATA_HOME/ox/sessions/` (`~/.local/share/ox/sessions/`). One `{uuid}.jsonl` file per session.
 - Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header.

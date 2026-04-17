@@ -28,7 +28,7 @@ pub(crate) struct SessionManager {
 impl SessionManager {
     /// Start a new session. Writes the header entry immediately.
     pub(crate) fn start(store: &SessionStore, model: &str) -> Result<Self> {
-        let (session_id, header) = new_header(None, model);
+        let (session_id, header) = new_header(model);
         let writer = store.create(&header)?;
 
         Ok(Self {
@@ -40,31 +40,25 @@ impl SessionManager {
         })
     }
 
-    /// Resume a previous session. Loads its messages and starts a new
-    /// session file with a `parent_id` link.
-    pub(crate) fn resume(
-        store: &SessionStore,
-        parent_id: &str,
-        model: &str,
-    ) -> Result<(Self, Vec<Message>)> {
-        let messages = store.load_messages(parent_id)?;
+    /// Resume a previous session. Loads its messages and reopens the
+    /// existing session file in append mode.
+    pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<(Self, Vec<Message>)> {
+        let messages = store.load_messages(session_id)?;
         if messages.is_empty() {
-            bail!("session {parent_id} has no messages to resume");
+            bail!("session {session_id} has no messages to resume");
         }
 
-        let (session_id, header) = new_header(Some(parent_id), model);
-        let writer = store.create(&header)?;
+        let writer = store.open_append(session_id)?;
 
         let first_user_prompt = messages
             .iter()
             .find_map(extract_user_text)
             .map(String::from);
-        // Total conversation length (parent + child), not just messages in this file.
         let message_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
         let manager = Self {
             writer,
-            session_id,
+            session_id: session_id.to_owned(),
             message_count,
             first_user_prompt,
             finished: false,
@@ -114,11 +108,10 @@ impl SessionManager {
 
 // ── Helpers ──
 
-fn new_header(parent_id: Option<&str>, model: &str) -> (String, Entry) {
+fn new_header(model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
     let header = Entry::Header {
         session_id: session_id.clone(),
-        parent_id: parent_id.map(str::to_owned),
         cwd: current_dir_string(),
         model: model.to_owned(),
         created_at: OffsetDateTime::now_utc(),
@@ -186,17 +179,18 @@ mod tests {
     // ── resume ──
 
     #[test]
-    fn resume_loads_parent_messages_and_creates_new_session() {
+    fn resume_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
-        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
-        let parent_id = original.session_id().to_owned();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
         original.record_message(&Message::assistant("hi")).unwrap();
         original.finish().unwrap();
+        drop(original); // release file lock
 
-        let (resumed, messages) =
-            SessionManager::resume(&test_store(dir.path()), &parent_id, "m").unwrap();
-        assert_ne!(resumed.session_id(), parent_id);
+        let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
     }
@@ -204,34 +198,47 @@ mod tests {
     #[test]
     fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        let mut original = SessionManager::start(&test_store(dir.path()), "m").unwrap();
-        let parent_id = original.session_id().to_owned();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
         original.finish().unwrap();
+        drop(original);
 
-        assert!(SessionManager::resume(&test_store(dir.path()), &parent_id, "m").is_err());
+        assert!(SessionManager::resume(&store, &session_id).is_err());
     }
 
     #[test]
-    fn resume_carries_parent_title_into_summary() {
+    fn resume_appends_to_existing_file_and_updates_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionManager::start(&store, "m").unwrap();
-        let parent_id = original.session_id().to_owned();
+        let session_id = original.session_id().to_owned();
         original
             .record_message(&Message::user("Fix the auth bug"))
             .unwrap();
         original.finish().unwrap();
+        drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &parent_id, "m").unwrap();
-        let resumed_id = resumed.session_id().to_owned();
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        resumed
+            .record_message(&Message::assistant("Done."))
+            .unwrap();
         resumed.finish().unwrap();
+        drop(resumed);
 
+        // The tail scanner finds the latest summary.
         let sessions = store.list().unwrap();
         let session = sessions
             .iter()
-            .find(|s| s.session_id == resumed_id)
+            .find(|s| s.session_id == session_id)
             .unwrap();
-        assert_eq!(session.summary.as_ref().unwrap().title, "Fix the auth bug");
+        let summary = session.summary.as_ref().unwrap();
+        assert_eq!(summary.title, "Fix the auth bug");
+        assert_eq!(summary.message_count, 2); // 1 original + 1 new
+
+        // All messages (original + appended) are in the same file.
+        let all_messages = store.load_messages(&session_id).unwrap();
+        assert_eq!(all_messages.len(), 2);
     }
 
     // ── record_message ──

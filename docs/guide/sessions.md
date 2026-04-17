@@ -41,7 +41,7 @@ Resume a specific session by ID prefix:
 ox -c a1b2
 ```
 
-When resuming, the full conversation history is loaded and sent to the model as context. A new session file is created (the old one is never modified), so the resumed conversation has its own session ID. The new file's header includes a `parent_id` field linking back to the original session.
+When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID. An advisory file lock prevents two processes from writing to the same session simultaneously.
 
 If no sessions exist, or if the prefix matches zero or multiple sessions, `ox` prints an error and exits.
 
