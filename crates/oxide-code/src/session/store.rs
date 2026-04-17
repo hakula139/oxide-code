@@ -122,19 +122,19 @@ impl SessionStore {
         Ok(sessions.into_iter().next().map(|s| s.session_id))
     }
 
+    fn session_path(&self, session_id: &str) -> Result<PathBuf> {
+        if session_id.contains(['/', '\\']) || session_id.contains("..") {
+            bail!("invalid session ID: {session_id}");
+        }
+        Ok(self.sessions_dir.join(format!("{session_id}.jsonl")))
+    }
+
     /// Create a store at an explicit directory. Used by tests to bypass
     /// XDG resolution.
     #[cfg(test)]
     pub(super) fn open_at(sessions_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         Ok(Self { sessions_dir })
-    }
-
-    fn session_path(&self, session_id: &str) -> Result<PathBuf> {
-        if session_id.contains(['/', '\\']) || session_id.contains("..") {
-            bail!("invalid session ID: {session_id}");
-        }
-        Ok(self.sessions_dir.join(format!("{session_id}.jsonl")))
     }
 }
 
@@ -530,7 +530,7 @@ not valid json
         assert!(store.latest_session_id().unwrap().is_none());
     }
 
-    // ── SessionWriter::append ──
+    // ── append ──
 
     #[test]
     fn append_writes_multiple_entries() {

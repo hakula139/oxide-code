@@ -105,13 +105,6 @@ async fn main() -> Result<()> {
 
 // ── Session Helpers ──
 
-/// Log session I/O errors without aborting the agent loop.
-fn log_session_err(result: anyhow::Result<()>) {
-    if let Err(e) = result {
-        warn!("session write failed: {e}");
-    }
-}
-
 /// Print a table of recent sessions and exit.
 fn list_sessions() -> Result<()> {
     let store = SessionStore::open()?;
@@ -198,6 +191,13 @@ fn create_tool_registry() -> ToolRegistry {
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
+}
+
+/// Log session I/O errors without aborting the agent loop.
+fn log_session_err(result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        warn!("session write failed: {e}");
+    }
 }
 
 // ── TUI Mode ──
