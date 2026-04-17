@@ -29,6 +29,14 @@ use tui::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
+/// Cached local UTC offset, computed before the tokio runtime starts.
+///
+/// `time::UtcOffset::current_local_offset()` is unsound under
+/// multi-threaded runtimes on Linux (it reads `/etc/localtime` via
+/// `localtime_r` while other threads may call `setenv`). Computing the
+/// offset in single-threaded `fn main()` avoids the issue.
+static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
+
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
 struct Cli {
@@ -59,8 +67,17 @@ struct Cli {
     list: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    LOCAL_OFFSET
+        .set(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+        .ok();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -115,7 +132,7 @@ fn list_sessions() -> Result<()> {
         return Ok(());
     }
 
-    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
 
     println!("{:<10} {:<19} {:<6} Title", "ID", "Created", "Msgs");
     for s in &sessions {
