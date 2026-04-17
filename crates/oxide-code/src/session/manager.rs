@@ -196,6 +196,21 @@ mod tests {
     }
 
     #[test]
+    fn resume_works_on_unfinished_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("hello")).unwrap();
+        // No finish() — simulates a crash.
+        drop(original);
+
+        let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        assert_eq!(resumed.session_id(), session_id);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
     fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
