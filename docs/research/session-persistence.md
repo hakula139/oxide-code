@@ -84,13 +84,13 @@ The original session ID flows through to the `x-claude-code-session-id` API head
 
 ## Design Choices
 
-| Decision            | Choice                  | Rationale                                                |
-| ------------------- | ----------------------- | -------------------------------------------------------- |
-| Storage format      | JSONL                   | Proven, append-only, no dependencies                     |
-| Location            | XDG_DATA_HOME           | Proper XDG separation from config                        |
-| File naming         | `{UUID}.jsonl`          | Simple, globally unique, no path encoding                |
-| Session resume      | Append to existing file | Same file is self-contained; matches claude-code / Codex |
-| Listing             | Head + tail extraction  | O(n_sessions) but avoids full-file parse                 |
-| Concurrent access   | Advisory flock (`fs2`)  | Prevents interleaved writes; released on crash           |
-| Write batching      | None (immediate flush)  | CLI workload is low-frequency; premature optimization    |
-| Context compression | Deferred                | Separate phase per roadmap                               |
+| Decision          | Choice                  | Rationale                                                                                                              |
+| ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Storage format    | JSONL                   | Proven, append-only, no dependencies                                                                                   |
+| Location          | XDG_DATA_HOME           | Proper XDG separation from config                                                                                      |
+| File naming       | `{UUID}.jsonl`          | Simple, globally unique, no path encoding                                                                              |
+| Session resume    | Append to existing file | Same file is self-contained; matches claude-code / Codex                                                               |
+| Listing           | Head + tail extraction  | O(n_sessions) but avoids full-file parse                                                                               |
+| Concurrent access | Advisory flock (`fs2`)  | Prevents interleaved writes; released on crash. Small TOCTOU between read and lock in resume (acceptable for CLI tool) |
+| Write batching    | None (immediate flush)  | CLI workload is low-frequency; premature optimization                                                                  |
+| Context compress. | Deferred                | Separate phase per roadmap                                                                                             |

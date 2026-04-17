@@ -42,6 +42,13 @@ impl SessionManager {
 
     /// Resume a previous session. Loads its messages and reopens the
     /// existing session file in append mode.
+    ///
+    /// Note: there is a small TOCTOU window between `load_messages` (read,
+    /// no lock) and `open_append` (lock). Another process could append
+    /// messages in between, making the loaded messages stale. In practice
+    /// this is a non-issue for a single-user CLI tool — the lock still
+    /// prevents concurrent *writers*, just not a reader seeing the latest
+    /// state before acquiring the lock.
     pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<(Self, Vec<Message>)> {
         let messages = store.load_messages(session_id)?;
         if messages.is_empty() {
