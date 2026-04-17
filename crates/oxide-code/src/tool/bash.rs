@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::{Tool, ToolMetadata, ToolOutput};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 
 pub(crate) struct BashTool;
 

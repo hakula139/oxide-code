@@ -18,7 +18,7 @@ const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 const LOCK_MAX_RETRIES: u32 = 5;
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(1000);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
