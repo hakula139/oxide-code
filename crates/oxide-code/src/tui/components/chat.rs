@@ -7,6 +7,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use std::collections::HashMap;
+
 use crate::message::{ContentBlock, Message, Role};
 use crate::tui::component::{Action, Component};
 use crate::tui::event::{tool_call_icon, tool_call_title};
@@ -21,6 +23,10 @@ use crate::tui::wrap::{expand_tabs, wrap_line_styled};
 enum ChatEntry {
     User(String),
     Assistant(String),
+    /// Committed thinking block (populated only from resumed history
+    /// when `show_thinking` is enabled). Live thinking streams through
+    /// the transient [`ChatView::thinking_buffer`] instead.
+    Thinking(String),
     ToolCall {
         icon: &'static str,
         label: String,
@@ -119,12 +125,17 @@ impl ChatView {
 
     /// Populate the chat history from resumed session messages.
     ///
-    /// Restores user / assistant text and assistant tool-call markers
-    /// so a resumed view matches the live one visually. Tool _results_
-    /// (often long, verbose output) and thinking blocks are skipped —
-    /// they were part of the original session but add noise to the
-    /// history view.
+    /// Renders user / assistant text, assistant tool-call markers, and
+    /// the paired tool results so a resumed view matches the live one
+    /// visually. Thinking blocks are rendered only when
+    /// [`ChatView::show_thinking`] is on — this mirrors claude-code's
+    /// "verbose / transcript" gating (thinking is valuable context but
+    /// noisy by default).
+    ///
+    /// `RedactedThinking` blocks are intentionally dropped: their body
+    /// is opaque ciphertext and carries no human-readable context.
     pub(crate) fn load_history(&mut self, messages: &[Message]) {
+        let mut tool_labels: HashMap<String, String> = HashMap::new();
         for msg in messages {
             let mut text = String::new();
             for block in &msg.content {
@@ -135,8 +146,8 @@ impl ChatView {
                         }
                         text.push_str(t);
                     }
-                    ContentBlock::ToolUse { name, input, .. }
-                    | ContentBlock::ServerToolUse { name, input, .. } => {
+                    ContentBlock::ToolUse { id, name, input }
+                    | ContentBlock::ServerToolUse { id, name, input } => {
                         // Flush any accumulated text so entries render
                         // in source order (assistant text, then the
                         // tool call it preceded).
@@ -147,7 +158,35 @@ impl ChatView {
                         let icon = tool_call_icon(name);
                         let label = tool_call_title(name, input)
                             .map_or_else(|| name.clone(), str::to_owned);
+                        tool_labels.insert(id.clone(), label.clone());
                         self.entries.push(ChatEntry::ToolCall { icon, label });
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        let label = tool_labels
+                            .get(tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| "(result)".to_owned());
+                        self.entries.push(ChatEntry::ToolResult {
+                            label,
+                            content: content.clone(),
+                            is_error: *is_error,
+                        });
+                    }
+                    ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                        // Keep Thinking entries unconditionally — the
+                        // renderer (see the main `match entry` block)
+                        // honors `show_thinking` to decide whether to
+                        // emit rows. Storing them means flipping the
+                        // toggle doesn't require reloading the session.
+                        if !text.is_empty() {
+                            self.entries
+                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
+                        }
+                        self.entries.push(ChatEntry::Thinking(thinking.clone()));
                     }
                     _ => {}
                 }
@@ -357,6 +396,12 @@ impl ChatView {
                     self.push_assistant_message_lines(&mut lines, content, width);
                     lines.push(Line::raw(""));
                 }
+                ChatEntry::Thinking(content) => {
+                    if self.show_thinking {
+                        self.push_thinking_lines(&mut lines, content, width);
+                        lines.push(Line::raw(""));
+                    }
+                }
                 ChatEntry::ToolCall { icon, label } => {
                     self.push_tool_call_line(&mut lines, icon, label);
                 }
@@ -376,7 +421,7 @@ impl ChatView {
 
         // Thinking buffer (ephemeral — not stored in history).
         if self.show_thinking && !self.thinking_buffer.is_empty() {
-            self.push_thinking_lines(&mut lines, width);
+            self.push_thinking_lines(&mut lines, &self.thinking_buffer, width);
         }
 
         // Streaming buffer (not yet committed).
@@ -541,11 +586,11 @@ impl ChatView {
 
     // ── Thinking ──
 
-    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
+    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, text: &'a str, width: usize) {
         push_section_header(lines, "Thinking...", self.theme.thinking());
         push_bordered_lines(
             lines,
-            &self.thinking_buffer,
+            text,
             BORDER_PREFIX,
             self.theme.dim(),
             self.theme.thinking(),
@@ -812,10 +857,18 @@ mod tests {
     }
 
     #[test]
-    fn load_history_skips_tool_result_only_messages() {
+    fn load_history_renders_tool_result_after_paired_tool_use() {
         let mut chat = test_chat();
         chat.load_history(&[
             Message::user("ask"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
@@ -826,9 +879,45 @@ mod tests {
             },
             Message::assistant("reply"),
         ]);
-        assert_eq!(chat.entries.len(), 2);
+        assert_eq!(chat.entries.len(), 4);
         assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "ask"));
-        assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "reply"));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::ToolCall { label, .. } if label == "ls"
+        ));
+        assert!(matches!(
+            &chat.entries[2],
+            ChatEntry::ToolResult { label, content, is_error: false } if label == "ls" && content == "output"
+        ));
+        assert!(matches!(&chat.entries[3], ChatEntry::Assistant(t) if t == "reply"));
+    }
+
+    #[test]
+    fn load_history_tool_result_without_matching_tool_use_uses_fallback_label() {
+        // Orphan tool_result (no preceding tool_use with the same id).
+        // Unusual but possible after crash sanitization; render with a
+        // generic fallback instead of dropping.
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "missing".to_owned(),
+                content: "stderr".to_owned(),
+                is_error: true,
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolResult {
+            label,
+            content,
+            is_error,
+        } = &chat.entries[0]
+        else {
+            panic!("expected tool result, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(label, "(result)");
+        assert_eq!(content, "stderr");
+        assert!(*is_error);
     }
 
     #[test]
@@ -995,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn load_history_still_skips_thinking_blocks() {
+    fn load_history_renders_thinking_entries_before_following_text() {
         let mut chat = test_chat();
         chat.load_history(&[Message {
             role: Role::Assistant,
@@ -1009,10 +1098,57 @@ mod tests {
                 },
             ],
         }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Thinking(t) if t == "long internal reasoning"
+        ));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::Assistant(t) if t == "visible reply"
+        ));
+    }
+
+    #[test]
+    fn load_history_thinking_entry_is_dropped_when_body_is_whitespace() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "   \n  ".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "reply".to_owned(),
+                },
+            ],
+        }]);
         assert_eq!(chat.entries.len(), 1);
         assert!(matches!(
             &chat.entries[0],
-            ChatEntry::Assistant(t) if t == "visible reply"
+            ChatEntry::Assistant(t) if t == "reply"
+        ));
+    }
+
+    #[test]
+    fn load_history_redacted_thinking_is_dropped() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::RedactedThinking {
+                    data: "opaque-ciphertext".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "fine".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "fine"
         ));
     }
 
