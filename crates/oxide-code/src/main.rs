@@ -234,9 +234,26 @@ fn create_tool_registry() -> ToolRegistry {
 }
 
 /// Log session I/O errors without aborting the agent loop.
-fn log_session_err(result: anyhow::Result<()>) {
-    if let Err(e) = result {
-        warn!("session write failed: {e}");
+///
+/// The first failure within a session is also surfaced to the user via
+/// `sink` (when available) so they know the conversation may not be
+/// saved. Subsequent failures warn-log only to avoid spamming the UI
+/// — the persistence problem has already been announced.
+fn log_session_err(
+    result: anyhow::Result<()>,
+    session: &mut SessionManager,
+    sink: Option<&dyn AgentSink>,
+) {
+    let Err(e) = result else {
+        return;
+    };
+    warn!("session write failed: {e}");
+    if session.record_write_failure()
+        && let Some(sink) = sink
+    {
+        _ = sink.send(AgentEvent::Error(format!(
+            "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
+        )));
     }
 }
 
@@ -313,8 +330,14 @@ async fn run_tui(
         _ => {}
     }
 
-    // Write the session summary after abort to guarantee it runs.
-    log_session_err(session.lock().await.finish());
+    // Write the session summary after abort to guarantee it runs. The
+    // TUI is already torn down, so surfaced-error channels are gone —
+    // fall back to warn-log only (sink = None).
+    {
+        let mut session = session.lock().await;
+        let r = session.finish();
+        log_session_err(r, &mut session, None);
+    }
 
     result
 }
@@ -333,7 +356,11 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
-                log_session_err(session.lock().await.record_message(&user_msg));
+                {
+                    let mut s = session.lock().await;
+                    let r = s.record_message(&user_msg);
+                    log_session_err(r, &mut s, Some(&sink));
+                }
                 messages.push(user_msg);
                 let prompt = prompt::build_prompt(client.model()).await;
                 let turn_result = {
@@ -384,7 +411,8 @@ async fn bare_repl(
             }
 
             let user_msg = Message::user(&input);
-            log_session_err(session.record_message(&user_msg));
+            let r = session.record_message(&user_msg);
+            log_session_err(r, &mut session, Some(&sink));
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
             agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
@@ -394,7 +422,8 @@ async fn bare_repl(
     }
     .await;
 
-    log_session_err(session.finish());
+    let r = session.finish();
+    log_session_err(r, &mut session, Some(&sink));
     result
 }
 
@@ -410,11 +439,13 @@ async fn headless(
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
     let user_msg = Message::user(prompt_text);
-    log_session_err(session.record_message(&user_msg));
+    let r = session.record_message(&user_msg);
+    log_session_err(r, &mut session, Some(&sink));
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
     let result = agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await;
-    log_session_err(session.finish());
+    let r = session.finish();
+    log_session_err(r, &mut session, Some(&sink));
     result?;
     println!();
     Ok(())
@@ -450,7 +481,8 @@ async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        log_session_err(session.record_message(&assistant_msg));
+        let r = session.record_message(&assistant_msg);
+        log_session_err(r, session, Some(sink));
         messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
@@ -492,7 +524,8 @@ async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        log_session_err(session.record_message(&tool_result_msg));
+        let r = session.record_message(&tool_result_msg);
+        log_session_err(r, session, Some(sink));
         messages.push(tool_result_msg);
     }
 

@@ -46,6 +46,12 @@ pub(crate) struct SessionManager {
     /// conversation chain.
     last_message_uuid: Option<Uuid>,
     finished: bool,
+    /// Set the first time a [`record_message`][Self::record_message] or
+    /// [`finish`][Self::finish] call returns an error. Lets callers
+    /// surface the failure to the user exactly once per session —
+    /// subsequent failures warn-log only so we don't spam the UI with
+    /// repeated disk-full / permission errors mid-conversation.
+    write_failed: bool,
 }
 
 impl SessionManager {
@@ -62,6 +68,7 @@ impl SessionManager {
             first_user_prompt: None,
             last_message_uuid: None,
             finished: false,
+            write_failed: false,
         })
     }
 
@@ -101,6 +108,7 @@ impl SessionManager {
             first_user_prompt,
             last_message_uuid: data.last_uuid,
             finished: false,
+            write_failed: false,
         };
         Ok((manager, data.messages))
     }
@@ -156,6 +164,18 @@ impl SessionManager {
 
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Mark a write failure and report whether this is the first one.
+    ///
+    /// Returns `true` the first time it's called after a failed write;
+    /// `false` on every subsequent call. Callers use the `true` return
+    /// to surface a one-off UI error without re-reporting on each later
+    /// failed write.
+    pub(crate) fn record_write_failure(&mut self) -> bool {
+        let first = !self.write_failed;
+        self.write_failed = true;
+        first
     }
 }
 
@@ -703,6 +723,26 @@ mod tests {
             .filter(|l| l.contains(r#""type":"summary""#))
             .count();
         assert_eq!(summary_count, 1);
+    }
+
+    // ── record_write_failure ──
+
+    #[test]
+    fn record_write_failure_first_call_returns_true_then_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        assert!(
+            manager.record_write_failure(),
+            "first failure should be reported"
+        );
+        assert!(
+            !manager.record_write_failure(),
+            "subsequent failures should be silenced"
+        );
+        assert!(
+            !manager.record_write_failure(),
+            "flag is sticky across further calls"
+        );
     }
 
     // ── extract_user_text ──
