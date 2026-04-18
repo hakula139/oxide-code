@@ -164,10 +164,7 @@ mod tests {
                 Ok(_) => panic!("{raw:?} should have been rejected"),
                 Err(e) => e.to_string(),
             };
-            assert!(
-                err.contains("empty session ID prefix"),
-                "{raw:?} → {err:?}"
-            );
+            assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
             assert!(err.contains("bare"), "{raw:?} → {err:?}");
         }
     }
@@ -181,10 +178,7 @@ mod tests {
             "bbbbbbbbbbb".to_owned(),
             "c".to_owned(),
         ];
-        assert_eq!(
-            format_session_id_preview(ids),
-            "aaaaaaaa, bbbbbbbb, c"
-        );
+        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
     }
 
     #[test]
