@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 use time::OffsetDateTime;
+use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
@@ -197,7 +198,7 @@ fn current_dir_string() -> String {
     match std::env::current_dir() {
         Ok(p) => p.display().to_string(),
         Err(e) => {
-            tracing::warn!("failed to read current directory: {e}");
+            warn!("failed to read current directory: {e}");
             "<unknown>".to_owned()
         }
     }
