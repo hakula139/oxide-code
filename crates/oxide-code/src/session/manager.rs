@@ -86,11 +86,16 @@ impl SessionManager {
     /// seeing the latest state before acquiring the lock.
     pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<(Self, Vec<Message>)> {
         let mut data = store.load_session_data(session_id)?;
+        sanitize_resumed_messages(&mut data.messages);
+        // Run the emptiness check *after* sanitization. Otherwise a
+        // file that loads into a non-empty vector but becomes empty
+        // after sanitize (all unresolved tool_use + orphan tool_result,
+        // or sanitization dropped every turn) would slip through with
+        // `last_message_uuid = data.last_uuid`, and the next recorded
+        // message would chain to a UUID that's no longer in view.
         if data.messages.is_empty() {
             bail!("session {session_id} has no messages to resume");
         }
-
-        sanitize_resumed_messages(&mut data.messages);
 
         let writer = store.open_append(session_id)?;
 
@@ -503,6 +508,37 @@ mod tests {
             "assistant-only-tool-use should be dropped"
         );
         assert_eq!(messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn resume_errors_when_sanitize_empties_transcript() {
+        // Single assistant message with nothing but an unresolved
+        // tool_use — sanitize drops it, leaving an empty vec. The
+        // pre-fix code accepted this but kept `last_message_uuid =
+        // Some(dropped_uuid)`, so the next recorded message would
+        // parent-chain to a UUID no longer present in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(&Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .unwrap();
+        drop(original);
+
+        let result = SessionManager::resume(&store, &session_id);
+        let err = match result {
+            Ok(_) => panic!("expected resume to bail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("no messages to resume"), "got: {err}");
     }
 
     #[test]
