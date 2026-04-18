@@ -144,7 +144,27 @@ async fn async_main() -> Result<()> {
 fn list_sessions(all: bool) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
-    render_list(&mut std::io::stdout().lock(), &store, all, local_offset)
+    let term_width = detect_terminal_width();
+    render_list(
+        &mut std::io::stdout().lock(),
+        &store,
+        all,
+        local_offset,
+        term_width,
+    )
+}
+
+/// Detect the terminal width for title truncation in `--list`.
+/// Returns `None` when stdout is not a TTY (piped / redirected) or
+/// when the window size cannot be queried — the renderer skips
+/// truncation in either case so downstream tools see the full title.
+fn detect_terminal_width() -> Option<usize> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    crossterm::terminal::size()
+        .ok()
+        .map(|(cols, _)| usize::from(cols))
 }
 
 fn create_tool_registry() -> ToolRegistry {

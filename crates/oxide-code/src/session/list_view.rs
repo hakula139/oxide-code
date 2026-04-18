@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use time::UtcOffset;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::entry::SessionInfo;
 use super::store::SessionStore;
@@ -20,18 +21,22 @@ use crate::util::path::tildify;
 /// `all` selects the store scope: `false` lists only the current
 /// project; `true` spans every project the store can see.
 /// `local_offset` is applied to the displayed `Last Active` timestamp.
+/// `term_width` is the terminal width used to truncate the `Title`
+/// column; pass `None` when the output is piped or width is unknown
+/// to skip truncation.
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
     all: bool,
     local_offset: UtcOffset,
+    term_width: Option<usize>,
 ) -> Result<()> {
     let sessions = if all {
         store.list_all()?
     } else {
         store.list()?
     };
-    render_sessions(out, &sessions, all, local_offset)
+    render_sessions(out, &sessions, all, local_offset, term_width)
 }
 
 /// Pure formatter: take an already-loaded `sessions` slice and write a
@@ -47,6 +52,7 @@ fn render_sessions(
     sessions: &[SessionInfo],
     all: bool,
     local_offset: UtcOffset,
+    term_width: Option<usize>,
 ) -> Result<()> {
     if sessions.is_empty() {
         let scope = if all { "" } else { " in this project" };
@@ -57,13 +63,22 @@ fn render_sessions(
     let project_col_width = if all {
         sessions
             .iter()
-            .map(|s| tildify(Path::new(&s.cwd)).chars().count())
+            .map(|s| tildify(Path::new(&s.cwd)).width())
             .max()
             .unwrap_or(0)
             .clamp(PROJECT_COL_MIN, PROJECT_COL_MAX)
     } else {
         0
     };
+
+    // FIXED_PREFIX_WIDTH + (Project + 1) when --all. Title starts after
+    // this many visual columns; anything beyond that must be truncated
+    // to keep rows single-line.
+    let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
+    let title_budget = term_width.and_then(|w| {
+        let budget = w.checked_sub(prefix_width)?;
+        (budget >= MIN_TITLE_BUDGET).then_some(budget)
+    });
 
     if all {
         writeln!(
@@ -98,7 +113,11 @@ fn render_sessions(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
+        let raw_title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
+        let title = match title_budget {
+            Some(budget) => truncate_to_width(raw_title, budget),
+            None => raw_title.to_owned(),
+        };
         if all {
             let project = tildify(Path::new(&s.cwd));
             writeln!(
@@ -113,6 +132,47 @@ fn render_sessions(
     }
     Ok(())
 }
+
+/// Truncate `s` to fit within `max_width` visual columns, appending
+/// `…` when truncation occurs. Width accounting uses
+/// [`UnicodeWidthChar`] so CJK / emoji are billed at their rendered
+/// width. Returns `s` unchanged when it already fits, or an empty
+/// string when `max_width` is 0.
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let budget = max_width.saturating_sub(ELLIPSIS_WIDTH);
+    let mut acc = 0;
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + w > budget {
+            break;
+        }
+        out.push(ch);
+        acc += w;
+    }
+    out.push('…');
+    out
+}
+
+/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
+/// prefix every row shares before `--all` inserts its optional Project
+/// column and the row finally reaches `Title`.
+const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
+
+/// Smallest title-column width we will truncate to. Below this, the
+/// output is so narrow that truncation destroys almost all signal, so
+/// we skip it and let the terminal wrap instead.
+const MIN_TITLE_BUDGET: usize = 12;
+
+/// Visual width of the `…` ellipsis character.
+const ELLIPSIS_WIDTH: usize = 1;
 
 /// Minimum width for the `Project` column — at least wide enough to
 /// fit the header label ("Project" = 7 chars) without truncation-by-padding.
@@ -145,8 +205,12 @@ mod tests {
     }
 
     fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
+        render_with_width(sessions, all, None)
+    }
+
+    fn render_with_width(sessions: &[SessionInfo], all: bool, term_width: Option<usize>) -> String {
         let mut buf = Vec::new();
-        render_sessions(&mut buf, sessions, all, UtcOffset::UTC).unwrap();
+        render_sessions(&mut buf, sessions, all, UtcOffset::UTC, term_width).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -259,5 +323,91 @@ mod tests {
         // (no data loss) and columns don't collapse.
         assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
         assert!(title_pos > 0);
+    }
+
+    #[test]
+    fn render_sessions_truncates_title_when_term_width_too_narrow() {
+        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+        s.title = Some(TitleInfo {
+            title: "A very long session title that will not fit".to_owned(),
+            updated_at: datetime!(2026-04-18 09:05:00 UTC),
+        });
+        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~21
+        // chars + `…`).
+        let out = render_with_width(&[s], false, Some(60));
+        let row = out.lines().nth(1).unwrap();
+        let title = row
+            .split_once("-      ")
+            .map(|(_, t)| t)
+            .expect("row must have the Msgs cell");
+        assert!(title.ends_with('…'), "expected ellipsis, got: {title:?}");
+        assert!(
+            title.width() <= 22,
+            "title width {} exceeds budget for {title:?}",
+            title.width(),
+        );
+    }
+
+    #[test]
+    fn render_sessions_leaves_title_untruncated_without_term_width() {
+        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+        let full_title = "A very long session title that will not fit";
+        s.title = Some(TitleInfo {
+            title: full_title.to_owned(),
+            updated_at: datetime!(2026-04-18 09:05:00 UTC),
+        });
+        let out = render_with_width(&[s], false, None);
+        assert!(
+            out.contains(full_title),
+            "full title should render when term_width is None: {out}",
+        );
+    }
+
+    #[test]
+    fn render_sessions_skips_truncation_when_title_budget_below_minimum() {
+        let mut s = session("0123456789ab", datetime!(2026-04-18 09:00:00 UTC));
+        let full_title = "A very long session title that will not fit";
+        s.title = Some(TitleInfo {
+            title: full_title.to_owned(),
+            updated_at: datetime!(2026-04-18 09:05:00 UTC),
+        });
+        // Prefix 38 + MIN_TITLE_BUDGET(12) = 50. term_width = 45 leaves
+        // a budget below minimum → no truncation (let the terminal
+        // wrap rather than chopping everything to `F…`).
+        let out = render_with_width(&[s], false, Some(45));
+        assert!(
+            out.contains(full_title),
+            "full title should render when budget too small: {out}",
+        );
+    }
+
+    // ── truncate_to_width ──
+
+    #[test]
+    fn truncate_to_width_passes_through_strings_that_fit() {
+        assert_eq!(truncate_to_width("short", 10), "short");
+    }
+
+    #[test]
+    fn truncate_to_width_appends_ellipsis_on_ascii_overflow() {
+        assert_eq!(truncate_to_width("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn truncate_to_width_accounts_for_cjk_double_width() {
+        // 中 is width 2. "中中中" → width 6. Budget 5 → 1 CJK char + `…` = width 3.
+        // Budget accounts for the ellipsis (width 1), leaves 4 for content.
+        // Two CJK chars take width 4, so we should emit "中中…" (width 5).
+        assert_eq!(truncate_to_width("中中中", 5), "中中…");
+    }
+
+    #[test]
+    fn truncate_to_width_returns_empty_when_max_width_is_zero() {
+        assert_eq!(truncate_to_width("anything", 0), "");
+    }
+
+    #[test]
+    fn truncate_to_width_returns_ellipsis_only_when_max_width_one() {
+        assert_eq!(truncate_to_width("abc", 1), "…");
     }
 }
