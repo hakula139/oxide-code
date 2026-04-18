@@ -202,6 +202,20 @@ fn log_session_err(
     }
 }
 
+/// Record one message to the session, surfacing any write failure via
+/// `sink`. Holds the session lock only for the duration of the write
+/// so other tasks (and concurrent writes from the same task) see
+/// fresh access instead of blocking behind a long-running agent turn.
+async fn record_session_message(
+    session: &Mutex<SessionManager>,
+    msg: &Message,
+    sink: Option<&dyn AgentSink>,
+) {
+    let mut s = session.lock().await;
+    let r = s.record_message(msg);
+    log_session_err(r, &mut s, sink);
+}
+
 // ── TUI Mode ──
 
 async fn run_tui(
@@ -294,17 +308,11 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
-                {
-                    let mut s = session.lock().await;
-                    let r = s.record_message(&user_msg);
-                    log_session_err(r, &mut s, Some(&sink));
-                }
+                record_session_message(&session, &user_msg, Some(&sink)).await;
                 messages.push(user_msg);
                 let prompt = prompt::build_prompt(client.model()).await;
-                let turn_result = {
-                    let mut s = session.lock().await;
-                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &mut s).await
-                };
+                let turn_result =
+                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;
                 if let Err(e) = turn_result {
                     _ = sink.send(AgentEvent::Error(e.to_string()));
                 }
@@ -326,13 +334,18 @@ async fn bare_repl(
     tools: &ToolRegistry,
     model: &str,
     show_thinking: bool,
-    mut session: SessionManager,
+    session: SessionManager,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
+    // Wrap in Mutex so `agent_turn` (and the user-msg recorder) can
+    // lock briefly per write. No other task touches `session` here,
+    // so the lock is uncontended; the Mutex just matches agent_turn's
+    // shared-state signature.
+    let session = Mutex::new(session);
 
     let result: Result<()> = async {
         loop {
@@ -349,17 +362,17 @@ async fn bare_repl(
             }
 
             let user_msg = Message::user(&input);
-            let r = session.record_message(&user_msg);
-            log_session_err(r, &mut session, Some(&sink));
+            record_session_message(&session, &user_msg, Some(&sink)).await;
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
-            agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await?;
+            agent_turn(client, tools, &mut messages, &prompt, &sink, &session).await?;
             _ = sink.send(AgentEvent::TurnComplete);
         }
         Ok(())
     }
     .await;
 
+    let mut session = session.into_inner();
     let r = session.finish();
     log_session_err(r, &mut session, Some(&sink));
     result
@@ -373,15 +386,19 @@ async fn headless(
     model: &str,
     show_thinking: bool,
     prompt_text: &str,
-    mut session: SessionManager,
+    session: SessionManager,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking);
+    // Wrap in Mutex so `agent_turn` can lock briefly per write. Only
+    // one task touches the session in headless mode, so this is just
+    // type-plumbing to match the shared-state signature.
+    let session = Mutex::new(session);
     let user_msg = Message::user(prompt_text);
-    let r = session.record_message(&user_msg);
-    log_session_err(r, &mut session, Some(&sink));
+    record_session_message(&session, &user_msg, Some(&sink)).await;
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
-    let result = agent_turn(client, tools, &mut messages, &prompt, &sink, &mut session).await;
+    let result = agent_turn(client, tools, &mut messages, &prompt, &sink, &session).await;
+    let mut session = session.into_inner();
     let r = session.finish();
     log_session_err(r, &mut session, Some(&sink));
     result?;
@@ -397,7 +414,7 @@ async fn agent_turn(
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
     sink: &dyn AgentSink,
-    session: &mut SessionManager,
+    session: &Mutex<SessionManager>,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
@@ -419,8 +436,7 @@ async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        let r = session.record_message(&assistant_msg);
-        log_session_err(r, session, Some(sink));
+        record_session_message(session, &assistant_msg, Some(sink)).await;
         messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
@@ -462,8 +478,7 @@ async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        let r = session.record_message(&tool_result_msg);
-        log_session_err(r, session, Some(sink));
+        record_session_message(session, &tool_result_msg, Some(sink)).await;
         messages.push(tool_result_msg);
     }
 
