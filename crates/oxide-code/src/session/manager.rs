@@ -1,13 +1,21 @@
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::entry::Entry;
+use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter};
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
 const MAX_TITLE_LEN: usize = 60;
+
+/// Synthetic assistant content injected when resume detects a trailing
+/// user turn with only `tool_results` (i.e., the previous run crashed
+/// between writing the `tool_result` message and the next assistant
+/// response). Keeps role alternation valid for the next API call.
+const RESUME_CONTINUATION_SENTINEL: &str = "[Previous turn was interrupted; continuing.]";
 
 // ── SessionManager ──
 
@@ -19,14 +27,20 @@ const MAX_TITLE_LEN: usize = 60;
 pub(crate) struct SessionManager {
     writer: SessionWriter,
     session_id: String,
-    /// Message count at the time this manager was created. For new
-    /// sessions this is 0; for resumed sessions it equals the number
-    /// of loaded messages. Used by `finish()` to skip writing a
-    /// duplicate summary when no new messages were recorded.
+    /// Message count at construction time. For fresh sessions this is
+    /// `0`; for resumed sessions it equals the loaded message count.
+    /// Used by [`finish`][Self::finish] to skip writing a duplicate
+    /// summary when no new messages were recorded.
     initial_message_count: u32,
     message_count: u32,
-    /// Captured from the first user message for the session title.
+    /// Captured from the first user text seen. Doubles as a flag: if
+    /// `Some`, the initial [`Entry::Title`] was already written (either
+    /// this run or by the previous run before resume).
     first_user_prompt: Option<String>,
+    /// UUID of the last recorded [`Entry::Message`]. Used as
+    /// `parent_uuid` for the next recorded message, forming the
+    /// conversation chain.
+    last_message_uuid: Option<Uuid>,
     finished: bool,
 }
 
@@ -42,32 +56,38 @@ impl SessionManager {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt: None,
+            last_message_uuid: None,
             finished: false,
         })
     }
 
-    /// Resume a previous session. Loads its messages and reopens the
+    /// Resume a previous session. Loads its messages, sanitizes them to
+    /// a resumable state (drops unresolved `tool_use` blocks and pairs
+    /// orphan `tool_result` turns with a sentinel), and reopens the
     /// existing session file in append mode.
     ///
-    /// Note: there is a small TOCTOU window between `load_messages` (read,
-    /// no lock) and `open_append` (lock). Another process could append
-    /// messages in between, making the loaded messages stale. In practice
-    /// this is a non-issue for a single-user CLI tool — the lock still
-    /// prevents concurrent *writers*, just not a reader seeing the latest
-    /// state before acquiring the lock.
+    /// Note: there is a small TOCTOU window between `load_session_data`
+    /// (read, no lock) and `open_append` (lock). Another process could
+    /// append messages in between, making the loaded messages stale.
+    /// In practice this is a non-issue for a single-user CLI tool — the
+    /// lock still prevents concurrent *writers*, just not a reader
+    /// seeing the latest state before acquiring the lock.
     pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<(Self, Vec<Message>)> {
-        let messages = store.load_messages(session_id)?;
-        if messages.is_empty() {
+        let mut data = store.load_session_data(session_id)?;
+        if data.messages.is_empty() {
             bail!("session {session_id} has no messages to resume");
         }
 
+        sanitize_resumed_messages(&mut data.messages);
+
         let writer = store.open_append(session_id)?;
 
-        let first_user_prompt = messages
+        let first_user_prompt = data
+            .messages
             .iter()
             .find_map(extract_user_text)
             .map(String::from);
-        let message_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+        let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
 
         let manager = Self {
             writer,
@@ -75,33 +95,48 @@ impl SessionManager {
             initial_message_count: message_count,
             message_count,
             first_user_prompt,
+            last_message_uuid: data.last_uuid,
             finished: false,
         };
-        Ok((manager, messages))
+        Ok((manager, data.messages))
     }
 
     /// Record a conversation message to the session file.
+    ///
+    /// On the first user message that carries text, writes an initial
+    /// [`Entry::Title`] *before* the [`Entry::Message`] — so listings
+    /// show the correct title even if the process crashes before any
+    /// further progress.
     pub(crate) fn record_message(&mut self, message: &Message) -> Result<()> {
+        let now = OffsetDateTime::now_utc();
+
         if self.first_user_prompt.is_none()
             && let Some(text) = extract_user_text(message)
         {
+            self.writer.append(&Entry::Title {
+                title: truncate_title(text, MAX_TITLE_LEN),
+                source: TitleSource::FirstPrompt,
+                updated_at: now,
+            })?;
             self.first_user_prompt = Some(text.to_owned());
         }
 
+        let uuid = Uuid::new_v4();
         self.writer.append(&Entry::Message {
+            uuid,
+            parent_uuid: self.last_message_uuid,
             message: message.clone(),
-            timestamp: OffsetDateTime::now_utc(),
+            timestamp: now,
         })?;
+        self.last_message_uuid = Some(uuid);
         self.message_count = self.message_count.saturating_add(1);
         Ok(())
     }
 
-    /// Write the summary entry. No-op if already called or if no new
-    /// messages were recorded since resume (avoids accumulating duplicate
-    /// summaries on empty resume cycles).
+    /// Write the summary entry. No-op if already called or if this is a
+    /// resumed session and no new messages were recorded (avoids
+    /// accumulating duplicate summaries on empty resume cycles).
     pub(crate) fn finish(&mut self) -> Result<()> {
-        // Skip if already written, or if this is a resumed session with no
-        // new messages (avoids accumulating duplicate summary entries).
         if self.finished
             || (self.initial_message_count > 0 && self.message_count == self.initial_message_count)
         {
@@ -109,15 +144,9 @@ impl SessionManager {
         }
         self.finished = true;
 
-        let title = self.first_user_prompt.as_deref().map_or_else(
-            || "(empty session)".to_owned(),
-            |s| truncate_title(s, MAX_TITLE_LEN),
-        );
-
         self.writer.append(&Entry::Summary {
-            title,
-            updated_at: OffsetDateTime::now_utc(),
             message_count: self.message_count,
+            updated_at: OffsetDateTime::now_utc(),
         })
     }
 
@@ -135,6 +164,7 @@ fn new_header(model: &str) -> (String, Entry) {
         cwd: current_dir_string(),
         model: model.to_owned(),
         created_at: OffsetDateTime::now_utc(),
+        version: CURRENT_VERSION,
     };
     (session_id, header)
 }
@@ -144,14 +174,14 @@ fn current_dir_string() -> String {
         Ok(p) => p.display().to_string(),
         Err(e) => {
             tracing::warn!("failed to read current directory: {e}");
-            String::new()
+            "<unknown>".to_owned()
         }
     }
 }
 
 /// Extract the first non-empty text content from a user message.
 fn extract_user_text(message: &Message) -> Option<&str> {
-    if message.role != crate::message::Role::User {
+    if message.role != Role::User {
         return None;
     }
     message.content.iter().find_map(|b| match b {
@@ -174,6 +204,63 @@ fn truncate_title(s: &str, max_len: usize) -> String {
     }
 }
 
+// ── Resume Sanitization ──
+
+/// Normalize a loaded conversation to a state the API will accept as
+/// the prefix of a new turn.
+///
+/// Fixes common crash-induced inconsistencies:
+///
+/// 1. Drops trailing `thinking` / `redacted_thinking` blocks (API
+///    rejects assistant messages that end with thinking).
+/// 2. Drops unresolved `tool_use` blocks — assistant tool calls that
+///    never received a matching `tool_result`. Happens when the
+///    process crashed between `tool_use` stream end and tool execution
+///    (or between tool execution and `tool_result` write).
+/// 3. Drops messages that became empty after (2).
+/// 4. Appends a synthetic assistant sentinel when the last remaining
+///    message is a user turn containing only `tool_result` blocks — the
+///    crash window between writing `tool_results` and the next assistant
+///    response. Prevents two-user-turns-in-a-row on the next API call.
+fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
+    strip_trailing_thinking(messages);
+
+    // tool_use_ids for which any tool_result exists somewhere in the log.
+    let resolved_ids: HashSet<String> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for msg in &mut *messages {
+        if msg.role == Role::Assistant {
+            msg.content.retain(|b| match b {
+                ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
+                    resolved_ids.contains(id)
+                }
+                _ => true,
+            });
+        }
+    }
+
+    messages.retain(|m| !m.content.is_empty());
+
+    if let Some(last) = messages.last()
+        && last.role == Role::User
+        && last
+            .content
+            .iter()
+            .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    {
+        messages.push(Message::assistant(RESUME_CONTINUATION_SENTINEL));
+    }
+
+    strip_trailing_thinking(messages);
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -181,7 +268,6 @@ mod tests {
     use super::*;
 
     fn test_store(dir: &Path) -> SessionStore {
-        // Bypass XDG resolution for tests.
         SessionStore::open_at(dir.to_path_buf()).unwrap()
     }
 
@@ -194,6 +280,7 @@ mod tests {
         let path = dir.path().join(format!("{}.jsonl", manager.session_id()));
         assert!(path.exists());
         assert_eq!(manager.message_count, 0);
+        assert!(manager.last_message_uuid.is_none());
     }
 
     // ── resume ──
@@ -207,12 +294,13 @@ mod tests {
         original.record_message(&Message::user("hello")).unwrap();
         original.record_message(&Message::assistant("hi")).unwrap();
         original.finish().unwrap();
-        drop(original); // release file lock
+        drop(original);
 
         let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
+        assert!(resumed.last_message_uuid.is_some());
     }
 
     #[test]
@@ -222,8 +310,7 @@ mod tests {
         let mut original = SessionManager::start(&store, "m").unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
-        // No finish() — simulates a crash.
-        drop(original);
+        drop(original); // no finish() — simulates a crash
 
         let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
         assert_eq!(resumed.session_id(), session_id);
@@ -243,7 +330,165 @@ mod tests {
     }
 
     #[test]
-    fn resume_appends_to_existing_file_and_updates_summary() {
+    fn resume_drops_unresolved_trailing_tool_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Let me check".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "unresolved_tool".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({"cmd": "ls"}),
+                    },
+                ],
+            })
+            .unwrap();
+        drop(original); // crash before tool_result
+
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        assert_eq!(messages.len(), 2);
+        let assistant = &messages[1];
+        assert_eq!(assistant.role, Role::Assistant);
+        assert!(
+            !assistant
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+            "unresolved tool_use should be dropped"
+        );
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { .. })),
+            "text block should be preserved"
+        );
+    }
+
+    #[test]
+    fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .unwrap();
+        drop(original);
+
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "assistant-only-tool-use should be dropped"
+        );
+        assert_eq!(messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn resume_appends_sentinel_when_last_is_user_tool_results_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .unwrap();
+        original
+            .record_message(&Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "ok".to_owned(),
+                    is_error: false,
+                }],
+            })
+            .unwrap();
+        drop(original); // crash before next assistant response
+
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        assert_eq!(messages.len(), 4, "sentinel should be appended");
+        assert_eq!(messages[3].role, Role::Assistant);
+        assert!(
+            matches!(&messages[3].content[0], ContentBlock::Text { text } if text == RESUME_CONTINUATION_SENTINEL)
+        );
+    }
+
+    #[test]
+    fn resume_preserves_parent_chain_on_next_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").unwrap();
+        let session_id = original.session_id().to_owned();
+        original.record_message(&Message::user("hello")).unwrap();
+        original.record_message(&Message::assistant("hi")).unwrap();
+        drop(original);
+
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        let first_new = Uuid::new_v4();
+        resumed.record_message(&Message::user("follow up")).unwrap();
+
+        // Read the file and find the new message's parent_uuid — should
+        // match the last uuid from the original run.
+        let content =
+            std::fs::read_to_string(dir.path().join(format!("{session_id}.jsonl"))).unwrap();
+        let entries: Vec<Entry> = content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+
+        let msg_uuids: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Message {
+                    uuid, parent_uuid, ..
+                } => Some((*uuid, *parent_uuid)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msg_uuids.len(), 3);
+        assert!(msg_uuids[0].1.is_none(), "first message has no parent");
+        assert_eq!(
+            msg_uuids[1].1,
+            Some(msg_uuids[0].0),
+            "second message chains to first"
+        );
+        assert_eq!(
+            msg_uuids[2].1,
+            Some(msg_uuids[1].0),
+            "post-resume message chains to pre-resume tail"
+        );
+        // Silence warnings about unused local.
+        let _ = first_new;
+    }
+
+    #[test]
+    fn resume_appends_and_updates_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionManager::start(&store, "m").unwrap();
@@ -261,49 +506,118 @@ mod tests {
         resumed.finish().unwrap();
         drop(resumed);
 
-        // The tail scanner finds the latest summary.
         let sessions = store.list().unwrap();
         let session = sessions
             .iter()
             .find(|s| s.session_id == session_id)
             .unwrap();
-        let summary = session.summary.as_ref().unwrap();
-        assert_eq!(summary.title, "Fix the auth bug");
-        assert_eq!(summary.message_count, 2); // 1 original + 1 new
+        let title = session.title.as_ref().unwrap();
+        assert_eq!(title.title, "Fix the auth bug");
+        let exit = session.exit.as_ref().unwrap();
+        assert_eq!(exit.message_count, 2);
 
-        // All messages (original + appended) are in the same file.
-        let all_messages = store.load_messages(&session_id).unwrap();
-        assert_eq!(all_messages.len(), 2);
+        let data = store.load_session_data(&session_id).unwrap();
+        assert_eq!(data.messages.len(), 2);
     }
 
     // ── record_message ──
 
     #[test]
-    fn record_message_increments_count() {
+    fn record_message_increments_count_and_chains_parent() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let sid = manager.session_id().to_owned();
+
         manager.record_message(&Message::user("hello")).unwrap();
         manager.record_message(&Message::assistant("hi")).unwrap();
         assert_eq!(manager.message_count, 2);
+
+        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let entries: Vec<Entry> = content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let msgs: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Message {
+                    uuid, parent_uuid, ..
+                } => Some((*uuid, *parent_uuid)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].1.is_none());
+        assert_eq!(msgs[1].1, Some(msgs[0].0));
     }
 
     #[test]
-    fn record_message_captures_first_user_prompt() {
+    fn record_message_writes_title_before_first_user_message() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let sid = manager.session_id().to_owned();
+        manager
+            .record_message(&Message::user("First prompt"))
+            .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // Line 0: header. Line 1: title. Line 2: message.
+        assert!(lines[1].contains(r#""type":"title""#));
+        assert!(lines[2].contains(r#""type":"message""#));
+    }
+
+    #[test]
+    fn record_message_writes_title_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let sid = manager.session_id().to_owned();
 
         manager.record_message(&Message::user("first")).unwrap();
         manager.record_message(&Message::user("second")).unwrap();
 
+        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let title_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .count();
+        assert_eq!(title_count, 1);
         assert_eq!(manager.first_user_prompt.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn record_message_no_title_for_tool_result_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let sid = manager.session_id().to_owned();
+
+        manager
+            .record_message(&Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t".to_owned(),
+                    content: "out".to_owned(),
+                    is_error: false,
+                }],
+            })
+            .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        assert!(!content.contains(r#""type":"title""#));
     }
 
     // ── finish ──
 
     #[test]
-    fn finish_writes_summary_with_title_from_first_prompt() {
+    fn finish_writes_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
         let sid = manager.session_id().to_owned();
 
         manager
@@ -311,26 +625,24 @@ mod tests {
             .unwrap();
         manager.finish().unwrap();
 
-        let store = test_store(dir.path());
         let sessions = store.list().unwrap();
         let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
-        let summary = session.summary.as_ref().unwrap();
-        assert_eq!(summary.title, "Fix the auth bug");
-        assert_eq!(summary.message_count, 1);
+        assert_eq!(session.title.as_ref().unwrap().title, "Fix the auth bug");
+        assert_eq!(session.exit.as_ref().unwrap().message_count, 1);
     }
 
     #[test]
-    fn finish_empty_session_uses_placeholder_title() {
+    fn finish_empty_session_writes_summary_without_title() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m").unwrap();
         let sid = manager.session_id().to_owned();
         manager.finish().unwrap();
 
-        let sessions = test_store(dir.path()).list().unwrap();
+        let sessions = store.list().unwrap();
         let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
-        let summary = session.summary.as_ref().unwrap();
-        assert_eq!(summary.title, "(empty session)");
-        assert_eq!(summary.message_count, 0);
+        assert!(session.title.is_none(), "no user prompt means no title");
+        assert_eq!(session.exit.as_ref().unwrap().message_count, 0);
     }
 
     #[test]
@@ -341,9 +653,8 @@ mod tests {
         let sid = manager.session_id().to_owned();
         manager.record_message(&Message::user("hi")).unwrap();
         manager.finish().unwrap();
-        manager.finish().unwrap(); // second call is a no-op
+        manager.finish().unwrap();
 
-        // Only one summary entry should exist in the file.
         let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
         let summary_count = content
             .lines()
@@ -362,13 +673,10 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        // Resume but record no new messages.
         let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
         resumed.finish().unwrap();
         drop(resumed);
 
-        // Only one summary entry should exist — the original. The empty
-        // resume should not have appended a duplicate.
         let content =
             std::fs::read_to_string(dir.path().join(format!("{session_id}.jsonl"))).unwrap();
         let summary_count = content
@@ -395,7 +703,7 @@ mod tests {
     #[test]
     fn extract_user_text_skips_empty() {
         let msg = Message {
-            role: crate::message::Role::User,
+            role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "  ".to_owned(),
             }],
@@ -406,7 +714,7 @@ mod tests {
     #[test]
     fn extract_user_text_returns_none_for_tool_result_only() {
         let msg = Message {
-            role: crate::message::Role::User,
+            role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_owned(),
                 content: "output".to_owned(),
@@ -419,7 +727,7 @@ mod tests {
     #[test]
     fn extract_user_text_finds_text_after_tool_result() {
         let msg = Message {
-            role: crate::message::Role::User,
+            role: Role::User,
             content: vec![
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".to_owned(),
@@ -451,13 +759,11 @@ mod tests {
     fn truncate_title_long_string_adds_ellipsis() {
         let long = "a".repeat(100);
         let result = truncate_title(&long, 20);
-        // 17 a's + "..." = 20 characters exactly.
         assert_eq!(result, format!("{}...", "a".repeat(17)));
     }
 
     #[test]
     fn truncate_title_multibyte_respects_character_count() {
-        // 61 two-byte characters → should truncate to 57 chars + "...".
         let s = "\u{00e9}".repeat(61);
         let result = truncate_title(&s, 60);
         assert!(result.chars().count() <= 60);
@@ -477,5 +783,62 @@ mod tests {
     #[test]
     fn truncate_title_trims_whitespace() {
         assert_eq!(truncate_title("  padded  ", 60), "padded");
+    }
+
+    // ── sanitize_resumed_messages ──
+
+    #[test]
+    fn sanitize_noop_for_clean_transcript() {
+        let mut messages = vec![
+            Message::user("hello"),
+            Message::assistant("hi"),
+            Message::user("bye"),
+        ];
+        let before = messages.len();
+        sanitize_resumed_messages(&mut messages);
+        assert_eq!(messages.len(), before);
+    }
+
+    #[test]
+    fn sanitize_pairs_tool_use_with_result() {
+        let mut messages = vec![
+            Message::user("do X"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "checking".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::Value::Null,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::Value::Null,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "ok".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        // Assistant has text + t1 (resolved), t2 dropped.
+        let assistant_blocks = &messages[1].content;
+        assert_eq!(assistant_blocks.len(), 2);
+        assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
+        assert!(matches!(&assistant_blocks[1], ContentBlock::ToolUse { id, .. } if id == "t1"));
+        // Last message is still user with tool_result → sentinel appended.
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[3].role, Role::Assistant);
     }
 }

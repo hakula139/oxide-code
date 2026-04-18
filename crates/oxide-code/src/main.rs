@@ -145,13 +145,10 @@ fn list_sessions() -> Result<()> {
             ))
             .unwrap_or_default();
         let msgs = s
-            .summary
+            .exit
             .as_ref()
-            .map_or("-".to_owned(), |sum| sum.message_count.to_string());
-        let title = s
-            .summary
-            .as_ref()
-            .map_or("(untitled)", |sum| sum.title.as_str());
+            .map_or("-".to_owned(), |e| e.message_count.to_string());
+        let title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
         println!("{id_prefix:<10} {created:<19} {msgs:<6} {title}");
     }
 

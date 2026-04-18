@@ -63,7 +63,6 @@ impl Message {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "called only in tests for now"))]
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,

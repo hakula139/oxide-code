@@ -71,7 +71,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "fmt",
 ] }
 unicode-width = "0.2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [profile.release]
