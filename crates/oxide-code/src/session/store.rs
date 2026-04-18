@@ -896,6 +896,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn open_append_succeeds_when_peer_releases_lock_within_budget() {
+        // Peer holds the lock briefly, then releases. Our
+        // `open_append` call should spin through a couple of retry
+        // intervals, then succeed — this is the "two ox invocations
+        // back-to-back" path the retry budget is designed for.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let writer = store.create(&sample_header("releases")).await.unwrap();
+
+        // Spawn a task that releases the lock after ~2 × RETRY_INTERVAL
+        // (well inside the retry budget).
+        let hold = lock::RETRY_INTERVAL * 2;
+        tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            drop(writer);
+        });
+
+        let start = std::time::Instant::now();
+        let resumed = store.open_append("releases").await;
+        let elapsed = start.elapsed();
+
+        assert!(resumed.is_ok(), "expected retry to succeed: {resumed:?}");
+        assert!(
+            elapsed >= hold,
+            "succeeded before peer released: {elapsed:?} < {hold:?}"
+        );
+        let budget = lock::RETRY_INTERVAL * lock::MAX_RETRIES;
+        assert!(
+            elapsed < budget,
+            "retry took the full exhaustion budget: {elapsed:?} >= {budget:?}"
+        );
+    }
+
     // ── load_session_data ──
 
     #[tokio::test]
