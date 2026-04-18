@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](http://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
+oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
 
 ### CLI
 
@@ -73,6 +73,7 @@ ox     # Start an interactive session
 │   └── wrap.rs                 # Word-wrap with continuation indent for styled lines
 ├── util.rs                     # Shared utilities module root
 └── util/
+    ├── env.rs                  # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
     ├── lock.rs                 # Async retry helper for advisory locks (used by oauth)
     └── path.rs                 # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```

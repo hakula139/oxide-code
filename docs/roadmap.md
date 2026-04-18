@@ -40,7 +40,7 @@ The project direction is simple:
 - Custom prompt text — trimmed from Claude Code's original to remove references to unimplemented features. Sections to re-add when features ship:
   - **Permission system**: "Tools are executed in a user-selected permission mode" (tool approval / deny flow).
   - **Hooks**: shell commands that execute on tool call events (`<user-prompt-submit-hook>`).
-  - **Context compression**: "The system will automatically compress prior messages as it approaches context limits."
+  - **Context compression**: "The system will automatically compress prior messages as it approaches context limits".
   - **Security testing restrictions**: CTF / pentesting / DoS guardrails (re-evaluate when expanding user base).
 
 ### Terminal UI

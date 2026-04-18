@@ -11,7 +11,7 @@ use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
 ///
-/// Sized for wide terminals: the `--list` row is `ID(8) Last Active(16)
+/// Sized for wide terminals: the `--list` row is `ID(10) Last Active(19)
 /// Msgs(6) Title`, so ~80 chars of title space on a 120-col terminal
 /// and still truncates cleanly (`...`) on narrower ones.
 const MAX_TITLE_LEN: usize = 80;
