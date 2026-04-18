@@ -9,6 +9,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::message::{ContentBlock, Message, Role};
 use crate::tui::component::{Action, Component};
+use crate::tui::event::{tool_call_icon, tool_call_title};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line_styled};
@@ -118,31 +119,46 @@ impl ChatView {
 
     /// Populate the chat history from resumed session messages.
     ///
-    /// Extracts user text and assistant text from each message. Tool
-    /// calls, tool results, and thinking blocks are skipped — they were
-    /// part of the original session but would add noise to the history
-    /// view.
+    /// Restores user / assistant text and assistant tool-call markers
+    /// so a resumed view matches the live one visually. Tool _results_
+    /// (often long, verbose output) and thinking blocks are skipped —
+    /// they were part of the original session but add noise to the
+    /// history view.
     pub(crate) fn load_history(&mut self, messages: &[Message]) {
         for msg in messages {
             let mut text = String::new();
             for block in &msg.content {
-                if let ContentBlock::Text { text: t } = block
-                    && !t.trim().is_empty()
-                {
-                    if !text.is_empty() {
-                        text.push('\n');
+                match block {
+                    ContentBlock::Text { text: t } if !t.trim().is_empty() => {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
                     }
-                    text.push_str(t);
+                    ContentBlock::ToolUse { name, input, .. }
+                    | ContentBlock::ServerToolUse { name, input, .. } => {
+                        // Flush any accumulated text so entries render
+                        // in source order (assistant text, then the
+                        // tool call it preceded).
+                        if !text.is_empty() {
+                            self.entries
+                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
+                        }
+                        let icon = tool_call_icon(name);
+                        let label =
+                            tool_call_title(name, input).map_or_else(|| name.clone(), str::to_owned);
+                        self.entries.push(ChatEntry::ToolCall { icon, label });
+                    }
+                    _ => {}
                 }
             }
-            if text.is_empty() {
-                continue;
+            if !text.is_empty() {
+                let entry = match msg.role {
+                    Role::User => ChatEntry::User(text),
+                    Role::Assistant => ChatEntry::Assistant(text),
+                };
+                self.entries.push(entry);
             }
-            let entry = match msg.role {
-                Role::User => ChatEntry::User(text),
-                Role::Assistant => ChatEntry::Assistant(text),
-            };
-            self.entries.push(entry);
         }
     }
 
@@ -850,6 +866,154 @@ mod tests {
         let mut chat = test_chat();
         chat.load_history(&[]);
         assert!(chat.entries.is_empty());
+    }
+
+    #[test]
+    fn load_history_restores_tool_call_markers_after_assistant_text() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Let me check that.".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "ls -la"}),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "Let me check that."
+        ));
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[1] else {
+            panic!("expected tool call, got {:?}", chat.entries[1]);
+        };
+        assert_eq!(*icon, "$");
+        assert_eq!(label, "ls -la");
+    }
+
+    #[test]
+    fn load_history_renders_consecutive_tool_calls_separately() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "read".to_owned(),
+                    input: serde_json::json!({"file_path": "src/foo.rs"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".to_owned(),
+                    name: "grep".to_owned(),
+                    input: serde_json::json!({"pattern": "TODO"}),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::ToolCall { icon: "→", label } if label == "src/foo.rs"
+        ));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::ToolCall { icon: "⌕", label } if label == "TODO"
+        ));
+    }
+
+    #[test]
+    fn load_history_unknown_tool_falls_back_to_tool_name_as_label() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".to_owned(),
+                name: "custom_tool".to_owned(),
+                input: serde_json::json!({"arg": "value"}),
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
+            panic!("expected tool call, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(*icon, "⟡");
+        assert_eq!(label, "custom_tool");
+    }
+
+    #[test]
+    fn load_history_server_tool_use_renders_like_local_tool_call() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ServerToolUse {
+                id: "srv1".to_owned(),
+                name: "web_search".to_owned(),
+                input: serde_json::json!({"query": "rust"}),
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
+            panic!("expected tool call, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(*icon, "⟡");
+        assert_eq!(label, "web_search");
+    }
+
+    #[test]
+    fn load_history_assistant_text_after_tool_use_emits_new_assistant_entry() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Checking logs...".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "tail -f log"}),
+                },
+                ContentBlock::Text {
+                    text: "Looks good.".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 3);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "Checking logs..."
+        ));
+        assert!(matches!(&chat.entries[1], ChatEntry::ToolCall { .. }));
+        assert!(matches!(
+            &chat.entries[2],
+            ChatEntry::Assistant(t) if t == "Looks good."
+        ));
+    }
+
+    #[test]
+    fn load_history_still_skips_thinking_blocks() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "long internal reasoning".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "visible reply".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "visible reply"
+        ));
     }
 
     // ── append_stream_token ──
