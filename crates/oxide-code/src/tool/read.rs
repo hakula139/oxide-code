@@ -82,9 +82,19 @@ async fn read_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    if metadata.is_dir() {
+    // Reject anything that isn't a regular file. `is_dir()` alone lets pseudo
+    // files slip through: /dev/urandom et al. report `metadata.len() == 0`,
+    // which bypasses the size gate below, and `tokio::fs::read` then streams
+    // without bound and exhausts memory.
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
         return Err(format!(
             "{path} is a directory, not a file. Use the glob tool to list directory contents."
+        ));
+    }
+    if !file_type.is_file() {
+        return Err(format!(
+            "{path} is not a regular file (fifo, socket, or device); refusing to read.",
         ));
     }
 
@@ -297,6 +307,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("too large"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_rejects_non_regular_file() {
+        // A unix-domain socket is a non-regular file with `metadata.len() == 0`,
+        // which would bypass the size gate if `file_type().is_file()` were skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let err = read_file(path.to_str().unwrap(), None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "expected non-regular-file error, got: {err}",
+        );
     }
 
     #[tokio::test]

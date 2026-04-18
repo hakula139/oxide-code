@@ -169,8 +169,13 @@ struct GrepParams<'a> {
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
+    // Bound regex compilation. The default size limit is 10 MB; a pattern
+    // like `a{100000}{100000}` would allocate a massive DFA per tool call.
+    // 1 MB is plenty for any real-world search expression.
     let re = regex::RegexBuilder::new(params.pattern)
         .case_insensitive(params.case_insensitive)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
         .build()
         .map_err(|e| format!("Invalid regex: {e}"))?;
 
