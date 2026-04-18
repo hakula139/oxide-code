@@ -62,10 +62,10 @@ struct Cli {
         value_name = "SESSION_ID",
         conflicts_with = "prompt"
     )]
-    resume: Option<Option<String>>,
+    r#continue: Option<Option<String>>,
 
     /// List recent sessions and exit.
-    #[arg(short, long, conflicts_with_all = ["prompt", "resume"])]
+    #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
     /// Operate across every project. By default `--list` and `--continue`
@@ -104,7 +104,8 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref(), cli.all).await?;
+    let (session, messages) =
+        resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
     let tools = create_tool_registry();
