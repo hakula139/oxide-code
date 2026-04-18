@@ -1088,8 +1088,13 @@ mod tests {
     fn truncate_title_multibyte_respects_character_count() {
         let s = "\u{00e9}".repeat(61);
         let result = truncate_title(&s, 60);
-        assert!(result.chars().count() <= 60);
-        assert!(result.ends_with("..."));
+        // Exact char count: 57 é + "..." = 60, not "<= 60".
+        assert_eq!(result.chars().count(), 60);
+        assert_eq!(
+            result,
+            format!("{}...", "\u{00e9}".repeat(57)),
+            "truncated body should be 57 é followed by ellipsis",
+        );
     }
 
     #[test]

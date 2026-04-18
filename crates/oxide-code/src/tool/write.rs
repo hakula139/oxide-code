@@ -179,4 +179,24 @@ mod tests {
         let (result, _) = write_file(dir.path().to_str().unwrap(), "content").await;
         assert!(result.unwrap_err().contains("Failed to write file"));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_fails_on_read_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked.txt");
+        std::fs::write(&path, "original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let (result, _) = write_file(path.to_str().unwrap(), "overwrite").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to write file"),
+            "expected write-failure error, got: {err}",
+        );
+        // Permission denial did not corrupt the original bytes.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
 }
