@@ -1,4 +1,4 @@
-pub(crate) mod entry;
+mod entry;
 pub(crate) mod manager;
-pub(crate) mod path;
+mod path;
 pub(crate) mod store;
