@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::util::lock;
 
@@ -105,25 +105,18 @@ pub async fn load_token() -> Result<String> {
 
 /// Load credentials from the best available source.
 ///
-/// On macOS, reads from both the Keychain and the credentials file, preferring
-/// whichever has the later expiry. Falls back gracefully if either source is
-/// unavailable.
+/// On macOS, the Keychain is the authoritative source — preferred whenever
+/// present, with the credentials file as a fallback. This keeps trust inverted
+/// from the more-permissive file: an attacker who can write `~/.claude/.credentials.json`
+/// cannot override a valid Keychain entry by claiming a far-future expiry.
+/// Near-expired Keychain entries are still used; [`is_near_expiry`] triggers a
+/// refresh that writes both sources back in sync.
 #[cfg(target_os = "macos")]
 fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
-    let keychain = read_keychain();
-    let file = read_credentials(file_path);
-
-    match (keychain, file) {
-        (Some(kc), Ok(fc)) => {
-            if fc.claude_ai_oauth.expires_at_ms() > kc.claude_ai_oauth.expires_at_ms() {
-                Ok(fc)
-            } else {
-                Ok(kc)
-            }
-        }
-        (Some(kc), Err(_)) => Ok(kc),
-        (None, file) => file,
+    if let Some(kc) = read_keychain() {
+        return Ok(kc);
     }
+    read_credentials(file_path)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -171,8 +164,30 @@ fn keychain_account() -> Option<String> {
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&content).context("failed to parse Claude Code credentials")
+    let parsed =
+        serde_json::from_str(&content).context("failed to parse Claude Code credentials")?;
+    enforce_private_mode(path);
+    Ok(parsed)
 }
+
+/// Reassert owner-only permissions on the credentials file.
+///
+/// `claude` normally creates the file with `0o600`, but older versions or a
+/// user who `cp`'d the file may have left laxer perms in place. We reapply
+/// the strict mode every time we read so the window of exposure is bounded.
+/// Failures are logged at debug level — we have no fallback but shouldn't
+/// prevent the user from authenticating.
+#[cfg(unix)]
+fn enforce_private_mode(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        debug!("failed to reassert 0o600 on {}: {e}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn enforce_private_mode(_path: &Path) {}
 
 fn is_near_expiry(expires_at_ms: u64) -> bool {
     now_millis() + TOKEN_EXPIRY_BUFFER_MS >= expires_at_ms
@@ -234,6 +249,11 @@ struct RefreshResponse {
 /// Write refreshed tokens back to the credentials file (and macOS Keychain),
 /// preserving unknown fields.
 ///
+/// The file is replaced atomically via write-to-temp + rename so a crash
+/// between the open-truncate and the final write cannot leave the file
+/// empty or half-written — a corruption there would invalidate login for
+/// both `ox` and `claude`.
+///
 /// Must be called while holding the [`LockGuard`] from [`acquire_lock`].
 fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
@@ -252,24 +272,68 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
     oauth["expiresAt"] = serde_json::json!(now_millis() + response.expires_in * 1000);
 
     if let Some(scope) = &response.scope {
-        let scopes: Vec<&str> = scope.split(' ').collect();
+        // `split_whitespace` tolerates extra or leading/trailing spaces in the
+        // server's `scope` field; `split(' ')` would emit empty strings.
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
         oauth["scopes"] = serde_json::json!(scopes);
     }
 
     let serialized = serde_json::to_string_pretty(&json)?;
-    std::fs::write(path, serialized.as_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    atomic_write_private(path, serialized.as_bytes())?;
 
     #[cfg(all(target_os = "macos", not(test)))]
     if let Err(e) = write_keychain(&serialized) {
         warn!("failed to update Keychain: {e:#}");
     }
 
+    Ok(())
+}
+
+/// Write `bytes` to `path` atomically with owner-only (`0o600`) permissions
+/// on Unix. Creates a sibling `.tmp.<uuid>` file, chmods it, then renames —
+/// the rename is atomic on POSIX, so any reader sees either the old or the
+/// new content, never a truncated state.
+fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("credentials path has no parent directory")?;
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("creds"),
+        uuid::Uuid::new_v4().simple(),
+    ));
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(&tmp)
+        .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
+
+    let write_result = std::io::Write::write_all(&mut file, bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(anyhow::Error::from);
+
+    if let Err(e) = write_result {
+        _ = std::fs::remove_file(&tmp);
+        return Err(e.context(format!(
+            "failed to write temp credentials {}",
+            tmp.display()
+        )));
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e).context(format!(
+            "failed to install credentials at {}",
+            path.display()
+        )));
+    }
     Ok(())
 }
 
@@ -305,7 +369,9 @@ struct LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        _ = std::fs::remove_dir_all(&self.path);
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            debug!("failed to release lock {}: {e}", self.path.display());
+        }
     }
 }
 
@@ -320,8 +386,10 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
                 path: path.to_owned(),
             })),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if is_stale_lock(path) {
-                    _ = std::fs::remove_dir_all(path);
+                if is_stale_lock(path)
+                    && let Err(e) = std::fs::remove_dir_all(path)
+                {
+                    debug!("failed to clear stale lock {}: {e}", path.display());
                 }
                 Ok(None)
             }
@@ -342,11 +410,11 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
 }
 
 fn is_stale_lock(path: &Path) -> bool {
+    // Treat unreadable metadata as *not* stale — safer to back off and retry
+    // than to clobber a lock we can't inspect (EACCES, EIO, ...).
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .map_or(true, |t| {
-            t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD
-        })
+        .is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
 }
 
 fn lock_path() -> Option<PathBuf> {
@@ -529,6 +597,43 @@ mod tests {
         );
         assert_eq!(oauth["subscriptionType"], "pro");
         assert_eq!(oauth["rateLimitTier"], "default");
+    }
+
+    #[test]
+    fn write_refreshed_credentials_tolerates_whitespace_in_scope_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+
+        std::fs::write(
+            &path,
+            indoc::indoc! {r#"
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "t",
+                        "refreshToken": "r",
+                        "expiresAt": 1000,
+                        "scopes": []
+                    }
+                }
+            "#},
+        )
+        .unwrap();
+
+        let response = RefreshResponse {
+            access_token: "t2".to_owned(),
+            refresh_token: "r2".to_owned(),
+            expires_in: 3600,
+            scope: Some("  user:profile   user:inference  ".to_owned()),
+        };
+
+        write_refreshed_credentials(&path, &response).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            json["claudeAiOauth"]["scopes"],
+            serde_json::json!(["user:profile", "user:inference"]),
+        );
     }
 
     #[test]
