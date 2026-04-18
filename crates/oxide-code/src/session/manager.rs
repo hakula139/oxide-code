@@ -249,7 +249,13 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 ///    `tool_result`s, so the symmetric filter keeps the transcript
 ///    valid.
 /// 4. Drops messages that became empty after (2) or (3).
-/// 5. Appends a synthetic assistant sentinel when the last remaining
+/// 5. Collapses adjacent same-role messages left over after (4). The
+///    API requires strict user / assistant alternation; dropping an
+///    assistant turn with only unresolved `tool_use`, or a user turn
+///    with only orphan `tool_result`, can leave two same-role turns
+///    adjacent. Merging their content preserves every block while
+///    restoring alternation.
+/// 6. Appends a synthetic assistant sentinel when the last remaining
 ///    message is a user turn containing only `tool_result` blocks — the
 ///    crash window between writing `tool_results` and the next assistant
 ///    response. Prevents two-user-turns-in-a-row on the next API call.
@@ -303,6 +309,7 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     }
 
     messages.retain(|m| !m.content.is_empty());
+    collapse_consecutive_same_role(messages);
 
     if let Some(last) = messages.last()
         && last.role == Role::User
@@ -315,6 +322,23 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     }
 
     strip_trailing_thinking(messages);
+}
+
+/// Merge every pair of consecutive same-role messages by extending the
+/// earlier message's content with the later one's and dropping the
+/// later one. Called after filtering / drop passes so that sanitization
+/// can never leave the transcript with two user or two assistant
+/// messages in a row.
+fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i + 1 < messages.len() {
+        if messages[i].role == messages[i + 1].role {
+            let next = messages.remove(i + 1);
+            messages[i].content.extend(next.content);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -989,6 +1013,64 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_collapses_adjacent_users_after_empty_assistant_drop() {
+        // Unresolved tool_use is the assistant's only content, so the
+        // assistant message is dropped; the two surrounding user turns
+        // would then be adjacent and invalid without the collapse pass.
+        let mut messages = vec![
+            Message::user("do X"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            },
+            Message::user("and now Y"),
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].content.len(), 2);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "do X"));
+        assert!(
+            matches!(&messages[0].content[1], ContentBlock::Text { text } if text == "and now Y")
+        );
+    }
+
+    #[test]
+    fn sanitize_collapses_adjacent_assistants_after_orphan_user_drop() {
+        // User turn is an orphan tool_result surrounded by two
+        // assistant text turns. The orphan filter empties the user;
+        // retain drops it; without collapse we'd have two adjacent
+        // assistants.
+        let mut messages = vec![
+            Message::user("do X"),
+            Message::assistant("first answer"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "ghost".to_owned(),
+                    content: "stale".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("second answer"),
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+        let answer = &messages[1].content;
+        assert_eq!(answer.len(), 2);
+        assert!(matches!(&answer[0], ContentBlock::Text { text } if text == "first answer"));
+        assert!(matches!(&answer[1], ContentBlock::Text { text } if text == "second answer"));
+    }
+
+    #[test]
     fn sanitize_drops_orphan_when_assistant_tool_use_was_dropped() {
         // Mismatched IDs: the user tool_result references "t2", but the
         // assistant never had "t2". Step 2 drops the assistant's "t1"
@@ -1028,5 +1110,40 @@ mod tests {
         let assistant = &messages[1].content;
         assert_eq!(assistant.len(), 1);
         assert!(matches!(&assistant[0], ContentBlock::Text { text } if text == "checking"));
+    }
+
+    // ── collapse_consecutive_same_role ──
+
+    #[test]
+    fn collapse_consecutive_same_role_merges_runs_and_preserves_alternation() {
+        // Mixed input: a run of three assistants, then a lone user,
+        // then a run of two users. The helper should leave exactly
+        // assistant → user after merging both runs.
+        let mut messages = vec![
+            Message::assistant("a1"),
+            Message::assistant("a2"),
+            Message::assistant("a3"),
+            Message::user("u1"),
+            Message::user("u2"),
+        ];
+        collapse_consecutive_same_role(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::Assistant);
+        assert_eq!(messages[0].content.len(), 3);
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].content.len(), 2);
+    }
+
+    #[test]
+    fn collapse_consecutive_same_role_noop_on_alternating_transcript() {
+        let mut messages = vec![
+            Message::user("u"),
+            Message::assistant("a"),
+            Message::user("u2"),
+        ];
+        collapse_consecutive_same_role(&mut messages);
+
+        assert_eq!(messages.len(), 3);
     }
 }
