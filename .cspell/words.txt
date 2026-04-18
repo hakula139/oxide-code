@@ -10,6 +10,7 @@ codex
 creds
 crossterm
 deserialize
+disambiguable
 dtolnay
 feff
 gitui
@@ -36,6 +37,7 @@ sysname
 SYSPROMPT
 thiserror
 throbber
+tildified
 TOCTOU
 tokio
 tracing

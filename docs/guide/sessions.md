@@ -29,6 +29,16 @@ a1b2c3d4   2026-04-18 09:20    12     Fix authentication bug
 e5f6a7b8   2026-04-17 17:30    5      Add session persistence
 ```
 
+With `--all`, a `Project` column is inserted so cross-project rows stay disambiguable (paths under `$HOME` are rendered as `~/…`):
+
+```text
+ID         Last Active         Msgs   Project          Title
+a1b2c3d4   2026-04-18 09:20    12     ~/work/oxide     Fix authentication bug
+9a0b1c2d   2026-04-18 08:05    3      ~/scratch        Investigate UTF-8 truncation
+```
+
+Titles that would overflow the terminal width are truncated with `…`. When output is piped (e.g., into `less`), titles render untruncated so downstream tools can wrap at their own width.
+
 ## Resuming a Session
 
 Resume the most recent session in the current project:
