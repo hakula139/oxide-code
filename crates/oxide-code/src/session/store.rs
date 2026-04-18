@@ -154,19 +154,43 @@ impl SessionStore {
         let path = self.find_session_path(session_id)?;
         let file =
             File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let mut messages = Vec::new();
         let mut last_uuid = None;
+        let mut buf = Vec::new();
+        let mut line_no: u32 = 0;
 
-        for (i, line) in reader.lines().enumerate() {
-            let line = line.with_context(|| format!("read error at line {}", i + 1))?;
-            if line.is_empty() {
+        // Read byte-by-line instead of `BufReader::lines()`. A crash
+        // during `writeln!` can leave the last record truncated —
+        // mid-byte of a multibyte UTF-8 codepoint in the worst case —
+        // and `lines()` propagates `InvalidData` there, failing the
+        // entire resume. Doing the decode ourselves lets us warn-skip
+        // bad lines with the same resilience we already apply to
+        // malformed JSON, and tolerate a missing trailing newline.
+        loop {
+            buf.clear();
+            let read = reader
+                .read_until(b'\n', &mut buf)
+                .with_context(|| format!("read error at line {}", line_no + 1))?;
+            if read == 0 {
+                break;
+            }
+            line_no += 1;
+            let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
+            if without_newline.is_empty() {
                 continue;
             }
-            let entry: Entry = match serde_json::from_str(&line) {
+            let line = match std::str::from_utf8(without_newline) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("skipping non-utf8 entry at line {line_no}: {e}");
+                    continue;
+                }
+            };
+            let entry: Entry = match serde_json::from_str(line) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("skipping malformed entry at line {}: {e}", i + 1);
+                    warn!("skipping malformed entry at line {line_no}: {e}");
                     continue;
                 }
             };
@@ -949,6 +973,65 @@ mod tests {
         assert!(store.load_session_data("../etc/passwd").is_err());
         assert!(store.load_session_data(r"..\..\etc\passwd").is_err());
         assert!(store.load_session_data("session\0evil").is_err());
+    }
+
+    #[test]
+    fn load_session_data_recovers_from_truncated_utf8_at_eof() {
+        // Simulate a SIGKILL mid-`writeln!` that left the final record
+        // broken in the middle of a multibyte UTF-8 sequence. The
+        // pre-fix code used `BufReader::lines()`, which propagates an
+        // `InvalidData` error there and fails the whole resume.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let created_at = datetime!(2026-01-01 00:00:00 UTC);
+        let path = test_project_path(dir.path(), &session_filename("chopped", created_at));
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(
+            br#"{"type":"header","session_id":"chopped","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        );
+        bytes.extend_from_slice(
+            br#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
+"#,
+        );
+        // Start writing the next message, then crash inside the emoji.
+        bytes.extend_from_slice(br#"{"type":"message","uuid":"b2c3d4e5-f6a7-8901-bcde-234567890abc","message":{"role":"assistant","content":[{"type":"text","text":"crab "#);
+        // First two bytes of 🦀 (U+1F980, UTF-8: F0 9F A6 80) so we
+        // are mid-character at EOF.
+        bytes.extend_from_slice(&[0xF0, 0x9F]);
+        fs::write(&path, &bytes).unwrap();
+
+        let data = store.load_session_data("chopped").unwrap();
+        assert_eq!(data.messages.len(), 1, "first full message survives");
+        assert_eq!(
+            data.last_uuid,
+            Some(Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-1234567890ef").unwrap())
+        );
+    }
+
+    #[test]
+    fn load_session_data_recovers_from_missing_trailing_newline() {
+        // A crash between the JSON body and the final '\n' leaves a
+        // complete record without a newline. The loader should still
+        // parse it rather than dropping the last turn.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let created_at = datetime!(2026-01-01 00:00:00 UTC);
+        let path = test_project_path(dir.path(), &session_filename("nonewline", created_at));
+        let content = concat!(
+            r#"{"type":"header","session_id":"nonewline","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}"#,
+            "\n",
+            r#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}"#,
+        );
+        fs::write(&path, content).unwrap();
+
+        let data = store.load_session_data("nonewline").unwrap();
+        assert_eq!(data.messages.len(), 1);
+        assert_eq!(
+            data.last_uuid,
+            Some(Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-1234567890ef").unwrap())
+        );
     }
 
     #[test]
