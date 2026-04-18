@@ -14,7 +14,7 @@ use crate::tui::component::{Action, Component};
 use crate::tui::event::{tool_call_icon, tool_call_title};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs, wrap_line_styled};
+use crate::tui::wrap::{expand_tabs, wrap_line};
 
 // ── Chat Entry ──
 
@@ -559,9 +559,7 @@ impl ChatView {
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(display_text, text_style),
             ]);
-            for wrapped in
-                wrap_line_styled(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix))
-            {
+            for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
                 lines.push(wrapped);
             }
         }
@@ -755,7 +753,7 @@ fn push_bordered_lines(
             Span::styled(prefix.to_owned(), bar_style),
             Span::styled(text_line.to_owned(), text_style),
         ]);
-        for wrapped in wrap_line_styled(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
+        for wrapped in wrap_line(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
             lines.push(wrapped);
         }
     }

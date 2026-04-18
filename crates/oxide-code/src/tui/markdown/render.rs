@@ -527,7 +527,7 @@ where
 
         if self.width > 0 {
             let indent = self.continuation_indent_width();
-            for wrapped in wrap_line(Line::from(spans), self.width, indent) {
+            for wrapped in wrap_line(Line::from(spans), self.width, indent, None) {
                 self.lines.push(wrapped);
             }
         } else {
@@ -568,7 +568,7 @@ where
             return;
         };
         let indent = self.continuation_indent_width();
-        for wrapped in wrap_line(line, self.width, indent) {
+        for wrapped in wrap_line(line, self.width, indent, None) {
             self.lines.push(wrapped);
         }
     }
