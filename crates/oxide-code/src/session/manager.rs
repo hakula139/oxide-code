@@ -126,12 +126,18 @@ impl SessionManager {
         if self.first_user_prompt.is_none()
             && let Some(text) = extract_user_text(message)
         {
+            // Cache the prompt before the title append. If the append
+            // fails we still remember that the first user prompt has
+            // been seen, so a later retry does not promote the second
+            // user message as the session title. Consistency trumps
+            // persistence here — the in-memory title is lost either
+            // way; we just refuse to silently replace it.
+            self.first_user_prompt = Some(text.to_owned());
             self.writer.append(&Entry::Title {
                 title: truncate_title(text, MAX_TITLE_LEN),
                 source: TitleSource::FirstPrompt,
                 updated_at: now,
             })?;
-            self.first_user_prompt = Some(text.to_owned());
         }
 
         let uuid = Uuid::new_v4();
