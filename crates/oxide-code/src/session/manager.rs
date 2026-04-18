@@ -427,6 +427,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_after_mid_stream_abort_yields_clean_user_ending_transcript() {
+        // Regression test for D5.4: the TUI records the user message,
+        // then Ctrl+C during streaming aborts the agent task before
+        // the assistant message can be recorded. `run_tui` still
+        // calls `finish()` on the post-abort path, writing a Summary.
+        // The next resume must see exactly one user message with no
+        // sanitization heroics needed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("what does this do?"))
+            .unwrap();
+        original.finish().unwrap();
+        drop(original);
+
+        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        assert_eq!(resumed.session_id(), session_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::User);
+        let ContentBlock::Text { text } = &messages[0].content[0] else {
+            panic!("expected text block, got {:?}", messages[0].content);
+        };
+        assert_eq!(text, "what does this do?");
+        assert_eq!(
+            resumed.message_count, 1,
+            "resumed count should reflect the one recorded user turn"
+        );
+        assert!(
+            resumed.last_message_uuid.is_some(),
+            "parent_uuid chain must carry over to the next recorded message"
+        );
+    }
+
+    #[tokio::test]
     async fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
