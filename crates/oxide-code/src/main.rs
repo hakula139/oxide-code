@@ -65,6 +65,12 @@ struct Cli {
     /// List recent sessions and exit.
     #[arg(short, long, conflicts_with_all = ["prompt", "resume"])]
     list: bool,
+
+    /// Operate across every project. By default `--list` and `--continue`
+    /// only see sessions created in the current working directory; with
+    /// `--all`, they span every project.
+    #[arg(short, long)]
+    all: bool,
 }
 
 fn main() -> Result<()> {
@@ -86,7 +92,7 @@ async fn async_main() -> Result<()> {
 
     // Handle --list before loading config (no API access needed).
     if cli.list {
-        return list_sessions();
+        return list_sessions(cli.all);
     }
 
     let config = Config::load().await?;
@@ -96,7 +102,7 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref())?;
+    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref(), cli.all)?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
     let tools = create_tool_registry();
@@ -122,13 +128,19 @@ async fn async_main() -> Result<()> {
 
 // ── Session Helpers ──
 
-/// Print a table of recent sessions and exit.
-fn list_sessions() -> Result<()> {
+/// Print a table of recent sessions and exit. With `all = true`, spans
+/// every project; otherwise scoped to the current working directory.
+fn list_sessions(all: bool) -> Result<()> {
     let store = SessionStore::open()?;
-    let sessions = store.list()?;
+    let sessions = if all {
+        store.list_all()?
+    } else {
+        store.list()?
+    };
 
     if sessions.is_empty() {
-        println!("No sessions found.");
+        let scope = if all { "" } else { " in this project" };
+        println!("No sessions found{scope}.");
         return Ok(());
     }
 
@@ -157,15 +169,22 @@ fn list_sessions() -> Result<()> {
 
 /// Create or resume a session based on CLI flags.
 ///
+/// `resume`:
 /// - `None`: no `--continue` flag → new session.
 /// - `Some(None)`: `--continue` without value → resume latest.
 /// - `Some(Some(id))`: `--continue <id>` → resume specific session.
+///
+/// `all` widens the search scope for `--continue` from the current
+/// project to every project. A specific session ID is always resolved
+/// across projects once matched, so `--all` mainly changes which
+/// sessions are eligible in the prefix / latest lookup.
 fn resolve_session(
     store: &SessionStore,
     model: &str,
     resume: Option<&Option<String>>,
+    all: bool,
 ) -> Result<(SessionManager, Vec<Message>)> {
-    // Normalize: treat empty / whitespace-only prefixes as "resume latest".
+    let candidates = || -> Result<_> { if all { store.list_all() } else { store.list() } };
     let resume = resume.map(|opt| opt.as_deref().filter(|s| !s.trim().is_empty()));
 
     match resume {
@@ -174,15 +193,17 @@ fn resolve_session(
             Ok((session, Vec::new()))
         }
         Some(None) => {
-            let session_id = store
-                .latest_session_id()?
+            let session_id = candidates()?
+                .into_iter()
+                .next()
+                .map(|s| s.session_id)
                 .context("no sessions to resume")?;
             let (session, messages) = SessionManager::resume(store, &session_id)?;
             debug!("resuming session {session_id}");
             Ok((session, messages))
         }
         Some(Some(prefix)) => {
-            let sessions = store.list()?;
+            let sessions = candidates()?;
             let matched: Vec<_> = sessions
                 .iter()
                 .filter(|s| s.session_id.starts_with(prefix))

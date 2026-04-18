@@ -267,8 +267,15 @@ mod tests {
 
     use super::*;
 
+    const TEST_PROJECT: &str = "test-project";
+
     fn test_store(dir: &Path) -> SessionStore {
-        SessionStore::open_at(dir.to_path_buf()).unwrap()
+        SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
+    }
+
+    /// Resolve the on-disk path of a session file inside [`TEST_PROJECT`].
+    fn test_session_file(dir: &Path, session_id: &str) -> std::path::PathBuf {
+        dir.join(TEST_PROJECT).join(format!("{session_id}.jsonl"))
     }
 
     // ── start ──
@@ -277,7 +284,7 @@ mod tests {
     fn start_creates_session_file_with_zero_count() {
         let dir = tempfile::tempdir().unwrap();
         let manager = SessionManager::start(&test_store(dir.path()), "test-model").unwrap();
-        let path = dir.path().join(format!("{}.jsonl", manager.session_id()));
+        let path = test_session_file(dir.path(), manager.session_id());
         assert!(path.exists());
         assert_eq!(manager.message_count, 0);
         assert!(manager.last_message_uuid.is_none());
@@ -454,8 +461,7 @@ mod tests {
 
         // Read the file and find the new message's parent_uuid — should
         // match the last uuid from the original run.
-        let content =
-            std::fs::read_to_string(dir.path().join(format!("{session_id}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
         let entries: Vec<Entry> = content
             .lines()
             .filter(|l| !l.is_empty())
@@ -533,7 +539,7 @@ mod tests {
         manager.record_message(&Message::assistant("hi")).unwrap();
         assert_eq!(manager.message_count, 2);
 
-        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let entries: Vec<Entry> = content
             .lines()
             .filter(|l| !l.is_empty())
@@ -563,7 +569,7 @@ mod tests {
             .record_message(&Message::user("First prompt"))
             .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         // Line 0: header. Line 1: title. Line 2: message.
         assert!(lines[1].contains(r#""type":"title""#));
@@ -580,7 +586,7 @@ mod tests {
         manager.record_message(&Message::user("first")).unwrap();
         manager.record_message(&Message::user("second")).unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let title_count = content
             .lines()
             .filter(|l| l.contains(r#""type":"title""#))
@@ -607,7 +613,7 @@ mod tests {
             })
             .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         assert!(!content.contains(r#""type":"title""#));
     }
 
@@ -655,7 +661,7 @@ mod tests {
         manager.finish().unwrap();
         manager.finish().unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join(format!("{sid}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let summary_count = content
             .lines()
             .filter(|l| l.contains(r#""type":"summary""#))
@@ -677,8 +683,7 @@ mod tests {
         resumed.finish().unwrap();
         drop(resumed);
 
-        let content =
-            std::fs::read_to_string(dir.path().join(format!("{session_id}.jsonl"))).unwrap();
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
         let summary_count = content
             .lines()
             .filter(|l| l.contains(r#""type":"summary""#))

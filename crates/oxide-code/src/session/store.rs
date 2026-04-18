@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
 
 const DATA_DIR: &str = "ox";
@@ -36,16 +37,24 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Low-level session file operations.
 ///
-/// Each session is a JSONL file in `$XDG_DATA_HOME/ox/sessions/`. The store
-/// handles path resolution, file creation, reading, and listing.
+/// Sessions are stored under `$XDG_DATA_HOME/ox/sessions/{project}/`,
+/// where `{project}` is a sanitized fingerprint of the working
+/// directory at session creation time. The store exposes one "home"
+/// project (the current CWD) that listing, creation, and default
+/// resume operate on, and provides explicit cross-project variants
+/// for `--all` callers.
 pub(crate) struct SessionStore {
+    /// Root directory holding every project subdirectory.
     sessions_dir: PathBuf,
+    /// Subdirectory for the current working directory.
+    project_dir: PathBuf,
 }
 
 impl SessionStore {
-    /// Create a store rooted at the XDG data directory.
-    ///
-    /// Creates `$XDG_DATA_HOME/ox/sessions/` if it does not exist.
+    /// Create a store rooted at the XDG data directory, scoped to the
+    /// current working directory. Creates both the root and the
+    /// project subdirectory if needed, and runs a one-time migration
+    /// of any legacy flat-layout sessions into their project subdirs.
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = resolve_sessions_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
@@ -56,8 +65,27 @@ impl SessionStore {
         fs::create_dir_all(&sessions_dir)
             .with_context(|| format!("failed to create {}", sessions_dir.display()))?;
 
-        debug!("session store at {}", sessions_dir.display());
-        Ok(Self { sessions_dir })
+        migrate_flat_layout(&sessions_dir);
+
+        let project_name = match std::env::current_dir() {
+            Ok(cwd) => sanitize_cwd(&cwd),
+            Err(e) => {
+                warn!("cannot resolve current directory for project scoping: {e}");
+                UNKNOWN_PROJECT_DIR.to_owned()
+            }
+        };
+        let project_dir = sessions_dir.join(&project_name);
+        fs::create_dir_all(&project_dir)
+            .with_context(|| format!("failed to create {}", project_dir.display()))?;
+
+        debug!(
+            "session store at {} (project: {project_name})",
+            sessions_dir.display()
+        );
+        Ok(Self {
+            sessions_dir,
+            project_dir,
+        })
     }
 
     /// Create a new session file and write the header entry.
@@ -86,8 +114,12 @@ impl SessionStore {
     /// Contended locks are retried up to [`LOCK_MAX_RETRIES`] times with
     /// a [`LOCK_RETRY_INTERVAL`] delay, so accidental back-to-back
     /// `ox -c <id>` invocations do not fail abruptly.
+    ///
+    /// Searches every project subdirectory, not just the current one,
+    /// so `ox -c <id>` resumes a session regardless of which project
+    /// it originally belonged to.
     pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
-        let path = self.session_path(session_id)?;
+        let path = self.find_session_path(session_id)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
@@ -97,12 +129,13 @@ impl SessionStore {
     }
 
     /// Load all messages from a session file along with the UUID of the
-    /// last message (for parent-chain continuity on resume).
+    /// last message (for parent-chain continuity on resume). Like
+    /// [`Self::open_append`], searches every project subdirectory.
     ///
     /// Skips non-[`Entry::Message`] lines (headers, titles, summaries,
     /// unknown). Warns and skips malformed lines.
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
-        let path = self.session_path(session_id)?;
+        let path = self.find_session_path(session_id)?;
         let file =
             File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
         let reader = BufReader::new(file);
@@ -141,60 +174,124 @@ impl SessionStore {
         })
     }
 
-    /// List sessions by reading the header (first line) and scanning the
-    /// tail for the latest [`Entry::Title`] and [`Entry::Summary`] of
-    /// each `.jsonl` file. Returned sorted by file mtime (most recently
-    /// active first), so resumed sessions bubble to the top.
+    /// List sessions for the current project, sorted by file mtime
+    /// (most recently active first) so resumed sessions bubble to the
+    /// top.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        let entries = fs::read_dir(&self.sessions_dir)
-            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?;
-
-        let mut sessions: Vec<SessionInfo> = entries
-            .filter_map(|entry| match entry {
-                Ok(e) => Some(e),
-                Err(e) => {
-                    warn!("skipping directory entry: {e}");
-                    None
-                }
-            })
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .filter_map(|e| match read_session_info(&e.path()) {
-                Ok(info) => Some(info),
-                Err(e) => {
-                    warn!("skipping unreadable session file: {e}");
-                    None
-                }
-            })
-            .collect();
-
-        sessions.sort_by(|a, b| {
-            b.last_active_at
-                .cmp(&a.last_active_at)
-                .then_with(|| b.session_id.cmp(&a.session_id))
-        });
+        let mut sessions = read_sessions_in_dir(&self.project_dir)?;
+        sort_sessions_recent_first(&mut sessions);
         Ok(sessions)
     }
 
-    /// Return the most recent session ID, if any sessions exist.
-    pub(crate) fn latest_session_id(&self) -> Result<Option<String>> {
-        let sessions = self.list()?;
-        Ok(sessions.into_iter().next().map(|s| s.session_id))
+    /// List sessions across every project subdirectory. Used by the
+    /// `--all` flag for cross-project views.
+    pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(&self.sessions_dir)
+            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping directory entry: {e}");
+                    continue;
+                }
+            };
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                match read_sessions_in_dir(&entry.path()) {
+                    Ok(mut s) => sessions.append(&mut s),
+                    Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
+                }
+            }
+        }
+        sort_sessions_recent_first(&mut sessions);
+        Ok(sessions)
     }
 
     fn session_path(&self, session_id: &str) -> Result<PathBuf> {
-        if session_id.contains(['/', '\\', '\0']) || session_id.contains("..") {
-            bail!("invalid session ID: {session_id}");
+        validate_session_id(session_id)?;
+        Ok(self.project_dir.join(format!("{session_id}.jsonl")))
+    }
+
+    /// Locate an existing session file. Checks the current project
+    /// first (the fast path: no extra I/O if the session was created
+    /// here), then walks sibling project subdirectories so
+    /// cross-project resume by session ID also works.
+    fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
+        let direct = self.session_path(session_id)?;
+        if direct.exists() {
+            return Ok(direct);
         }
-        Ok(self.sessions_dir.join(format!("{session_id}.jsonl")))
+        let filename = format!("{session_id}.jsonl");
+        for entry in fs::read_dir(&self.sessions_dir)
+            .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
+        {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let candidate = entry.path().join(&filename);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        bail!("session not found: {session_id}")
     }
 
     /// Create a store at an explicit directory. Used by tests to bypass
-    /// XDG resolution.
+    /// XDG resolution. `project_name` selects the subdirectory inside
+    /// `sessions_dir` that acts as the current project.
     #[cfg(test)]
-    pub(super) fn open_at(sessions_dir: PathBuf) -> Result<Self> {
+    pub(super) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
-        Ok(Self { sessions_dir })
+        let project_dir = sessions_dir.join(project_name);
+        fs::create_dir_all(&project_dir)?;
+        Ok(Self {
+            sessions_dir,
+            project_dir,
+        })
     }
+}
+
+/// Reject session IDs that could escape the project subdirectory.
+fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.contains(['/', '\\', '\0']) || session_id.contains("..") {
+        bail!("invalid session ID: {session_id}");
+    }
+    Ok(())
+}
+
+/// Read every `.jsonl` file in `dir` and return the successfully
+/// parsed [`SessionInfo`] entries, warning and skipping on errors.
+fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
+    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    Ok(entries
+        .filter_map(|entry| match entry {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warn!("skipping directory entry: {e}");
+                None
+            }
+        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|e| match read_session_info(&e.path()) {
+            Ok(info) => Some(info),
+            Err(e) => {
+                warn!("skipping unreadable session file: {e}");
+                None
+            }
+        })
+        .collect())
+}
+
+fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
+    sessions.sort_by(|a, b| {
+        b.last_active_at
+            .cmp(&a.last_active_at)
+            .then_with(|| b.session_id.cmp(&a.session_id))
+    });
 }
 
 // ── SessionWriter ──
@@ -278,6 +375,70 @@ fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
         .filter(|p| p.is_absolute())
         .or_else(|| home.map(|h| h.join(".local").join("share")))?;
     Some(base.join(DATA_DIR).join(SESSIONS_DIR))
+}
+
+// ── Migration ──
+
+/// Move any legacy flat-layout session files (`{uuid}.jsonl` directly
+/// inside [`sessions_dir`]) into their project subdirectory based on
+/// each file's header `cwd`. Idempotent and fast when no flat files
+/// exist, so it can run unconditionally at store open time.
+///
+/// Errors on individual files are logged and skipped — a partial
+/// migration is preferable to refusing to open the store entirely.
+fn migrate_flat_layout(sessions_dir: &Path) {
+    let entries = match fs::read_dir(sessions_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                "cannot scan {} for flat-layout migration: {e}",
+                sessions_dir.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl")
+            || entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            continue;
+        }
+        if let Err(e) = relocate_flat_session(sessions_dir, &path) {
+            warn!(
+                "skipping migration for {}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+}
+
+/// Read the header of a legacy flat-layout session file and move the
+/// file into the appropriate project subdirectory.
+fn relocate_flat_session(sessions_dir: &Path, path: &Path) -> Result<()> {
+    let cwd = read_session_cwd(path).context("cannot read header for migration")?;
+    let project = sessions_dir.join(sanitize_cwd(Path::new(&cwd)));
+    fs::create_dir_all(&project).with_context(|| format!("cannot create {}", project.display()))?;
+    let target = project.join(path.file_name().context("path missing filename")?);
+    if target.exists() {
+        bail!("destination already exists: {}", target.display());
+    }
+    fs::rename(path, &target)
+        .with_context(|| format!("rename {} -> {}", path.display(), target.display()))?;
+    debug!("migrated {} to {}", path.display(), target.display());
+    Ok(())
+}
+
+/// Read only the header line of a session file and return its `cwd`.
+fn read_session_cwd(path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let mut first_line = String::new();
+    BufReader::new(file).read_line(&mut first_line)?;
+    let entry: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
+    match entry {
+        Entry::Header { cwd, .. } => Ok(cwd),
+        _ => bail!("first line is not a header"),
+    }
 }
 
 // ── Session Info Extraction ──
@@ -409,8 +570,17 @@ mod tests {
     use crate::message::ContentBlock;
     use crate::session::entry::TitleSource;
 
+    const TEST_PROJECT: &str = "test-project";
+
     fn test_store(dir: &Path) -> SessionStore {
-        SessionStore::open_at(dir.to_path_buf()).unwrap()
+        SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
+    }
+
+    /// Resolve the path of a session file inside [`TEST_PROJECT`] —
+    /// tests used to reference files directly under `dir.path()`, but
+    /// the project-scoped layout puts each file under a subdirectory.
+    fn test_session_file(dir: &Path, filename: &str) -> PathBuf {
+        dir.join(TEST_PROJECT).join(filename)
     }
 
     fn sample_header(session_id: &str) -> Entry {
@@ -457,7 +627,7 @@ mod tests {
 
         let _writer = store.create(&header).unwrap();
 
-        let content = fs::read_to_string(dir.path().join("test-id.jsonl")).unwrap();
+        let content = fs::read_to_string(test_session_file(dir.path(), "test-id.jsonl")).unwrap();
         let parsed: Entry = serde_json::from_str(content.trim()).unwrap();
         assert!(
             matches!(parsed, Entry::Header { session_id, version, .. } if session_id == "test-id" && version == CURRENT_VERSION)
@@ -477,7 +647,7 @@ mod tests {
     fn create_fails_when_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        fs::write(dir.path().join("existing.jsonl"), "{}").unwrap();
+        fs::write(test_session_file(dir.path(), "existing.jsonl"), "{}").unwrap();
         assert!(store.create(&sample_header("existing")).is_err());
     }
 
@@ -490,7 +660,7 @@ mod tests {
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("perm-test")).unwrap();
 
-        let meta = fs::metadata(dir.path().join("perm-test.jsonl")).unwrap();
+        let meta = fs::metadata(test_session_file(dir.path(), "perm-test.jsonl")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
@@ -601,7 +771,8 @@ mod tests {
     #[test]
     fn load_session_data_skips_corrupt_empty_and_unknown_lines() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("messy.jsonl");
+        let store = test_store(dir.path());
+        let path = test_session_file(dir.path(), "messy.jsonl");
         fs::write(
             &path,
             indoc! {r#"
@@ -613,7 +784,6 @@ mod tests {
             "#},
         )
         .unwrap();
-        let store = test_store(dir.path());
 
         let data = store.load_session_data("messy").unwrap();
         assert_eq!(data.messages.len(), 1);
@@ -642,7 +812,8 @@ mod tests {
     #[test]
     fn load_session_data_rejects_future_format_version() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("future.jsonl");
+        let store = test_store(dir.path());
+        let path = test_session_file(dir.path(), "future.jsonl");
         let future_version = CURRENT_VERSION + 1;
         fs::write(
             &path,
@@ -652,7 +823,6 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = test_store(dir.path());
         let err = store.load_session_data("future").unwrap_err().to_string();
         assert!(err.contains("newer than supported"), "got: {err}");
     }
@@ -728,7 +898,7 @@ mod tests {
         drop(w_new);
 
         // Backdate zzz's mtime so its file is older than aaa's.
-        let new_path = dir.path().join("zzz-new-header.jsonl");
+        let new_path = test_session_file(dir.path(), "zzz-new-header.jsonl");
         let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let times = std::fs::FileTimes::new().set_modified(far_past);
         File::options()
@@ -798,7 +968,7 @@ mod tests {
                 .unwrap();
         }
 
-        let path = dir.path().join("long.jsonl");
+        let path = test_session_file(dir.path(), "long.jsonl");
         assert!(
             path.metadata().unwrap().len() > TAIL_BUF_SIZE,
             "test file should exceed the tail window"
@@ -824,50 +994,131 @@ mod tests {
     #[test]
     fn list_skips_non_session_files_and_malformed_jsonl() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("notes.txt"), "not a session").unwrap();
+        let store = test_store(dir.path());
+        fs::write(test_session_file(dir.path(), "notes.txt"), "not a session").unwrap();
         fs::write(
-            dir.path().join("bad.jsonl"),
+            test_session_file(dir.path(), "bad.jsonl"),
             r#"{"type":"message","uuid":"00000000-0000-0000-0000-000000000000","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
         )
         .unwrap();
-        let store = test_store(dir.path());
         assert!(store.list().unwrap().is_empty());
     }
 
-    // ── latest_session_id ──
+    #[test]
+    fn list_is_scoped_to_current_project() {
+        // Only sessions in the current project dir are visible; siblings
+        // in other project subdirectories stay hidden.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own")).unwrap();
+
+        // Drop a session into a sibling project subdir.
+        let sibling_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _foreign = sibling_store.create(&sample_header("foreign")).unwrap();
+        drop(sibling_store);
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "own");
+    }
+
+    // ── list_all ──
 
     #[test]
-    fn latest_session_id_returns_most_recent() {
+    fn list_all_spans_every_project_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own")).unwrap();
+
+        let foreign_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
+        drop(foreign_store);
+
+        let all = store.list_all().unwrap();
+        let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["foreign", "own"]);
+    }
+
+    // ── find_session_path ──
+
+    #[test]
+    fn find_session_path_falls_back_to_other_projects() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
-        let _wa = store
-            .create(&Entry::Header {
-                session_id: "old".to_owned(),
-                cwd: "/".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-04-15 10:00:00 UTC),
-                version: CURRENT_VERSION,
-            })
-            .unwrap();
-        let _wb = store
-            .create(&Entry::Header {
-                session_id: "new".to_owned(),
-                cwd: "/".to_owned(),
-                model: "m".to_owned(),
-                created_at: datetime!(2026-04-16 12:00:00 UTC),
-                version: CURRENT_VERSION,
-            })
-            .unwrap();
+        // Session lives in a different project subdirectory.
+        let foreign_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _w = foreign_store.create(&sample_header("foreign")).unwrap();
+        drop(foreign_store);
 
-        assert_eq!(store.latest_session_id().unwrap().as_deref(), Some("new"));
+        let found = store.find_session_path("foreign").unwrap();
+        assert_eq!(
+            found,
+            dir.path().join("other-project").join("foreign.jsonl")
+        );
     }
 
     #[test]
-    fn latest_session_id_returns_none_when_empty() {
+    fn find_session_path_errors_for_unknown_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        assert!(store.latest_session_id().unwrap().is_none());
+        let err = store.find_session_path("ghost").unwrap_err().to_string();
+        assert!(err.contains("session not found"), "got: {err}");
+    }
+
+    // ── migrate_flat_layout ──
+
+    #[test]
+    fn migrate_flat_layout_moves_files_into_project_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().to_path_buf();
+        fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Seed a legacy flat-layout session whose header points at
+        // "/foo/project".
+        let legacy_path = sessions_dir.join("legacy.jsonl");
+        fs::write(
+            &legacy_path,
+            r#"{"type":"header","session_id":"legacy","cwd":"/foo/project","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        )
+        .unwrap();
+
+        migrate_flat_layout(&sessions_dir);
+
+        assert!(!legacy_path.exists(), "legacy file should have moved");
+        let expected = sessions_dir
+            .join(sanitize_cwd(Path::new("/foo/project")))
+            .join("legacy.jsonl");
+        assert!(expected.exists(), "migrated file missing at {expected:?}");
+    }
+
+    #[test]
+    fn migrate_flat_layout_is_idempotent_and_skips_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().to_path_buf();
+
+        // Pre-existing project subdir with a session already in place.
+        let project = sessions_dir.join("already-scoped");
+        fs::create_dir_all(&project).unwrap();
+        let settled = project.join("kept.jsonl");
+        fs::write(
+            &settled,
+            r#"{"type":"header","session_id":"kept","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        )
+        .unwrap();
+
+        // Calling the migration twice must leave the file exactly where
+        // it is and not recurse into the subdirectory.
+        migrate_flat_layout(&sessions_dir);
+        migrate_flat_layout(&sessions_dir);
+
+        assert!(settled.exists());
     }
 
     // ── append ──
@@ -885,7 +1136,7 @@ mod tests {
             .append(&sample_message_entry(Uuid::new_v4(), "world"))
             .unwrap();
 
-        let content = fs::read_to_string(dir.path().join("multi.jsonl")).unwrap();
+        let content = fs::read_to_string(test_session_file(dir.path(), "multi.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
     }
