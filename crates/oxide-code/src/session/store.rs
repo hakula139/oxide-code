@@ -53,6 +53,7 @@ impl SessionStore {
 
         fs::create_dir_all(&sessions_dir)
             .with_context(|| format!("failed to create {}", sessions_dir.display()))?;
+        enforce_private_dir(&sessions_dir);
 
         // Migrations run oldest-first so each pass operates on the
         // layout the previous one produced.
@@ -69,6 +70,7 @@ impl SessionStore {
         let project_dir = sessions_dir.join(&project_name);
         fs::create_dir_all(&project_dir)
             .with_context(|| format!("failed to create {}", project_dir.display()))?;
+        enforce_private_dir(&project_dir);
 
         debug!(
             "session store at {} (project: {project_name})",
@@ -334,9 +336,39 @@ impl SessionStore {
     }
 }
 
-/// Reject session IDs that could escape the project subdirectory.
+/// Reassert owner-only (`0o700`) permissions on a session directory.
+///
+/// Session files themselves are created `0o600`, but without this the
+/// parent directory takes the process umask (usually `0o755`), leaving
+/// session IDs, project names, and mtimes visible to every local user.
+/// Failures are logged at debug level; we have no fallback but shouldn't
+/// block session startup over it.
+#[cfg(unix)]
+fn enforce_private_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
+        debug!("failed to tighten {} to 0o700: {e}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn enforce_private_dir(_path: &Path) {}
+
+/// Reject session IDs that could escape the project subdirectory or
+/// trip up platform-specific filename handling.
+///
+/// Restricts to ASCII alphanumerics, `-`, and `_`, bounded at 64 characters.
+/// This covers the canonical 36-char UUID v4 our generator emits while also
+/// rejecting path separators (`/`, `\`), NUL, parent-dir references, control
+/// characters, and reserved-in-Windows chars (`:`, `?`, `|`, `*`, `<`, `>`).
 fn validate_session_id(session_id: &str) -> Result<()> {
-    if session_id.contains(['/', '\\', '\0']) || session_id.contains("..") {
+    let ok = !session_id.is_empty()
+        && session_id.len() <= 64
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !ok {
         bail!("invalid session ID: {session_id}");
     }
     Ok(())
@@ -1087,9 +1119,16 @@ mod tests {
     fn load_session_data_rejects_malicious_session_ids() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
+        assert!(store.load_session_data("").is_err());
         assert!(store.load_session_data("../etc/passwd").is_err());
         assert!(store.load_session_data(r"..\..\etc\passwd").is_err());
         assert!(store.load_session_data("session\0evil").is_err());
+        // Windows-reserved and control chars are also rejected.
+        assert!(store.load_session_data("foo:bar").is_err());
+        assert!(store.load_session_data("foo|bar").is_err());
+        assert!(store.load_session_data("foo*").is_err());
+        // Bounded length: a very long ID is rejected.
+        assert!(store.load_session_data(&"a".repeat(65)).is_err());
     }
 
     #[tokio::test]
