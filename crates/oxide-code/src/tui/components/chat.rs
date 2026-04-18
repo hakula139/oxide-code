@@ -403,18 +403,18 @@ impl ChatView {
                     }
                 }
                 ChatEntry::ToolCall { icon, label } => {
-                    self.push_tool_call_line(&mut lines, icon, label);
+                    self.push_tool_call_line(&mut lines, icon, label, width);
                 }
                 ChatEntry::ToolResult {
                     label,
                     content,
                     is_error,
                 } => {
-                    self.push_tool_result_line(&mut lines, label, *is_error);
+                    self.push_tool_result_line(&mut lines, label, *is_error, width);
                     self.push_tool_output_lines(&mut lines, content, *is_error, width);
                 }
                 ChatEntry::Error(msg) => {
-                    self.push_tool_result_line(&mut lines, msg, true);
+                    self.push_tool_result_line(&mut lines, msg, true, width);
                 }
             }
         }
@@ -500,32 +500,51 @@ impl ChatView {
 
     // ── Tool Calls ──
 
-    fn push_tool_call_line<'a>(&'a self, lines: &mut Vec<Line<'a>>, icon: &'a str, label: &'a str) {
-        lines.push(Line::from(vec![
-            Span::styled(BORDER_PREFIX, self.theme.tool_border()),
+    fn push_tool_call_line(
+        &self,
+        lines: &mut Vec<Line<'_>>,
+        icon: &'static str,
+        label: &str,
+        width: usize,
+    ) {
+        // Continuation aligns under the label (past `"  ▎ X "`).
+        let border_style = self.theme.tool_border();
+        let cont_prefix = border_continuation_prefix(TOOL_RESULT_PREFIX, border_style);
+        let line = Line::from(vec![
+            Span::styled(BORDER_PREFIX, border_style),
             Span::styled(icon, self.theme.tool_icon()),
             Span::raw(" "),
-            Span::styled(label, self.theme.text()),
-        ]));
+            Span::styled(label.to_owned(), self.theme.text()),
+        ]);
+        for wrapped in wrap_line(line, width, TOOL_RESULT_PREFIX.len(), Some(&cont_prefix)) {
+            lines.push(wrapped);
+        }
     }
 
-    fn push_tool_result_line<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        label: &'a str,
+    fn push_tool_result_line(
+        &self,
+        lines: &mut Vec<Line<'_>>,
+        label: &str,
         is_error: bool,
+        width: usize,
     ) {
         let (indicator, indicator_style) = if is_error {
             ("✗", self.theme.error())
         } else {
             ("✓", self.theme.success())
         };
-        lines.push(Line::from(vec![
-            Span::styled(TOOL_RESULT_PREFIX, self.tool_border_style(is_error)),
+        // Continuation aligns under the label (past `"  ▎   X "`).
+        let border_style = self.tool_border_style(is_error);
+        let cont_prefix = border_continuation_prefix(TOOL_OUTPUT_PREFIX, border_style);
+        let line = Line::from(vec![
+            Span::styled(TOOL_RESULT_PREFIX, border_style),
             Span::styled(indicator, indicator_style),
             Span::raw(" "),
-            Span::styled(label, self.theme.muted()),
-        ]));
+            Span::styled(label.to_owned(), self.theme.muted()),
+        ]);
+        for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
+            lines.push(wrapped);
+        }
     }
 
     fn push_tool_output_lines<'a>(
@@ -1581,6 +1600,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn push_tool_call_line_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_cmd =
+            "cd /Users/hakula/GitHub/oxide-code && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
+        chat.push_tool_call("$", long_cmd);
+        let text = chat.build_text(60);
+        assert!(
+            text.lines.len() > 1,
+            "long tool call label should wrap across multiple lines: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            assert!(
+                width <= 60,
+                "wrapped tool call line must fit the width budget (got {width}): {line:?}",
+            );
+        }
+    }
+
     // ── push_tool_result_line ──
 
     #[test]
@@ -1601,6 +1641,27 @@ mod tests {
         assert!(text.contains("✗"));
         assert!(text.contains("failed"));
         assert!(text.contains("error details"));
+    }
+
+    #[test]
+    fn push_tool_result_line_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_label =
+            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
+        chat.push_tool_result(long_label, "", false);
+        let text = chat.build_text(50);
+        assert!(
+            text.lines.len() > 1,
+            "long tool result label should wrap: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            assert!(
+                width <= 50,
+                "wrapped tool result line must fit width (got {width}): {line:?}",
+            );
+        }
     }
 
     // ── push_error ──
