@@ -58,29 +58,35 @@ The `message` entries wrap `Message` objects (already `Serialize` / `Deserialize
 
 ## Storage Location
 
-Sessions live in `$XDG_DATA_HOME/ox/sessions/`, falling back to `~/.local/share/ox/sessions/`. This follows XDG conventions — config in `XDG_CONFIG_HOME`, data in `XDG_DATA_HOME`.
+Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`, falling back to `~/.local/share/ox/sessions/{project}/`. `{project}` is a stable fingerprint of the working directory at session creation time — path separators and reserved characters become `-`, and very long paths are truncated with an inline FNV-1a 64-bit hash suffix so two long paths sharing a prefix cannot collide.
 
-File naming: `{session_id}.jsonl` where session ID is a UUID v4.
+File naming: `{unix_timestamp}-{session_id}.jsonl`. Session ID is still a UUID v4; the timestamp prefix gives chronological directory-order listings without fighting the `--list` mtime sort. Lookup by session ID is by suffix (`-{id}.jsonl`), so the prefix stays invisible to callers.
+
+Two migrations run once at store open time and are idempotent:
+
+1. **Flat → project-scoped** — any legacy `{uuid}.jsonl` file at the top of the sessions dir is moved into its project subdir based on the header's `cwd`, picking up the new timestamp prefix in the same pass.
+2. **Unprefixed → prefixed** — any remaining `{id}.jsonl` inside a project subdir is renamed to `{epoch}-{id}.jsonl` by reading the header.
 
 On Unix, session files are created with mode `0o600` (user-only read / write) so conversation logs — which may contain verbatim tool output and secrets from bash commands — are not world-readable on multi-user systems.
 
 ## Session Listing
 
-`ox --list` reads each session file's first line (header) and last ~4 KB (tail scan). The tail scan finds the **latest** `title` and `summary` entries independently, so a re-titled session (e.g., after AI-title generation) shows its current title without rewriting the file.
+`ox --list` walks the current project subdirectory by default; `--all` / `-a` widens the scope to every project. For each file we read the header (line 1), optionally an `Entry::Title` on line 2 (see tail-scan note), and scan the last ~4 KB for the latest re-appended `Title` and `Summary`.
 
 - **Header** → session ID, CWD, model, created timestamp, format version.
-- **Latest title** → display title + source (first-prompt, AI-generated, user-provided).
+- **Title** → head scan catches the first-prompt title; tail scan overrides with any later AI-generated / user-provided title. The newer `updated_at` wins.
 - **Latest summary** → message count + updated timestamp.
-- Sessions without a title line show `(untitled)` — happens when the session was started but no user prompt was recorded, or when an older format without titles is loaded.
+- Sessions without a title line show `(untitled)` — happens when the session was started but no user prompt was recorded.
 - Sessions without a summary line still list — they were interrupted before clean exit, so `Msgs` displays `-`.
+- Sort order is by file mtime (most recently active first), with session_id as a tiebreak. Resumed sessions therefore bubble back to the top of the list.
 
 ## Session Resume
 
-`ox -c` resumes the most recent session. `ox -c <prefix>` resumes by session ID prefix match.
+`ox -c` resumes the most recent session in the current project. `ox -c <prefix>` resumes by session ID prefix match. `--all` / `-a` extends either to every project; a specific session ID also resolves cross-project automatically via the `find_session_path` fallback.
 
 Resume reopens the **existing** session file in append mode. Messages are loaded into memory, sanitized (see below), and sent to the model as context. New messages are appended to the same file. The `parent_uuid` of the first new message references the UUID of the last loaded message, keeping the conversation chain intact.
 
-An advisory file lock (`flock` via the `fs2` crate) prevents two processes from writing to the same session simultaneously. The lock is held for the lifetime of the writer and released automatically on process exit or crash.
+An advisory file lock (`flock` via the `fs2` crate) prevents two processes from writing to the same session simultaneously. The lock is released automatically on process exit, so a stuck lock always indicates a live peer — `ox` retries the acquisition up to 5 times with a 1 s interval before giving up, so accidental back-to-back invocations succeed once the first has finished.
 
 The original session ID flows through to the `x-claude-code-session-id` API header.
 
@@ -123,21 +129,23 @@ This keeps the next API call safe without requiring the user to manually repair 
 
 ## Design Choices
 
-| Decision               | Choice                                       | Rationale                                                                                                              |
-| ---------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Storage format         | JSONL                                        | Proven, append-only, no dependencies                                                                                   |
-| Location               | XDG_DATA_HOME                                | Proper XDG separation from config                                                                                      |
-| File naming            | `{UUID}.jsonl`                               | Simple, globally unique, no path encoding                                                                              |
-| File permissions       | `0o600` on Unix                              | Session logs may contain secrets from bash output; restrict to owner on multi-user systems                             |
-| Entry discriminator    | Tagged union with `Unknown` catch-all        | Forward-compat: new variants land additively without breaking old readers                                              |
-| Message identity       | `uuid` per message + optional `parent_uuid`  | Foundation for future forking / partial replay; chain is verifiable                                                    |
-| Title lifecycle        | Separate `Title` entry, re-appendable        | Supports AI-generated titles and future `/title` command without rewriting the file                                    |
-| Summary                | `Summary` on exit (message_count only)       | Latest wins on tail scan; splitting title out kept summary as a pure exit marker                                       |
-| Format versioning      | `version` field on header (`default = 1`)    | Explicit version lets future bumps reject old readers cleanly                                                          |
-| Session resume         | Append to existing file                      | Same file is self-contained; matches claude-code / Codex                                                               |
-| Resume sanitization    | Drop unresolved `tool_use`s, inject sentinel | API rejects unresolved tool calls or consecutive user turns; sanitization keeps resume robust after mid-turn crashes   |
-| Listing                | Head + tail extraction                       | O(n_sessions) but avoids full-file parse                                                                               |
-| Concurrent access      | Advisory flock (`fs2`)                       | Prevents interleaved writes; released on crash. Small TOCTOU between read and lock in resume (acceptable for CLI tool) |
-| Write batching         | None (immediate flush)                       | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck                                      |
-| Project-scoped listing | Deferred                                     | Sessions all in one flat dir today; per-project subdirs tracked in `.claude/plans/session-follow-ups.md`               |
-| Compression            | Deferred                                     | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                             |
+| Decision            | Choice                                             | Rationale                                                                                                                                          |
+| ------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Storage format      | JSONL                                              | Proven, append-only, no dependencies                                                                                                               |
+| Location            | XDG_DATA_HOME                                      | Proper XDG separation from config                                                                                                                  |
+| Directory layout    | Per-project subdir (`sanitize(cwd)`)               | Listings stay scoped to the project you are working in; `--all` opts into a cross-project view                                                     |
+| File naming         | `{epoch}-{UUID}.jsonl`                             | Timestamp prefix keeps `ls` chronological; lookup by UUID suffix stays O(readdir)                                                                  |
+| Migration           | Idempotent flat → project → prefix sweep on open   | Users upgrading from the flat layout land on the final layout in one `ox` invocation without manual steps                                          |
+| File permissions    | `0o600` on Unix                                    | Session logs may contain secrets from bash output; restrict to owner on multi-user systems                                                         |
+| Entry discriminator | Tagged union with `Unknown` catch-all              | Forward-compat: new variants land additively without breaking old readers                                                                          |
+| Message identity    | `uuid` per message + optional `parent_uuid`        | Foundation for future forking / partial replay; chain is verifiable                                                                                |
+| Title lifecycle     | Separate `Title` entry, re-appendable              | Supports AI-generated titles and future `/title` command without rewriting the file                                                                |
+| Summary             | `Summary` on exit (message_count only)             | Latest wins on tail scan; splitting title out kept summary as a pure exit marker                                                                   |
+| Format versioning   | `version` field on header (`default = 1`)          | Explicit version lets future bumps reject old readers cleanly                                                                                      |
+| Session resume      | Append to existing file                            | Same file is self-contained; matches claude-code / Codex                                                                                           |
+| Resume sanitization | Drop unresolved `tool_use`s, inject sentinel       | API rejects unresolved tool calls or consecutive user turns; sanitization keeps resume robust after mid-turn crashes                               |
+| Listing scan        | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                        |
+| Listing sort key    | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                      |
+| Concurrent access   | Advisory flock with 5×1 s retry                    | Prevents interleaved writes; released on process exit, so retry handles accidental back-to-back invocations. Small TOCTOU between read and lock OK |
+| Write batching      | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md` #1)            |
+| Compression         | Deferred                                           | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                                                         |

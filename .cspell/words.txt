@@ -36,6 +36,7 @@ sysname
 SYSPROMPT
 thiserror
 throbber
+TOCTOU
 tokio
 tracing
 venv

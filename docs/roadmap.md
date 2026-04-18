@@ -61,11 +61,13 @@ The project direction is simple:
 
 ### Session Persistence
 
-- JSONL-based conversation logs — append-only, one entry per line, immediate flush. Discriminated entry types: `header` (session metadata), `message` (conversation), `summary` (for fast listing).
-- Session resume via `ox -c` (most recent) or `ox -c <id-prefix>` (specific session). Reopens the existing session file in append mode. Advisory file lock (`flock`) prevents concurrent access.
-- Session listing via `ox --list` / `ox -l` — reads first line (header) and tail (summary) of each `.jsonl` file. Shows session ID prefix, creation time (local), message count, and title (derived from first user prompt).
-- Storage at `$XDG_DATA_HOME/ox/sessions/` (`~/.local/share/ox/sessions/`). One `{uuid}.jsonl` file per session.
+- JSONL-based conversation logs — append-only, one entry per line, immediate flush. Forward-compatible entry types: `header` (session metadata with format `version`), `message` (UUID + `parent_uuid` chain for future forking / partial replay), `title` (re-appendable, with `source`: `first_prompt` / `ai_generated` / `user_provided`), `summary` (exit marker with message count), and an `Unknown` catch-all so new variants land additively.
+- Project-scoped storage at `$XDG_DATA_HOME/ox/sessions/{project}/`, where `{project}` is a sanitized fingerprint of the working directory. One-time migration on startup moves any flat-layout or unprefixed files into place. Files are `{unix_timestamp}-{uuid}.jsonl`.
+- Session resume via `ox -c` (most recent in current project) or `ox -c <id-prefix>` (specific session). `--all` / `-a` widens `--list` and `--continue` across every project; resume by session ID also falls back to other projects automatically. Reopens the existing session file in append mode. Advisory `flock` retries a few times on contention before giving up.
+- Session listing via `ox --list` / `ox -l` — reads the header (line 1) and line 2 for a first-prompt title, then scans the last 4 KB for a re-appended title or the exit summary. Sorted by file mtime (most recently active first) so resumed sessions bubble to the top. Shows session ID prefix, last-active time (local), message count, and title.
+- Resume sanitization on load: strips trailing `thinking`, drops unresolved `tool_use` blocks (crash between `tool_use` write and `tool_result` write), drops empty messages, and appends a continuation sentinel if the last message is a user turn of only tool results — keeps the transcript API-valid after mid-turn crashes.
 - Resumed conversation history displayed in the TUI chat view (user and assistant text messages; tool calls and thinking blocks omitted for readability).
+- On Unix, session files are created with mode `0o600` so verbatim tool output (which may include secrets) stays owner-only.
 - Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header.
 
 ## Current Focus
