@@ -547,7 +547,6 @@ mod tests {
         drop(original);
 
         let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
-        let first_new = Uuid::new_v4();
         resumed.record_message(&Message::user("follow up")).unwrap();
 
         // Read the file and find the new message's parent_uuid — should
@@ -580,8 +579,6 @@ mod tests {
             Some(msg_uuids[1].0),
             "post-resume message chains to pre-resume tail"
         );
-        // Silence warnings about unused local.
-        let _ = first_new;
     }
 
     #[test]
