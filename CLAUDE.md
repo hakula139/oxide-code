@@ -40,8 +40,9 @@ ox     # Start an interactive session
 │   └── sections.rs             # Static prompt section constants (intro, guidance, style)
 ├── session.rs                  # Session module root
 ├── session/
-│   ├── entry.rs                # JSONL entry types (Header, Message, Summary) and SessionInfo
+│   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
+│   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
