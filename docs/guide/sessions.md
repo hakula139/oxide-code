@@ -53,7 +53,9 @@ ox -c a1b2 -a      # prefix match across all projects
 
 When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID. An advisory file lock (with retry) prevents two processes from writing to the same session simultaneously; if the lock is genuinely held, `ox` retries a few times before giving up with a clear error.
 
-`ox` also sanitizes the loaded conversation before the next API call: if the previous run crashed between a tool call and its result, the unresolved tool call is dropped so the API accepts the resumed state.
+`ox` also sanitizes the loaded conversation before the next API call. If the previous run crashed mid-turn, unresolved tool calls are dropped, orphan tool results are dropped, and a continuation sentinel is injected if needed, so the API accepts the resumed state.
+
+If the session file ever fails to write (disk full, permission change, etc.), `ox` reports the first failure inline and keeps the conversation going in memory. Further write errors are logged but not re-surfaced, so a temporary disk hiccup does not flood the UI.
 
 If no sessions exist, or if the prefix matches zero or multiple sessions, `ox` prints an error and exits.
 

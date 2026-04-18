@@ -97,11 +97,16 @@ A session can crash between writing an assistant's `tool_use` block and the corr
 `SessionManager::resume` runs these sanitization passes on the loaded conversation:
 
 1. Strip trailing `thinking` / `redacted_thinking` blocks on the last assistant (API rejects trailing thinking).
-2. Drop `tool_use` blocks that have no matching `tool_result` anywhere in the log.
-3. Drop messages that became empty after (2).
-4. If the last remaining message is a user turn containing only `tool_result` blocks (crash between `tool_result` write and the next assistant response), append a synthetic assistant sentinel so role alternation stays valid for the next API call.
+2. Drop assistant `tool_use` blocks that have no matching `tool_result` anywhere in the log.
+3. Drop user `tool_result` blocks whose `tool_use_id` has no surviving assistant `tool_use`. Symmetric to (2); covers the case where the paired `tool_use` line was corrupted during load or dropped in (2), leaving an orphan `tool_result` the API would reject.
+4. Drop messages that became empty after (2) or (3).
+5. If the last remaining message is a user turn containing only `tool_result` blocks (crash between `tool_result` write and the next assistant response), append a synthetic assistant sentinel so role alternation stays valid for the next API call.
 
 This keeps the next API call safe without requiring the user to manually repair the transcript.
+
+### Write-error reporting
+
+Session I/O runs alongside the agent loop but must not abort it — the user's turn should not fail because the disk is full. `main::log_session_err` logs every failure at `warn!` and, the first time a write fails in a session, surfaces an `AgentEvent::Error` through the active sink so the TUI / REPL can show it inline. Subsequent failures within the same session warn-log only; the `write_failed` flag on `SessionManager` prevents repeated UI errors for the same root cause.
 
 ## Reference Implementations
 
@@ -129,23 +134,24 @@ This keeps the next API call safe without requiring the user to manually repair 
 
 ## Design Choices
 
-| Decision            | Choice                                             | Rationale                                                                                                                                          |
-| ------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Storage format      | JSONL                                              | Proven, append-only, no dependencies                                                                                                               |
-| Location            | XDG_DATA_HOME                                      | Proper XDG separation from config                                                                                                                  |
-| Directory layout    | Per-project subdir (`sanitize(cwd)`)               | Listings stay scoped to the project you are working in; `--all` opts into a cross-project view                                                     |
-| File naming         | `{epoch}-{UUID}.jsonl`                             | Timestamp prefix keeps `ls` chronological; lookup by UUID suffix stays O(readdir)                                                                  |
-| Migration           | Idempotent flat → project → prefix sweep on open   | Users upgrading from the flat layout land on the final layout in one `ox` invocation without manual steps                                          |
-| File permissions    | `0o600` on Unix                                    | Session logs may contain secrets from bash output; restrict to owner on multi-user systems                                                         |
-| Entry discriminator | Tagged union with `Unknown` catch-all              | Forward-compat: new variants land additively without breaking old readers                                                                          |
-| Message identity    | `uuid` per message + optional `parent_uuid`        | Foundation for future forking / partial replay; chain is verifiable                                                                                |
-| Title lifecycle     | Separate `Title` entry, re-appendable              | Supports AI-generated titles and future `/title` command without rewriting the file                                                                |
-| Summary             | `Summary` on exit (message_count only)             | Latest wins on tail scan; splitting title out kept summary as a pure exit marker                                                                   |
-| Format versioning   | `version` field on header (`default = 1`)          | Explicit version lets future bumps reject old readers cleanly                                                                                      |
-| Session resume      | Append to existing file                            | Same file is self-contained; matches claude-code / Codex                                                                                           |
-| Resume sanitization | Drop unresolved `tool_use`s, inject sentinel       | API rejects unresolved tool calls or consecutive user turns; sanitization keeps resume robust after mid-turn crashes                               |
-| Listing scan        | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                        |
-| Listing sort key    | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                      |
-| Concurrent access   | Advisory flock with 5×1 s retry                    | Prevents interleaved writes; released on process exit, so retry handles accidental back-to-back invocations. Small TOCTOU between read and lock OK |
-| Write batching      | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md` #1)            |
-| Compression         | Deferred                                           | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                                                         |
+| Decision              | Choice                                             | Rationale                                                                                                                                           |
+| --------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Storage format        | JSONL                                              | Proven, append-only, no dependencies                                                                                                                |
+| Location              | XDG_DATA_HOME                                      | Proper XDG separation from config                                                                                                                   |
+| Directory layout      | Per-project subdir (`sanitize(cwd)`)               | Listings stay scoped to the project you are working in; `--all` opts into a cross-project view                                                      |
+| File naming           | `{epoch}-{UUID}.jsonl`                             | Timestamp prefix keeps `ls` chronological; lookup by UUID suffix stays O(readdir)                                                                   |
+| Migration             | Idempotent flat → project → prefix sweep on open   | Users upgrading from the flat layout land on the final layout in one `ox` invocation without manual steps                                           |
+| File permissions      | `0o600` on Unix                                    | Session logs may contain secrets from bash output; restrict to owner on multi-user systems                                                          |
+| Entry discriminator   | Tagged union with `Unknown` catch-all              | Forward-compat: new variants land additively without breaking old readers                                                                           |
+| Message identity      | `uuid` per message + optional `parent_uuid`        | Foundation for future forking / partial replay; chain is verifiable                                                                                 |
+| Title lifecycle       | Separate `Title` entry, re-appendable              | Supports AI-generated titles and future `/title` command without rewriting the file                                                                 |
+| Summary               | `Summary` on exit (message_count only)             | Latest wins on tail scan; splitting title out kept summary as a pure exit marker                                                                    |
+| Format versioning     | `version` field on header (`default = 1`)          | Explicit version lets future bumps reject old readers cleanly                                                                                       |
+| Session resume        | Append to existing file                            | Same file is self-contained; matches claude-code / Codex                                                                                            |
+| Resume sanitization   | Symmetric filter + sentinel                        | Drop unresolved `tool_use`s AND orphan `tool_result`s, then inject sentinel if needed; covers both halves of a tool turn lost to crashes/corruption |
+| Write-error surfacing | First failure only (via `AgentEvent::Error`)       | Balance visibility (user knows persistence broke) against spam (no re-report on every write) after the initial notification                         |
+| Listing scan          | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                         |
+| Listing sort key      | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                       |
+| Concurrent access     | Advisory flock with 5×1 s retry                    | Prevents interleaved writes; released on process exit, so retry handles accidental back-to-back invocations. Small TOCTOU between read and lock OK  |
+| Write batching        | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md` #1)             |
+| Compression           | Deferred                                           | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                                                          |
