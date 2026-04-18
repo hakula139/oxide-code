@@ -135,10 +135,11 @@ impl AgentSink for StdioSink {
                 }
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
+                let icon = tool_call_icon(&name);
                 if let Some(title) = tool_call_title(&name, &input) {
-                    eprintln!("⟡ {name}: {title}");
+                    eprintln!("{icon} {name}: {title}");
                 } else {
-                    eprintln!("⟡ {name}");
+                    eprintln!("{icon} {name}");
                 }
             }
             AgentEvent::ToolCallEnd { title, content, .. } => {

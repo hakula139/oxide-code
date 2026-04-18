@@ -590,7 +590,10 @@ async fn agent_turn(
         messages.push(tool_result_msg);
     }
 
-    bail!("exceeded {MAX_TOOL_ROUNDS} tool rounds")
+    bail!(
+        "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
+         — this is a safety cap against runaway loops. Ask again with a narrower request."
+    )
 }
 
 // ── Stream Processing ──

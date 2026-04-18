@@ -49,9 +49,11 @@ impl Config {
         let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
         } else {
-            let token = oauth::load_token()
-                .await
-                .context("ANTHROPIC_API_KEY not set and Claude Code credentials not found")?;
+            let token = oauth::load_token().await.context(
+                "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
+                 ox.toml, or sign in with Claude Code (checks macOS Keychain and \
+                 ~/.claude/.credentials.json)",
+            )?;
             Auth::OAuth(token)
         };
 
