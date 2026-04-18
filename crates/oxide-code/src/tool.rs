@@ -54,7 +54,7 @@ pub(crate) struct ToolMetadata {
     /// Process exit code, present only for the bash tool.
     #[expect(
         dead_code,
-        reason = "set by bash tool but not yet surfaced in TUI display"
+        reason = "recorded by the bash tool but unused by the current TUI tool-result renderer"
     )]
     pub(crate) exit_code: Option<i32>,
 }

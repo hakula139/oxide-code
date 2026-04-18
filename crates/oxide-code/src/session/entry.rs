@@ -108,7 +108,10 @@ pub(crate) struct TitleInfo {
 #[derive(Debug, Clone)]
 pub(crate) struct ExitInfo {
     pub(crate) message_count: u32,
-    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
+    #[expect(
+        dead_code,
+        reason = "parsed from the summary entry but unused by list output today"
+    )]
     pub(crate) updated_at: OffsetDateTime,
 }
 
@@ -118,7 +121,10 @@ pub(crate) struct ExitInfo {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
-    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
+    #[expect(
+        dead_code,
+        reason = "read from header for completeness but not consumed by list output"
+    )]
     pub(crate) cwd: String,
     #[expect(
         dead_code,
