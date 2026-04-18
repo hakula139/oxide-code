@@ -240,14 +240,24 @@ fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 
 // ── Session Info Extraction ──
 
-/// Read session info from a JSONL file by parsing the first line (header)
-/// and scanning the tail for the latest [`Entry::Title`] and
-/// [`Entry::Summary`].
+/// Read session info from a JSONL file.
+///
+/// Combines a head scan (line 1 header + line 2 optional
+/// [`Entry::Title`] with source [`TitleSource::FirstPrompt`]) with a
+/// tail scan for the latest re-appended [`Entry::Title`] and
+/// [`Entry::Summary`]. The first-prompt title lives at line 2 of the
+/// file and can sit beyond [`TAIL_BUF_SIZE`] once the session grows,
+/// so a pure tail scan would miss it.
+///
+/// When both a head and a tail title are present, the one with the
+/// newer `updated_at` wins — this lets AI-generated titles (appended
+/// later, landing in the tail window) supersede the first-prompt title.
 fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let mut reader = BufReader::new(&file);
 
     let mut first_line = String::new();
-    BufReader::new(&file).read_line(&mut first_line)?;
+    reader.read_line(&mut first_line)?;
     let header: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
     let Entry::Header {
         session_id,
@@ -260,10 +270,24 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         bail!("first line is not a header");
     };
 
+    let mut second_line = String::new();
+    let head_title = if reader.read_line(&mut second_line)? > 0 {
+        parse_title(second_line.trim())
+    } else {
+        None
+    };
+    drop(reader);
+
     // BufReader's internal buffering may have advanced the underlying file
-    // position past the first line. read_tail_info seeks explicitly to
-    // the tail region.
-    let (title, exit) = read_tail_info(&mut file)?;
+    // position past line 2. read_tail_info seeks explicitly to the tail
+    // region, so the post-drop position does not matter.
+    let (tail_title, exit) = read_tail_info(&mut file)?;
+
+    let title = [head_title, tail_title]
+        .into_iter()
+        .flatten()
+        .max_by_key(|t| t.updated_at);
+
     Ok(SessionInfo {
         session_id,
         cwd,
@@ -274,10 +298,21 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     })
 }
 
-/// Read the last `TAIL_BUF_SIZE` bytes of a file and scan for the latest
-/// [`Entry::Title`] and [`Entry::Summary`] entries. Each is the last
-/// occurrence of its type in the tail window — Title may be re-appended
-/// (e.g., by an AI-title feature) and the latest supersedes earlier ones.
+/// Parse a JSONL line into a [`TitleInfo`], returning `None` for any
+/// line that is not a well-formed [`Entry::Title`].
+fn parse_title(line: &str) -> Option<TitleInfo> {
+    match serde_json::from_str(line).ok()? {
+        Entry::Title {
+            title, updated_at, ..
+        } => Some(TitleInfo { title, updated_at }),
+        _ => None,
+    }
+}
+
+/// Read the last [`TAIL_BUF_SIZE`] bytes of a file and scan backward
+/// for the latest [`Entry::Title`] and [`Entry::Summary`] entries in
+/// that window. Title may be re-appended (e.g., by an AI-title
+/// feature); the latest supersedes earlier ones.
 fn read_tail_info(file: &mut File) -> Result<(Option<TitleInfo>, Option<ExitInfo>)> {
     let len = file.metadata()?.len();
     let offset = len.saturating_sub(TAIL_BUF_SIZE);
@@ -292,28 +327,22 @@ fn read_tail_info(file: &mut File) -> Result<(Option<TitleInfo>, Option<ExitInfo
         if title.is_some() && exit.is_some() {
             break;
         }
-        match serde_json::from_str(line) {
-            Ok(Entry::Title {
-                title: t,
-                source,
-                updated_at,
-            }) if title.is_none() => {
-                title = Some(TitleInfo {
-                    title: t,
-                    source,
-                    updated_at,
-                });
-            }
-            Ok(Entry::Summary {
+        if title.is_none()
+            && let Some(t) = parse_title(line)
+        {
+            title = Some(t);
+            continue;
+        }
+        if exit.is_none()
+            && let Ok(Entry::Summary {
                 message_count,
                 updated_at,
-            }) if exit.is_none() => {
-                exit = Some(ExitInfo {
-                    message_count,
-                    updated_at,
-                });
-            }
-            _ => {}
+            }) = serde_json::from_str(line)
+        {
+            exit = Some(ExitInfo {
+                message_count,
+                updated_at,
+            });
         }
     }
 
@@ -625,6 +654,38 @@ mod tests {
         let sessions = store.list().unwrap();
         let title = sessions[0].title.as_ref().unwrap();
         assert_eq!(title.title, "AI generated");
+    }
+
+    #[test]
+    fn list_finds_first_prompt_title_beyond_tail_window() {
+        // The first-prompt title is written at line 2 and never re-appended.
+        // A pure tail scan misses it once the file exceeds TAIL_BUF_SIZE.
+        // Verify the head scan catches it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("long")).unwrap();
+        writer
+            .append(&Entry::Title {
+                title: "first prompt".to_owned(),
+                source: TitleSource::FirstPrompt,
+                updated_at: datetime!(2026-04-16 12:00:00 UTC),
+            })
+            .unwrap();
+        let padding = "x".repeat(200);
+        for _ in 0..30 {
+            writer
+                .append(&sample_message_entry(Uuid::new_v4(), &padding))
+                .unwrap();
+        }
+
+        let path = dir.path().join("long.jsonl");
+        assert!(
+            path.metadata().unwrap().len() > TAIL_BUF_SIZE,
+            "test file should exceed the tail window"
+        );
+        let sessions = store.list().unwrap();
+        let title = sessions[0].title.as_ref().unwrap();
+        assert_eq!(title.title, "first prompt");
     }
 
     #[test]

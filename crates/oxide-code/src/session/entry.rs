@@ -92,12 +92,15 @@ pub(crate) enum TitleSource {
 }
 
 /// Title fields extracted from the latest [`Entry::Title`] in a session.
+///
+/// `source` from [`Entry::Title`] is preserved on disk but not projected
+/// here — consumers only need the text today. The AI-title feature will
+/// reintroduce it together with a display annotation.
 #[derive(Debug, Clone)]
 pub(crate) struct TitleInfo {
     pub(crate) title: String,
-    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
-    pub(crate) source: TitleSource,
-    #[expect(dead_code, reason = "populated during listing but not yet displayed")]
+    /// Used by the merge between head and tail scan to pick the latest
+    /// title when a session has more than one [`Entry::Title`].
     pub(crate) updated_at: OffsetDateTime,
 }
 
