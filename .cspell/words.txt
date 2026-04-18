@@ -38,6 +38,7 @@ SYSPROMPT
 thiserror
 throbber
 tildified
+tildify
 TOCTOU
 tokio
 tracing
