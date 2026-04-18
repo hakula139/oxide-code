@@ -216,6 +216,46 @@ async fn record_session_message(
     log_session_err(r, &mut s, sink);
 }
 
+/// Wait for any shutdown signal — SIGINT (portable), SIGTERM, or
+/// SIGHUP (Unix only). Returns when the first signal arrives.
+///
+/// Installs the handlers lazily on first call. Callers that embed this
+/// in a `tokio::select!` let the arbiter cut off the other branch and
+/// run cleanup (session `finish()`, terminal restore, etc.) before the
+/// process exits. Crucially, `tokio::signal::ctrl_c` overrides tokio's
+/// default "terminate on SIGINT" behavior — without this handler our
+/// bare REPL / headless modes would exit without writing a Summary.
+///
+/// In the TUI, SIGINT from Ctrl+C is already intercepted by crossterm's
+/// raw-mode input; this handler catches it only when raw mode is not
+/// engaged (e.g., during setup / teardown) and still catches SIGTERM /
+/// SIGHUP regardless of mode.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let ctrl_c = tokio::signal::ctrl_c();
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            _ = ctrl_c.await;
+            return;
+        };
+        let Ok(mut sighup) = signal(SignalKind::hangup()) else {
+            _ = ctrl_c.await;
+            return;
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+            _ = sighup.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 // ── TUI Mode ──
 
 async fn run_tui(
@@ -270,7 +310,16 @@ async fn run_tui(
     };
 
     // Run the TUI on the main thread (it needs terminal access).
-    let result = app.run(&mut terminal).await;
+    // Race against shutdown signals (SIGTERM / SIGHUP — raw mode eats
+    // SIGINT before it reaches us) so external signals trigger the
+    // same teardown path as a normal quit.
+    let result = tokio::select! {
+        result = app.run(&mut terminal) => result,
+        () = shutdown_signal() => {
+            debug!("TUI received shutdown signal, tearing down");
+            Ok(())
+        }
+    };
 
     tui::terminal::restore();
 
@@ -352,8 +401,18 @@ async fn bare_repl(
             eprint!("> ");
             std::io::stderr().flush()?;
 
-            let Some(line) = lines.next_line().await? else {
-                break; // EOF
+            // Race stdin input against shutdown signals so Ctrl+C (SIGINT),
+            // SIGTERM, or SIGHUP break the loop cleanly and fall through
+            // to `finish()` below.
+            let line = tokio::select! {
+                line = lines.next_line() => line?,
+                () = shutdown_signal() => {
+                    eprintln!();
+                    None
+                }
+            };
+            let Some(line) = line else {
+                break; // EOF or signal
             };
 
             let input = line.trim().to_owned();
@@ -365,7 +424,18 @@ async fn bare_repl(
             record_session_message(&session, &user_msg, Some(&sink)).await;
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
-            agent_turn(client, tools, &mut messages, &prompt, &sink, &session).await?;
+            // Allow the in-flight turn to be interrupted too; the
+            // session state that's already been written persists and
+            // resume-side sanitization heals any dangling tool_use.
+            let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+            let turn_result = tokio::select! {
+                r = turn => r,
+                () = shutdown_signal() => {
+                    eprintln!();
+                    break;
+                }
+            };
+            turn_result?;
             _ = sink.send(AgentEvent::TurnComplete);
         }
         Ok(())
@@ -397,7 +467,17 @@ async fn headless(
     record_session_message(&session, &user_msg, Some(&sink)).await;
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
-    let result = agent_turn(client, tools, &mut messages, &prompt, &sink, &session).await;
+    // Race the single turn against shutdown signals so the recorded
+    // user message still gets a Summary entry on Ctrl+C / SIGTERM /
+    // SIGHUP; resume-side sanitization heals any dangling state.
+    let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+    let result = tokio::select! {
+        r = turn => r,
+        () = shutdown_signal() => {
+            eprintln!();
+            Ok(())
+        }
+    };
     let mut session = session.into_inner();
     let r = session.finish();
     log_session_err(r, &mut session, Some(&sink));
