@@ -395,6 +395,10 @@ async fn bare_repl(
     // so the lock is uncontended; the Mutex just matches agent_turn's
     // shared-state signature.
     let session = Mutex::new(session);
+    // Tracks whether we broke out of the loop due to a shutdown signal
+    // (as opposed to EOF / error). See the post-`finish()` exit note
+    // below for why we care.
+    let mut shutdown_fired = false;
 
     let result: Result<()> = async {
         loop {
@@ -408,6 +412,7 @@ async fn bare_repl(
                 line = lines.next_line() => line?,
                 () = shutdown_signal() => {
                     eprintln!();
+                    shutdown_fired = true;
                     None
                 }
             };
@@ -432,6 +437,7 @@ async fn bare_repl(
                 r = turn => r,
                 () = shutdown_signal() => {
                     eprintln!();
+                    shutdown_fired = true;
                     break;
                 }
             };
@@ -445,6 +451,18 @@ async fn bare_repl(
     let mut session = session.into_inner();
     let r = session.finish();
     log_session_err(r, &mut session, Some(&sink));
+
+    // `tokio::io::stdin()` spawns a blocking thread that cannot be
+    // cancelled (see tokio::io::stdin docs), so on a signal-induced
+    // exit the runtime Drop would hang waiting for that thread until
+    // the user hits Enter. Our explicit cleanup (`finish()`) has
+    // already run, so skip the runtime teardown entirely via
+    // `std::process::exit(0)`. Only do this on signal exit —
+    // normal EOF / error paths should return through `main` so the
+    // exit code reflects the result.
+    if shutdown_fired {
+        std::process::exit(0);
+    }
     result
 }
 
@@ -470,17 +488,27 @@ async fn headless(
     // Race the single turn against shutdown signals so the recorded
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
+    let mut shutdown_fired = false;
     let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
     let result = tokio::select! {
         r = turn => r,
         () = shutdown_signal() => {
             eprintln!();
+            shutdown_fired = true;
             Ok(())
         }
     };
     let mut session = session.into_inner();
     let r = session.finish();
     log_session_err(r, &mut session, Some(&sink));
+
+    // Mirror `bare_repl`: on signal exit, skip runtime Drop so any
+    // outstanding HTTP / reqwest connection pool doesn't hold the
+    // process open. Headless does not touch `tokio::io::stdin`, so
+    // this is defensive rather than strictly necessary.
+    if shutdown_fired {
+        std::process::exit(0);
+    }
     result?;
     println!();
     Ok(())
