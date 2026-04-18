@@ -89,48 +89,78 @@ impl Environment {
 
 // ── Model Metadata ──
 
-/// Map a model ID to its marketing name.
+/// Metadata for a known Claude model ID substring.
 ///
-/// Arms are ordered most-specific-first because `contains()` would match
-/// e.g. `"claude-opus-4"` against `"claude-opus-4-6"`. When adding new
-/// models, keep more specific prefixes above less specific ones.
+/// Match order is significant: entries are scanned top-to-bottom and the
+/// first substring match wins. Keep more-specific prefixes (e.g.
+/// `claude-opus-4-6`) above their less-specific parents (`claude-opus-4`)
+/// so `claude-opus-4-6` never matches the wrong arm.
+struct ModelInfo {
+    id_substr: &'static str,
+    marketing: &'static str,
+    cutoff: Option<&'static str>,
+}
+
+const MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id_substr: "claude-opus-4-6",
+        marketing: "Claude Opus 4.6",
+        cutoff: Some("May 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-sonnet-4-6",
+        marketing: "Claude Sonnet 4.6",
+        cutoff: Some("August 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-opus-4-5",
+        marketing: "Claude Opus 4.5",
+        cutoff: Some("May 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-sonnet-4-5",
+        marketing: "Claude Sonnet 4.5",
+        cutoff: Some("January 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-haiku-4-5",
+        marketing: "Claude Haiku 4.5",
+        cutoff: Some("February 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-opus-4-1",
+        marketing: "Claude Opus 4.1",
+        cutoff: Some("January 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-opus-4",
+        marketing: "Claude Opus 4",
+        cutoff: Some("January 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-sonnet-4",
+        marketing: "Claude Sonnet 4",
+        cutoff: Some("January 2025"),
+    },
+    ModelInfo {
+        id_substr: "claude-haiku-4",
+        marketing: "Claude Haiku 4",
+        cutoff: Some("February 2025"),
+    },
+];
+
+fn lookup_model(model: &str) -> Option<&'static ModelInfo> {
+    MODELS.iter().find(|m| model.contains(m.id_substr))
+}
+
+/// Map a model ID to its marketing name.
 pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
-    if model.contains("claude-opus-4-6") {
-        Some("Claude Opus 4.6")
-    } else if model.contains("claude-sonnet-4-6") {
-        Some("Claude Sonnet 4.6")
-    } else if model.contains("claude-opus-4-5") {
-        Some("Claude Opus 4.5")
-    } else if model.contains("claude-sonnet-4-5") {
-        Some("Claude Sonnet 4.5")
-    } else if model.contains("claude-haiku-4-5") {
-        Some("Claude Haiku 4.5")
-    } else if model.contains("claude-opus-4-1") {
-        Some("Claude Opus 4.1")
-    } else if model.contains("claude-opus-4") {
-        Some("Claude Opus 4")
-    } else if model.contains("claude-sonnet-4") {
-        Some("Claude Sonnet 4")
-    } else if model.contains("claude-haiku-4") {
-        Some("Claude Haiku 4")
-    } else {
-        None
-    }
+    lookup_model(model).map(|m| m.marketing)
 }
 
 /// Map a model ID to its knowledge cutoff date.
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
-    if model.contains("claude-sonnet-4-6") {
-        Some("August 2025")
-    } else if model.contains("claude-opus-4-6") || model.contains("claude-opus-4-5") {
-        Some("May 2025")
-    } else if model.contains("claude-haiku-4") {
-        Some("February 2025")
-    } else if model.contains("claude-opus-4") || model.contains("claude-sonnet-4") {
-        Some("January 2025")
-    } else {
-        None
-    }
+    lookup_model(model).and_then(|m| m.cutoff)
 }
 
 // ── Platform Detection ──
