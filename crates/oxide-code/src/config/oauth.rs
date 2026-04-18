@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+
+use crate::util::lock;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -17,8 +19,9 @@ const OAUTH_SCOPES: &[&str] = &[
 const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
-const LOCK_MAX_RETRIES: u32 = 5;
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// Directory mtime threshold above which an existing lock is treated
+/// as stale and removed before re-attempting acquisition. Guards
+/// against a peer that crashed without cleaning up its lock dir.
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
@@ -306,36 +309,36 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire a directory-based lock, compatible with `proper-lockfile` (used by
-/// Claude Code). Retries with fixed interval and breaks stale locks.
+/// Acquire a directory-based lock, compatible with `proper-lockfile`
+/// (used by Claude Code). Retries contended locks via the shared
+/// [`lock::retry_acquire`] helper and breaks stale lock directories
+/// on each attempt.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
-    for attempt in 0..=LOCK_MAX_RETRIES {
-        match std::fs::create_dir(path) {
-            Ok(()) => {
-                return Ok(LockGuard {
-                    path: path.to_owned(),
-                });
-            }
+    lock::retry_acquire(
+        || match std::fs::create_dir(path) {
+            Ok(()) => Ok(Some(LockGuard {
+                path: path.to_owned(),
+            })),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale_lock(path) {
                     _ = std::fs::remove_dir_all(path);
-                    continue;
                 }
-                if attempt == LOCK_MAX_RETRIES {
-                    bail!(
-                        "failed to acquire credentials lock after {LOCK_MAX_RETRIES} retries \
-                         — another process may be refreshing"
-                    );
-                }
-                tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
+                Ok(None)
             }
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("failed to create lock at {}", path.display()));
-            }
-        }
-    }
-    unreachable!()
+            Err(e) => Err(anyhow::Error::new(e)
+                .context(format!("failed to create lock at {}", path.display()))),
+        },
+        lock::MAX_RETRIES,
+        lock::RETRY_INTERVAL,
+        || {
+            anyhow!(
+                "failed to acquire credentials lock after {} retries \
+                 — another process may be refreshing",
+                lock::MAX_RETRIES,
+            )
+        },
+    )
+    .await
 }
 
 fn is_stale_lock(path: &Path) -> bool {
