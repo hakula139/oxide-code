@@ -532,15 +532,17 @@ async fn stream_sse(
         buf.extend_from_slice(&chunk);
 
         loop {
-            if buf.len() > MAX_SSE_FRAME_BYTES {
-                bail!(
-                    "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without \
-                     a terminating blank line; upstream may be misbehaving"
-                );
-            }
-
             // SSE frames are terminated by a blank line (\n\n).
             let Some(end) = buf.windows(2).position(|w| w == b"\n\n") else {
+                // Only flag an oversized buffer when we cannot find a
+                // terminator — a single arriving chunk carrying many
+                // complete frames is fine regardless of total size.
+                if buf.len() > MAX_SSE_FRAME_BYTES {
+                    bail!(
+                        "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without \
+                         a terminating blank line; upstream may be misbehaving"
+                    );
+                }
                 break;
             };
             let frame_bytes: Vec<u8> = buf.drain(..end + 2).take(end).collect();

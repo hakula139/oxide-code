@@ -51,9 +51,7 @@ impl SessionStore {
         )
         .context("cannot determine session storage directory")?;
 
-        fs::create_dir_all(&sessions_dir)
-            .with_context(|| format!("failed to create {}", sessions_dir.display()))?;
-        enforce_private_dir(&sessions_dir);
+        create_private_dir_all(&sessions_dir)?;
 
         // Migrations run oldest-first so each pass operates on the
         // layout the previous one produced.
@@ -68,9 +66,7 @@ impl SessionStore {
             }
         };
         let project_dir = sessions_dir.join(&project_name);
-        fs::create_dir_all(&project_dir)
-            .with_context(|| format!("failed to create {}", project_dir.display()))?;
-        enforce_private_dir(&project_dir);
+        create_private_dir_all(&project_dir)?;
 
         debug!(
             "session store at {} (project: {project_name})",
@@ -336,24 +332,38 @@ impl SessionStore {
     }
 }
 
-/// Reassert owner-only (`0o700`) permissions on a session directory.
+/// Create `path` (and any missing parents) with owner-only (`0o700`)
+/// permissions on Unix.
 ///
-/// Session files themselves are created `0o600`, but without this the
-/// parent directory takes the process umask (usually `0o755`), leaving
-/// session IDs, project names, and mtimes visible to every local user.
-/// Failures are logged at debug level; we have no fallback but shouldn't
-/// block session startup over it.
-#[cfg(unix)]
-fn enforce_private_dir(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-        debug!("failed to tighten {} to 0o700: {e}", path.display());
+/// Session files themselves are created `0o600`, but without tight
+/// parent perms the session IDs, project names, and mtimes would be
+/// visible to every local user via `ls`. Passing the mode to
+/// `DirBuilder` means the *first* syscall produces a private directory,
+/// closing the TOCTOU window a post-create `chmod` would leave open.
+fn create_private_dir_all(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
-}
+    builder
+        .create(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
 
-#[cfg(not(unix))]
-fn enforce_private_dir(_path: &Path) {}
+    // `recursive(true)` skips the mode on already-existing directories,
+    // so tighten them post-hoc. Failures are logged; startup should not
+    // block on a perms tweak (e.g., NFS without POSIX perms).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
+            debug!("failed to tighten {} to 0o700: {e}", path.display());
+        }
+    }
+    Ok(())
+}
 
 /// Reject session IDs that could escape the project subdirectory or
 /// trip up platform-specific filename handling.

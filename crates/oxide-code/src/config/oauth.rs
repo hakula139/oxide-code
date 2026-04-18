@@ -164,9 +164,11 @@ fn keychain_account() -> Option<String> {
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    // Reassert permissions before parsing so a file that is later rejected
+    // (corrupt JSON, etc.) still gets tightened — the user will retry.
+    enforce_private_mode(path);
     let parsed =
         serde_json::from_str(&content).context("failed to parse Claude Code credentials")?;
-    enforce_private_mode(path);
     Ok(parsed)
 }
 

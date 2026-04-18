@@ -691,13 +691,16 @@ async fn stream_response(
                 if let BlockAccumulator::Text(text) = &acc
                     && !text.is_empty()
                 {
-                    sink.send(AgentEvent::StreamToken(text.clone()))?;
+                    // Display-only event. Drop on a full channel rather
+                    // than canceling the turn — the full content is
+                    // accumulating in `acc` and will still be recorded.
+                    _ = sink.send(AgentEvent::StreamToken(text.clone()));
                 }
                 blocks[index] = Some(acc);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, sink)?;
+                    apply_delta(block, delta, sink);
                 }
             }
             StreamEvent::Error { error } => {
@@ -742,11 +745,14 @@ fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccum
     }
 }
 
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) -> Result<()> {
+fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            sink.send(AgentEvent::StreamToken(text))?;
+            // Display-only delta. Authoritative content lives in `buf`;
+            // dropping the token on a full TUI channel costs display
+            // fidelity but not data integrity.
+            _ = sink.send(AgentEvent::StreamToken(text));
         }
         (
             BlockAccumulator::ToolUse { json_buf, .. }
@@ -762,7 +768,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             },
         ) => {
             thinking.push_str(&thinking_delta);
-            sink.send(AgentEvent::ThinkingToken(thinking_delta))?;
+            _ = sink.send(AgentEvent::ThinkingToken(thinking_delta));
         }
         (
             BlockAccumulator::Thinking { signature, .. },
@@ -776,5 +782,4 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             debug!(?block, ?delta, "ignoring unhandled delta");
         }
     }
-    Ok(())
 }

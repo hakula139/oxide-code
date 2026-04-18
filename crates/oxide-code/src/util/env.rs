@@ -1,3 +1,5 @@
+// ── Readers ──
+
 /// Read an environment variable, returning `None` when unset *or* empty.
 ///
 /// Matches the common "unset or empty means absent" interpretation used

@@ -106,6 +106,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         }
     };
 
+    #[cfg(unix)]
     let pgid = child.id();
 
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
@@ -124,7 +125,6 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             // that backgrounded themselves.
             #[cfg(unix)]
             kill_process_group(pgid).await;
-            let _ = pgid; // silence unused-var on non-Unix
             return ToolOutput {
                 content: format!("Command timed out after {}ms", timeout.as_millis()),
                 is_error: true,
@@ -180,15 +180,19 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
 
 /// Best-effort SIGKILL of an entire process group on Unix.
 ///
-/// Shelled out to `/bin/kill` because the `unsafe_code = "forbid"` lint blocks
-/// a direct `libc::killpg`, and we don't want to pull in `nix` just for this
-/// one call. Ignoring errors is fine — if `kill` is missing or the group has
-/// already exited, the best-effort cleanup is already done.
+/// Shelled out to an absolute-path `/bin/kill` because the `unsafe_code =
+/// "forbid"` lint blocks a direct `libc::killpg`, and we don't want to pull
+/// in `nix` just for this one call. The hardcoded path avoids PATH-based
+/// resolution so a user-local `kill` binary on `PATH` cannot be invoked on
+/// every timeout. POSIX places `kill` at `/bin/kill` on macOS and every
+/// Linux distro we target. Ignoring errors is fine — if `/bin/kill` is
+/// missing or the group has already exited, the best-effort cleanup is
+/// already done.
 #[cfg(unix)]
 async fn kill_process_group(pgid: Option<u32>) {
     let Some(pgid) = pgid else { return };
 
-    let _ = Command::new("kill")
+    let _ = Command::new("/bin/kill")
         .arg("-KILL")
         .arg(format!("-{pgid}"))
         .stdin(std::process::Stdio::null())
