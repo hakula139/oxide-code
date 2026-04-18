@@ -155,6 +155,10 @@ where
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
+                // Tight list items emit `Text` directly without paragraph
+                // wrappers, so `end_paragraph` never runs — wrap here to
+                // respect the width budget before the indent is popped.
+                self.wrap_last_line();
                 self.indent_stack.pop();
                 self.pending_marker = None;
             }
@@ -499,8 +503,9 @@ where
     /// Start a new output line with indent prefixes and any pending list marker.
     ///
     /// When `self.width` is set, lines that exceed the width budget are
-    /// word-wrapped with continuation lines indented to the current
-    /// `indent_stack` depth (using spaces, not markers).
+    /// word-wrapped with continuation lines prefixed by the current
+    /// `indent_stack` (using continuation forms, not markers — so
+    /// blockquote `> ` repeats while list `- ` becomes spaces).
     fn push_line(&mut self, line: Line<'static>) {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -525,24 +530,40 @@ where
 
         spans.extend(line.spans);
 
-        if self.width > 0 {
-            let indent = self.continuation_indent_width();
-            for wrapped in wrap_line(Line::from(spans), self.width, indent, None) {
-                self.lines.push(wrapped);
-            }
+        self.wrap_and_push(Line::from(spans));
+    }
+
+    /// Wrap `line` against the current width budget (using the indent
+    /// stack as the continuation prefix) and append the results.
+    fn wrap_and_push(&mut self, line: Line<'static>) {
+        if self.width == 0 {
+            self.lines.push(line);
+            return;
+        }
+        let cont_prefix = self.continuation_indent_spans();
+        let indent = cont_prefix
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let prefix = if cont_prefix.is_empty() {
+            None
         } else {
-            self.lines.push(Line::from(spans));
+            Some(cont_prefix.as_slice())
+        };
+        for wrapped in wrap_line(line, self.width, indent, prefix) {
+            self.lines.push(wrapped);
         }
     }
 
-    /// Total display width of the continuation indent (all `indent_stack`
-    /// entries, using continuation widths rather than markers).
-    fn continuation_indent_width(&self) -> usize {
+    /// Flatten the `indent_stack` into a single span vector, used as the
+    /// continuation prefix when wrapping. Entries store the continuation
+    /// form (spaces for lists, `> ` for blockquotes) so that wrapped
+    /// lines repeat blockquote markers without duplicating list markers.
+    fn continuation_indent_spans(&self) -> Vec<Span<'static>> {
         self.indent_stack
             .iter()
-            .flat_map(|prefix| prefix.iter())
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum()
+            .flat_map(|prefix| prefix.iter().cloned())
+            .collect()
     }
 
     /// Append a span to the last line, creating one if needed.
@@ -556,10 +577,11 @@ where
 
     /// Word-wrap the last accumulated line in place.
     ///
-    /// Inline content (paragraphs, headings) is built by appending spans to
-    /// the last line via [`push_span`](Self::push_span), bypassing the
-    /// wrapping in [`push_line`](Self::push_line). This method retroactively
-    /// wraps the completed line so it respects the width budget.
+    /// Inline content (paragraphs, headings, tight list items) is built
+    /// by appending spans to the last line via
+    /// [`push_span`](Self::push_span), bypassing the wrapping in
+    /// [`push_line`](Self::push_line). This method retroactively wraps
+    /// the completed line so it respects the width budget.
     fn wrap_last_line(&mut self) {
         if self.width == 0 {
             return;
@@ -567,10 +589,7 @@ where
         let Some(line) = self.lines.pop() else {
             return;
         };
-        let indent = self.continuation_indent_width();
-        for wrapped in wrap_line(line, self.width, indent, None) {
-            self.lines.push(wrapped);
-        }
+        self.wrap_and_push(line);
     }
 
     fn push_blank_line(&mut self) {
@@ -1305,5 +1324,73 @@ mod tests {
             "long heading should wrap into multiple lines, got {} line(s)",
             text.lines.len()
         );
+    }
+
+    #[test]
+    fn blockquote_wraps_with_marker_on_continuations() {
+        let lines = rendered_text_at_width("> one two three four five six seven eight", 15);
+        assert!(lines.len() >= 2, "should wrap: {lines:?}");
+        for line in &lines {
+            assert!(
+                line.starts_with("> "),
+                "blockquote continuation must repeat `> ` marker: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_blockquote_wraps_with_nested_markers() {
+        let lines = rendered_text_at_width("> > one two three four five six seven eight", 20);
+        assert!(lines.len() >= 2, "should wrap: {lines:?}");
+        for line in &lines {
+            assert!(
+                line.starts_with("> > "),
+                "nested blockquote continuation must repeat `> > ` markers: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tight_list_item_wraps_without_repeating_marker() {
+        let lines = rendered_text_at_width("- one two three four five six seven eight", 15);
+        assert!(lines.len() >= 2, "tight list item should wrap: {lines:?}");
+        assert!(
+            lines[0].starts_with("- "),
+            "first line has marker: {lines:?}"
+        );
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with("  ") && !line.starts_with("- "),
+                "continuation should be space-indented, not a new marker: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blockquote_list_item_wraps_with_blockquote_marker_only() {
+        let lines = rendered_text_at_width("> - one two three four five six seven eight", 20);
+        assert!(lines.len() >= 2, "should wrap: {lines:?}");
+        assert!(
+            lines[0].starts_with("> - "),
+            "first line has blockquote + list markers: {lines:?}"
+        );
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with("> "),
+                "continuation keeps blockquote marker: {line:?}"
+            );
+            assert!(
+                !line.contains("- "),
+                "continuation should not repeat list marker: {line:?}"
+            );
+        }
+    }
+
+    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
+        render_markdown(input, &theme(), width)
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 }
