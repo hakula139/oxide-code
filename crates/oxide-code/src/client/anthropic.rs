@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
@@ -248,13 +250,14 @@ impl Client {
 
         match &config.auth {
             Auth::ApiKey(key) => {
-                headers.insert("x-api-key", HeaderValue::from_str(key)?);
+                let mut value = HeaderValue::from_str(key)?;
+                value.set_sensitive(true);
+                headers.insert("x-api-key", value);
             }
             Auth::OAuth(token) => {
-                headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {token}"))?,
-                );
+                let mut value = HeaderValue::from_str(&format!("Bearer {token}"))?;
+                value.set_sensitive(true);
+                headers.insert(AUTHORIZATION, value);
                 betas.push(OAUTH_BETA_HEADER);
             }
         }
@@ -287,8 +290,15 @@ impl Client {
             HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
         );
 
+        // Anthropic sends keepalive events at least every ~15 s during streaming,
+        // so a 60 s read timeout catches slowloris-style dribble without false
+        // positives on healthy streams. The connect timeout is separate and
+        // tighter; the whole-request `timeout` is omitted because a single
+        // assistant response can legitimately take several minutes.
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_mins(1))
             .build()
             .context("failed to build HTTP client")?;
 
@@ -493,6 +503,10 @@ fn first_user_text(messages: &[Message]) -> &str {
         .unwrap_or("")
 }
 
+/// Hard cap on the unterminated SSE frame buffer. A misbehaving upstream that
+/// never emits `\n\n` would otherwise let `buf` grow without bound until OOM.
+const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
@@ -508,21 +522,48 @@ async fn stream_sse(
     }
 
     let mut stream = response.bytes_stream();
-    let mut buf = String::new();
+    // Byte buffer (not String) so a UTF-8 multibyte sequence split across
+    // network chunks is reassembled intact. `String::from_utf8_lossy` on raw
+    // chunks would inject U+FFFD at the boundary instead.
+    let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("error reading response stream")?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
 
-        // SSE frames are terminated by a blank line (\n\n).
-        while let Some(end) = buf.find("\n\n") {
-            let frame = buf[..end].to_owned();
-            buf.drain(..end + 2);
+        loop {
+            if buf.len() > MAX_SSE_FRAME_BYTES {
+                bail!(
+                    "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without \
+                     a terminating blank line; upstream may be misbehaving"
+                );
+            }
 
-            if let Some(event) = parse_sse_frame(&frame)?
-                && tx.send(Ok(event)).await.is_err()
-            {
-                return Ok(());
+            // SSE frames are terminated by a blank line (\n\n).
+            let Some(end) = buf.windows(2).position(|w| w == b"\n\n") else {
+                break;
+            };
+            let frame_bytes: Vec<u8> = buf.drain(..end + 2).take(end).collect();
+
+            let frame = match std::str::from_utf8(&frame_bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("skipping invalid UTF-8 SSE frame: {e}");
+                    continue;
+                }
+            };
+
+            match parse_sse_frame(frame) {
+                Ok(Some(event)) => {
+                    if tx.send(Ok(event)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // A single malformed frame should not poison the whole turn.
+                    debug!("skipping malformed SSE frame: {e:#}");
+                }
             }
         }
     }
@@ -538,21 +579,31 @@ async fn stream_sse(
 /// event: content_block_delta
 /// data: {"type":"content_block_delta", ...}
 /// ```
+///
+/// Per the SSE spec, multiple `data:` lines in one frame are concatenated
+/// with `\n`. Anthropic's protocol currently uses single-line data fields,
+/// but supporting the spec defensively costs nothing and avoids silently
+/// dropping all-but-the-last line if the format evolves.
 fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
-    let mut data = None;
+    let mut data_lines: Vec<&str> = Vec::new();
 
     for line in frame.lines() {
-        if let Some(value) = line.strip_prefix("data: ") {
-            data = Some(value);
+        if let Some(value) = line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+        {
+            data_lines.push(value);
         }
     }
 
-    let Some(data) = data else {
-        return Ok(None);
+    let data: std::borrow::Cow<'_, str> = match data_lines.as_slice() {
+        [] => return Ok(None),
+        [one] => std::borrow::Cow::Borrowed(*one),
+        _ => std::borrow::Cow::Owned(data_lines.join("\n")),
     };
 
     let event: StreamEvent =
-        serde_json::from_str(data).with_context(|| format!("failed to parse SSE data: {data}"))?;
+        serde_json::from_str(&data).with_context(|| format!("failed to parse SSE data: {data}"))?;
 
     Ok(Some(event))
 }
@@ -921,5 +972,32 @@ mod tests {
     fn parse_sse_frame_invalid_json() {
         let frame = "data: {not valid json}";
         assert!(parse_sse_frame(frame).is_err());
+    }
+
+    #[test]
+    fn parse_sse_frame_concatenates_multiple_data_lines_with_newline() {
+        // Per the SSE spec, multiple data: lines must be joined with \n.
+        // The prior implementation kept only the last line, which would
+        // drop the opening brace here and fail to parse. JSON treats \n
+        // as whitespace between tokens so this round-trips cleanly.
+        let frame = indoc! {r#"
+            event: ping
+            data: {"type":
+            data: "ping"}
+        "#};
+
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn parse_sse_frame_accepts_data_prefix_without_space() {
+        // Some gateways emit `data:payload` (no leading space). The spec
+        // allows both; tolerate either form.
+        let frame = indoc! {r#"
+            data:{"type":"ping"}
+        "#};
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(event, StreamEvent::Ping));
     }
 }
