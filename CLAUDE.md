@@ -73,7 +73,7 @@ ox     # Start an interactive session
 │   └── wrap.rs                 # Word-wrap with continuation indent for styled lines
 ├── util.rs                     # Shared utilities module root
 └── util/
-    ├── lock.rs                 # Async retry helper for advisory locks (shared by session + oauth)
+    ├── lock.rs                 # Async retry helper for advisory locks (used by oauth)
     └── path.rs                 # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```
 

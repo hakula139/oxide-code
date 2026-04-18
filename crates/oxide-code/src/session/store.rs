@@ -1,9 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fs4::fs_std::FileExt;
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -11,7 +11,6 @@ use uuid::Uuid;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
-use crate::util::lock;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
@@ -82,15 +81,23 @@ impl SessionStore {
 
     /// Create a new session file and write the header entry.
     ///
-    /// Takes an exclusive advisory lock on the file to prevent concurrent
-    /// access. The lock is held for the lifetime of the returned writer.
     /// On Unix, the file is created with mode `0o600` so session contents
     /// (verbatim tool output, assistant responses) are not world-readable.
+    /// Creation is atomic via `O_CREAT | O_EXCL`, so the rare case of two
+    /// processes minting the same session ID fails cleanly.
     ///
     /// Filenames are `{created_at_epoch}-{session_id}.jsonl`. The epoch
     /// prefix makes `ls` on a project subdirectory return sessions in
     /// chronological order, which is convenient when inspecting the
     /// store outside of `ox --list`.
+    ///
+    /// Session files carry no file-level lock: concurrent resumes are
+    /// explicitly allowed and form forks in the recorded UUID chain.
+    /// See [`Self::load_session_data`] for the fork-aware loader.
+    #[expect(
+        clippy::unused_async,
+        reason = "async preserves the call-site shape for a planned tokio::fs migration; synchronous fs calls are short-lived (open + header write)"
+    )]
     pub(crate) async fn create(&self, header: &Entry) -> Result<SessionWriter> {
         let Entry::Header {
             session_id,
@@ -107,7 +114,6 @@ impl SessionStore {
             .join(session_filename(session_id, *created_at));
         let file = open_create_exclusive(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
-        lock_with_retry(&file, session_id).await?;
 
         let mut writer = SessionWriter { file };
         writer.append(header)?;
@@ -116,38 +122,65 @@ impl SessionStore {
 
     /// Open an existing session file in append mode.
     ///
-    /// Takes an exclusive advisory lock on the file to prevent concurrent
-    /// access. The lock is held for the lifetime of the returned writer.
-    /// Contended locks are retried up to [`lock::MAX_RETRIES`] times
-    /// with a [`lock::RETRY_INTERVAL`] delay, so accidental back-to-back
-    /// `ox -c <id>` invocations do not fail abruptly.
-    ///
     /// Searches every project subdirectory, not just the current one,
     /// so `ox -c <id>` resumes a session regardless of which project
     /// it originally belonged to.
+    ///
+    /// No file-level lock is acquired: two processes resuming the same
+    /// session both append to the same file, forming a fork in the
+    /// UUID chain. [`Self::load_session_data`] reconstructs the newest
+    /// non-sidechain branch on the next resume. Individual writes rely
+    /// on POSIX `O_APPEND` for line positioning; writes larger than
+    /// `PIPE_BUF` (typically 4 KiB) may interleave, but the loader
+    /// warn-skips any malformed UTF-8 / JSON fragments that result.
+    #[expect(
+        clippy::unused_async,
+        reason = "async preserves the call-site shape for a planned tokio::fs migration; synchronous fs calls are short-lived"
+    )]
     pub(crate) async fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
             .with_context(|| format!("session not found: {}", path.display()))?;
-        lock_with_retry(&file, session_id).await?;
         Ok(SessionWriter { file })
     }
 
-    /// Load all messages from a session file along with the UUID of the
-    /// last message (for parent-chain continuity on resume). Like
+    /// Load a session's message chain and return the UUID of its tip
+    /// (for parent-chain continuity on resume). Like
     /// [`Self::open_append`], searches every project subdirectory.
     ///
-    /// Skips non-[`Entry::Message`] lines (headers, titles, summaries,
-    /// unknown). Warns and skips malformed lines.
+    /// Walks the recorded UUID DAG rather than the raw file order.
+    /// Two processes resuming the same session concurrently both
+    /// append with `parent_uuid` pointing at what each saw as the
+    /// tip, forming a fork. The loader:
+    ///
+    /// 1. Builds a map of every valid `Entry::Message` by UUID.
+    /// 2. Computes the set of leaves — UUIDs not referenced as
+    ///    `parent_uuid` by any other message.
+    /// 3. Picks the leaf with the newest timestamp as the tip (ties
+    ///    break by UUID byte order for determinism).
+    /// 4. Walks back via `parent_uuid` to the root, reverses → linear
+    ///    chain from root to tip.
+    ///
+    /// The "newest-leaf wins" policy matches claude-code's
+    /// `loadMessagesFromJsonlPath` and means the losing branch on a
+    /// concurrent-resume fork stays in the file but is invisible to
+    /// later resumes. The trade-off is documented in
+    /// [`Self::open_append`].
+    ///
+    /// Non-`Message` entries (headers, titles, summaries, unknown)
+    /// are skipped. Malformed lines — including interleaved-write
+    /// fragments from concurrent large writes, truncated UTF-8 from
+    /// a crash during `writeln!`, or unknown future entry types —
+    /// are warn-skipped and do not fail the load.
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
         let path = self.find_session_path(session_id)?;
         let file =
             File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
         let mut reader = BufReader::new(file);
-        let mut messages = Vec::new();
-        let mut last_uuid = None;
+        let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
+        let mut referenced: HashSet<Uuid> = HashSet::new();
         let mut buf = Vec::new();
         let mut line_no: u32 = 0;
 
@@ -191,14 +224,32 @@ impl SessionStore {
                         "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
                     );
                 }
-                Entry::Message { uuid, message, .. } => {
-                    last_uuid = Some(uuid);
-                    messages.push(message);
+                Entry::Message {
+                    uuid,
+                    parent_uuid,
+                    message,
+                    timestamp,
+                } => {
+                    if let Some(p) = parent_uuid {
+                        referenced.insert(p);
+                    }
+                    // Last-append-wins on duplicate UUIDs — a retry or
+                    // partial-write recovery could replay an entry, and
+                    // we prefer the most recent representation.
+                    nodes.insert(
+                        uuid,
+                        ChainNode {
+                            parent_uuid,
+                            message,
+                            timestamp,
+                        },
+                    );
                 }
                 _ => {}
             }
         }
 
+        let (messages, last_uuid) = resolve_chain(nodes, &referenced);
         Ok(SessionData {
             messages,
             last_uuid,
@@ -407,33 +458,62 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-/// Try to acquire an exclusive advisory lock, retrying on contention
-/// via the shared [`crate::util::lock::retry_acquire`] helper.
+/// Internal node used by [`resolve_chain`] to walk the UUID DAG.
+struct ChainNode {
+    parent_uuid: Option<Uuid>,
+    message: Message,
+    timestamp: OffsetDateTime,
+}
+
+/// Turn a UUID-indexed message map into a linear chain ending at the
+/// newest leaf. `referenced` is the set of UUIDs mentioned by some
+/// message as its `parent_uuid`; the leaves are `nodes.keys() - referenced`.
 ///
-/// `flock` is released automatically when a process exits, so a stuck
-/// lock always implies a live peer. Retrying lets accidental
-/// back-to-back invocations succeed once the first has finished a
-/// short-lived action (e.g. listing, quick query), while still erroring
-/// out on a genuinely long-held lock after [`lock::MAX_RETRIES`] attempts.
-async fn lock_with_retry(file: &File, session_id: &str) -> Result<()> {
-    lock::retry_acquire(
-        || {
-            Ok(file
-                .try_lock_exclusive()
-                .context("flock(2) failed while acquiring session lock")?
-                .then_some(()))
-        },
-        lock::MAX_RETRIES,
-        lock::RETRY_INTERVAL,
-        || {
-            anyhow::anyhow!(
-                "session {session_id} is in use by another process \
-                 (retried {} times)",
-                lock::MAX_RETRIES,
-            )
-        },
-    )
-    .await
+/// Returns `(chain, Some(tip))` on success, or `(vec![], None)` when
+/// the file contains no messages. A cycle (e.g., from on-disk
+/// corruption where a UUID points at one of its descendants) is
+/// treated as a terminated chain: the walker detects the repeat and
+/// stops, preserving the prefix it has already collected rather than
+/// looping forever. A `parent_uuid` missing from `nodes` (orphan) is
+/// also treated as a chain terminator.
+fn resolve_chain(
+    mut nodes: HashMap<Uuid, ChainNode>,
+    referenced: &HashSet<Uuid>,
+) -> (Vec<Message>, Option<Uuid>) {
+    let tip = nodes
+        .iter()
+        .filter(|(uuid, _)| !referenced.contains(uuid))
+        .max_by(|(a_uuid, a), (b_uuid, b)| {
+            a.timestamp
+                .cmp(&b.timestamp)
+                .then_with(|| a_uuid.cmp(b_uuid))
+        })
+        .map(|(uuid, _)| *uuid);
+    let Some(tip_uuid) = tip else {
+        return (Vec::new(), None);
+    };
+
+    let mut chain: Vec<Message> = Vec::new();
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut cursor = Some(tip_uuid);
+    while let Some(uuid) = cursor {
+        if !seen.insert(uuid) {
+            // Cycle or repeated visit — bail out with what we have.
+            warn!(
+                "session chain walk hit a cycle at {uuid}; truncating to the prefix collected so far"
+            );
+            break;
+        }
+        let Some(node) = nodes.remove(&uuid) else {
+            // Missing ancestor — chain reaches an orphan. Stop here;
+            // everything we collected so far stays in `chain`.
+            break;
+        };
+        chain.push(node.message);
+        cursor = node.parent_uuid;
+    }
+    chain.reverse();
+    (chain, Some(tip_uuid))
 }
 
 // ── Path Resolution ──
@@ -760,11 +840,23 @@ mod tests {
     }
 
     fn sample_message_entry(uuid: Uuid, text: &str) -> Entry {
+        sample_message_at(uuid, None, datetime!(2026-04-16 12:00:01 UTC), text)
+    }
+
+    /// Variant of [`sample_message_entry`] that accepts a `parent_uuid`
+    /// and explicit timestamp so tests can build multi-message chains
+    /// (and forks) exercised by the DAG-walking loader.
+    fn sample_message_at(
+        uuid: Uuid,
+        parent_uuid: Option<Uuid>,
+        timestamp: OffsetDateTime,
+        text: &str,
+    ) -> Entry {
         Entry::Message {
             uuid,
-            parent_uuid: None,
+            parent_uuid,
             message: Message::user(text),
-            timestamp: datetime!(2026-04-16 12:00:01 UTC),
+            timestamp,
         }
     }
 
@@ -842,14 +934,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("append-test")).await.unwrap();
+        let u1 = Uuid::new_v4();
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "first"))
+            .append(&sample_message_at(
+                u1,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "first",
+            ))
             .unwrap();
-        drop(writer); // release lock
+        drop(writer);
 
         let mut writer = store.open_append("append-test").await.unwrap();
         writer
-            .append(&sample_message_entry(Uuid::new_v4(), "second"))
+            .append(&sample_message_at(
+                Uuid::new_v4(),
+                Some(u1),
+                datetime!(2026-04-16 12:00:02 UTC),
+                "second",
+            ))
             .unwrap();
         drop(writer);
 
@@ -871,62 +974,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_append_rejects_concurrent_access_after_retries_exhausted() {
+    async fn open_append_allows_concurrent_resumes_without_blocking() {
+        // Two processes resuming the same session is a first-class
+        // case: both acquire append handles immediately, and the
+        // resulting UUID fork is resolved at load time (see
+        // `load_session_data_picks_newest_leaf_on_fork`).
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("locked")).await.unwrap();
+        let _writer_a = store.create(&sample_header("concurrent")).await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = store.open_append("locked").await;
+        let writer_b = store.open_append("concurrent").await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_err());
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(err.contains("retried"), "unexpected error: {err}");
         assert!(
-            err.contains("in use by another process"),
-            "unexpected error: {err}"
+            writer_b.is_ok(),
+            "second resume should succeed immediately, got {writer_b:?}"
         );
-        // Retry loop must wait MAX_RETRIES × RETRY_INTERVAL before
-        // giving up — confirms we actually retried rather than failing fast.
-        let expected = lock::RETRY_INTERVAL * lock::MAX_RETRIES;
         assert!(
-            elapsed >= expected,
-            "lock gave up too early: {elapsed:?} < {expected:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn open_append_succeeds_when_peer_releases_lock_within_budget() {
-        // Peer holds the lock briefly, then releases. Our
-        // `open_append` call should spin through a couple of retry
-        // intervals, then succeed — this is the "two ox invocations
-        // back-to-back" path the retry budget is designed for.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let writer = store.create(&sample_header("releases")).await.unwrap();
-
-        // Spawn a task that releases the lock after ~2 × RETRY_INTERVAL
-        // (well inside the retry budget).
-        let hold = lock::RETRY_INTERVAL * 2;
-        tokio::spawn(async move {
-            tokio::time::sleep(hold).await;
-            drop(writer);
-        });
-
-        let start = std::time::Instant::now();
-        let resumed = store.open_append("releases").await;
-        let elapsed = start.elapsed();
-
-        assert!(resumed.is_ok(), "expected retry to succeed: {resumed:?}");
-        assert!(
-            elapsed >= hold,
-            "succeeded before peer released: {elapsed:?} < {hold:?}"
-        );
-        let budget = lock::RETRY_INTERVAL * lock::MAX_RETRIES;
-        assert!(
-            elapsed < budget,
-            "retry took the full exhaustion budget: {elapsed:?} >= {budget:?}"
+            elapsed < std::time::Duration::from_millis(200),
+            "open_append should not block on a concurrent writer: {elapsed:?}"
         );
     }
 
@@ -1013,6 +1080,173 @@ mod tests {
         assert!(store.load_session_data("../etc/passwd").is_err());
         assert!(store.load_session_data(r"..\..\etc\passwd").is_err());
         assert!(store.load_session_data("session\0evil").is_err());
+    }
+
+    #[tokio::test]
+    async fn load_session_data_picks_newest_leaf_on_fork() {
+        // Two processes resumed and each appended — forming a fork
+        // in the UUID DAG. `load_session_data` must pick the newest
+        // leaf as the tip and walk back to the shared ancestor,
+        // matching claude-code's `loadMessagesFromJsonlPath`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("fork")).await.unwrap();
+
+        let root = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                root,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "shared root",
+            ))
+            .unwrap();
+
+        // Branch A: recorded first, at t+2s.
+        let branch_a = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                branch_a,
+                Some(root),
+                datetime!(2026-04-16 12:00:02 UTC),
+                "branch A (older leaf)",
+            ))
+            .unwrap();
+
+        // Branch B: recorded later, at t+3s. Should win as the tip.
+        let branch_b = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                branch_b,
+                Some(root),
+                datetime!(2026-04-16 12:00:03 UTC),
+                "branch B (newer leaf)",
+            ))
+            .unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("fork").unwrap();
+        assert_eq!(
+            data.last_uuid,
+            Some(branch_b),
+            "tip should be the newer leaf"
+        );
+        assert_eq!(data.messages.len(), 2);
+        assert!(
+            matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "shared root"),
+            "chain should start at the shared ancestor"
+        );
+        assert!(
+            matches!(&data.messages[1].content[0], ContentBlock::Text { text } if text == "branch B (newer leaf)"),
+            "chain should end at the newest leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_data_terminates_at_orphan_parent_reference() {
+        // parent_uuid points at a UUID not present in the file — e.g.,
+        // because the parent line was lost to an interleaved write or
+        // a truncation. The walker should stop at the orphan instead
+        // of looping or erroring; everything collected so far is
+        // returned.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("orphan")).await.unwrap();
+
+        let only = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                only,
+                Some(Uuid::new_v4()), // points at a missing ancestor
+                datetime!(2026-04-16 12:00:01 UTC),
+                "orphan tip",
+            ))
+            .unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("orphan").unwrap();
+        assert_eq!(data.last_uuid, Some(only));
+        assert_eq!(data.messages.len(), 1);
+        assert!(
+            matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "orphan tip")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_data_breaks_chain_walk_on_cycle() {
+        // Corrupted file where two messages point at each other.
+        // Defensive: the walker must terminate rather than looping.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("cycle")).await.unwrap();
+
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                a,
+                Some(b), // a points at b — part of the cycle
+                datetime!(2026-04-16 12:00:01 UTC),
+                "A",
+            ))
+            .unwrap();
+        writer
+            .append(&sample_message_at(
+                b,
+                Some(a), // b points back at a — completes the cycle
+                datetime!(2026-04-16 12:00:02 UTC),
+                "B",
+            ))
+            .unwrap();
+        drop(writer);
+
+        // Every message is referenced by another, so there's no leaf.
+        // `resolve_chain` returns an empty chain; we only assert the
+        // load doesn't hang and succeeds.
+        let data = store.load_session_data("cycle").unwrap();
+        assert!(
+            data.messages.is_empty(),
+            "cycle with no leaf should yield an empty chain, got: {:?}",
+            data.messages,
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_data_prefers_later_duplicate_uuid() {
+        // A replayed append (e.g., after a partial-write retry) can
+        // produce two records with the same UUID. Keep the later one
+        // — newest-wins matches the API-replay semantics the UUID is
+        // supposed to dedupe on.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("dup")).await.unwrap();
+
+        let u = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                u,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "first copy",
+            ))
+            .unwrap();
+        writer
+            .append(&sample_message_at(
+                u,
+                None,
+                datetime!(2026-04-16 12:00:05 UTC),
+                "second copy",
+            ))
+            .unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("dup").unwrap();
+        assert_eq!(data.last_uuid, Some(u));
+        assert_eq!(data.messages.len(), 1);
+        assert!(
+            matches!(&data.messages[0].content[0], ContentBlock::Text { text } if text == "second copy"),
+            "latest duplicate should win"
+        );
     }
 
     #[test]

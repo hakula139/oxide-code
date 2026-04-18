@@ -86,9 +86,19 @@ On Unix, session files are created with mode `0o600` (user-only read / write) so
 
 `ox -c` resumes the most recent session in the current project. `ox -c <prefix>` resumes by session ID prefix match. `--all` / `-a` extends either to every project; a specific session ID also resolves cross-project automatically via the `find_session_path` fallback.
 
-Resume reopens the **existing** session file in append mode. Messages are loaded into memory, sanitized (see below), and sent to the model as context. New messages are appended to the same file. The `parent_uuid` of the first new message references the UUID of the last loaded message, keeping the conversation chain intact.
+Resume reopens the **existing** session file in append mode. Messages are loaded into memory, sanitized (see below), and sent to the model as context. New messages are appended to the same file. The `parent_uuid` of the first new message references the UUID of the tip of the loaded chain, keeping the conversation threaded.
 
-An advisory file lock (`flock` via the `fs4` crate, the maintained `fs2` successor) prevents two processes from writing to the same session simultaneously. The lock is released automatically on process exit, so a stuck lock always indicates a live peer — `ox` retries the acquisition up to 5 times with a 1 s interval before giving up via the shared `util::lock::retry_acquire` helper, so accidental back-to-back invocations succeed once the first has finished.
+### Fork-friendly concurrency
+
+Two processes can resume the same session simultaneously — there is no file-level lock. Each resumer:
+
+1. Reads the current file contents (including whatever the peer has already written).
+2. Computes the tip of the UUID DAG at the moment of reading.
+3. Appends new messages with `parent_uuid` pointing at that tip.
+
+When the peer had already appended between (1) and (3), the new messages form a **fork**: two branches share an ancestor, both are leaves. On the next resume, the loader walks all recorded `Entry::Message` lines into a UUID-indexed map, identifies leaves as UUIDs not referenced by any message's `parent_uuid`, picks the leaf with the newest timestamp as the tip, and walks back via `parent_uuid` to produce a linear chain from root to tip. The losing branch stays in the file (for audit / manual recovery) but is invisible to subsequent API calls. This mirrors claude-code's `loadMessagesFromJsonlPath` and its `--fork-session` feature.
+
+Writes smaller than `PIPE_BUF` (typically 4 KiB) are atomic under POSIX `O_APPEND`, so the common case — short text messages — never interleaves. Larger writes (e.g., a bash tool result dumping several KB of output) can interleave with a peer's write and produce malformed JSONL lines; the loader warn-skips any line that fails UTF-8 decoding or JSON parsing, so a garbled line is lost but the rest of the session resumes.
 
 The original session ID flows through to the `x-claude-code-session-id` API header.
 
@@ -156,6 +166,6 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 | Write-error surfacing | First failure only (via `AgentEvent::Error`)       | Balance visibility (user knows persistence broke) against spam (no re-report on every write) after the initial notification                                                                                                                                           |
 | Listing scan          | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                                                                                                                                           |
 | Listing sort key      | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                                                                                                                                         |
-| Concurrent access     | Advisory flock with 5×1 s retry                    | Prevents interleaved writes; released on process exit, so retry handles accidental back-to-back invocations. Small TOCTOU between read and lock OK                                                                                                                    |
+| Concurrent access     | Fork-on-conflict via UUID DAG (no file lock)       | Two resumers both append; loader walks the DAG and picks the newest leaf. Matches claude-code's `loadMessagesFromJsonlPath` and its `--fork-session` feature. Writes under `PIPE_BUF` (4 KiB) are atomic; larger interleaved writes are warn-skipped on read          |
 | Write batching        | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md` #1)                                                                                                                               |
 | Compression           | Deferred                                           | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                                                                                                                                                                            |

@@ -61,7 +61,9 @@ ox -c --all        # latest session anywhere
 ox -c a1b2 -a      # prefix match across all projects
 ```
 
-When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID. An advisory file lock (with retry) prevents two processes from writing to the same session simultaneously; if the lock is genuinely held, `ox` retries a few times before giving up with a clear error.
+When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID.
+
+Two processes can resume the same session at the same time — this is intentional. Each process picks up the transcript as it exists at load time and appends new messages; the recorded messages form a UUID chain, so on the next resume `ox` walks the chain and follows the newest branch. A "losing" branch still lives in the file (you can inspect it manually) but is invisible to subsequent replays.
 
 `ox` also sanitizes the loaded conversation before the next API call. If the previous run crashed mid-turn, unresolved tool calls are dropped, orphan tool results are dropped, any adjacent same-role turns left behind are merged, and synthetic user / assistant sentinels are injected at the edges when needed, so the API accepts the resumed state.
 
