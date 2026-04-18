@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-/// Retry budget for advisory locks in this crate. Shared by the
-/// session file lock ([`session::store`]) and the OAuth credential
-/// lock ([`config::oauth`]) so their behaviour stays uniform.
+/// Retry budget for advisory locks in this crate. Currently used by
+/// the OAuth credential lock ([`crate::config::oauth`]); session files
+/// no longer take a flock (concurrent resume is supported via the UUID
+/// DAG instead, see [`crate::session::store::SessionStore::open_append`]).
+/// Kept here so future lock-acquisition call sites stay uniform.
 pub(crate) const MAX_RETRIES: u32 = 5;
 
 /// Sleep duration between successive lock-acquisition attempts.
