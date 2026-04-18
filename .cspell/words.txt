@@ -10,6 +10,7 @@ codex
 creds
 crossterm
 deserialize
+disambiguable
 dtolnay
 feff
 gitui
@@ -36,8 +37,12 @@ sysname
 SYSPROMPT
 thiserror
 throbber
+tildified
+tildify
+TOCTOU
 tokio
 tracing
+unresumable
 venv
 xxhash
 yazi

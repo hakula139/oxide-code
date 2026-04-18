@@ -7,20 +7,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 ///
 /// `continuation_indent` is the number of leading columns consumed by
 /// the continuation prefix. Each continuation line is prefixed with the
-/// spans returned by `continuation_prefix` (if provided) or plain spaces.
+/// spans in `continuation_prefix` (if provided) or plain spaces.
 ///
 /// Returns the original line unchanged when it fits within `max_width`.
 pub(crate) fn wrap_line(
-    line: Line<'static>,
-    max_width: usize,
-    continuation_indent: usize,
-) -> Vec<Line<'static>> {
-    wrap_line_styled(line, max_width, continuation_indent, None)
-}
-
-/// Like [`wrap_line`], but emits `continuation_prefix` spans on each
-/// continuation line instead of plain spaces.
-pub(crate) fn wrap_line_styled(
     line: Line<'static>,
     max_width: usize,
     continuation_indent: usize,
@@ -215,7 +205,7 @@ mod tests {
     #[test]
     fn short_line_unchanged() {
         let line = Line::from("Hello, world!");
-        let result = wrap_line(line, 80, 4);
+        let result = wrap_line(line, 80, 4, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].spans[0].content.as_ref(), "Hello, world!");
     }
@@ -223,14 +213,14 @@ mod tests {
     #[test]
     fn zero_width_returns_unchanged() {
         let line = Line::from("Hello, world!");
-        let result = wrap_line(line, 0, 4);
+        let result = wrap_line(line, 0, 4, None);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn wraps_at_word_boundary() {
         let line = Line::from("Hello world foo bar");
-        let result = wrap_line(line, 12, 0);
+        let result = wrap_line(line, 12, 0, None);
         let texts: Vec<String> = result
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -243,7 +233,7 @@ mod tests {
     fn continuation_indent_applied() {
         // "    Hello world foo bar" (23 chars), width 16, indent 4
         let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
-        let result = wrap_line(line, 16, 4);
+        let result = wrap_line(line, 16, 4, None);
         assert!(result.len() >= 2, "should wrap: {result:?}");
         // Continuation lines start with 4-space indent.
         let cont = &result[1];
@@ -260,7 +250,7 @@ mod tests {
             Span::styled("Bold ", bold),
             Span::raw("normal text that is long enough to wrap"),
         ]);
-        let result = wrap_line(line, 20, 0);
+        let result = wrap_line(line, 20, 0, None);
         assert!(result.len() >= 2, "should wrap: {result:?}");
         // First span on first line should preserve bold.
         let first_span = &result[0].spans[0];
@@ -273,7 +263,7 @@ mod tests {
     #[test]
     fn force_break_on_long_word() {
         let line = Line::from("abcdefghijklmnopqrstuvwxyz");
-        let result = wrap_line(line, 10, 0);
+        let result = wrap_line(line, 10, 0, None);
         assert!(result.len() >= 2, "should force-break: {result:?}");
     }
 
@@ -284,7 +274,7 @@ mod tests {
             Span::raw("  "),
             Span::styled("a b c d e f g h i j k l", code_style),
         ]);
-        let result = wrap_line(line, 14, 2);
+        let result = wrap_line(line, 14, 2, None);
         assert!(result.len() >= 2, "should wrap: {result:?}");
         // Check that continuation has 2-space prefix.
         let cont = &result[1];
@@ -296,6 +286,25 @@ mod tests {
         // The remaining spans should still have green color.
         let has_green = cont.spans.iter().any(|s| s.style.fg == Some(Color::Green));
         assert!(has_green, "style should be preserved on continuation");
+    }
+
+    #[test]
+    fn continuation_prefix_spans_applied() {
+        let marker_style = Style::default().fg(Color::Green);
+        let line = Line::from(vec![
+            Span::styled("> ", marker_style),
+            Span::raw("one two three four five six"),
+        ]);
+        let prefix = vec![Span::styled("> ", marker_style)];
+        let result = wrap_line(line, 12, 2, Some(&prefix));
+        assert!(result.len() >= 2, "should wrap: {result:?}");
+        let cont = &result[1];
+        assert_eq!(
+            cont.spans[0].content.as_ref(),
+            "> ",
+            "continuation should start with the styled prefix"
+        );
+        assert_eq!(cont.spans[0].style.fg, Some(Color::Green));
     }
 
     // ── expand_tabs ──

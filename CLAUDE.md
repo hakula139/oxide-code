@@ -30,7 +30,7 @@ ox     # Start an interactive session
 ├── config.rs                   # Configuration loading and layered merging
 ├── config/
 │   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
-│   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, file locking
+│   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
 ├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly)
@@ -38,6 +38,14 @@ ox     # Start an interactive session
 │   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
 │   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs             # Static prompt section constants (intro, guidance, style)
+├── session.rs                  # Session module root
+├── session/
+│   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── list_view.rs            # `ox --list` table rendering (writes to any `impl Write`)
+│   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
+│   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
+│   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
+│   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout
@@ -47,22 +55,26 @@ ox     # Start an interactive session
 │   ├── read.rs                 # File reading with line numbers and pagination
 │   └── write.rs                # File writing with directory creation
 ├── tui.rs                      # TUI module root
-└── tui/
-    ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
-    ├── component.rs            # Component trait and Action enum
-    ├── components.rs           # Components module root
-    ├── components/
-    │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
-    │   ├── input.rs            # Multi-line input area (ratatui-textarea)
-    │   └── status.rs           # Status bar (model, spinner, status, working directory)
-    ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
-    ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
-    ├── markdown/
-    │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
-    │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
-    ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
-    ├── theme.rs                # Catppuccin Mocha palette, style helpers
-    └── wrap.rs                 # Word-wrap with continuation indent for styled lines
+├── tui/
+│   ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
+│   ├── component.rs            # Component trait and Action enum
+│   ├── components.rs           # Components module root
+│   ├── components/
+│   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
+│   │   ├── input.rs            # Multi-line input area (ratatui-textarea)
+│   │   └── status.rs           # Status bar (model, spinner, status, working directory)
+│   ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
+│   ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
+│   ├── markdown/
+│   │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
+│   │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
+│   ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
+│   ├── theme.rs                # Catppuccin Mocha palette, style helpers
+│   └── wrap.rs                 # Word-wrap with continuation indent for styled lines
+├── util.rs                     # Shared utilities module root
+└── util/
+    ├── lock.rs                 # Async retry helper for advisory locks (used by oauth)
+    └── path.rs                 # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```
 
 ## Coding Conventions

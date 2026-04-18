@@ -253,7 +253,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         })
         .collect();
 
-    files_with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
+    files_with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     CollectedFiles {
         files: files_with_mtime.into_iter().map(|(p, _)| p).collect(),

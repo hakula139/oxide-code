@@ -21,6 +21,7 @@ Early development. What works today:
 - System prompt with CLAUDE.md / AGENTS.md injection
 - Authentication (API key and Claude Code OAuth)
 - TOML config file with layered loading
+- Session persistence with JSONL conversation logs, resume, and listing
 
 See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 
@@ -38,6 +39,7 @@ ox
 | [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                 |
 | [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment   |
 | [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules |
+| [Sessions](docs/guide/sessions.md)              | Session persistence, listing, and resume        |
 
 ## Building from Source
 

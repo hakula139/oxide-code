@@ -108,7 +108,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
         })
         .collect();
 
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     if matches.is_empty() {
         return Ok("No files found".into());

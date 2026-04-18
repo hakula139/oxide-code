@@ -13,6 +13,7 @@ use super::components::status::{Status, StatusBar};
 use super::event::{AgentEvent, UserAction, tool_call_icon, tool_call_title};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
+use crate::message::Message;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -36,11 +37,14 @@ impl App {
         cwd: String,
         agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
+        history: &[Message],
     ) -> Self {
         let theme = Theme::default();
+        let mut chat = ChatView::new(theme, show_thinking);
+        chat.load_history(history);
         Self {
             status_bar: StatusBar::new(theme, model, cwd),
-            chat: ChatView::new(theme, show_thinking),
+            chat,
             input: InputArea::new(theme),
             agent_rx,
             user_tx,

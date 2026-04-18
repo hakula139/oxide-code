@@ -7,10 +7,14 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use std::collections::HashMap;
+
+use crate::message::{ContentBlock, Message, Role};
 use crate::tui::component::{Action, Component};
+use crate::tui::event::{tool_call_icon, tool_call_title};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs, wrap_line_styled};
+use crate::tui::wrap::{expand_tabs, wrap_line};
 
 // ── Chat Entry ──
 
@@ -19,6 +23,10 @@ use crate::tui::wrap::{expand_tabs, wrap_line_styled};
 enum ChatEntry {
     User(String),
     Assistant(String),
+    /// Committed thinking block (populated only from resumed history
+    /// when `show_thinking` is enabled). Live thinking streams through
+    /// the transient [`ChatView::thinking_buffer`] instead.
+    Thinking(String),
     ToolCall {
         icon: &'static str,
         label: String,
@@ -112,6 +120,84 @@ impl ChatView {
             viewport_height: 0,
             viewport_width: 0,
             auto_scroll: true,
+        }
+    }
+
+    /// Populate the chat history from resumed session messages.
+    ///
+    /// Renders user / assistant text, assistant tool-call markers, and
+    /// the paired tool results so a resumed view matches the live one
+    /// visually. Thinking blocks are rendered only when
+    /// [`ChatView::show_thinking`] is on — this mirrors claude-code's
+    /// "verbose / transcript" gating (thinking is valuable context but
+    /// noisy by default).
+    ///
+    /// `RedactedThinking` blocks are intentionally dropped: their body
+    /// is opaque ciphertext and carries no human-readable context.
+    pub(crate) fn load_history(&mut self, messages: &[Message]) {
+        let mut tool_labels: HashMap<String, String> = HashMap::new();
+        for msg in messages {
+            let mut text = String::new();
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text: t } if !t.trim().is_empty() => {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
+                    }
+                    ContentBlock::ToolUse { id, name, input }
+                    | ContentBlock::ServerToolUse { id, name, input } => {
+                        // Flush any accumulated text so entries render
+                        // in source order (assistant text, then the
+                        // tool call it preceded).
+                        if !text.is_empty() {
+                            self.entries
+                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
+                        }
+                        let icon = tool_call_icon(name);
+                        let label = tool_call_title(name, input)
+                            .map_or_else(|| name.clone(), str::to_owned);
+                        tool_labels.insert(id.clone(), label.clone());
+                        self.entries.push(ChatEntry::ToolCall { icon, label });
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        let label = tool_labels
+                            .get(tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| "(result)".to_owned());
+                        self.entries.push(ChatEntry::ToolResult {
+                            label,
+                            content: content.clone(),
+                            is_error: *is_error,
+                        });
+                    }
+                    ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
+                        // Keep Thinking entries unconditionally — the
+                        // renderer (see the main `match entry` block)
+                        // honors `show_thinking` to decide whether to
+                        // emit rows. Storing them means flipping the
+                        // toggle doesn't require reloading the session.
+                        if !text.is_empty() {
+                            self.entries
+                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
+                        }
+                        self.entries.push(ChatEntry::Thinking(thinking.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            if !text.is_empty() {
+                let entry = match msg.role {
+                    Role::User => ChatEntry::User(text),
+                    Role::Assistant => ChatEntry::Assistant(text),
+                };
+                self.entries.push(entry);
+            }
         }
     }
 
@@ -310,26 +396,32 @@ impl ChatView {
                     self.push_assistant_message_lines(&mut lines, content, width);
                     lines.push(Line::raw(""));
                 }
+                ChatEntry::Thinking(content) => {
+                    if self.show_thinking {
+                        self.push_thinking_lines(&mut lines, content, width);
+                        lines.push(Line::raw(""));
+                    }
+                }
                 ChatEntry::ToolCall { icon, label } => {
-                    self.push_tool_call_line(&mut lines, icon, label);
+                    self.push_tool_call_line(&mut lines, icon, label, width);
                 }
                 ChatEntry::ToolResult {
                     label,
                     content,
                     is_error,
                 } => {
-                    self.push_tool_result_line(&mut lines, label, *is_error);
+                    self.push_tool_result_line(&mut lines, label, *is_error, width);
                     self.push_tool_output_lines(&mut lines, content, *is_error, width);
                 }
                 ChatEntry::Error(msg) => {
-                    self.push_tool_result_line(&mut lines, msg, true);
+                    self.push_tool_result_line(&mut lines, msg, true, width);
                 }
             }
         }
 
         // Thinking buffer (ephemeral — not stored in history).
         if self.show_thinking && !self.thinking_buffer.is_empty() {
-            self.push_thinking_lines(&mut lines, width);
+            self.push_thinking_lines(&mut lines, &self.thinking_buffer, width);
         }
 
         // Streaming buffer (not yet committed).
@@ -408,32 +500,51 @@ impl ChatView {
 
     // ── Tool Calls ──
 
-    fn push_tool_call_line<'a>(&'a self, lines: &mut Vec<Line<'a>>, icon: &'a str, label: &'a str) {
-        lines.push(Line::from(vec![
-            Span::styled(BORDER_PREFIX, self.theme.tool_border()),
+    fn push_tool_call_line(
+        &self,
+        lines: &mut Vec<Line<'_>>,
+        icon: &'static str,
+        label: &str,
+        width: usize,
+    ) {
+        // Continuation aligns under the label (past `"  ▎ X "`).
+        let border_style = self.theme.tool_border();
+        let cont_prefix = border_continuation_prefix(TOOL_RESULT_PREFIX, border_style);
+        let line = Line::from(vec![
+            Span::styled(BORDER_PREFIX, border_style),
             Span::styled(icon, self.theme.tool_icon()),
             Span::raw(" "),
-            Span::styled(label, self.theme.text()),
-        ]));
+            Span::styled(label.to_owned(), self.theme.text()),
+        ]);
+        for wrapped in wrap_line(line, width, TOOL_RESULT_PREFIX.len(), Some(&cont_prefix)) {
+            lines.push(wrapped);
+        }
     }
 
-    fn push_tool_result_line<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        label: &'a str,
+    fn push_tool_result_line(
+        &self,
+        lines: &mut Vec<Line<'_>>,
+        label: &str,
         is_error: bool,
+        width: usize,
     ) {
         let (indicator, indicator_style) = if is_error {
             ("✗", self.theme.error())
         } else {
             ("✓", self.theme.success())
         };
-        lines.push(Line::from(vec![
-            Span::styled(TOOL_RESULT_PREFIX, self.tool_border_style(is_error)),
+        // Continuation aligns under the label (past `"  ▎   X "`).
+        let border_style = self.tool_border_style(is_error);
+        let cont_prefix = border_continuation_prefix(TOOL_OUTPUT_PREFIX, border_style);
+        let line = Line::from(vec![
+            Span::styled(TOOL_RESULT_PREFIX, border_style),
             Span::styled(indicator, indicator_style),
             Span::raw(" "),
-            Span::styled(label, self.theme.muted()),
-        ]));
+            Span::styled(label.to_owned(), self.theme.muted()),
+        ]);
+        for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
+            lines.push(wrapped);
+        }
     }
 
     fn push_tool_output_lines<'a>(
@@ -467,9 +578,7 @@ impl ChatView {
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(display_text, text_style),
             ]);
-            for wrapped in
-                wrap_line_styled(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix))
-            {
+            for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
                 lines.push(wrapped);
             }
         }
@@ -494,11 +603,11 @@ impl ChatView {
 
     // ── Thinking ──
 
-    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
+    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, text: &'a str, width: usize) {
         push_section_header(lines, "Thinking...", self.theme.thinking());
         push_bordered_lines(
             lines,
-            &self.thinking_buffer,
+            text,
             BORDER_PREFIX,
             self.theme.dim(),
             self.theme.thinking(),
@@ -663,7 +772,7 @@ fn push_bordered_lines(
             Span::styled(prefix.to_owned(), bar_style),
             Span::styled(text_line.to_owned(), text_style),
         ]);
-        for wrapped in wrap_line_styled(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
+        for wrapped in wrap_line(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
             lines.push(wrapped);
         }
     }
@@ -751,6 +860,313 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    // ── load_history ──
+
+    #[test]
+    fn load_history_populates_user_and_assistant_entries() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message::user("hello"), Message::assistant("hi there")]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "hello"));
+        assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "hi there"));
+    }
+
+    #[test]
+    fn load_history_renders_tool_result_after_paired_tool_use() {
+        let mut chat = test_chat();
+        chat.load_history(&[
+            Message::user("ask"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "output".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("reply"),
+        ]);
+        assert_eq!(chat.entries.len(), 4);
+        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "ask"));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::ToolCall { label, .. } if label == "ls"
+        ));
+        assert!(matches!(
+            &chat.entries[2],
+            ChatEntry::ToolResult { label, content, is_error: false } if label == "ls" && content == "output"
+        ));
+        assert!(matches!(&chat.entries[3], ChatEntry::Assistant(t) if t == "reply"));
+    }
+
+    #[test]
+    fn load_history_tool_result_without_matching_tool_use_uses_fallback_label() {
+        // Orphan tool_result (no preceding tool_use with the same id).
+        // Unusual but possible after crash sanitization; render with a
+        // generic fallback instead of dropping.
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "missing".to_owned(),
+                content: "stderr".to_owned(),
+                is_error: true,
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolResult {
+            label,
+            content,
+            is_error,
+        } = &chat.entries[0]
+        else {
+            panic!("expected tool result, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(label, "(result)");
+        assert_eq!(content, "stderr");
+        assert!(*is_error);
+    }
+
+    #[test]
+    fn load_history_joins_multiple_text_blocks() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "first".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "second".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(&chat.entries[0], ChatEntry::Assistant(t) if t == "first\nsecond"));
+    }
+
+    #[test]
+    fn load_history_skips_whitespace_only_text() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "  \n  ".to_owned(),
+            }],
+        }]);
+        assert!(chat.entries.is_empty());
+    }
+
+    #[test]
+    fn load_history_empty_slice_is_noop() {
+        let mut chat = test_chat();
+        chat.load_history(&[]);
+        assert!(chat.entries.is_empty());
+    }
+
+    #[test]
+    fn load_history_restores_tool_call_markers_after_assistant_text() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Let me check that.".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "ls -la"}),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "Let me check that."
+        ));
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[1] else {
+            panic!("expected tool call, got {:?}", chat.entries[1]);
+        };
+        assert_eq!(*icon, "$");
+        assert_eq!(label, "ls -la");
+    }
+
+    #[test]
+    fn load_history_renders_consecutive_tool_calls_separately() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "read".to_owned(),
+                    input: serde_json::json!({"file_path": "src/foo.rs"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".to_owned(),
+                    name: "grep".to_owned(),
+                    input: serde_json::json!({"pattern": "TODO"}),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::ToolCall { icon: "→", label } if label == "src/foo.rs"
+        ));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::ToolCall { icon: "⌕", label } if label == "TODO"
+        ));
+    }
+
+    #[test]
+    fn load_history_unknown_tool_falls_back_to_tool_name_as_label() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".to_owned(),
+                name: "custom_tool".to_owned(),
+                input: serde_json::json!({"arg": "value"}),
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
+            panic!("expected tool call, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(*icon, "⟡");
+        assert_eq!(label, "custom_tool");
+    }
+
+    #[test]
+    fn load_history_server_tool_use_renders_like_local_tool_call() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ServerToolUse {
+                id: "srv1".to_owned(),
+                name: "web_search".to_owned(),
+                input: serde_json::json!({"query": "rust"}),
+            }],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
+            panic!("expected tool call, got {:?}", chat.entries[0]);
+        };
+        assert_eq!(*icon, "⟡");
+        assert_eq!(label, "web_search");
+    }
+
+    #[test]
+    fn load_history_assistant_text_after_tool_use_emits_new_assistant_entry() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Checking logs...".to_owned(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::json!({"command": "tail -f log"}),
+                },
+                ContentBlock::Text {
+                    text: "Looks good.".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 3);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "Checking logs..."
+        ));
+        assert!(matches!(&chat.entries[1], ChatEntry::ToolCall { .. }));
+        assert!(matches!(
+            &chat.entries[2],
+            ChatEntry::Assistant(t) if t == "Looks good."
+        ));
+    }
+
+    #[test]
+    fn load_history_renders_thinking_entries_before_following_text() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "long internal reasoning".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "visible reply".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 2);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Thinking(t) if t == "long internal reasoning"
+        ));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::Assistant(t) if t == "visible reply"
+        ));
+    }
+
+    #[test]
+    fn load_history_thinking_entry_is_dropped_when_body_is_whitespace() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "   \n  ".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "reply".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "reply"
+        ));
+    }
+
+    #[test]
+    fn load_history_redacted_thinking_is_dropped() {
+        let mut chat = test_chat();
+        chat.load_history(&[Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::RedactedThinking {
+                    data: "opaque-ciphertext".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "fine".to_owned(),
+                },
+            ],
+        }]);
+        assert_eq!(chat.entries.len(), 1);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::Assistant(t) if t == "fine"
+        ));
     }
 
     // ── append_stream_token ──
@@ -1184,6 +1600,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn push_tool_call_line_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_cmd =
+            "cd /Users/hakula/GitHub/oxide-code && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
+        chat.push_tool_call("$", long_cmd);
+        let text = chat.build_text(60);
+        assert!(
+            text.lines.len() > 1,
+            "long tool call label should wrap across multiple lines: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            assert!(
+                width <= 60,
+                "wrapped tool call line must fit the width budget (got {width}): {line:?}",
+            );
+        }
+    }
+
     // ── push_tool_result_line ──
 
     #[test]
@@ -1204,6 +1641,27 @@ mod tests {
         assert!(text.contains("✗"));
         assert!(text.contains("failed"));
         assert!(text.contains("error details"));
+    }
+
+    #[test]
+    fn push_tool_result_line_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_label =
+            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
+        chat.push_tool_result(long_label, "", false);
+        let text = chat.build_text(50);
+        assert!(
+            text.lines.len() > 1,
+            "long tool result label should wrap: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            assert!(
+                width <= 50,
+                "wrapped tool result line must fit width (got {width}): {line:?}",
+            );
+        }
     }
 
     // ── push_error ──

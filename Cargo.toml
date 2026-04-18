@@ -20,6 +20,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
+fs4 = { version = "0.13", features = ["sync"] }
 futures = "0.3"
 globset = "0.4"
 ignore = "0.4"
@@ -44,7 +45,14 @@ syntect = { version = "5", default-features = false, features = [
   "regex-onig",
 ] }
 tempfile = "3"
-time = { version = "0.3", features = ["local-offset"] }
+time = { version = "0.3", features = [
+  "formatting",
+  "local-offset",
+  "macros",
+  "parsing",
+  "serde",
+  "serde-well-known",
+] }
 toml = "0.8"
 tokio = { version = "1", features = [
   "io-std",
@@ -63,7 +71,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "fmt",
 ] }
 unicode-width = "0.2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [profile.release]
