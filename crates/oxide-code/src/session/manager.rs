@@ -241,8 +241,15 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 ///    never received a matching `tool_result`. Happens when the
 ///    process crashed between `tool_use` stream end and tool execution
 ///    (or between tool execution and `tool_result` write).
-/// 3. Drops messages that became empty after (2).
-/// 4. Appends a synthetic assistant sentinel when the last remaining
+/// 3. Drops orphan `tool_result` blocks — user `tool_result`s whose
+///    `tool_use_id` does not match any surviving assistant `tool_use`.
+///    Happens when a corrupted JSONL line drops a `tool_use` during
+///    load (or when step 2 removes one), leaving its paired
+///    `tool_result` pointing at nothing. The API rejects orphan
+///    `tool_result`s, so the symmetric filter keeps the transcript
+///    valid.
+/// 4. Drops messages that became empty after (2) or (3).
+/// 5. Appends a synthetic assistant sentinel when the last remaining
 ///    message is a user turn containing only `tool_result` blocks — the
 ///    crash window between writing `tool_results` and the next assistant
 ///    response. Prevents two-user-turns-in-a-row on the next API call.
@@ -264,6 +271,31 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
             msg.content.retain(|b| match b {
                 ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
                     resolved_ids.contains(id)
+                }
+                _ => true,
+            });
+        }
+    }
+
+    // Symmetric pass: collect the tool_use ids that actually survived
+    // the assistant filter above, then drop user tool_results whose id
+    // isn't in that set. An orphan tool_result would fail API validation.
+    let surviving_tool_use_ids: HashSet<String> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    for msg in &mut *messages {
+        if msg.role == Role::User {
+            msg.content.retain(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    surviving_tool_use_ids.contains(tool_use_id)
                 }
                 _ => true,
             });
@@ -899,5 +931,102 @@ mod tests {
         // Last message is still user with tool_result → sentinel appended.
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_tool_result_block_and_keeps_siblings() {
+        // User turn has one tool_result with no matching tool_use (the
+        // preceding assistant only produced text). The orphan block
+        // should be dropped; the sibling text should survive.
+        let mut messages = vec![
+            Message::user("do X"),
+            Message::assistant("done, no tool needed"),
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "orphan".to_owned(),
+                        content: "ghost".to_owned(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: "follow-up".to_owned(),
+                    },
+                ],
+            },
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        let last = &messages[2];
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.content.len(), 1);
+        assert!(matches!(&last.content[0], ContentBlock::Text { text } if text == "follow-up"));
+    }
+
+    #[test]
+    fn sanitize_drops_user_message_with_only_orphan_tool_result() {
+        // The user turn contains nothing but an orphan tool_result;
+        // once the orphan is dropped, the message is empty and the
+        // whole turn is removed.
+        let mut messages = vec![
+            Message::user("do X"),
+            Message::assistant("all clear"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "ghost".to_owned(),
+                    content: "nobody asked".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_when_assistant_tool_use_was_dropped() {
+        // Mismatched IDs: the user tool_result references "t2", but the
+        // assistant never had "t2". Step 2 drops the assistant's "t1"
+        // (unresolved), leaving no surviving tool_use ids; step 3 then
+        // drops the user's "t2" tool_result as orphan. Text sibling on
+        // the assistant survives so both turns remain.
+        let mut messages = vec![
+            Message::user("do X"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "checking".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::Value::Null,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t2".to_owned(),
+                    content: "stale".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+        // Assistant text survives, tool_use "t1" dropped.
+        let assistant = &messages[1].content;
+        assert_eq!(assistant.len(), 1);
+        assert!(matches!(&assistant[0], ContentBlock::Text { text } if text == "checking"));
     }
 }
