@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::util::lock;
+use crate::util::{env, lock};
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -158,7 +158,7 @@ fn read_keychain() -> Option<CredentialsFile> {
 
 #[cfg(target_os = "macos")]
 fn keychain_account() -> Option<String> {
-    std::env::var("USER").ok().filter(|u| !u.is_empty())
+    env::string("USER")
 }
 
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {

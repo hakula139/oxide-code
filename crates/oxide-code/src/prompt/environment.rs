@@ -3,6 +3,8 @@ use std::path::Path;
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
+use crate::util::env;
+
 /// Detected runtime environment for the system prompt.
 ///
 /// Each field maps to one or more bullets in the `# Environment` section.
@@ -185,7 +187,7 @@ fn normalize_node_platform(os: &str) -> &'static str {
 ///
 /// Returns just the basename (`"zsh"`, `"bash"`) rather than the full path.
 fn detect_shell() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".to_owned());
+    let shell = env::string("SHELL").unwrap_or_else(|| "unknown".to_owned());
     std::path::Path::new(&shell)
         .file_name()
         .and_then(|n| n.to_str())
