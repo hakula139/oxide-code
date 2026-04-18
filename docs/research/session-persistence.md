@@ -69,6 +69,12 @@ Two migrations run once at store open time and are idempotent:
 
 On Unix, session files are created with mode `0o600` (user-only read / write) so conversation logs — which may contain verbatim tool output and secrets from bash commands — are not world-readable on multi-user systems.
 
+## Lazy File Creation
+
+`SessionManager::start` does not touch disk: it allocates the session ID, builds the header in memory, and stores both alongside a clone of the `SessionStore` handle. The on-disk file is materialized by the first `record_message` call, which calls `SessionStore::create` to write the header before the message itself. A session that exits before any message is recorded therefore leaves no artifact behind, mirroring claude-code's `sessionStorage` model and keeping `ox --list` clear of empty `ox`-then-quit sessions.
+
+The header's `created_at` reflects the moment `ox` was launched, not the moment the user typed — the timestamp is captured at `start` and persisted unchanged when the file finally materializes. `finish` is a no-op when no message was ever recorded, so an unmaterialized session never writes a `Summary` entry either. A transient I/O failure during materialization (disk full, permission error) leaves the cached header in place so a later retry can still create the file.
+
 ## Session Listing
 
 `ox --list` walks the current project subdirectory by default; `--all` / `-a` widens the scope to every project. For each file we read the header (line 1), optionally an `Entry::Title` on line 2 (see tail-scan note), and scan the last ~4 KB for the latest re-appended `Title` and `Summary`.
@@ -76,7 +82,7 @@ On Unix, session files are created with mode `0o600` (user-only read / write) so
 - **Header** → session ID, CWD, model, created timestamp, format version.
 - **Title** → head scan catches the first-prompt title; tail scan overrides with any later AI-generated / user-provided title. The newer `updated_at` wins.
 - **Latest summary** → message count + updated timestamp.
-- Sessions without a title line show `(untitled)` — happens when the session was started but no user prompt was recorded.
+- Sessions without a title line show `(untitled)` — happens when the first recorded message was not a user text turn (for example, a tool-result-only continuation after a partial restore).
 - Sessions without a summary line still list — they were interrupted before clean exit, so `Msgs` displays `-`.
 - Sort order is by file mtime (most recently active first), with session_id as a tiebreak. Resumed sessions therefore bubble back to the top of the list.
 - Under `--all`, a `Project` column shows the tildified stored `cwd` so cross-project rows stay disambiguable. The column is sized to the widest row, clamped to `[8, 40]` chars.
