@@ -9,6 +9,8 @@
 
 use std::path::Path;
 
+use xxhash_rust::xxh64::xxh64;
+
 /// Maximum character length of a project subdirectory name before we
 /// truncate and append a hash. 80 keeps names readable while staying
 /// well below filesystem `NAME_MAX` limits (255 on ext4 / APFS).
@@ -26,8 +28,12 @@ pub(crate) const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 /// path. Reserved characters (`/`, `\`, `:`, and anything not
 /// `[A-Za-z0-9._-]`) become `-`. Leading and trailing `-` characters
 /// are trimmed. Names longer than [`MAX_PROJECT_DIR_LEN`] are
-/// truncated and suffixed with a 16-char FNV-1a hash of the original
-/// path so distinct long paths never collide.
+/// truncated and suffixed with a 16-char xxh64 hash of the original
+/// path bytes so distinct long paths never collide after truncation.
+///
+/// Hashing uses `OsStr::as_encoded_bytes` (stable since Rust 1.74)
+/// rather than the UTF-8-lossy string representation, so two non-UTF8
+/// paths whose lossy form coincides still hash apart.
 pub(crate) fn sanitize_cwd(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let sanitized: String = raw
@@ -55,20 +61,8 @@ pub(crate) fn sanitize_cwd(path: &Path) -> String {
         .char_indices()
         .nth(keep_chars)
         .map_or(trimmed.len(), |(i, _)| i);
-    let hash = fnv1a_64(raw.as_bytes());
+    let hash = xxh64(path.as_os_str().as_encoded_bytes(), 0);
     format!("{}-{hash:016x}", &trimmed[..cut])
-}
-
-/// FNV-1a 64-bit hash. Stable across Rust versions and platforms, which
-/// `std::hash::DefaultHasher` is not — so the same CWD always maps to
-/// the same project subdirectory name.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 #[cfg(test)]
@@ -135,14 +129,35 @@ mod tests {
         assert_eq!(sanitize_cwd(p), sanitize_cwd(p));
     }
 
-    // ── fnv1a_64 ──
-
+    #[cfg(unix)]
     #[test]
-    fn fnv1a_64_known_vectors() {
-        // Canonical FNV-1a 64-bit vectors (see
-        // <http://www.isthe.com/chongo/tech/comp/fnv/>).
-        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+    fn sanitize_cwd_distinguishes_non_utf8_paths_with_same_lossy_form() {
+        // Two paths that differ only in their invalid-UTF8 bytes
+        // render the same as String (both produce U+FFFD REPLACEMENT
+        // CHARACTER for the bad byte). The hash suffix must still
+        // separate them so sessions do not collide.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::PathBuf;
+
+        let base = "/".to_string() + &"a".repeat(200) + "/";
+        let mut bytes_a = base.as_bytes().to_vec();
+        bytes_a.push(0xFF);
+        let mut bytes_b = base.as_bytes().to_vec();
+        bytes_b.push(0xFE);
+
+        let path_a = PathBuf::from(OsStr::from_bytes(&bytes_a));
+        let path_b = PathBuf::from(OsStr::from_bytes(&bytes_b));
+
+        assert_eq!(
+            path_a.to_string_lossy(),
+            path_b.to_string_lossy(),
+            "precondition: lossy forms collide"
+        );
+        assert_ne!(
+            sanitize_cwd(&path_a),
+            sanitize_cwd(&path_b),
+            "raw-byte hash must disambiguate"
+        );
     }
 }
