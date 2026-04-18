@@ -347,10 +347,16 @@ fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
 }
 
 fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
-    sessions.sort_by(|a, b| {
-        b.last_active_at
-            .cmp(&a.last_active_at)
-            .then_with(|| b.session_id.cmp(&a.session_id))
+    // Matches the `sort_by_key(|e| Reverse(...))` idiom used by the
+    // mtime sort in `tool/{glob,grep}.rs`. `session_id` breaks ties
+    // in reverse-alphabetical order so the resulting order is
+    // stable across `list` calls even when two sessions share a
+    // single-second mtime.
+    sessions.sort_by_key(|s| {
+        (
+            std::cmp::Reverse(s.last_active_at),
+            std::cmp::Reverse(s.session_id.clone()),
+        )
     });
 }
 
