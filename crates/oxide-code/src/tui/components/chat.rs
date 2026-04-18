@@ -145,8 +145,8 @@ impl ChatView {
                                 .push(ChatEntry::Assistant(std::mem::take(&mut text)));
                         }
                         let icon = tool_call_icon(name);
-                        let label =
-                            tool_call_title(name, input).map_or_else(|| name.clone(), str::to_owned);
+                        let label = tool_call_title(name, input)
+                            .map_or_else(|| name.clone(), str::to_owned);
                         self.entries.push(ChatEntry::ToolCall { icon, label });
                     }
                     _ => {}
