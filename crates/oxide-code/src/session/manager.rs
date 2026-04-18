@@ -63,9 +63,9 @@ pub(crate) struct SessionManager {
 
 impl SessionManager {
     /// Start a new session. Writes the header entry immediately.
-    pub(crate) fn start(store: &SessionStore, model: &str) -> Result<Self> {
+    pub(crate) async fn start(store: &SessionStore, model: &str) -> Result<Self> {
         let (session_id, header) = new_header(model);
-        let writer = store.create(&header)?;
+        let writer = store.create(&header).await?;
 
         Ok(Self {
             writer,
@@ -90,7 +90,10 @@ impl SessionManager {
     /// In practice this is a non-issue for a single-user CLI tool — the
     /// lock still prevents concurrent *writers*, just not a reader
     /// seeing the latest state before acquiring the lock.
-    pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<(Self, Vec<Message>)> {
+    pub(crate) async fn resume(
+        store: &SessionStore,
+        session_id: &str,
+    ) -> Result<(Self, Vec<Message>)> {
         let mut data = store.load_session_data(session_id)?;
         sanitize_resumed_messages(&mut data.messages);
         // Run the emptiness check *after* sanitization. Otherwise a
@@ -103,7 +106,7 @@ impl SessionManager {
             bail!("session {session_id} has no messages to resume");
         }
 
-        let writer = store.open_append(session_id)?;
+        let writer = store.open_append(session_id).await?;
 
         let first_user_prompt = data
             .messages
@@ -399,10 +402,12 @@ mod tests {
 
     // ── start ──
 
-    #[test]
-    fn start_creates_session_file_with_zero_count() {
+    #[tokio::test]
+    async fn start_creates_session_file_with_zero_count() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SessionManager::start(&test_store(dir.path()), "test-model").unwrap();
+        let manager = SessionManager::start(&test_store(dir.path()), "test-model")
+            .await
+            .unwrap();
         let path = test_session_file(dir.path(), manager.session_id());
         assert!(path.exists());
         assert_eq!(manager.message_count, 0);
@@ -411,55 +416,55 @@ mod tests {
 
     // ── resume ──
 
-    #[test]
-    fn resume_loads_messages_and_keeps_session_id() {
+    #[tokio::test]
+    async fn resume_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
         original.record_message(&Message::assistant("hi")).unwrap();
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
         assert!(resumed.last_message_uuid.is_some());
     }
 
-    #[test]
-    fn resume_works_on_unfinished_session() {
+    #[tokio::test]
+    async fn resume_works_on_unfinished_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
         drop(original); // no finish() — simulates a crash
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
     }
 
-    #[test]
-    fn resume_empty_session_returns_error() {
+    #[tokio::test]
+    async fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.finish().unwrap();
         drop(original);
 
-        assert!(SessionManager::resume(&store, &session_id).is_err());
+        assert!(SessionManager::resume(&store, &session_id).await.is_err());
     }
 
-    #[test]
-    fn resume_drops_unresolved_trailing_tool_use() {
+    #[tokio::test]
+    async fn resume_drops_unresolved_trailing_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("do X")).unwrap();
         original
@@ -479,7 +484,7 @@ mod tests {
             .unwrap();
         drop(original); // crash before tool_result
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 2);
         let assistant = &messages[1];
         assert_eq!(assistant.role, Role::Assistant);
@@ -499,11 +504,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
+    #[tokio::test]
+    async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("do X")).unwrap();
         original
@@ -518,7 +523,7 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(
             messages.len(),
             1,
@@ -527,8 +532,8 @@ mod tests {
         assert_eq!(messages[0].role, Role::User);
     }
 
-    #[test]
-    fn resume_errors_when_sanitize_empties_transcript() {
+    #[tokio::test]
+    async fn resume_errors_when_sanitize_empties_transcript() {
         // Single assistant message with nothing but an unresolved
         // tool_use — sanitize drops it, leaving an empty vec. The
         // pre-fix code accepted this but kept `last_message_uuid =
@@ -536,7 +541,7 @@ mod tests {
         // parent-chain to a UUID no longer present in memory.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original
             .record_message(&Message {
@@ -550,7 +555,7 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let result = SessionManager::resume(&store, &session_id);
+        let result = SessionManager::resume(&store, &session_id).await;
         let err = match result {
             Ok(_) => panic!("expected resume to bail"),
             Err(e) => e.to_string(),
@@ -558,11 +563,11 @@ mod tests {
         assert!(err.contains("no messages to resume"), "got: {err}");
     }
 
-    #[test]
-    fn resume_appends_sentinel_when_last_is_user_tool_results_only() {
+    #[tokio::test]
+    async fn resume_appends_sentinel_when_last_is_user_tool_results_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("do X")).unwrap();
         original
@@ -587,7 +592,7 @@ mod tests {
             .unwrap();
         drop(original); // crash before next assistant response
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).unwrap();
+        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 4, "sentinel should be appended");
         assert_eq!(messages[3].role, Role::Assistant);
         assert!(
@@ -595,17 +600,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_preserves_parent_chain_on_next_record() {
+    #[tokio::test]
+    async fn resume_preserves_parent_chain_on_next_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
         original.record_message(&Message::assistant("hi")).unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed.record_message(&Message::user("follow up")).unwrap();
 
         // Read the file and find the new message's parent_uuid — should
@@ -640,11 +645,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_appends_and_updates_summary() {
+    #[tokio::test]
+    async fn resume_appends_and_updates_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original
             .record_message(&Message::user("Fix the auth bug"))
@@ -652,7 +657,7 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::assistant("Done."))
             .unwrap();
@@ -675,11 +680,11 @@ mod tests {
 
     // ── record_message ──
 
-    #[test]
-    fn record_message_increments_count_and_chains_parent() {
+    #[tokio::test]
+    async fn record_message_increments_count_and_chains_parent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
 
         manager.record_message(&Message::user("hello")).unwrap();
@@ -706,11 +711,11 @@ mod tests {
         assert_eq!(msgs[1].1, Some(msgs[0].0));
     }
 
-    #[test]
-    fn record_message_writes_title_before_first_user_message() {
+    #[tokio::test]
+    async fn record_message_writes_title_before_first_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
         manager
             .record_message(&Message::user("First prompt"))
@@ -723,11 +728,11 @@ mod tests {
         assert!(lines[2].contains(r#""type":"message""#));
     }
 
-    #[test]
-    fn record_message_writes_title_only_once() {
+    #[tokio::test]
+    async fn record_message_writes_title_only_once() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
 
         manager.record_message(&Message::user("first")).unwrap();
@@ -742,11 +747,11 @@ mod tests {
         assert_eq!(manager.first_user_prompt.as_deref(), Some("first"));
     }
 
-    #[test]
-    fn record_message_no_title_for_tool_result_only() {
+    #[tokio::test]
+    async fn record_message_no_title_for_tool_result_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
 
         manager
@@ -766,11 +771,11 @@ mod tests {
 
     // ── finish ──
 
-    #[test]
-    fn finish_writes_summary_with_count() {
+    #[tokio::test]
+    async fn finish_writes_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
 
         manager
@@ -784,11 +789,11 @@ mod tests {
         assert_eq!(session.exit.as_ref().unwrap().message_count, 1);
     }
 
-    #[test]
-    fn finish_empty_session_writes_summary_without_title() {
+    #[tokio::test]
+    async fn finish_empty_session_writes_summary_without_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
         manager.finish().unwrap();
 
@@ -798,11 +803,11 @@ mod tests {
         assert_eq!(session.exit.as_ref().unwrap().message_count, 0);
     }
 
-    #[test]
-    fn finish_is_idempotent() {
+    #[tokio::test]
+    async fn finish_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").unwrap();
+        let mut manager = SessionManager::start(&store, "m").await.unwrap();
         let sid = manager.session_id().to_owned();
         manager.record_message(&Message::user("hi")).unwrap();
         manager.finish().unwrap();
@@ -816,17 +821,17 @@ mod tests {
         assert_eq!(summary_count, 1);
     }
 
-    #[test]
-    fn finish_skips_summary_on_empty_resume() {
+    #[tokio::test]
+    async fn finish_skips_summary_on_empty_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").unwrap();
+        let mut original = SessionManager::start(&store, "m").await.unwrap();
         let session_id = original.session_id().to_owned();
         original.record_message(&Message::user("hello")).unwrap();
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).unwrap();
+        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed.finish().unwrap();
         drop(resumed);
 
@@ -840,10 +845,12 @@ mod tests {
 
     // ── record_write_failure ──
 
-    #[test]
-    fn record_write_failure_first_call_returns_true_then_false() {
+    #[tokio::test]
+    async fn record_write_failure_first_call_returns_true_then_false() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m").unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m")
+            .await
+            .unwrap();
         assert!(
             manager.record_write_failure(),
             "first failure should be reported"

@@ -1,7 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use fs4::fs_std::FileExt;
@@ -12,6 +11,7 @@ use uuid::Uuid;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
+use crate::util::lock;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
@@ -20,18 +20,6 @@ const SESSIONS_DIR: &str = "sessions";
 /// [`Entry::Summary`] without reading the entire file. 4 KB is generous
 /// for a single JSON line.
 const TAIL_BUF_SIZE: u64 = 4096;
-
-/// Retry budget for acquiring the advisory write lock on a session
-/// file. Matches the credentials lock in `config/oauth.rs` so the two
-/// retry paths behave uniformly.
-const LOCK_MAX_RETRIES: u32 = 5;
-
-/// Sleep duration between lock-acquisition attempts. Shortened under
-/// `cfg(test)` so the contention test does not block CI for seconds.
-#[cfg(not(test))]
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 // ── SessionStore ──
 
@@ -102,7 +90,7 @@ impl SessionStore {
     /// prefix makes `ls` on a project subdirectory return sessions in
     /// chronological order, which is convenient when inspecting the
     /// store outside of `ox --list`.
-    pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
+    pub(crate) async fn create(&self, header: &Entry) -> Result<SessionWriter> {
         let Entry::Header {
             session_id,
             created_at,
@@ -112,12 +100,14 @@ impl SessionStore {
             bail!("expected Header entry");
         };
         validate_session_id(session_id)?;
+
         let path = self
             .project_dir
             .join(session_filename(session_id, *created_at));
         let file = open_create_exclusive(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
-        lock_with_retry(&file, session_id)?;
+        lock_with_retry(&file, session_id).await?;
+
         let mut writer = SessionWriter { file };
         writer.append(header)?;
         Ok(writer)
@@ -127,20 +117,20 @@ impl SessionStore {
     ///
     /// Takes an exclusive advisory lock on the file to prevent concurrent
     /// access. The lock is held for the lifetime of the returned writer.
-    /// Contended locks are retried up to [`LOCK_MAX_RETRIES`] times with
-    /// a [`LOCK_RETRY_INTERVAL`] delay, so accidental back-to-back
+    /// Contended locks are retried up to [`lock::MAX_RETRIES`] times
+    /// with a [`lock::RETRY_INTERVAL`] delay, so accidental back-to-back
     /// `ox -c <id>` invocations do not fail abruptly.
     ///
     /// Searches every project subdirectory, not just the current one,
     /// so `ox -c <id>` resumes a session regardless of which project
     /// it originally belonged to.
-    pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
+    pub(crate) async fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
             .with_context(|| format!("session not found: {}", path.display()))?;
-        lock_with_retry(&file, session_id)?;
+        lock_with_retry(&file, session_id).await?;
         Ok(SessionWriter { file })
     }
 
@@ -411,34 +401,32 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
 }
 
 /// Try to acquire an exclusive advisory lock, retrying on contention
-/// with a fixed interval between attempts.
+/// via the shared [`crate::util::lock::retry_acquire`] helper.
 ///
 /// `flock` is released automatically when a process exits, so a stuck
 /// lock always implies a live peer. Retrying lets accidental
 /// back-to-back invocations succeed once the first has finished a
 /// short-lived action (e.g. listing, quick query), while still erroring
-/// out on a genuinely long-held lock after [`LOCK_MAX_RETRIES`] attempts.
-fn lock_with_retry(file: &File, session_id: &str) -> Result<()> {
-    for attempt in 0..=LOCK_MAX_RETRIES {
-        match file.try_lock_exclusive() {
-            Ok(true) => return Ok(()),
-            Ok(false) if attempt < LOCK_MAX_RETRIES => {
-                std::thread::sleep(LOCK_RETRY_INTERVAL);
-            }
-            Ok(false) => {
-                bail!(
-                    "session {session_id} is in use by another process \
-                     (retried {LOCK_MAX_RETRIES} times)"
-                );
-            }
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!(
-                    "failed to acquire lock on session {session_id}"
-                )));
-            }
-        }
-    }
-    unreachable!()
+/// out on a genuinely long-held lock after [`lock::MAX_RETRIES`] attempts.
+async fn lock_with_retry(file: &File, session_id: &str) -> Result<()> {
+    lock::retry_acquire(
+        || {
+            Ok(file
+                .try_lock_exclusive()
+                .context("flock(2) failed while acquiring session lock")?
+                .then_some(()))
+        },
+        lock::MAX_RETRIES,
+        lock::RETRY_INTERVAL,
+        || {
+            anyhow::anyhow!(
+                "session {session_id} is in use by another process \
+                 (retried {} times)",
+                lock::MAX_RETRIES,
+            )
+        },
+    )
+    .await
 }
 
 // ── Path Resolution ──
@@ -784,13 +772,13 @@ mod tests {
 
     // ── create ──
 
-    #[test]
-    fn create_writes_header_to_new_file() {
+    #[tokio::test]
+    async fn create_writes_header_to_new_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let header = sample_header("test-id");
 
-        let _writer = store.create(&header).unwrap();
+        let _writer = store.create(&header).await.unwrap();
 
         let content = fs::read_to_string(test_session_file(dir.path(), "test-id")).unwrap();
         let parsed: Entry = serde_json::from_str(content.trim()).unwrap();
@@ -799,17 +787,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn create_rejects_non_header_entry() {
+    #[tokio::test]
+    async fn create_rejects_non_header_entry() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let entry = sample_message_entry(Uuid::new_v4(), "hi");
 
-        assert!(store.create(&entry).is_err());
+        assert!(store.create(&entry).await.is_err());
     }
 
-    #[test]
-    fn create_fails_when_file_already_exists() {
+    #[tokio::test]
+    async fn create_fails_when_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let header = sample_header("existing");
@@ -818,17 +806,17 @@ mod tests {
         };
         let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
         fs::write(taken, "{}").unwrap();
-        assert!(store.create(&header).is_err());
+        assert!(store.create(&header).await.is_err());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn create_sets_user_only_file_permissions_on_unix() {
+    #[tokio::test]
+    async fn create_sets_user_only_file_permissions_on_unix() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("perm-test")).unwrap();
+        let _writer = store.create(&sample_header("perm-test")).await.unwrap();
 
         let meta = fs::metadata(test_session_file(dir.path(), "perm-test")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -836,17 +824,17 @@ mod tests {
 
     // ── open_append ──
 
-    #[test]
-    fn open_append_writes_to_existing_file() {
+    #[tokio::test]
+    async fn open_append_writes_to_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("append-test")).unwrap();
+        let mut writer = store.create(&sample_header("append-test")).await.unwrap();
         writer
             .append(&sample_message_entry(Uuid::new_v4(), "first"))
             .unwrap();
         drop(writer); // release lock
 
-        let mut writer = store.open_append("append-test").unwrap();
+        let mut writer = store.open_append("append-test").await.unwrap();
         writer
             .append(&sample_message_entry(Uuid::new_v4(), "second"))
             .unwrap();
@@ -862,21 +850,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_append_fails_for_nonexistent_session() {
+    #[tokio::test]
+    async fn open_append_fails_for_nonexistent_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        assert!(store.open_append("no-such-session").is_err());
+        assert!(store.open_append("no-such-session").await.is_err());
     }
 
-    #[test]
-    fn open_append_rejects_concurrent_access_after_retries_exhausted() {
+    #[tokio::test]
+    async fn open_append_rejects_concurrent_access_after_retries_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("locked")).unwrap();
+        let _writer = store.create(&sample_header("locked")).await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = store.open_append("locked");
+        let result = store.open_append("locked").await;
         let elapsed = start.elapsed();
 
         assert!(result.is_err());
@@ -886,9 +874,9 @@ mod tests {
             err.contains("in use by another process"),
             "unexpected error: {err}"
         );
-        // Retry loop must wait LOCK_MAX_RETRIES × LOCK_RETRY_INTERVAL before
+        // Retry loop must wait MAX_RETRIES × RETRY_INTERVAL before
         // giving up — confirms we actually retried rather than failing fast.
-        let expected = LOCK_RETRY_INTERVAL * LOCK_MAX_RETRIES;
+        let expected = lock::RETRY_INTERVAL * lock::MAX_RETRIES;
         assert!(
             elapsed >= expected,
             "lock gave up too early: {elapsed:?} < {expected:?}"
@@ -897,11 +885,11 @@ mod tests {
 
     // ── load_session_data ──
 
-    #[test]
-    fn load_session_data_returns_only_messages_with_last_uuid() {
+    #[tokio::test]
+    async fn load_session_data_returns_only_messages_with_last_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("load-test")).unwrap();
+        let mut writer = store.create(&sample_header("load-test")).await.unwrap();
 
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
@@ -1060,8 +1048,8 @@ mod tests {
 
     // ── list ──
 
-    #[test]
-    fn list_returns_sessions_in_mtime_order_newest_first() {
+    #[tokio::test]
+    async fn list_returns_sessions_in_mtime_order_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
@@ -1073,6 +1061,7 @@ mod tests {
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
+            .await
             .unwrap();
         wa.append(&sample_title_entry("Older")).unwrap();
         wa.append(&sample_summary_entry(3)).unwrap();
@@ -1085,6 +1074,7 @@ mod tests {
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
                 version: CURRENT_VERSION,
             })
+            .await
             .unwrap();
         wb.append(&sample_title_entry("Newer")).unwrap();
         wb.append(&sample_summary_entry(5)).unwrap();
@@ -1097,8 +1087,8 @@ mod tests {
         assert_eq!(sessions[1].session_id, "aaa");
     }
 
-    #[test]
-    fn list_mtime_overrides_header_created_at_order() {
+    #[tokio::test]
+    async fn list_mtime_overrides_header_created_at_order() {
         // Sort is by file mtime, not header created_at: a resumed session
         // (fresh mtime, older header) should bubble above a brand-new one.
         let dir = tempfile::tempdir().unwrap();
@@ -1112,6 +1102,7 @@ mod tests {
                 created_at: datetime!(2026-01-01 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
+            .await
             .unwrap();
         w_old.append(&sample_title_entry("Old")).unwrap();
         drop(w_old);
@@ -1124,6 +1115,7 @@ mod tests {
                 created_at: datetime!(2026-04-17 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
+            .await
             .unwrap();
         w_new.append(&sample_title_entry("New")).unwrap();
         drop(w_new);
@@ -1152,11 +1144,11 @@ mod tests {
         assert_eq!(sessions[1].session_id, "zzz-new-header");
     }
 
-    #[test]
-    fn list_picks_latest_title_when_re_appended() {
+    #[tokio::test]
+    async fn list_picks_latest_title_when_re_appended() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("retitled")).unwrap();
+        let mut writer = store.create(&sample_header("retitled")).await.unwrap();
         writer
             .append(&Entry::Title {
                 title: "original prompt".to_owned(),
@@ -1177,14 +1169,14 @@ mod tests {
         assert_eq!(title.title, "AI generated");
     }
 
-    #[test]
-    fn list_finds_first_prompt_title_beyond_tail_window() {
+    #[tokio::test]
+    async fn list_finds_first_prompt_title_beyond_tail_window() {
         // The first-prompt title is written at line 2 and never re-appended.
         // A pure tail scan misses it once the file exceeds TAIL_BUF_SIZE.
         // Verify the head scan catches it.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("long")).unwrap();
+        let mut writer = store.create(&sample_header("long")).await.unwrap();
         writer
             .append(&Entry::Title {
                 title: "first prompt".to_owned(),
@@ -1209,11 +1201,11 @@ mod tests {
         assert_eq!(title.title, "first prompt");
     }
 
-    #[test]
-    fn list_works_without_title_or_summary() {
+    #[tokio::test]
+    async fn list_works_without_title_or_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("bare")).unwrap();
+        let _writer = store.create(&sample_header("bare")).await.unwrap();
 
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -1235,18 +1227,21 @@ mod tests {
         assert!(store.list().unwrap().is_empty());
     }
 
-    #[test]
-    fn list_is_scoped_to_current_project() {
+    #[tokio::test]
+    async fn list_is_scoped_to_current_project() {
         // Only sessions in the current project dir are visible; siblings
         // in other project subdirectories stay hidden.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).unwrap();
+        let _own = store.create(&sample_header("own")).await.unwrap();
 
         // Drop a session into a sibling project subdir.
         let sibling_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = sibling_store.create(&sample_header("foreign")).unwrap();
+        let _foreign = sibling_store
+            .create(&sample_header("foreign"))
+            .await
+            .unwrap();
         drop(sibling_store);
 
         let sessions = store.list().unwrap();
@@ -1256,15 +1251,18 @@ mod tests {
 
     // ── list_all ──
 
-    #[test]
-    fn list_all_spans_every_project_subdirectory() {
+    #[tokio::test]
+    async fn list_all_spans_every_project_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).unwrap();
+        let _own = store.create(&sample_header("own")).await.unwrap();
 
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
+        let _foreign = foreign_store
+            .create(&sample_header("foreign"))
+            .await
+            .unwrap();
         drop(foreign_store);
 
         let all = store.list_all().unwrap();
@@ -1275,15 +1273,18 @@ mod tests {
 
     // ── find_session_path ──
 
-    #[test]
-    fn find_session_path_falls_back_to_other_projects() {
+    #[tokio::test]
+    async fn find_session_path_falls_back_to_other_projects() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
         // Session lives in a different project subdirectory.
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _w = foreign_store.create(&sample_header("foreign")).unwrap();
+        let _w = foreign_store
+            .create(&sample_header("foreign"))
+            .await
+            .unwrap();
         drop(foreign_store);
 
         let found = store.find_session_path("foreign").unwrap();
@@ -1308,11 +1309,11 @@ mod tests {
 
     // ── append ──
 
-    #[test]
-    fn append_writes_multiple_entries() {
+    #[tokio::test]
+    async fn append_writes_multiple_entries() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("multi")).unwrap();
+        let mut writer = store.create(&sample_header("multi")).await.unwrap();
 
         writer
             .append(&sample_message_entry(Uuid::new_v4(), "hello"))

@@ -5,6 +5,7 @@ mod prompt;
 mod session;
 mod tool;
 mod tui;
+mod util;
 
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
@@ -102,7 +103,7 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref(), cli.all)?;
+    let (session, messages) = resolve_session(&store, &model, cli.resume.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
     let tools = create_tool_registry();
@@ -190,7 +191,7 @@ enum ResumeMode<'a> {
     Prefix(&'a str),
 }
 
-fn resolve_session(
+async fn resolve_session(
     store: &SessionStore,
     model: &str,
     resume: Option<&Option<String>>,
@@ -198,7 +199,7 @@ fn resolve_session(
 ) -> Result<(SessionManager, Vec<Message>)> {
     let mode = normalize_resume_arg(resume)?;
     if matches!(mode, ResumeMode::Fresh) {
-        let session = SessionManager::start(store, model)?;
+        let session = SessionManager::start(store, model).await?;
         return Ok((session, Vec::new()));
     }
 
@@ -237,7 +238,7 @@ fn resolve_session(
         }
     };
 
-    let (session, messages) = SessionManager::resume(store, &session_id)?;
+    let (session, messages) = SessionManager::resume(store, &session_id).await?;
     debug!("resuming session {session_id}");
     Ok((session, messages))
 }
