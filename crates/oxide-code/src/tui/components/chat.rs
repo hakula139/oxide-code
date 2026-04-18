@@ -124,22 +124,25 @@ impl ChatView {
     /// view.
     pub(crate) fn load_history(&mut self, messages: &[Message]) {
         for msg in messages {
-            let text: String = msg
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut text = String::new();
+            for block in &msg.content {
+                if let ContentBlock::Text { text: t } = block
+                    && !t.trim().is_empty()
+                {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(t);
+                }
+            }
             if text.is_empty() {
                 continue;
             }
-            match msg.role {
-                Role::User => self.entries.push(ChatEntry::User(text)),
-                Role::Assistant => self.entries.push(ChatEntry::Assistant(text)),
-            }
+            let entry = match msg.role {
+                Role::User => ChatEntry::User(text),
+                Role::Assistant => ChatEntry::Assistant(text),
+            };
+            self.entries.push(entry);
         }
     }
 
