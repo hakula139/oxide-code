@@ -43,6 +43,7 @@ ox     # Start an interactive session
 │   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
+│   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/

@@ -21,6 +21,7 @@ use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use prompt::{PromptParts, environment::marketing_name};
 use session::manager::SessionManager;
+use session::resolver::resolve_session;
 use session::store::SessionStore;
 use tool::{
     ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
@@ -166,118 +167,6 @@ fn list_sessions(all: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Create or resume a session based on CLI flags.
-///
-/// `resume`:
-/// - `None`: no `--continue` flag → new session.
-/// - `Some(None)`: `--continue` without value → resume latest.
-/// - `Some(Some(id))`: `--continue <id>` → resume specific session.
-///
-/// `all` widens the search scope for `--continue` from the current
-/// project to every project. A specific session ID is always resolved
-/// across projects once matched, so `--all` mainly changes which
-/// sessions are eligible in the prefix / latest lookup.
-/// Normalized form of the CLI `--continue` argument. Built by
-/// [`normalize_resume_arg`] and consumed by [`resolve_session`].
-enum ResumeMode<'a> {
-    /// No `--continue` was passed — start a brand new session.
-    Fresh,
-    /// Bare `--continue` — resume the most recent session in scope.
-    Latest,
-    /// `--continue <prefix>` — resume the single session whose ID
-    /// starts with the (trimmed, non-empty) prefix.
-    Prefix(&'a str),
-}
-
-async fn resolve_session(
-    store: &SessionStore,
-    model: &str,
-    resume: Option<&Option<String>>,
-    all: bool,
-) -> Result<(SessionManager, Vec<Message>)> {
-    let mode = normalize_resume_arg(resume)?;
-    if matches!(mode, ResumeMode::Fresh) {
-        let session = SessionManager::start(store, model).await?;
-        return Ok((session, Vec::new()));
-    }
-
-    let sessions = if all {
-        store.list_all()?
-    } else {
-        store.list()?
-    };
-
-    let session_id = match mode {
-        ResumeMode::Fresh => unreachable!("handled above"),
-        ResumeMode::Latest => sessions
-            .into_iter()
-            .next()
-            .map(|s| s.session_id)
-            .context("no sessions to resume")?,
-        ResumeMode::Prefix(prefix) => {
-            let mut matched = sessions
-                .into_iter()
-                .filter(|s| s.session_id.starts_with(prefix))
-                .map(|s| s.session_id);
-            let first = matched.next();
-            let second = matched.next();
-            match (first, second) {
-                (None, _) => bail!("no session matching prefix '{prefix}'"),
-                (Some(only), None) => only,
-                (Some(a), Some(b)) => {
-                    let rest: Vec<_> = matched.collect();
-                    bail!(
-                        "ambiguous prefix '{prefix}' matches {} sessions: {}",
-                        2 + rest.len(),
-                        format_session_id_preview([a, b].into_iter().chain(rest)),
-                    );
-                }
-            }
-        }
-    };
-
-    let (session, messages) = SessionManager::resume(store, &session_id).await?;
-    debug!("resuming session {session_id}");
-    Ok((session, messages))
-}
-
-/// Trim and classify a `--continue` argument into a [`ResumeMode`].
-/// Empty / whitespace-only prefixes are rejected explicitly so they
-/// cannot silently collapse into "resume latest" — the bare
-/// `--continue` flag already expresses that intent.
-fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
-    match resume {
-        None => Ok(ResumeMode::Fresh),
-        Some(None) => Ok(ResumeMode::Latest),
-        Some(Some(raw)) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                bail!("empty session ID prefix; use `ox -c` (bare) to resume the latest session");
-            }
-            Ok(ResumeMode::Prefix(trimmed))
-        }
-    }
-}
-
-/// Join the first [`MATCH_PREVIEW_LIMIT`] session IDs (truncated to
-/// 8 chars each) as `aaaaaaaa, bbbbbbbb`, appending `, …` when more
-/// matches were provided. Drives the ambiguous-prefix error in
-/// [`resolve_session`].
-fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
-    const MATCH_PREVIEW_LIMIT: usize = 5;
-    let mut iter = ids.into_iter();
-    let first_batch: Vec<String> = iter
-        .by_ref()
-        .take(MATCH_PREVIEW_LIMIT)
-        .map(|id| id[..id.len().min(8)].to_owned())
-        .collect();
-    let mut out = first_batch.join(", ");
-    if iter.next().is_some() {
-        out.push_str(", …");
-    }
-    out
 }
 
 fn create_tool_registry() -> ToolRegistry {
