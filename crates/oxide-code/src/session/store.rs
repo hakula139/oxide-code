@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -18,6 +19,18 @@ const SESSIONS_DIR: &str = "sessions";
 /// [`Entry::Summary`] without reading the entire file. 4 KB is generous
 /// for a single JSON line.
 const TAIL_BUF_SIZE: u64 = 4096;
+
+/// Retry budget for acquiring the advisory write lock on a session
+/// file. Matches the credentials lock in `config/oauth.rs` so the two
+/// retry paths behave uniformly.
+const LOCK_MAX_RETRIES: u32 = 5;
+
+/// Sleep duration between lock-acquisition attempts. Shortened under
+/// `cfg(test)` so the contention test does not block CI for seconds.
+#[cfg(not(test))]
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 // ── SessionStore ──
 
@@ -60,8 +73,7 @@ impl SessionStore {
         let path = self.session_path(session_id)?;
         let file = open_create_exclusive(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
-        file.try_lock_exclusive()
-            .with_context(|| format!("session {session_id} is already in use"))?;
+        lock_with_retry(&file, session_id)?;
         let mut writer = SessionWriter { file };
         writer.append(header)?;
         Ok(writer)
@@ -71,14 +83,16 @@ impl SessionStore {
     ///
     /// Takes an exclusive advisory lock on the file to prevent concurrent
     /// access. The lock is held for the lifetime of the returned writer.
+    /// Contended locks are retried up to [`LOCK_MAX_RETRIES`] times with
+    /// a [`LOCK_RETRY_INTERVAL`] delay, so accidental back-to-back
+    /// `ox -c <id>` invocations do not fail abruptly.
     pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.session_path(session_id)?;
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
             .with_context(|| format!("session not found: {}", path.display()))?;
-        file.try_lock_exclusive()
-            .with_context(|| format!("session {session_id} is already in use"))?;
+        lock_with_retry(&file, session_id)?;
         Ok(SessionWriter { file })
     }
 
@@ -227,6 +241,32 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
         options.mode(0o600);
     }
     options.open(path)
+}
+
+/// Try to acquire an exclusive advisory lock, retrying on contention
+/// with a fixed interval between attempts.
+///
+/// `flock` is released automatically when a process exits, so a stuck
+/// lock always implies a live peer. Retrying lets accidental
+/// back-to-back invocations succeed once the first has finished a
+/// short-lived action (e.g. listing, quick query), while still erroring
+/// out on a genuinely long-held lock after [`LOCK_MAX_RETRIES`] attempts.
+fn lock_with_retry(file: &File, session_id: &str) -> Result<()> {
+    for attempt in 0..=LOCK_MAX_RETRIES {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < LOCK_MAX_RETRIES => {
+                std::thread::sleep(LOCK_RETRY_INTERVAL);
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "session {session_id} is in use by another process \
+                     (retried {LOCK_MAX_RETRIES} times)"
+                )));
+            }
+        }
+    }
+    unreachable!()
 }
 
 // ── Path Resolution ──
@@ -490,15 +530,29 @@ mod tests {
     }
 
     #[test]
-    fn open_append_rejects_concurrent_access() {
+    fn open_append_rejects_concurrent_access_after_retries_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("locked")).unwrap();
 
+        let start = std::time::Instant::now();
         let result = store.open_append("locked");
+        let elapsed = start.elapsed();
+
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("already in use"), "unexpected error: {err}");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("retried"), "unexpected error: {err}");
+        assert!(
+            err.contains("in use by another process"),
+            "unexpected error: {err}"
+        );
+        // Retry loop must wait LOCK_MAX_RETRIES × LOCK_RETRY_INTERVAL before
+        // giving up — confirms we actually retried rather than failing fast.
+        let expected = LOCK_RETRY_INTERVAL * LOCK_MAX_RETRIES;
+        assert!(
+            elapsed >= expected,
+            "lock gave up too early: {elapsed:?} < {expected:?}"
+        );
     }
 
     // ── load_session_data ──
