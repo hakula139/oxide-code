@@ -690,9 +690,9 @@ mod tests {
     use indoc::indoc;
     use time::macros::datetime;
 
+    use super::entry::TitleSource;
     use super::*;
     use crate::message::ContentBlock;
-    use crate::session::entry::TitleSource;
 
     const TEST_PROJECT: &str = "test-project";
 
