@@ -43,6 +43,8 @@ ox -c a1b2
 
 When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID. An advisory file lock prevents two processes from writing to the same session simultaneously.
 
+`ox` also sanitizes the loaded conversation before the next API call: if the previous run crashed between a tool call and its result, the unresolved tool call is dropped so the API accepts the resumed state.
+
 If no sessions exist, or if the prefix matches zero or multiple sessions, `ox` prints an error and exits.
 
 ## Session Files
@@ -53,11 +55,14 @@ Session files are plain JSONL (one JSON object per line). You can inspect them d
 head -1 ~/.local/share/ox/sessions/*.jsonl   # view session headers
 ```
 
-Each file contains:
+On Unix, session files are created with user-only permissions (`0o600`) because they contain verbatim tool output that may include secrets from bash commands.
 
-1. A **header** line with session metadata (ID, working directory, model, timestamp).
-2. **Message** lines with the full conversation (user and assistant turns, tool calls and results).
-3. A **summary** line with the session title and message count (written on exit; missing if the session was interrupted).
+Each file contains these line types (tagged by `type`):
+
+1. A **header** on the first line — session metadata (ID, working directory, model, timestamp, format version).
+2. **Message** lines with the full conversation (user / assistant turns, tool calls, tool results), each with a stable `uuid` and chain link (`parent_uuid`) to the previous message.
+3. **Title** lines — the session title (truncated first user prompt by default; may be replaced later by an AI-generated or user-provided title). The latest occurrence wins.
+4. A **summary** line on clean exit with the final message count. Missing if the session was interrupted.
 
 ## Headless and REPL Modes
 
