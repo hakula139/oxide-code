@@ -80,7 +80,7 @@ On Unix, session files are created with mode `0o600` (user-only read / write) so
 - Sessions without a summary line still list — they were interrupted before clean exit, so `Msgs` displays `-`.
 - Sort order is by file mtime (most recently active first), with session_id as a tiebreak. Resumed sessions therefore bubble back to the top of the list.
 - Under `--all`, a `Project` column shows the tildified stored `cwd` so cross-project rows stay disambiguable. The column is sized to the widest row, clamped to `[8, 40]` chars.
-- Titles are truncated to fit the detected terminal width (`crossterm::terminal::size`) with a trailing `…`. Piped output (`ox -l | less`) and undetectable widths skip truncation so downstream tools see the full text.
+- Titles are truncated to fit the detected terminal width (`crossterm::terminal::size`) with a trailing `...`. Piped output (`ox -l | less`) and undetectable widths skip truncation so downstream tools see the full text.
 
 ## Session Resume
 

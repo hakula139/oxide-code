@@ -134,7 +134,7 @@ fn render_sessions(
 }
 
 /// Truncate `s` to fit within `max_width` visual columns, appending
-/// `…` when truncation occurs. Width accounting uses
+/// `...` when truncation occurs. Width accounting uses
 /// [`UnicodeWidthChar`] so CJK / emoji are billed at their rendered
 /// width. Returns `s` unchanged when it already fits, or an empty
 /// string when `max_width` is 0.
@@ -146,7 +146,15 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
         return String::new();
     }
 
-    let budget = max_width.saturating_sub(ELLIPSIS_WIDTH);
+    // Normal callers guard with MIN_TITLE_BUDGET so `max_width` is
+    // comfortably above `ELLIPSIS_WIDTH`; the fallback exists for
+    // pathological widths (exercised mainly by unit tests) where we'd
+    // otherwise overflow by emitting "..." into a 1- or 2-col slot.
+    let (budget, tail) = if max_width >= ELLIPSIS_WIDTH {
+        (max_width - ELLIPSIS_WIDTH, "...")
+    } else {
+        (max_width, "")
+    };
     let mut acc = 0;
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -157,7 +165,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
         out.push(ch);
         acc += w;
     }
-    out.push('…');
+    out.push_str(tail);
     out
 }
 
@@ -171,8 +179,8 @@ const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
 /// we skip it and let the terminal wrap instead.
 const MIN_TITLE_BUDGET: usize = 12;
 
-/// Visual width of the `…` ellipsis character.
-const ELLIPSIS_WIDTH: usize = 1;
+/// Visual width of the `...` truncation marker (three ASCII dots).
+const ELLIPSIS_WIDTH: usize = 3;
 
 /// Minimum width for the `Project` column — at least wide enough to
 /// fit the header label ("Project" = 7 chars) without truncation-by-padding.
@@ -332,15 +340,15 @@ mod tests {
             title: "A very long session title that will not fit".to_owned(),
             updated_at: datetime!(2026-04-18 09:05:00 UTC),
         });
-        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~21
-        // chars + `…`).
+        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19
+        // chars + `...`).
         let out = render_with_width(&[s], false, Some(60));
         let row = out.lines().nth(1).unwrap();
         let title = row
             .split_once("-      ")
             .map(|(_, t)| t)
             .expect("row must have the Msgs cell");
-        assert!(title.ends_with('…'), "expected ellipsis, got: {title:?}");
+        assert!(title.ends_with("..."), "expected ellipsis, got: {title:?}");
         assert!(
             title.width() <= 22,
             "title width {} exceeds budget for {title:?}",
@@ -373,7 +381,7 @@ mod tests {
         });
         // Prefix 38 + MIN_TITLE_BUDGET(12) = 50. term_width = 45 leaves
         // a budget below minimum → no truncation (let the terminal
-        // wrap rather than chopping everything to `F…`).
+        // wrap rather than chopping everything to `F...`).
         let out = render_with_width(&[s], false, Some(45));
         assert!(
             out.contains(full_title),
@@ -390,15 +398,15 @@ mod tests {
 
     #[test]
     fn truncate_to_width_appends_ellipsis_on_ascii_overflow() {
-        assert_eq!(truncate_to_width("abcdefghij", 5), "abcd…");
+        assert_eq!(truncate_to_width("abcdefghij", 5), "ab...");
     }
 
     #[test]
     fn truncate_to_width_accounts_for_cjk_double_width() {
-        // 中 is width 2. "中中中" → width 6. Budget 5 → 1 CJK char + `…` = width 3.
-        // Budget accounts for the ellipsis (width 1), leaves 4 for content.
-        // Two CJK chars take width 4, so we should emit "中中…" (width 5).
-        assert_eq!(truncate_to_width("中中中", 5), "中中…");
+        // "测试文本" → 4 CJK chars × width 2 = width 8. Budget 5 minus
+        // the 3-col ellipsis leaves 2 cols for content, so exactly one
+        // CJK char fits and we emit "测..." (width 5).
+        assert_eq!(truncate_to_width("测试文本", 5), "测...");
     }
 
     #[test]
@@ -407,7 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_width_returns_ellipsis_only_when_max_width_one() {
-        assert_eq!(truncate_to_width("abc", 1), "…");
+    fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
+        // `...` doesn't fit in 1- or 2-col budgets, so fall back to a
+        // raw truncation and return whatever content does fit.
+        assert_eq!(truncate_to_width("abc", 1), "a");
+        assert_eq!(truncate_to_width("abc", 2), "ab");
     }
 }

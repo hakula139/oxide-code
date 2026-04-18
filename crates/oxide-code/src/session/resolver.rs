@@ -107,7 +107,7 @@ pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<Re
 }
 
 /// Join the first `MATCH_PREVIEW_LIMIT` session IDs (truncated to
-/// 8 chars each) as `aaaaaaaa, bbbbbbbb`, appending `, …` when more
+/// 8 chars each) as `aaaaaaaa, bbbbbbbb`, appending `, ...` when more
 /// matches were provided. Drives the ambiguous-prefix error in
 /// [`resolve_session`].
 fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
@@ -120,7 +120,7 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
         .collect();
     let mut out = first_batch.join(", ");
     if iter.next().is_some() {
-        out.push_str(", …");
+        out.push_str(", ...");
     }
     out
 }
@@ -185,16 +185,16 @@ mod tests {
     fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
         let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
         let out = format_session_id_preview(ids);
-        let short_count = out.split(", ").filter(|s| *s != "…").count();
+        let short_count = out.split(", ").filter(|s| *s != "...").count();
         assert_eq!(short_count, 5, "{out:?}");
-        assert!(out.ends_with(", …"), "{out:?}");
+        assert!(out.ends_with(", ..."), "{out:?}");
     }
 
     #[test]
     fn format_session_id_preview_no_ellipsis_at_limit() {
         let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
         let out = format_session_id_preview(ids);
-        assert!(!out.contains('…'), "{out:?}");
+        assert!(!out.ends_with(", ..."), "{out:?}");
     }
 
     // ── resolve_session ──
