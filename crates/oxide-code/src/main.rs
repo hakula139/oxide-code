@@ -11,7 +11,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
@@ -41,6 +41,11 @@ static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock:
 
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
+#[command(group(
+    ArgGroup::new("scope")
+        .args(["list", "continue"])
+        .multiple(true),
+))]
 struct Cli {
     /// Disable the TUI and use a bare REPL instead.
     #[arg(long)]
@@ -68,10 +73,11 @@ struct Cli {
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
-    /// Operate across every project. By default `--list` and `--continue`
-    /// only see sessions created in the current working directory; with
-    /// `--all`, they span every project.
-    #[arg(short, long)]
+    /// Operate across every project. Widens the scope of `--list` /
+    /// `--continue` from the current working directory to every
+    /// project. Must be combined with `--list` or `--continue`; on its
+    /// own (or with `--prompt`) it would have no effect.
+    #[arg(short, long, requires = "scope")]
     all: bool,
 }
 
