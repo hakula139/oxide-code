@@ -9,7 +9,11 @@ use super::store::{SessionStore, SessionWriter};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
-const MAX_TITLE_LEN: usize = 60;
+///
+/// Sized for wide terminals: the `--list` row is `ID(8) Last Active(16)
+/// Msgs(6) Title`, so ~80 chars of title space on a 120-col terminal
+/// and still truncates cleanly (`...`) on narrower ones.
+const MAX_TITLE_LEN: usize = 80;
 
 /// Synthetic assistant content injected when resume detects a trailing
 /// user turn with only `tool_results` (i.e., the previous run crashed
