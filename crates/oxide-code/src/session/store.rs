@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use fs2::FileExt;
+use fs4::fs_std::FileExt;
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -421,14 +421,19 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
 fn lock_with_retry(file: &File, session_id: &str) -> Result<()> {
     for attempt in 0..=LOCK_MAX_RETRIES {
         match file.try_lock_exclusive() {
-            Ok(()) => return Ok(()),
-            Err(_) if attempt < LOCK_MAX_RETRIES => {
+            Ok(true) => return Ok(()),
+            Ok(false) if attempt < LOCK_MAX_RETRIES => {
                 std::thread::sleep(LOCK_RETRY_INTERVAL);
+            }
+            Ok(false) => {
+                bail!(
+                    "session {session_id} is in use by another process \
+                     (retried {LOCK_MAX_RETRIES} times)"
+                );
             }
             Err(e) => {
                 return Err(anyhow::Error::new(e).context(format!(
-                    "session {session_id} is in use by another process \
-                     (retried {LOCK_MAX_RETRIES} times)"
+                    "failed to acquire lock on session {session_id}"
                 )));
             }
         }
