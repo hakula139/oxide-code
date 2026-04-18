@@ -22,6 +22,12 @@ const MAX_TITLE_LEN: usize = 80;
 /// response). Keeps role alternation valid for the next API call.
 const RESUME_CONTINUATION_SENTINEL: &str = "[Previous turn was interrupted; continuing.]";
 
+/// Synthetic user content injected when resume leaves an assistant as
+/// the first message. Happens when sanitization drops a leading user
+/// turn whose only blocks were orphan `tool_results`; the API rejects
+/// transcripts that start with assistant, so we prepend a stub.
+const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
+
 // ── SessionManager ──
 
 /// High-level session lifecycle, owned by the agent loop.
@@ -267,7 +273,12 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 ///    with only orphan `tool_result`, can leave two same-role turns
 ///    adjacent. Merging their content preserves every block while
 ///    restoring alternation.
-/// 6. Appends a synthetic assistant sentinel when the last remaining
+/// 6. Prepends a synthetic user sentinel if the first remaining
+///    message is an assistant turn (reached when a leading user turn
+///    had only orphan `tool_result` blocks and was dropped in step 3).
+///    The API rejects transcripts that start with assistant, so a
+///    user stub is injected to keep alternation valid.
+/// 7. Appends a synthetic assistant sentinel when the last remaining
 ///    message is a user turn containing only `tool_result` blocks — the
 ///    crash window between writing `tool_results` and the next assistant
 ///    response. Prevents two-user-turns-in-a-row on the next API call.
@@ -322,6 +333,12 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
 
     messages.retain(|m| !m.content.is_empty());
     collapse_consecutive_same_role(messages);
+
+    if let Some(first) = messages.first()
+        && first.role == Role::Assistant
+    {
+        messages.insert(0, Message::user(RESUME_HEAD_SENTINEL));
+    }
 
     if let Some(last) = messages.last()
         && last.role == Role::User
@@ -1150,6 +1167,35 @@ mod tests {
         let assistant = &messages[1].content;
         assert_eq!(assistant.len(), 1);
         assert!(matches!(&assistant[0], ContentBlock::Text { text } if text == "checking"));
+    }
+
+    #[test]
+    fn sanitize_prepends_head_sentinel_when_leading_user_is_dropped() {
+        // Leading user turn has only an orphan tool_result — step 3
+        // drops it, step 4 removes the now-empty user, leaving the
+        // assistant as the first message. API rejects that, so a
+        // synthetic user turn is prepended.
+        let mut messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "ghost".to_owned(),
+                    content: "stale".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("carrying on"),
+            Message::user("next question"),
+        ];
+        sanitize_resumed_messages(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, Role::User);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == RESUME_HEAD_SENTINEL)
+        );
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[2].role, Role::User);
     }
 
     // ── collapse_consecutive_same_role ──

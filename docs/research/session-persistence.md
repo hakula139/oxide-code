@@ -101,7 +101,8 @@ A session can crash between writing an assistant's `tool_use` block and the corr
 3. Drop user `tool_result` blocks whose `tool_use_id` has no surviving assistant `tool_use`. Symmetric to (2); covers the case where the paired `tool_use` line was corrupted during load or dropped in (2), leaving an orphan `tool_result` the API would reject.
 4. Drop messages that became empty after (2) or (3).
 5. Merge adjacent same-role messages. (2)–(4) can empty an assistant or user turn between two same-role neighbors — e.g., an orphan-only user dropped between two assistants. The API rejects consecutive same-role turns, so the collapse pass concatenates their content blocks into the earlier message rather than losing data.
-6. If the last remaining message is a user turn containing only `tool_result` blocks (crash between `tool_result` write and the next assistant response), append a synthetic assistant sentinel so role alternation stays valid for the next API call.
+6. If the first remaining message is an assistant turn (reachable when a leading user turn held only orphan `tool_result` blocks and was dropped in step 3), prepend a synthetic user sentinel so the transcript begins with user as the API requires.
+7. If the last remaining message is a user turn containing only `tool_result` blocks (crash between `tool_result` write and the next assistant response), append a synthetic assistant sentinel so role alternation stays valid for the next API call.
 
 This keeps the next API call safe without requiring the user to manually repair the transcript.
 
@@ -149,7 +150,7 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 | Summary               | `Summary` on exit (message_count only)             | Latest wins on tail scan; splitting title out kept summary as a pure exit marker                                                                    |
 | Format versioning     | `version` field on header (`default = 1`)          | Explicit version lets future bumps reject old readers cleanly                                                                                       |
 | Session resume        | Append to existing file                            | Same file is self-contained; matches claude-code / Codex                                                                                            |
-| Resume sanitization   | Symmetric filter + collapse + sentinel             | Drop unresolved `tool_use`s AND orphan `tool_result`s, merge any adjacent same-role survivors, then inject sentinel if needed — keeps strict alternation after crashes/corruption |
+| Resume sanitization   | Symmetric filter + collapse + head/tail sentinels  | Drop unresolved `tool_use`s AND orphan `tool_result`s, merge any adjacent same-role survivors, inject a user sentinel if the transcript begins assistant and an assistant sentinel if it ends on orphan-only user — keeps strict alternation after crashes/corruption |
 | Write-error surfacing | First failure only (via `AgentEvent::Error`)       | Balance visibility (user knows persistence broke) against spam (no re-report on every write) after the initial notification                         |
 | Listing scan          | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                         |
 | Listing sort key      | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                       |
