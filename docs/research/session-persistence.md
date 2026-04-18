@@ -58,7 +58,7 @@ The `message` entries wrap `Message` objects (already `Serialize` / `Deserialize
 
 ## Storage Location
 
-Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`, falling back to `~/.local/share/ox/sessions/{project}/`. `{project}` is a stable fingerprint of the working directory at session creation time — path separators and reserved characters become `-`, and very long paths are truncated with an inline FNV-1a 64-bit hash suffix so two long paths sharing a prefix cannot collide.
+Sessions live in `$XDG_DATA_HOME/ox/sessions/{project}/`, falling back to `~/.local/share/ox/sessions/{project}/`. `{project}` is a filesystem-safe subdirectory name derived from the working directory at session creation time — path separators and reserved characters become `-`, and very long paths are truncated with an inline xxh64 hash suffix of the original path bytes so two long paths sharing a prefix cannot collide.
 
 File naming: `{unix_timestamp}-{session_id}.jsonl`. Session ID is still a UUID v4; the timestamp prefix gives chronological directory-order listings without fighting the `--list` mtime sort. Lookup by session ID is by suffix (`-{id}.jsonl`), so the prefix stays invisible to callers.
 
@@ -140,7 +140,7 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 | --------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Storage format        | JSONL                                              | Proven, append-only, no dependencies                                                                                                                |
 | Location              | XDG_DATA_HOME                                      | Proper XDG separation from config                                                                                                                   |
-| Directory layout      | Per-project subdir (`sanitize(cwd)`)               | Listings stay scoped to the project you are working in; `--all` opts into a cross-project view                                                      |
+| Directory layout      | Per-project subdir (`sanitize_cwd(path)`)          | Listings stay scoped to the project you are working in; `--all` opts into a cross-project view                                                      |
 | File naming           | `{epoch}-{UUID}.jsonl`                             | Timestamp prefix keeps `ls` chronological; lookup by UUID suffix stays O(readdir)                                                                   |
 | Migration             | Idempotent flat → project → prefix sweep on open   | Users upgrading from the flat layout land on the final layout in one `ox` invocation without manual steps                                           |
 | File permissions      | `0o600` on Unix                                    | Session logs may contain secrets from bash output; restrict to owner on multi-user systems                                                          |

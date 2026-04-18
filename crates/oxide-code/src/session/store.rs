@@ -26,8 +26,9 @@ const TAIL_BUF_SIZE: u64 = 4096;
 /// Low-level session file operations.
 ///
 /// Sessions are stored under `$XDG_DATA_HOME/ox/sessions/{project}/`,
-/// where `{project}` is a sanitized fingerprint of the working
-/// directory at session creation time. The store exposes one "home"
+/// where `{project}` is a filesystem-safe subdirectory name derived
+/// from the working directory at session creation time (see
+/// [`super::path::sanitize_cwd`]). The store exposes one "home"
 /// project (the current CWD) that listing, creation, and default
 /// resume operate on, and provides explicit cross-project variants
 /// for `--all` callers.
