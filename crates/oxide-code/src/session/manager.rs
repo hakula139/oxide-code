@@ -375,30 +375,8 @@ fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
+    use super::super::store::{test_session_file, test_store};
     use super::*;
-
-    const TEST_PROJECT: &str = "test-project";
-
-    fn test_store(dir: &Path) -> SessionStore {
-        SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
-    }
-
-    /// Resolve the on-disk path of a session file inside [`TEST_PROJECT`]
-    /// by its session ID. Files are named `{epoch}-{session_id}.jsonl`,
-    /// so we look up by the `-{session_id}.jsonl` suffix.
-    fn test_session_file(dir: &Path, session_id: &str) -> std::path::PathBuf {
-        let project_dir = dir.join(TEST_PROJECT);
-        let suffix = format!("-{session_id}.jsonl");
-        for entry in std::fs::read_dir(&project_dir).unwrap().flatten() {
-            let name = entry.file_name();
-            if name.to_string_lossy().ends_with(&suffix) {
-                return entry.path();
-            }
-        }
-        panic!("no session file matching {suffix} in {project_dir:?}");
-    }
 
     // ── start ──
 

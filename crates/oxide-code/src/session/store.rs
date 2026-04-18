@@ -709,6 +709,30 @@ fn read_tail_info(file: &mut File) -> Result<(Option<TitleInfo>, Option<ExitInfo
 }
 
 #[cfg(test)]
+pub(super) const TEST_PROJECT: &str = "test-project";
+
+/// Open a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
+/// Shared between the `session::store` and `session::manager` test
+/// modules so both exercise the same project-scoping path.
+#[cfg(test)]
+pub(super) fn test_store(dir: &Path) -> SessionStore {
+    SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
+}
+
+/// Resolve a session file inside [`TEST_PROJECT`] by its session ID.
+/// Filenames are prefixed with the creation epoch (see
+/// [`session_filename`]), so tests cannot build the path directly
+/// from a session ID alone; this helper scans the project dir for
+/// the matching suffix. Panics on miss.
+#[cfg(test)]
+pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
+    let project_dir = dir.join(TEST_PROJECT);
+    find_session_in(&project_dir, session_id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
+}
+
+#[cfg(test)]
 mod tests {
     use indoc::indoc;
     use time::macros::datetime;
@@ -717,29 +741,11 @@ mod tests {
     use super::*;
     use crate::message::ContentBlock;
 
-    const TEST_PROJECT: &str = "test-project";
-
-    fn test_store(dir: &Path) -> SessionStore {
-        SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
-    }
-
     /// Direct path inside [`TEST_PROJECT`] for a given filename. Used
     /// by tests that hand-roll a file before opening the store, or
     /// that seed invalid content the production loader should skip.
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
-    }
-
-    /// Locate a session file inside [`TEST_PROJECT`] by its session
-    /// ID. Filenames are prefixed with the creation epoch (see
-    /// [`session_filename`]), so tests cannot build the path directly
-    /// from a session ID alone; this helper scans the project dir
-    /// for the matching suffix.
-    fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
-        let project_dir = dir.join(TEST_PROJECT);
-        find_session_in(&project_dir, session_id)
-            .unwrap()
-            .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
     }
 
     fn sample_header(session_id: &str) -> Entry {
