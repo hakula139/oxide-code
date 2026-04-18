@@ -35,8 +35,27 @@ const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]"
 /// Wraps a [`SessionWriter`] to provide a simple record-oriented API:
 /// start or resume a session, record each message, and write a summary
 /// on exit.
+///
+/// Files are created lazily — [`start`][Self::start] only allocates a
+/// session ID and stages the header in memory, and the on-disk file is
+/// materialized by the first [`record_message`][Self::record_message]
+/// call. A session that exits before any message is recorded leaves
+/// no artifact behind, mirroring claude-code's `sessionStorage` model.
 pub(crate) struct SessionManager {
-    writer: SessionWriter,
+    /// Cloned at construction so [`record_message`] can lazily call
+    /// `store.create()` once the first message arrives. `SessionStore`
+    /// is a thin handle over two `PathBuf`s, so the clone is cheap.
+    store: SessionStore,
+    /// Header staged at [`start`][Self::start] time; `take()`-en when
+    /// the writer is materialized so the file's `created_at` reflects
+    /// the moment `ox` was launched, not the moment the user typed.
+    /// Always `None` on a resumed session (the writer is opened
+    /// eagerly by [`resume`][Self::resume]).
+    pending_header: Option<Entry>,
+    /// `None` until the first [`record_message`][Self::record_message]
+    /// (fresh session) or eagerly populated by
+    /// [`resume`][Self::resume].
+    writer: Option<SessionWriter>,
     session_id: String,
     /// Message count at construction time. For fresh sessions this is
     /// `0`; for resumed sessions it equals the loaded message count.
@@ -62,13 +81,18 @@ pub(crate) struct SessionManager {
 }
 
 impl SessionManager {
-    /// Start a new session. Writes the header entry immediately.
-    pub(crate) async fn start(store: &SessionStore, model: &str) -> Result<Self> {
+    /// Start a new session. Allocates a session ID and stages the
+    /// header in memory; the on-disk file is created by the first
+    /// [`record_message`][Self::record_message]. A session that exits
+    /// without recording any message therefore leaves no file behind,
+    /// keeping `ox --list` clear of empty sessions from `ox`-then-quit
+    /// flows.
+    pub(crate) fn start(store: &SessionStore, model: &str) -> Self {
         let (session_id, header) = new_header(model);
-        let writer = store.create(&header).await?;
-
-        Ok(Self {
-            writer,
+        Self {
+            store: store.clone(),
+            pending_header: Some(header),
+            writer: None,
             session_id,
             initial_message_count: 0,
             message_count: 0,
@@ -76,7 +100,7 @@ impl SessionManager {
             last_message_uuid: None,
             finished: false,
             write_failed: false,
-        })
+        }
     }
 
     /// Resume a previous session. Loads its messages, sanitizes them to
@@ -85,11 +109,11 @@ impl SessionManager {
     /// existing session file in append mode.
     ///
     /// Note: there is a small TOCTOU window between `load_session_data`
-    /// (read, no lock) and `open_append` (lock). Another process could
-    /// append messages in between, making the loaded messages stale.
-    /// In practice this is a non-issue for a single-user CLI tool — the
-    /// lock still prevents concurrent *writers*, just not a reader
-    /// seeing the latest state before acquiring the lock.
+    /// (read, no lock) and `open_append` (no lock either, since
+    /// concurrent resume is supported via the UUID DAG). Another
+    /// process could append messages in between, making the loaded
+    /// messages stale; the loser branch survives in the file but is
+    /// invisible to later resumes.
     pub(crate) async fn resume(
         store: &SessionStore,
         session_id: &str,
@@ -116,7 +140,9 @@ impl SessionManager {
         let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
 
         let manager = Self {
-            writer,
+            store: store.clone(),
+            pending_header: None,
+            writer: Some(writer),
             session_id: session_id.to_owned(),
             initial_message_count: message_count,
             message_count,
@@ -130,12 +156,31 @@ impl SessionManager {
 
     /// Record a conversation message to the session file.
     ///
-    /// On the first user message that carries text, writes an initial
-    /// [`Entry::Title`] *before* the [`Entry::Message`] — so listings
-    /// show the correct title even if the process crashes before any
-    /// further progress.
-    pub(crate) fn record_message(&mut self, message: &Message) -> Result<()> {
+    /// Materializes the on-disk file on the first call by writing the
+    /// staged header before the message. On the first user message
+    /// that carries text, also writes an initial [`Entry::Title`]
+    /// *before* the [`Entry::Message`] so listings show the correct
+    /// title even if the process crashes before any further progress.
+    ///
+    /// File materialization is async (header write + Unix `0o600`
+    /// chmod); a transient failure (e.g., disk full, permission
+    /// error) leaves `pending_header` populated so a later retry can
+    /// still create the file.
+    pub(crate) async fn record_message(&mut self, message: &Message) -> Result<()> {
         let now = OffsetDateTime::now_utc();
+
+        if let Some(header) = self.pending_header.as_ref() {
+            // Materialize on success only; on error, leave
+            // `pending_header` populated so a later retry can still
+            // create the file.
+            let writer = self.store.create(header).await?;
+            self.writer = Some(writer);
+            self.pending_header = None;
+        }
+        let writer = self
+            .writer
+            .as_mut()
+            .expect("writer is materialized after pending_header is consumed");
 
         if self.first_user_prompt.is_none()
             && let Some(text) = extract_user_text(message)
@@ -147,7 +192,7 @@ impl SessionManager {
             // persistence here — the in-memory title is lost either
             // way; we just refuse to silently replace it.
             self.first_user_prompt = Some(text.to_owned());
-            self.writer.append(&Entry::Title {
+            writer.append(&Entry::Title {
                 title: truncate_title(text, MAX_TITLE_LEN),
                 source: TitleSource::FirstPrompt,
                 updated_at: now,
@@ -155,7 +200,7 @@ impl SessionManager {
         }
 
         let uuid = Uuid::new_v4();
-        self.writer.append(&Entry::Message {
+        writer.append(&Entry::Message {
             uuid,
             parent_uuid: self.last_message_uuid,
             message: message.clone(),
@@ -166,10 +211,18 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write the summary entry. No-op if already called or if this is a
-    /// resumed session and no new messages were recorded (avoids
-    /// accumulating duplicate summaries on empty resume cycles).
+    /// Write the summary entry. No-op if already called, if no message
+    /// was ever recorded (fresh session that never materialized a
+    /// file), or if this is a resumed session and no new messages were
+    /// recorded (avoids accumulating duplicate summaries on empty
+    /// resume cycles).
     pub(crate) fn finish(&mut self) -> Result<()> {
+        let Some(writer) = self.writer.as_mut() else {
+            // No record_message ever succeeded → no file exists →
+            // nothing to summarize. The session leaves no trace.
+            self.finished = true;
+            return Ok(());
+        };
         if self.finished
             || (self.initial_message_count > 0 && self.message_count == self.initial_message_count)
         {
@@ -177,7 +230,7 @@ impl SessionManager {
         }
         self.finished = true;
 
-        self.writer.append(&Entry::Summary {
+        writer.append(&Entry::Summary {
             message_count: self.message_count,
             updated_at: OffsetDateTime::now_utc(),
         })
@@ -375,21 +428,34 @@ fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{test_session_file, test_store};
+    use super::super::store::{test_project_dir, test_session_file, test_store};
     use super::*;
 
     // ── start ──
 
     #[tokio::test]
-    async fn start_creates_session_file_with_zero_count() {
+    async fn start_does_not_materialize_file_until_first_record() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = SessionManager::start(&test_store(dir.path()), "test-model")
-            .await
-            .unwrap();
-        let path = test_session_file(dir.path(), manager.session_id());
-        assert!(path.exists());
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "test-model");
+        assert!(
+            std::fs::read_dir(test_project_dir(dir.path()))
+                .unwrap()
+                .next()
+                .is_none(),
+            "fresh session must not create a file before the first record_message",
+        );
         assert_eq!(manager.message_count, 0);
         assert!(manager.last_message_uuid.is_none());
+
+        manager
+            .record_message(&Message::user("first"))
+            .await
+            .unwrap();
+        assert!(
+            test_session_file(dir.path(), manager.session_id()).exists(),
+            "first record_message should materialize the session file",
+        );
     }
 
     // ── resume ──
@@ -398,10 +464,16 @@ mod tests {
     async fn resume_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
-        original.record_message(&Message::assistant("hi")).unwrap();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
+        original
+            .record_message(&Message::assistant("hi"))
+            .await
+            .unwrap();
         original.finish().unwrap();
         drop(original);
 
@@ -416,9 +488,12 @@ mod tests {
     async fn resume_works_on_unfinished_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
         drop(original); // no finish() — simulates a crash
 
         let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
@@ -436,10 +511,11 @@ mod tests {
         // sanitization heroics needed.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
         original
             .record_message(&Message::user("what does this do?"))
+            .await
             .unwrap();
         original.finish().unwrap();
         drop(original);
@@ -466,7 +542,7 @@ mod tests {
     async fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.finish().unwrap();
         drop(original);
@@ -478,9 +554,12 @@ mod tests {
     async fn resume_drops_unresolved_trailing_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message::user("do X"))
+            .await
+            .unwrap();
         original
             .record_message(&Message {
                 role: Role::Assistant,
@@ -495,6 +574,7 @@ mod tests {
                     },
                 ],
             })
+            .await
             .unwrap();
         drop(original); // crash before tool_result
 
@@ -522,9 +602,12 @@ mod tests {
     async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message::user("do X"))
+            .await
+            .unwrap();
         original
             .record_message(&Message {
                 role: Role::Assistant,
@@ -534,6 +617,7 @@ mod tests {
                     input: serde_json::Value::Null,
                 }],
             })
+            .await
             .unwrap();
         drop(original);
 
@@ -555,7 +639,7 @@ mod tests {
         // parent-chain to a UUID no longer present in memory.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
         original
             .record_message(&Message {
@@ -566,6 +650,7 @@ mod tests {
                     input: serde_json::Value::Null,
                 }],
             })
+            .await
             .unwrap();
         drop(original);
 
@@ -581,9 +666,12 @@ mod tests {
     async fn resume_appends_sentinel_when_last_is_user_tool_results_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("do X")).unwrap();
+        original
+            .record_message(&Message::user("do X"))
+            .await
+            .unwrap();
         original
             .record_message(&Message {
                 role: Role::Assistant,
@@ -593,6 +681,7 @@ mod tests {
                     input: serde_json::Value::Null,
                 }],
             })
+            .await
             .unwrap();
         original
             .record_message(&Message {
@@ -603,6 +692,7 @@ mod tests {
                     is_error: false,
                 }],
             })
+            .await
             .unwrap();
         drop(original); // crash before next assistant response
 
@@ -618,14 +708,23 @@ mod tests {
     async fn resume_preserves_parent_chain_on_next_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
-        original.record_message(&Message::assistant("hi")).unwrap();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
+        original
+            .record_message(&Message::assistant("hi"))
+            .await
+            .unwrap();
         drop(original);
 
         let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
-        resumed.record_message(&Message::user("follow up")).unwrap();
+        resumed
+            .record_message(&Message::user("follow up"))
+            .await
+            .unwrap();
 
         // Read the file and find the new message's parent_uuid — should
         // match the last uuid from the original run.
@@ -663,10 +762,11 @@ mod tests {
     async fn resume_appends_and_updates_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
         original
             .record_message(&Message::user("Fix the auth bug"))
+            .await
             .unwrap();
         original.finish().unwrap();
         drop(original);
@@ -674,6 +774,7 @@ mod tests {
         let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::assistant("Done."))
+            .await
             .unwrap();
         resumed.finish().unwrap();
         drop(resumed);
@@ -698,11 +799,17 @@ mod tests {
     async fn record_message_increments_count_and_chains_parent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
 
-        manager.record_message(&Message::user("hello")).unwrap();
-        manager.record_message(&Message::assistant("hi")).unwrap();
+        manager
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
+        manager
+            .record_message(&Message::assistant("hi"))
+            .await
+            .unwrap();
         assert_eq!(manager.message_count, 2);
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
@@ -729,10 +836,11 @@ mod tests {
     async fn record_message_writes_title_before_first_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
         manager
             .record_message(&Message::user("First prompt"))
+            .await
             .unwrap();
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
@@ -746,11 +854,17 @@ mod tests {
     async fn record_message_writes_title_only_once() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
 
-        manager.record_message(&Message::user("first")).unwrap();
-        manager.record_message(&Message::user("second")).unwrap();
+        manager
+            .record_message(&Message::user("first"))
+            .await
+            .unwrap();
+        manager
+            .record_message(&Message::user("second"))
+            .await
+            .unwrap();
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let title_count = content
@@ -765,7 +879,7 @@ mod tests {
     async fn record_message_no_title_for_tool_result_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
 
         manager
@@ -777,6 +891,7 @@ mod tests {
                     is_error: false,
                 }],
             })
+            .await
             .unwrap();
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
@@ -789,11 +904,12 @@ mod tests {
     async fn finish_writes_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
 
         manager
             .record_message(&Message::user("Fix the auth bug"))
+            .await
             .unwrap();
         manager.finish().unwrap();
 
@@ -804,26 +920,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_empty_session_writes_summary_without_title() {
+    async fn finish_empty_session_leaves_no_file() {
+        // A session that exits without recording any message must not
+        // appear in `--list` or be resumable. Mirrors claude-code's
+        // sessionStorage, which materializes the file lazily on the
+        // first append. See the bug report on PR #13: `ox` then quit
+        // produced an unresumable "(untitled), 0 msgs" entry.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
-        let sid = manager.session_id().to_owned();
+        let mut manager = SessionManager::start(&store, "m");
+        let _sid = manager.session_id().to_owned();
         manager.finish().unwrap();
 
-        let sessions = store.list().unwrap();
-        let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
-        assert!(session.title.is_none(), "no user prompt means no title");
-        assert_eq!(session.exit.as_ref().unwrap().message_count, 0);
+        assert!(
+            std::fs::read_dir(test_project_dir(dir.path()))
+                .unwrap()
+                .next()
+                .is_none(),
+            "empty session must not write a file",
+        );
+        assert!(
+            store.list().unwrap().is_empty(),
+            "empty session must not appear in --list",
+        );
     }
 
     #[tokio::test]
     async fn finish_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut manager = SessionManager::start(&store, "m").await.unwrap();
+        let mut manager = SessionManager::start(&store, "m");
         let sid = manager.session_id().to_owned();
-        manager.record_message(&Message::user("hi")).unwrap();
+        manager.record_message(&Message::user("hi")).await.unwrap();
         manager.finish().unwrap();
         manager.finish().unwrap();
 
@@ -839,9 +967,12 @@ mod tests {
     async fn finish_skips_summary_on_empty_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
         original.finish().unwrap();
         drop(original);
 
@@ -862,9 +993,7 @@ mod tests {
     #[tokio::test]
     async fn record_write_failure_first_call_returns_true_then_false() {
         let dir = tempfile::tempdir().unwrap();
-        let mut manager = SessionManager::start(&test_store(dir.path()), "m")
-            .await
-            .unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
         assert!(
             manager.record_write_failure(),
             "first failure should be reported"

@@ -212,7 +212,7 @@ async fn record_session_message(
     sink: Option<&dyn AgentSink>,
 ) {
     let mut s = session.lock().await;
-    let r = s.record_message(msg);
+    let r = s.record_message(msg).await;
     log_session_err(r, &mut s, sink);
 }
 

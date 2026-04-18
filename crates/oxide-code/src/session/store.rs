@@ -31,6 +31,7 @@ const TAIL_BUF_SIZE: u64 = 4096;
 /// project (the current CWD) that listing, creation, and default
 /// resume operate on, and provides explicit cross-project variants
 /// for `--all` callers.
+#[derive(Clone)]
 pub(crate) struct SessionStore {
     /// Root directory holding every project subdirectory.
     sessions_dir: PathBuf,
@@ -807,10 +808,19 @@ pub(super) fn test_store(dir: &Path) -> SessionStore {
 /// the matching suffix. Panics on miss.
 #[cfg(test)]
 pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
-    let project_dir = dir.join(TEST_PROJECT);
+    let project_dir = test_project_dir(dir);
     find_session_in(&project_dir, session_id)
         .unwrap()
         .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
+}
+
+/// Project subdirectory used by [`test_store`]. Exposed so tests
+/// can assert on the directory's contents (e.g., that lazy file
+/// creation has not materialized anything yet) without panicking
+/// on a missing session like [`test_session_file`].
+#[cfg(test)]
+pub(super) fn test_project_dir(dir: &Path) -> PathBuf {
+    dir.join(TEST_PROJECT)
 }
 
 #[cfg(test)]

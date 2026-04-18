@@ -44,7 +44,7 @@ pub(crate) async fn resolve_session(
 ) -> Result<(SessionManager, Vec<Message>)> {
     let mode = normalize_resume_arg(resume)?;
     if matches!(mode, ResumeMode::Fresh) {
-        let session = SessionManager::start(store, model).await?;
+        let session = SessionManager::start(store, model);
         return Ok((session, Vec::new()));
     }
 
@@ -127,7 +127,7 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{test_session_file, test_store};
+    use super::super::store::{test_project_dir, test_store};
     use super::*;
 
     // ── normalize_resume_arg ──
@@ -203,11 +203,14 @@ mod tests {
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let (session, messages) = resolve_session(&store, "m", None, false).await.unwrap();
+        let (_session, messages) = resolve_session(&store, "m", None, false).await.unwrap();
         assert!(messages.is_empty());
         assert!(
-            test_session_file(dir.path(), session.session_id()).exists(),
-            "fresh session file should have been created"
+            std::fs::read_dir(test_project_dir(dir.path()))
+                .unwrap()
+                .next()
+                .is_none(),
+            "fresh session file should be deferred until the first record_message",
         );
     }
 
@@ -226,7 +229,12 @@ mod tests {
     async fn resolve_session_prefix_errors_on_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let s = SessionManager::start(&store, "m").await.unwrap();
+        // Materialize a session file so the project listing is
+        // non-empty; without `record_message` the lazy creation
+        // never touches disk and the prefix lookup would short-circuit
+        // on "no sessions" instead of testing the no-match path.
+        let mut s = SessionManager::start(&store, "m");
+        s.record_message(&Message::user("noop")).await.unwrap();
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
@@ -248,8 +256,8 @@ mod tests {
         let store = test_store(dir.path());
 
         for _ in 0..20 {
-            let mut s = SessionManager::start(&store, "m").await.unwrap();
-            s.record_message(&Message::user("noop")).unwrap();
+            let mut s = SessionManager::start(&store, "m");
+            s.record_message(&Message::user("noop")).await.unwrap();
         }
 
         let listed = store.list().unwrap();
@@ -276,9 +284,12 @@ mod tests {
     async fn resolve_session_prefix_resumes_single_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m").await.unwrap();
+        let mut original = SessionManager::start(&store, "m");
         let full_id = original.session_id().to_owned();
-        original.record_message(&Message::user("hello")).unwrap();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
         drop(original);
 
         // A 10-char UUID prefix is vanishingly unlikely to collide.

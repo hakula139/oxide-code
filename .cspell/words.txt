@@ -42,6 +42,7 @@ tildify
 TOCTOU
 tokio
 tracing
+unresumable
 venv
 xxhash
 yazi
