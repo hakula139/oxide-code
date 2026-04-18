@@ -29,6 +29,7 @@ use tool::{
     glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
 };
 use tui::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use util::path::tildify;
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
@@ -197,15 +198,8 @@ async fn run_tui(
     let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
 
     let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| {
-            dirs::home_dir()
-                .and_then(|home| p.strip_prefix(&home).ok().map(ToOwned::to_owned))
-                .map_or_else(
-                    || p.display().to_string(),
-                    |rel| format!("~/{}", rel.display()),
-                )
-        })
+        .as_deref()
+        .map(tildify)
         .unwrap_or_default();
 
     let display_model = match marketing_name(model) {

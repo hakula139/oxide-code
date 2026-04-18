@@ -121,10 +121,9 @@ pub(crate) struct ExitInfo {
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
-    #[expect(
-        dead_code,
-        reason = "read from header for completeness but not consumed by list output"
-    )]
+    /// Working directory the session was started from. Surfaced as the
+    /// `Project` column under `--list --all` so cross-project listings
+    /// remain disambiguable.
     pub(crate) cwd: String,
     #[expect(
         dead_code,

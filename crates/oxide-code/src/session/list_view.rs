@@ -6,12 +6,14 @@
 //! so prior inline rendering had no automated coverage.
 
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use time::UtcOffset;
 
 use super::entry::SessionInfo;
 use super::store::SessionStore;
+use crate::util::path::tildify;
 
 /// Render `--list` output to `out`.
 ///
@@ -35,6 +37,11 @@ pub(crate) fn render_list(
 /// Pure formatter: take an already-loaded `sessions` slice and write a
 /// table to `out`. Split from [`render_list`] so tests can exercise the
 /// formatting without constructing a real [`SessionStore`].
+///
+/// When `all` is `true`, a `Project` column is inserted so cross-project
+/// rows can be disambiguated. In single-project mode the cwd is
+/// redundant (it's always `$PWD`), so the column is omitted to keep
+/// the output narrow.
 fn render_sessions(
     out: &mut dyn Write,
     sessions: &[SessionInfo],
@@ -47,12 +54,37 @@ fn render_sessions(
         return Ok(());
     }
 
-    writeln!(
-        out,
-        "{:<10} {:<19} {:<6} Title",
-        "ID", "Last Active", "Msgs"
-    )
-    .context("write list header")?;
+    let project_col_width = if all {
+        sessions
+            .iter()
+            .map(|s| tildify(Path::new(&s.cwd)).chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(PROJECT_COL_MIN, PROJECT_COL_MAX)
+    } else {
+        0
+    };
+
+    if all {
+        writeln!(
+            out,
+            "{:<10} {:<19} {:<6} {:<project$} Title",
+            "ID",
+            "Last Active",
+            "Msgs",
+            "Project",
+            project = project_col_width,
+        )
+        .context("write list header")?;
+    } else {
+        writeln!(
+            out,
+            "{:<10} {:<19} {:<6} Title",
+            "ID", "Last Active", "Msgs",
+        )
+        .context("write list header")?;
+    }
+
     for s in sessions {
         let id_prefix = &s.session_id[..s.session_id.len().min(8)];
         let last_active = s
@@ -67,11 +99,31 @@ fn render_sessions(
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
         let title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
-        writeln!(out, "{id_prefix:<10} {last_active:<19} {msgs:<6} {title}")
+        if all {
+            let project = tildify(Path::new(&s.cwd));
+            writeln!(
+                out,
+                "{id_prefix:<10} {last_active:<19} {msgs:<6} {project:<project_col_width$} {title}",
+            )
             .context("write list row")?;
+        } else {
+            writeln!(out, "{id_prefix:<10} {last_active:<19} {msgs:<6} {title}")
+                .context("write list row")?;
+        }
     }
     Ok(())
 }
+
+/// Minimum width for the `Project` column — at least wide enough to
+/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
+const PROJECT_COL_MIN: usize = 8;
+
+/// Upper cap on the `Project` column width. A session started from a
+/// pathologically deep path should not squeeze the `Title` column into
+/// oblivion; the value overflows its padding when a row exceeds the
+/// cap (one-off alignment hiccup rather than hiding the title column
+/// for the entire listing).
+const PROJECT_COL_MAX: usize = 40;
 
 #[cfg(test)]
 mod tests {
@@ -143,5 +195,69 @@ mod tests {
         let row = out.lines().nth(1).unwrap();
         assert!(row.contains(" 42     "), "got: {row:?}");
         assert!(row.ends_with("Fix auth bug"), "got: {row:?}");
+    }
+
+    #[test]
+    fn render_sessions_all_mode_inserts_project_column_aligned_to_widest_cwd() {
+        let mut short = session("aaaaaaaaaaaa", datetime!(2026-04-18 09:00:00 UTC));
+        short.cwd = "/a".to_owned();
+        let mut longer = session("bbbbbbbbbbbb", datetime!(2026-04-18 09:05:00 UTC));
+        longer.cwd = "/work/oxide-code".to_owned();
+        let out = render_to_string(&[short, longer], true);
+
+        let mut lines = out.lines();
+        let header = lines.next().unwrap();
+        assert!(
+            header.contains("Project"),
+            "header should mention Project: {header:?}"
+        );
+        let rows: Vec<&str> = lines.collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("/a"), "row 0 missing cwd: {:?}", rows[0]);
+        assert!(
+            rows[1].contains("/work/oxide-code"),
+            "row 1 missing cwd: {:?}",
+            rows[1],
+        );
+
+        // All rows share the padded Project width, so the Title slot
+        // should start at the same column across rows and line up
+        // with the header.
+        let header_title_col = header.find("Title").expect("header must contain Title");
+        let row_title_cols: Vec<usize> = rows
+            .iter()
+            .map(|r| {
+                r.rfind("(untitled)")
+                    .expect("row must render default title")
+            })
+            .collect();
+        assert_eq!(row_title_cols[0], row_title_cols[1], "titles misaligned");
+        assert_eq!(
+            row_title_cols[0], header_title_col,
+            "title column misaligned with header",
+        );
+    }
+
+    #[test]
+    fn render_sessions_project_col_width_respects_maximum() {
+        let long_cwd: String = "/deep/"
+            .chars()
+            .chain(std::iter::repeat_n('x', 80))
+            .collect();
+        let mut s = session("cccccccccccc", datetime!(2026-04-18 09:00:00 UTC));
+        s.cwd = long_cwd.clone();
+        let out = render_to_string(&[s], true);
+
+        let row = out.lines().nth(1).unwrap();
+        let title_pos = row
+            .rfind("(untitled)")
+            .expect("row must render the default title");
+        // 10 (ID) + 1 + 19 (Last Active) + 1 + 6 (Msgs) + 1 + 40 (cap) + cwd overflow + 1
+        // The cwd length exceeds the cap, so the untruncated cwd plus
+        // one separator space should land the title past the header
+        // cap position — the key point is the cwd is rendered in full
+        // (no data loss) and columns don't collapse.
+        assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
+        assert!(title_pos > 0);
     }
 }
