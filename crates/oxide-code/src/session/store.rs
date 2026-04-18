@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
+use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -128,7 +129,8 @@ impl SessionStore {
 
     /// List sessions by reading the header (first line) and scanning the
     /// tail for the latest [`Entry::Title`] and [`Entry::Summary`] of
-    /// each `.jsonl` file. Returned in reverse chronological order.
+    /// each `.jsonl` file. Returned sorted by file mtime (most recently
+    /// active first), so resumed sessions bubble to the top.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
         let entries = fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?;
@@ -152,8 +154,8 @@ impl SessionStore {
             .collect();
 
         sessions.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
+            b.last_active_at
+                .cmp(&a.last_active_at)
                 .then_with(|| b.session_id.cmp(&a.session_id))
         });
         Ok(sessions)
@@ -254,6 +256,9 @@ fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 /// later, landing in the tail window) supersede the first-prompt title.
 fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("cannot stat {}", path.display()))?;
     let mut reader = BufReader::new(&file);
 
     let mut first_line = String::new();
@@ -288,11 +293,17 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         .flatten()
         .max_by_key(|t| t.updated_at);
 
+    let last_active_at = metadata
+        .modified()
+        .ok()
+        .map_or(created_at, OffsetDateTime::from);
+
     Ok(SessionInfo {
         session_id,
         cwd,
         model,
         created_at,
+        last_active_at,
         title,
         exit,
     })
@@ -595,7 +606,7 @@ mod tests {
     // ── list ──
 
     #[test]
-    fn list_returns_sessions_in_reverse_chronological_order() {
+    fn list_returns_sessions_in_mtime_order_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
@@ -629,6 +640,61 @@ mod tests {
         assert_eq!(sessions[0].title.as_ref().unwrap().title, "Newer");
         assert_eq!(sessions[0].exit.as_ref().unwrap().message_count, 5);
         assert_eq!(sessions[1].session_id, "aaa");
+    }
+
+    #[test]
+    fn list_mtime_overrides_header_created_at_order() {
+        // Sort is by file mtime, not header created_at: a resumed session
+        // (fresh mtime, older header) should bubble above a brand-new one.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+
+        let mut w_old = store
+            .create(&Entry::Header {
+                session_id: "aaa-old-header".to_owned(),
+                cwd: "/a".to_owned(),
+                model: "m".to_owned(),
+                created_at: datetime!(2026-01-01 10:00:00 UTC),
+                version: CURRENT_VERSION,
+            })
+            .unwrap();
+        w_old.append(&sample_title_entry("Old")).unwrap();
+        drop(w_old);
+
+        let mut w_new = store
+            .create(&Entry::Header {
+                session_id: "zzz-new-header".to_owned(),
+                cwd: "/z".to_owned(),
+                model: "m".to_owned(),
+                created_at: datetime!(2026-04-17 10:00:00 UTC),
+                version: CURRENT_VERSION,
+            })
+            .unwrap();
+        w_new.append(&sample_title_entry("New")).unwrap();
+        drop(w_new);
+
+        // Backdate zzz's mtime so its file is older than aaa's.
+        let new_path = dir.path().join("zzz-new-header.jsonl");
+        let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let times = std::fs::FileTimes::new().set_modified(far_past);
+        File::options()
+            .write(true)
+            .open(&new_path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+
+        let sessions = store.list().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[0].session_id, "aaa-old-header",
+            "freshly-touched file with older header should come first"
+        );
+        assert!(
+            sessions[0].last_active_at > sessions[1].last_active_at,
+            "mtime drives ordering"
+        );
+        assert_eq!(sessions[1].session_id, "zzz-new-header");
     }
 
     #[test]

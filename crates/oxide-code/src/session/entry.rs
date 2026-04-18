@@ -125,7 +125,15 @@ pub(crate) struct SessionInfo {
         reason = "read from header for completeness but not consumed by list output"
     )]
     pub(crate) model: String,
+    #[expect(
+        dead_code,
+        reason = "kept for diagnostics but superseded by last_active_at for display and sort"
+    )]
     pub(crate) created_at: OffsetDateTime,
+    /// File mtime. Drives the `--list` sort order and display column so
+    /// resumed sessions bubble to the top. Falls back to `created_at` if
+    /// mtime cannot be read.
+    pub(crate) last_active_at: OffsetDateTime,
     /// Present when the session file contains a [`Title`][Entry::Title].
     pub(crate) title: Option<TitleInfo>,
     /// Present when the session exited cleanly (i.e., a

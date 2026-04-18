@@ -134,11 +134,11 @@ fn list_sessions() -> Result<()> {
 
     let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
 
-    println!("{:<10} {:<19} {:<6} Title", "ID", "Created", "Msgs");
+    println!("{:<10} {:<19} {:<6} Title", "ID", "Last Active", "Msgs");
     for s in &sessions {
         let id_prefix = &s.session_id[..s.session_id.len().min(8)];
-        let created = s
-            .created_at
+        let last_active = s
+            .last_active_at
             .to_offset(local_offset)
             .format(time::macros::format_description!(
                 "[year]-[month]-[day] [hour]:[minute]"
@@ -149,7 +149,7 @@ fn list_sessions() -> Result<()> {
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
         let title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
-        println!("{id_prefix:<10} {created:<19} {msgs:<6} {title}");
+        println!("{id_prefix:<10} {last_active:<19} {msgs:<6} {title}");
     }
 
     Ok(())
