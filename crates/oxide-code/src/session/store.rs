@@ -690,7 +690,7 @@ mod tests {
     use indoc::indoc;
     use time::macros::datetime;
 
-    use super::entry::TitleSource;
+    use super::super::entry::TitleSource;
     use super::*;
     use crate::message::ContentBlock;
 
@@ -1218,6 +1218,61 @@ mod tests {
         assert!(err.contains("session not found"), "got: {err}");
     }
 
+    // ── append ──
+
+    #[test]
+    fn append_writes_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("multi")).unwrap();
+
+        writer
+            .append(&sample_message_entry(Uuid::new_v4(), "hello"))
+            .unwrap();
+        writer
+            .append(&sample_message_entry(Uuid::new_v4(), "world"))
+            .unwrap();
+
+        let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3); // header + 2 messages
+    }
+
+    // ── resolve_sessions_dir ──
+
+    #[test]
+    fn resolve_sessions_dir_prefers_xdg() {
+        let xdg = PathBuf::from("/custom/data");
+        let result = resolve_sessions_dir(Some(xdg), Some(PathBuf::from("/home/u")));
+        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
+    }
+
+    #[test]
+    fn resolve_sessions_dir_falls_back_to_home() {
+        let result = resolve_sessions_dir(None, Some(PathBuf::from("/home/u")));
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
+        );
+    }
+
+    #[test]
+    fn resolve_sessions_dir_ignores_relative_xdg() {
+        let result = resolve_sessions_dir(
+            Some(PathBuf::from("relative")),
+            Some(PathBuf::from("/home/u")),
+        );
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
+        );
+    }
+
+    #[test]
+    fn resolve_sessions_dir_returns_none_without_home_or_xdg() {
+        assert!(resolve_sessions_dir(None, None).is_none());
+    }
+
     // ── migrate_flat_layout ──
 
     #[test]
@@ -1317,60 +1372,5 @@ mod tests {
         migrate_add_timestamp_prefix(&sessions_dir);
 
         assert!(existing.exists(), "already-prefixed file must stay put");
-    }
-
-    // ── append ──
-
-    #[test]
-    fn append_writes_multiple_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("multi")).unwrap();
-
-        writer
-            .append(&sample_message_entry(Uuid::new_v4(), "hello"))
-            .unwrap();
-        writer
-            .append(&sample_message_entry(Uuid::new_v4(), "world"))
-            .unwrap();
-
-        let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 3); // header + 2 messages
-    }
-
-    // ── resolve_sessions_dir ──
-
-    #[test]
-    fn resolve_sessions_dir_prefers_xdg() {
-        let xdg = PathBuf::from("/custom/data");
-        let result = resolve_sessions_dir(Some(xdg), Some(PathBuf::from("/home/u")));
-        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
-    }
-
-    #[test]
-    fn resolve_sessions_dir_falls_back_to_home() {
-        let result = resolve_sessions_dir(None, Some(PathBuf::from("/home/u")));
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_ignores_relative_xdg() {
-        let result = resolve_sessions_dir(
-            Some(PathBuf::from("relative")),
-            Some(PathBuf::from("/home/u")),
-        );
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_returns_none_without_home_or_xdg() {
-        assert!(resolve_sessions_dir(None, None).is_none());
     }
 }
