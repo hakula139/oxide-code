@@ -65,7 +65,10 @@ impl SessionStore {
         fs::create_dir_all(&sessions_dir)
             .with_context(|| format!("failed to create {}", sessions_dir.display()))?;
 
+        // Migrations run oldest-first so each pass operates on the
+        // layout the previous one produced.
         migrate_flat_layout(&sessions_dir);
+        migrate_add_timestamp_prefix(&sessions_dir);
 
         let project_name = match std::env::current_dir() {
             Ok(cwd) => sanitize_cwd(&cwd),
@@ -94,11 +97,24 @@ impl SessionStore {
     /// access. The lock is held for the lifetime of the returned writer.
     /// On Unix, the file is created with mode `0o600` so session contents
     /// (verbatim tool output, assistant responses) are not world-readable.
+    ///
+    /// Filenames are `{created_at_epoch}-{session_id}.jsonl`. The epoch
+    /// prefix makes `ls` on a project subdirectory return sessions in
+    /// chronological order, which is convenient when inspecting the
+    /// store outside of `ox --list`.
     pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
-        let Entry::Header { session_id, .. } = header else {
+        let Entry::Header {
+            session_id,
+            created_at,
+            ..
+        } = header
+        else {
             bail!("expected Header entry");
         };
-        let path = self.session_path(session_id)?;
+        validate_session_id(session_id)?;
+        let path = self
+            .project_dir
+            .join(session_filename(session_id, *created_at));
         let file = open_create_exclusive(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
         lock_with_retry(&file, session_id)?;
@@ -208,21 +224,18 @@ impl SessionStore {
         Ok(sessions)
     }
 
-    fn session_path(&self, session_id: &str) -> Result<PathBuf> {
-        validate_session_id(session_id)?;
-        Ok(self.project_dir.join(format!("{session_id}.jsonl")))
-    }
-
-    /// Locate an existing session file. Checks the current project
-    /// first (the fast path: no extra I/O if the session was created
-    /// here), then walks sibling project subdirectories so
-    /// cross-project resume by session ID also works.
+    /// Locate an existing session file by session ID. Filenames are
+    /// prefixed with the creation epoch, so we match by the
+    /// `-{session_id}.jsonl` suffix rather than a direct path build.
+    ///
+    /// Checks the current project first (the fast path), then falls
+    /// back to walking sibling project subdirectories so cross-project
+    /// resume by session ID also works.
     fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
-        let direct = self.session_path(session_id)?;
-        if direct.exists() {
-            return Ok(direct);
+        validate_session_id(session_id)?;
+        if let Some(path) = find_session_in(&self.project_dir, session_id)? {
+            return Ok(path);
         }
-        let filename = format!("{session_id}.jsonl");
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
         {
@@ -232,9 +245,8 @@ impl SessionStore {
             if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
-            let candidate = entry.path().join(&filename);
-            if candidate.exists() {
-                return Ok(candidate);
+            if let Some(path) = find_session_in(&entry.path(), session_id)? {
+                return Ok(path);
             }
         }
         bail!("session not found: {session_id}")
@@ -261,6 +273,40 @@ fn validate_session_id(session_id: &str) -> Result<()> {
         bail!("invalid session ID: {session_id}");
     }
     Ok(())
+}
+
+/// Format a new session filename as `{epoch}-{session_id}.jsonl`. The
+/// epoch prefix gives chronological directory-order listings and stays
+/// fixed-width (10 ASCII digits) through the year 2286.
+fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
+    format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
+}
+
+/// Return the path of the first `.jsonl` file in `dir` whose name ends
+/// with `-{session_id}.jsonl`. `None` means "no match in this dir", not
+/// a hard error — the caller can continue searching other locations.
+fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+    let suffix = format!("-{session_id}.jsonl");
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("cannot read {}", dir.display())));
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.ends_with(&suffix) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
 }
 
 /// Read every `.jsonl` file in `dir` and return the successfully
@@ -381,8 +427,9 @@ fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 
 /// Move any legacy flat-layout session files (`{uuid}.jsonl` directly
 /// inside [`sessions_dir`]) into their project subdirectory based on
-/// each file's header `cwd`. Idempotent and fast when no flat files
-/// exist, so it can run unconditionally at store open time.
+/// each file's header `cwd`, adding the timestamp prefix in the
+/// process. Idempotent and fast when no flat files exist, so it can
+/// run unconditionally at store open time.
 ///
 /// Errors on individual files are logged and skipped — a partial
 /// migration is preferable to refusing to open the store entirely.
@@ -406,20 +453,21 @@ fn migrate_flat_layout(sessions_dir: &Path) {
         }
         if let Err(e) = relocate_flat_session(sessions_dir, &path) {
             warn!(
-                "skipping migration for {}: {e}",
+                "skipping flat-layout migration for {}: {e}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
         }
     }
 }
 
-/// Read the header of a legacy flat-layout session file and move the
-/// file into the appropriate project subdirectory.
+/// Read the header of a legacy flat-layout session file and move it
+/// into the appropriate project subdirectory with a timestamped name.
 fn relocate_flat_session(sessions_dir: &Path, path: &Path) -> Result<()> {
-    let cwd = read_session_cwd(path).context("cannot read header for migration")?;
+    let (session_id, cwd, created_at) =
+        read_session_header_parts(path).context("cannot read header for migration")?;
     let project = sessions_dir.join(sanitize_cwd(Path::new(&cwd)));
     fs::create_dir_all(&project).with_context(|| format!("cannot create {}", project.display()))?;
-    let target = project.join(path.file_name().context("path missing filename")?);
+    let target = project.join(session_filename(&session_id, created_at));
     if target.exists() {
         bail!("destination already exists: {}", target.display());
     }
@@ -429,14 +477,90 @@ fn relocate_flat_session(sessions_dir: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read only the header line of a session file and return its `cwd`.
-fn read_session_cwd(path: &Path) -> Result<String> {
+/// Rename `{session_id}.jsonl` files inside each project subdirectory
+/// to `{epoch}-{session_id}.jsonl`. A no-op when every file is already
+/// prefixed.
+///
+/// Called after [`migrate_flat_layout`], so every direct entry in
+/// `sessions_dir` is a project subdirectory.
+fn migrate_add_timestamp_prefix(sessions_dir: &Path) {
+    let entries = match fs::read_dir(sessions_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                "cannot scan {} for timestamp-prefix migration: {e}",
+                sessions_dir.display()
+            );
+            return;
+        }
+    };
+    for project in entries.flatten() {
+        if !project.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        prefix_sessions_in(&project.path());
+    }
+}
+
+fn prefix_sessions_in(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("cannot scan {} for timestamp prefix: {e}", dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Already prefixed when the stem starts with `{digits}-`.
+        if stem.split_once('-').is_some_and(|(prefix, _)| {
+            !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit())
+        }) {
+            continue;
+        }
+        if let Err(e) = prefix_one_session(&path) {
+            warn!(
+                "skipping timestamp prefix for {}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+}
+
+fn prefix_one_session(path: &Path) -> Result<()> {
+    let (session_id, _cwd, created_at) =
+        read_session_header_parts(path).context("cannot read header for migration")?;
+    let parent = path.parent().context("session path missing parent")?;
+    let target = parent.join(session_filename(&session_id, created_at));
+    if target.exists() {
+        bail!("destination already exists: {}", target.display());
+    }
+    fs::rename(path, &target)
+        .with_context(|| format!("rename {} -> {}", path.display(), target.display()))?;
+    debug!("renamed {} to {}", path.display(), target.display());
+    Ok(())
+}
+
+/// Read the first line of a session file and return the fields
+/// migrations need (`session_id`, `cwd`, `created_at`).
+fn read_session_header_parts(path: &Path) -> Result<(String, String, OffsetDateTime)> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut first_line = String::new();
     BufReader::new(file).read_line(&mut first_line)?;
     let entry: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
     match entry {
-        Entry::Header { cwd, .. } => Ok(cwd),
+        Entry::Header {
+            session_id,
+            cwd,
+            created_at,
+            ..
+        } => Ok((session_id, cwd, created_at)),
         _ => bail!("first line is not a header"),
     }
 }
@@ -576,11 +700,23 @@ mod tests {
         SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
     }
 
-    /// Resolve the path of a session file inside [`TEST_PROJECT`] —
-    /// tests used to reference files directly under `dir.path()`, but
-    /// the project-scoped layout puts each file under a subdirectory.
-    fn test_session_file(dir: &Path, filename: &str) -> PathBuf {
+    /// Direct path inside [`TEST_PROJECT`] for a given filename. Used
+    /// by tests that hand-roll a file before opening the store, or
+    /// that seed invalid content the production loader should skip.
+    fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
+    }
+
+    /// Locate a session file inside [`TEST_PROJECT`] by its session
+    /// ID. Filenames are prefixed with the creation epoch (see
+    /// [`session_filename`]), so tests cannot build the path directly
+    /// from a session ID alone; this helper scans the project dir
+    /// for the matching suffix.
+    fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
+        let project_dir = dir.join(TEST_PROJECT);
+        find_session_in(&project_dir, session_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
     }
 
     fn sample_header(session_id: &str) -> Entry {
@@ -627,7 +763,7 @@ mod tests {
 
         let _writer = store.create(&header).unwrap();
 
-        let content = fs::read_to_string(test_session_file(dir.path(), "test-id.jsonl")).unwrap();
+        let content = fs::read_to_string(test_session_file(dir.path(), "test-id")).unwrap();
         let parsed: Entry = serde_json::from_str(content.trim()).unwrap();
         assert!(
             matches!(parsed, Entry::Header { session_id, version, .. } if session_id == "test-id" && version == CURRENT_VERSION)
@@ -647,8 +783,13 @@ mod tests {
     fn create_fails_when_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        fs::write(test_session_file(dir.path(), "existing.jsonl"), "{}").unwrap();
-        assert!(store.create(&sample_header("existing")).is_err());
+        let header = sample_header("existing");
+        let Entry::Header { created_at, .. } = header else {
+            unreachable!()
+        };
+        let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
+        fs::write(taken, "{}").unwrap();
+        assert!(store.create(&header).is_err());
     }
 
     #[cfg(unix)]
@@ -660,7 +801,7 @@ mod tests {
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("perm-test")).unwrap();
 
-        let meta = fs::metadata(test_session_file(dir.path(), "perm-test.jsonl")).unwrap();
+        let meta = fs::metadata(test_session_file(dir.path(), "perm-test")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
@@ -772,7 +913,8 @@ mod tests {
     fn load_session_data_skips_corrupt_empty_and_unknown_lines() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let path = test_session_file(dir.path(), "messy.jsonl");
+        let created_at = datetime!(2026-01-01 00:00:00 UTC);
+        let path = test_project_path(dir.path(), &session_filename("messy", created_at));
         fs::write(
             &path,
             indoc! {r#"
@@ -813,7 +955,8 @@ mod tests {
     fn load_session_data_rejects_future_format_version() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let path = test_session_file(dir.path(), "future.jsonl");
+        let created_at = datetime!(2026-01-01 00:00:00 UTC);
+        let path = test_project_path(dir.path(), &session_filename("future", created_at));
         let future_version = CURRENT_VERSION + 1;
         fs::write(
             &path,
@@ -898,7 +1041,7 @@ mod tests {
         drop(w_new);
 
         // Backdate zzz's mtime so its file is older than aaa's.
-        let new_path = test_session_file(dir.path(), "zzz-new-header.jsonl");
+        let new_path = test_session_file(dir.path(), "zzz-new-header");
         let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let times = std::fs::FileTimes::new().set_modified(far_past);
         File::options()
@@ -968,7 +1111,7 @@ mod tests {
                 .unwrap();
         }
 
-        let path = test_session_file(dir.path(), "long.jsonl");
+        let path = test_session_file(dir.path(), "long");
         assert!(
             path.metadata().unwrap().len() > TAIL_BUF_SIZE,
             "test file should exceed the tail window"
@@ -995,9 +1138,9 @@ mod tests {
     fn list_skips_non_session_files_and_malformed_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        fs::write(test_session_file(dir.path(), "notes.txt"), "not a session").unwrap();
+        fs::write(test_project_path(dir.path(), "notes.txt"), "not a session").unwrap();
         fs::write(
-            test_session_file(dir.path(), "bad.jsonl"),
+            test_project_path(dir.path(), "bad.jsonl"),
             r#"{"type":"message","uuid":"00000000-0000-0000-0000-000000000000","message":{"role":"user","content":[]},"timestamp":"2026-01-01T00:00:00Z"}"#,
         )
         .unwrap();
@@ -1057,8 +1200,13 @@ mod tests {
 
         let found = store.find_session_path("foreign").unwrap();
         assert_eq!(
-            found,
-            dir.path().join("other-project").join("foreign.jsonl")
+            found.parent(),
+            Some(dir.path().join("other-project").as_path())
+        );
+        let name = found.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.ends_with("-foreign.jsonl"),
+            "unexpected filename: {name}"
         );
     }
 
@@ -1091,10 +1239,17 @@ mod tests {
         migrate_flat_layout(&sessions_dir);
 
         assert!(!legacy_path.exists(), "legacy file should have moved");
-        let expected = sessions_dir
-            .join(sanitize_cwd(Path::new("/foo/project")))
-            .join("legacy.jsonl");
-        assert!(expected.exists(), "migrated file missing at {expected:?}");
+        let project_dir = sessions_dir.join(sanitize_cwd(Path::new("/foo/project")));
+        let moved = find_session_in(&project_dir, "legacy").unwrap();
+        let name = moved
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        assert_eq!(
+            name.as_deref(),
+            Some("1767225600-legacy.jsonl"),
+            "unexpected migrated filename: {name:?}"
+        );
     }
 
     #[test]
@@ -1121,6 +1276,49 @@ mod tests {
         assert!(settled.exists());
     }
 
+    // ── migrate_add_timestamp_prefix ──
+
+    #[test]
+    fn migrate_add_timestamp_prefix_renames_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().to_path_buf();
+        let project = sessions_dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+
+        let legacy = project.join("sess.jsonl");
+        fs::write(
+            &legacy,
+            r#"{"type":"header","session_id":"sess","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        )
+        .unwrap();
+
+        migrate_add_timestamp_prefix(&sessions_dir);
+
+        assert!(!legacy.exists(), "legacy unprefixed file should have moved");
+        assert!(project.join("1767225600-sess.jsonl").exists());
+    }
+
+    #[test]
+    fn migrate_add_timestamp_prefix_leaves_already_prefixed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().to_path_buf();
+        let project = sessions_dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+
+        let existing = project.join("1700000000-ok.jsonl");
+        fs::write(
+            &existing,
+            r#"{"type":"header","session_id":"ok","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+"#,
+        )
+        .unwrap();
+
+        migrate_add_timestamp_prefix(&sessions_dir);
+
+        assert!(existing.exists(), "already-prefixed file must stay put");
+    }
+
     // ── append ──
 
     #[test]
@@ -1136,7 +1334,7 @@ mod tests {
             .append(&sample_message_entry(Uuid::new_v4(), "world"))
             .unwrap();
 
-        let content = fs::read_to_string(test_session_file(dir.path(), "multi.jsonl")).unwrap();
+        let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
     }
