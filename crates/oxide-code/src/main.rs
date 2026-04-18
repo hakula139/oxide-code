@@ -20,6 +20,7 @@ use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use config::Config;
 use message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use prompt::{PromptParts, environment::marketing_name};
+use session::list_view::render_list;
 use session::manager::SessionManager;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
@@ -141,39 +142,8 @@ async fn async_main() -> Result<()> {
 /// every project; otherwise scoped to the current working directory.
 fn list_sessions(all: bool) -> Result<()> {
     let store = SessionStore::open()?;
-    let sessions = if all {
-        store.list_all()?
-    } else {
-        store.list()?
-    };
-
-    if sessions.is_empty() {
-        let scope = if all { "" } else { " in this project" };
-        println!("No sessions found{scope}.");
-        return Ok(());
-    }
-
     let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
-
-    println!("{:<10} {:<19} {:<6} Title", "ID", "Last Active", "Msgs");
-    for s in &sessions {
-        let id_prefix = &s.session_id[..s.session_id.len().min(8)];
-        let last_active = s
-            .last_active_at
-            .to_offset(local_offset)
-            .format(time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]"
-            ))
-            .unwrap_or_default();
-        let msgs = s
-            .exit
-            .as_ref()
-            .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
-        println!("{id_prefix:<10} {last_active:<19} {msgs:<6} {title}");
-    }
-
-    Ok(())
+    render_list(&mut std::io::stdout().lock(), &store, all, local_offset)
 }
 
 fn create_tool_registry() -> ToolRegistry {
