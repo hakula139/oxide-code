@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
+use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
@@ -45,9 +46,11 @@ impl SessionStore {
     /// project subdirectory if needed, and runs a one-time migration
     /// of any legacy flat-layout sessions into their project subdirs.
     pub(crate) fn open() -> Result<Self> {
-        let sessions_dir = resolve_sessions_dir(
+        let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
             dirs::home_dir(),
+            Path::new(".local/share"),
+            &Path::new(DATA_DIR).join(SESSIONS_DIR),
         )
         .context("cannot determine session storage directory")?;
 
@@ -549,17 +552,6 @@ fn resolve_chain(
     }
     chain.reverse();
     (chain, Some(tip_uuid))
-}
-
-// ── Path Resolution ──
-
-/// Resolve `$XDG_DATA_HOME/ox/sessions/`, falling back to
-/// `~/.local/share/ox/sessions/`.
-fn resolve_sessions_dir(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    let base = xdg
-        .filter(|p| p.is_absolute())
-        .or_else(|| home.map(|h| h.join(".local").join("share")))?;
-    Some(base.join(DATA_DIR).join(SESSIONS_DIR))
 }
 
 // ── Migration ──
@@ -1657,41 +1649,6 @@ mod tests {
         let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
-    }
-
-    // ── resolve_sessions_dir ──
-
-    #[test]
-    fn resolve_sessions_dir_prefers_xdg() {
-        let xdg = PathBuf::from("/custom/data");
-        let result = resolve_sessions_dir(Some(xdg), Some(PathBuf::from("/home/u")));
-        assert_eq!(result, Some(PathBuf::from("/custom/data/ox/sessions")));
-    }
-
-    #[test]
-    fn resolve_sessions_dir_falls_back_to_home() {
-        let result = resolve_sessions_dir(None, Some(PathBuf::from("/home/u")));
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_ignores_relative_xdg() {
-        let result = resolve_sessions_dir(
-            Some(PathBuf::from("relative")),
-            Some(PathBuf::from("/home/u")),
-        );
-        assert_eq!(
-            result,
-            Some(PathBuf::from("/home/u/.local/share/ox/sessions"))
-        );
-    }
-
-    #[test]
-    fn resolve_sessions_dir_returns_none_without_home_or_xdg() {
-        assert!(resolve_sessions_dir(None, None).is_none());
     }
 
     // ── migrate_flat_layout ──
