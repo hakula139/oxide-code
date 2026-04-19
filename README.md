@@ -54,10 +54,11 @@ The binary will be at `target/release/ox`.
 ## Development
 
 ```bash
-cargo build                    # Build
-cargo fmt --all --check        # Check formatting
-cargo clippy --all-targets -- -D warnings  # Lint (pedantic, zero warnings)
-cargo test                     # Run tests
+cargo fmt --all --check                            # Check formatting
+cargo build                                        # Build
+cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
+cargo test                                         # Run tests
+cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
 ```
 
 CI runs these same checks on every push and pull request via GitHub Actions.
