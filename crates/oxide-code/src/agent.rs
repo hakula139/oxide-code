@@ -283,3 +283,344 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use serde_json::json;
+
+    use super::*;
+
+    /// Captures every event the code under test sends, so assertions can
+    /// inspect both the sequence and the payload.
+    struct CapturingSink {
+        events: StdMutex<Vec<AgentEvent>>,
+    }
+
+    impl CapturingSink {
+        fn new() -> Self {
+            Self {
+                events: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<AgentEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl AgentSink for CapturingSink {
+        fn send(&self, event: AgentEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    // ── parse_tool_json ──
+
+    #[test]
+    fn parse_tool_json_valid_object_returns_value() {
+        let value = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
+        assert_eq!(value, json!({"command": "ls", "n": 3}));
+    }
+
+    #[test]
+    fn parse_tool_json_malformed_returns_empty_object() {
+        let value = parse_tool_json("{unclosed");
+        assert_eq!(value, json!({}));
+    }
+
+    // ── BlockAccumulator::into_content_block ──
+
+    #[test]
+    fn into_content_block_text_yields_text_block() {
+        let block = BlockAccumulator::Text("hi".to_owned()).into_content_block();
+        assert!(matches!(block, Some(ContentBlock::Text { text }) if text == "hi"));
+    }
+
+    #[test]
+    fn into_content_block_tool_use_yields_tool_use_block() {
+        let block = BlockAccumulator::ToolUse {
+            id: "tool_1".to_owned(),
+            name: "bash".to_owned(),
+            json_buf: r#"{"command": "ls"}"#.to_owned(),
+        }
+        .into_content_block();
+        let Some(ContentBlock::ToolUse { id, name, input }) = block else {
+            panic!("expected ToolUse, got {block:?}");
+        };
+        assert_eq!(id, "tool_1");
+        assert_eq!(name, "bash");
+        assert_eq!(input, json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn into_content_block_server_tool_use_yields_server_tool_use_block() {
+        let block = BlockAccumulator::ServerToolUse {
+            id: "srv_1".to_owned(),
+            name: "web_search".to_owned(),
+            json_buf: r#"{"query": "rust"}"#.to_owned(),
+        }
+        .into_content_block();
+        let Some(ContentBlock::ServerToolUse { id, name, input }) = block else {
+            panic!("expected ServerToolUse, got {block:?}");
+        };
+        assert_eq!(id, "srv_1");
+        assert_eq!(name, "web_search");
+        assert_eq!(input, json!({"query": "rust"}));
+    }
+
+    #[test]
+    fn into_content_block_thinking_preserves_signature() {
+        let block = BlockAccumulator::Thinking {
+            thinking: "step 1".to_owned(),
+            signature: "sig_abc".to_owned(),
+        }
+        .into_content_block();
+        let Some(ContentBlock::Thinking {
+            thinking,
+            signature,
+        }) = block
+        else {
+            panic!("expected Thinking, got {block:?}");
+        };
+        assert_eq!(thinking, "step 1");
+        assert_eq!(signature, "sig_abc");
+    }
+
+    #[test]
+    fn into_content_block_redacted_thinking_preserves_data() {
+        let block = BlockAccumulator::RedactedThinking {
+            data: "opaque-blob".to_owned(),
+        }
+        .into_content_block();
+        assert!(
+            matches!(block, Some(ContentBlock::RedactedThinking { data }) if data == "opaque-blob")
+        );
+    }
+
+    #[test]
+    fn into_content_block_skipped_yields_none() {
+        assert!(BlockAccumulator::Skipped.into_content_block().is_none());
+    }
+
+    // ── init_accumulator ──
+
+    #[test]
+    fn init_accumulator_text_starts_with_initial_text() {
+        let acc = init_accumulator(
+            ContentBlockInfo::Text {
+                text: "hi".to_owned(),
+            },
+            0,
+        );
+        assert!(matches!(acc, BlockAccumulator::Text(t) if t == "hi"));
+    }
+
+    #[test]
+    fn init_accumulator_tool_use_starts_with_empty_buf() {
+        let acc = init_accumulator(
+            ContentBlockInfo::ToolUse {
+                id: "tool_1".to_owned(),
+                name: "bash".to_owned(),
+            },
+            0,
+        );
+        let BlockAccumulator::ToolUse { id, name, json_buf } = acc else {
+            panic!("expected ToolUse, got {acc:?}");
+        };
+        assert_eq!(id, "tool_1");
+        assert_eq!(name, "bash");
+        assert!(json_buf.is_empty());
+    }
+
+    #[test]
+    fn init_accumulator_server_tool_use_starts_with_empty_buf() {
+        let acc = init_accumulator(
+            ContentBlockInfo::ServerToolUse {
+                id: "srv_1".to_owned(),
+                name: "web_search".to_owned(),
+            },
+            0,
+        );
+        let BlockAccumulator::ServerToolUse { id, name, json_buf } = acc else {
+            panic!("expected ServerToolUse, got {acc:?}");
+        };
+        assert_eq!(id, "srv_1");
+        assert_eq!(name, "web_search");
+        assert!(json_buf.is_empty());
+    }
+
+    #[test]
+    fn init_accumulator_thinking_preserves_fields() {
+        let acc = init_accumulator(
+            ContentBlockInfo::Thinking {
+                thinking: "step 1".to_owned(),
+                signature: "sig_abc".to_owned(),
+            },
+            0,
+        );
+        let BlockAccumulator::Thinking {
+            thinking,
+            signature,
+        } = acc
+        else {
+            panic!("expected Thinking, got {acc:?}");
+        };
+        assert_eq!(thinking, "step 1");
+        assert_eq!(signature, "sig_abc");
+    }
+
+    #[test]
+    fn init_accumulator_redacted_thinking_preserves_data() {
+        let acc = init_accumulator(
+            ContentBlockInfo::RedactedThinking {
+                data: "opaque-blob".to_owned(),
+            },
+            0,
+        );
+        assert!(
+            matches!(acc, BlockAccumulator::RedactedThinking { data } if data == "opaque-blob")
+        );
+    }
+
+    #[test]
+    fn init_accumulator_unknown_yields_skipped() {
+        let acc = init_accumulator(ContentBlockInfo::Unknown, 0);
+        assert!(matches!(acc, BlockAccumulator::Skipped));
+    }
+
+    // ── apply_delta ──
+
+    #[test]
+    fn apply_delta_text_appends_and_emits_stream_token() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::Text("ha".to_owned());
+        apply_delta(
+            &mut block,
+            Delta::TextDelta {
+                text: "llo".to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::Text(buf) = &block else {
+            panic!("expected Text, got {block:?}");
+        };
+        assert_eq!(buf, "hallo");
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::StreamToken(t) if t == "llo"));
+    }
+
+    #[test]
+    fn apply_delta_tool_use_appends_to_json_buf() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::ToolUse {
+            id: "tool_1".to_owned(),
+            name: "bash".to_owned(),
+            json_buf: r#"{"x"#.to_owned(),
+        };
+        apply_delta(
+            &mut block,
+            Delta::InputJsonDelta {
+                partial_json: r":1}".to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::ToolUse { json_buf, .. } = &block else {
+            panic!("expected ToolUse, got {block:?}");
+        };
+        assert_eq!(json_buf, r#"{"x:1}"#);
+        assert!(sink.events().is_empty());
+    }
+
+    #[test]
+    fn apply_delta_server_tool_use_appends_to_json_buf() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::ServerToolUse {
+            id: "srv_1".to_owned(),
+            name: "web_search".to_owned(),
+            json_buf: r#"{"q"#.to_owned(),
+        };
+        apply_delta(
+            &mut block,
+            Delta::InputJsonDelta {
+                partial_json: r#":"rust"}"#.to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::ServerToolUse { json_buf, .. } = &block else {
+            panic!("expected ServerToolUse, got {block:?}");
+        };
+        assert_eq!(json_buf, r#"{"q:"rust"}"#);
+        assert!(sink.events().is_empty());
+    }
+
+    #[test]
+    fn apply_delta_thinking_appends_and_emits_thinking_token() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::Thinking {
+            thinking: "step 1".to_owned(),
+            signature: String::new(),
+        };
+        apply_delta(
+            &mut block,
+            Delta::ThinkingDelta {
+                thinking: ", step 2".to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::Thinking { thinking, .. } = &block else {
+            panic!("expected Thinking, got {block:?}");
+        };
+        assert_eq!(thinking, "step 1, step 2");
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::ThinkingToken(t) if t == ", step 2"));
+    }
+
+    #[test]
+    fn apply_delta_signature_updates_signature_field() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::Thinking {
+            thinking: "step 1".to_owned(),
+            signature: String::new(),
+        };
+        apply_delta(
+            &mut block,
+            Delta::SignatureDelta {
+                signature: "sig_abc".to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::Thinking {
+            thinking,
+            signature,
+        } = &block
+        else {
+            panic!("expected Thinking, got {block:?}");
+        };
+        assert_eq!(thinking, "step 1");
+        assert_eq!(signature, "sig_abc");
+        assert!(sink.events().is_empty());
+    }
+
+    #[test]
+    fn apply_delta_mismatched_pair_is_a_noop() {
+        let sink = CapturingSink::new();
+        let mut block = BlockAccumulator::Text("hi".to_owned());
+        apply_delta(
+            &mut block,
+            Delta::InputJsonDelta {
+                partial_json: "ignored".to_owned(),
+            },
+            &sink,
+        );
+        let BlockAccumulator::Text(buf) = &block else {
+            panic!("expected Text, got {block:?}");
+        };
+        assert_eq!(buf, "hi");
+        assert!(sink.events().is_empty());
+    }
+}
