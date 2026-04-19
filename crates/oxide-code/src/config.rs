@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::env;
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 

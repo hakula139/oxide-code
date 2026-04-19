@@ -34,7 +34,7 @@ All sections and fields are optional. Project config (`ox.toml`) overrides user 
 | Key          | Type    | Default                     | Description             |
 | ------------ | ------- | --------------------------- | ----------------------- |
 | `api_key`    | string  | —                           | Anthropic API key       |
-| `model`      | string  | `claude-opus-4-6`           | Model to use            |
+| `model`      | string  | `claude-opus-4-7`           | Model to use            |
 | `base_url`   | string  | `https://api.anthropic.com` | API base URL            |
 | `max_tokens` | integer | `16384`                     | Max tokens per response |
 
@@ -67,7 +67,7 @@ If no API key is found, oxide-code reads OAuth credentials created by [Claude Co
 1. **macOS Keychain** — the `"Claude Code-credentials"` service entry, accessed via the `security-framework` crate.
 2. **Credentials file** — `~/.claude/.credentials.json`.
 
-When both sources exist, the credential with the later expiry is used. Expired tokens are refreshed automatically. On Linux, only the file source is available (no Keychain support).
+On macOS, the Keychain is the authoritative source — preferred whenever present, with the credentials file as a fallback so a local file with inflated `expiresAt` cannot override a valid Keychain entry. Expired tokens are refreshed automatically. On Linux, only the file source is available (no Keychain support).
 
 You do not need to configure anything — if Claude Code is installed and authenticated, oxide-code picks up its credentials automatically.
 
@@ -78,7 +78,7 @@ Environment variables override all config file values.
 | Variable               | Config key          | Default                     | Description             |
 | ---------------------- | ------------------- | --------------------------- | ----------------------- |
 | `ANTHROPIC_API_KEY`    | `client.api_key`    | —                           | Anthropic API key       |
-| `ANTHROPIC_MODEL`      | `client.model`      | `claude-opus-4-6`           | Model to use            |
+| `ANTHROPIC_MODEL`      | `client.model`      | `claude-opus-4-7`           | Model to use            |
 | `ANTHROPIC_BASE_URL`   | `client.base_url`   | `https://api.anthropic.com` | API base URL            |
 | `ANTHROPIC_MAX_TOKENS` | `client.max_tokens` | `16384`                     | Max tokens per response |
 | `OX_SHOW_THINKING`     | `tui.show_thinking` | `false`                     | Show extended thinking  |

@@ -54,7 +54,7 @@ The project direction is simple:
 - Tool call display with per-tool icons (`$ → ← ✎ ✱ ⌕`), styled left borders, success / error result indicators, and truncated output body (5 lines with overflow count).
 - Extended thinking display — dimmed italic block, respects `show_thinking` config, clears on stream start.
 - Multi-line input with `ratatui-textarea`: dynamic height (1–6 lines), Shift+Enter for newline, placeholder text. Visual line count estimation via `unicode-width` for correct height under word-wrap. Viewport-relative cursor positioning via tracked scroll offset.
-- Marketing model name in status bar (e.g., "Claude Opus 4.6" instead of raw API ID). Braille spinner animation (~80 ms per frame) during streaming and tool execution, starts immediately on prompt submit.
+- Marketing model name in status bar (e.g., "Claude Opus 4.7" instead of raw API ID). Braille spinner animation (~80 ms per frame) during streaming and tool execution, starts immediately on prompt submit.
 - Right-aligned working directory in status bar with `~/` home prefix.
 - Empty-state welcome screen.
 - Alternate screen, panic-safe terminal restore.

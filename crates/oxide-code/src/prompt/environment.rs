@@ -105,6 +105,11 @@ struct ModelInfo {
 
 const MODELS: &[ModelInfo] = &[
     ModelInfo {
+        id_substr: "claude-opus-4-7",
+        marketing: "Claude Opus 4.7",
+        cutoff: Some("January 2026"),
+    },
+    ModelInfo {
         id_substr: "claude-opus-4-6",
         marketing: "Claude Opus 4.6",
         cutoff: Some("May 2025"),
@@ -341,6 +346,7 @@ mod tests {
 
     #[test]
     fn marketing_name_known_models() {
+        assert_eq!(marketing_name("claude-opus-4-7"), Some("Claude Opus 4.7"));
         assert_eq!(marketing_name("claude-opus-4-6"), Some("Claude Opus 4.6"));
         assert_eq!(
             marketing_name("claude-sonnet-4-6"),
@@ -377,6 +383,7 @@ mod tests {
 
     #[test]
     fn knowledge_cutoff_known_models() {
+        assert_eq!(knowledge_cutoff("claude-opus-4-7"), Some("January 2026"));
         assert_eq!(knowledge_cutoff("claude-sonnet-4-6"), Some("August 2025"));
         assert_eq!(knowledge_cutoff("claude-opus-4-6"), Some("May 2025"));
         assert_eq!(knowledge_cutoff("claude-opus-4-5"), Some("May 2025"));
