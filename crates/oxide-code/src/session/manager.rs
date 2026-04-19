@@ -11,7 +11,7 @@ use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
 ///
-/// Sized for wide terminals: the `--list` row is `ID(8) Last Active(16)
+/// Sized for wide terminals: the `--list` row is `ID(10) Last Active(19)
 /// Msgs(6) Title`, so ~80 chars of title space on a 120-col terminal
 /// and still truncates cleanly (`...`) on narrower ones.
 const MAX_TITLE_LEN: usize = 80;
@@ -415,15 +415,14 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
 /// can never leave the transcript with two user or two assistant
 /// messages in a row.
 fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
-    let mut i = 0;
-    while i + 1 < messages.len() {
-        if messages[i].role == messages[i + 1].role {
-            let next = messages.remove(i + 1);
-            messages[i].content.extend(next.content);
+    messages.dedup_by(|next, prev| {
+        if prev.role == next.role {
+            prev.content.append(&mut next.content);
+            true
         } else {
-            i += 1;
+            false
         }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -1088,8 +1087,13 @@ mod tests {
     fn truncate_title_multibyte_respects_character_count() {
         let s = "\u{00e9}".repeat(61);
         let result = truncate_title(&s, 60);
-        assert!(result.chars().count() <= 60);
-        assert!(result.ends_with("..."));
+        // Exact char count: 57 é + "..." = 60, not "<= 60".
+        assert_eq!(result.chars().count(), 60);
+        assert_eq!(
+            result,
+            format!("{}...", "\u{00e9}".repeat(57)),
+            "truncated body should be 57 é followed by ellipsis",
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@ mod oauth;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+use crate::util::env;
+
+const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 
@@ -46,24 +48,26 @@ impl Config {
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();
 
-        let auth = if let Some(key) = non_empty_env("ANTHROPIC_API_KEY").or(client.api_key) {
+        let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
         } else {
-            let token = oauth::load_token()
-                .await
-                .context("ANTHROPIC_API_KEY not set and Claude Code credentials not found")?;
+            let token = oauth::load_token().await.context(
+                "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
+                 ox.toml, or sign in with Claude Code (checks macOS Keychain and \
+                 ~/.claude/.credentials.json)",
+            )?;
             Auth::OAuth(token)
         };
 
-        let model = non_empty_env("ANTHROPIC_MODEL")
+        let model = env::string("ANTHROPIC_MODEL")
             .or(client.model)
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
-        let base_url = non_empty_env("ANTHROPIC_BASE_URL")
+        let base_url = env::string("ANTHROPIC_BASE_URL")
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
-        let max_tokens = non_empty_env("ANTHROPIC_MAX_TOKENS")
+        let max_tokens = env::string("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
             .or(client.max_tokens)
             .unwrap_or(DEFAULT_MAX_TOKENS);
@@ -71,7 +75,7 @@ impl Config {
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
 
-        let show_thinking = env_bool("OX_SHOW_THINKING")
+        let show_thinking = env::bool("OX_SHOW_THINKING")
             .or(tui.show_thinking)
             .unwrap_or(false);
 
@@ -84,21 +88,6 @@ impl Config {
             show_thinking,
         })
     }
-}
-
-fn non_empty_env(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-/// Parse a boolean environment variable.
-///
-/// Returns `Some(true)` for `"1"` or `"true"`, `Some(false)` for any other
-/// non-empty value, and `None` when unset or empty. The `Some(false)` case
-/// is intentional: setting the variable to any value (even `"0"` or `"no"`)
-/// is treated as an explicit override that prevents fallthrough to config
-/// file values.
-fn env_bool(key: &str) -> Option<bool> {
-    non_empty_env(key).map(|v| v == "1" || v == "true")
 }
 
 #[cfg(test)]

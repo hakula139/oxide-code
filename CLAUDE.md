@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](http://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
+oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). It communicates with LLM APIs to help developers with software engineering tasks directly from the terminal.
 
 ### CLI
 
@@ -73,16 +73,21 @@ ox     # Start an interactive session
 │   └── wrap.rs                 # Word-wrap with continuation indent for styled lines
 ├── util.rs                     # Shared utilities module root
 └── util/
+    ├── env.rs                  # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
     ├── lock.rs                 # Async retry helper for advisory locks (used by oauth)
     └── path.rs                 # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```
 
 ## Coding Conventions
 
+### Trait Design
+
+- Per-instance metadata (display name, icon, input summary) goes on the trait, not in a separate `match name { ... }` table. Adding a new implementation should require editing only the new file, not switch arms scattered across the codebase.
+
 ### Error Handling
 
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
-- Library error types: `thiserror::Error` derive for errors that callers need to match on.
+- Reach for `thiserror::Error` only when callers need to match on error variants (no current uses; add the dep when the first one lands).
 - Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
 
 ### Lint Suppression
@@ -110,6 +115,7 @@ ox     # Start an interactive session
 - Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
 - Order helper functions after their caller (top-down reading order).
 - When adding new fields to structs or variants to enums, place them at the most semantically appropriate position among existing members, not simply appended at the bottom.
+- A type used by N callers across M modules belongs in the module that names the **contract**, not the module of the first **implementation**. If `tui::event::AgentSink` is implemented by both a TUI channel and a stdio writer, the trait belongs in `agent::` (the contract), not `tui::` (one implementation).
 
 ### Visibility
 
@@ -126,16 +132,12 @@ ox     # Start an interactive session
 - Prefer raw strings (`r"..."`) when the string contains characters that would need escaping. Always use the minimum delimiter level needed (`r"..."` → `r#"..."#` → `r##"..."##`).
 - Use `indoc!` / `formatdoc!` for multiline string content so the literal can be indented with surrounding code. Inline at the call site when the string is used once; use a named constant only when it is shared or very large. Avoid `\n` escapes and `\x20` workarounds for multiline content.
 
-### Enum String Mappings
-
-- Use `strum` derives (`AsRefStr`, `EnumString`, `EnumIter`) for enum ↔ string conversions instead of handwritten matches.
-- Keep manual `Display` impls when the display form differs from the serialized form (e.g., titlecase vs. lowercase).
-
 ### Dependencies
 
 - Versions centralized in `[workspace.dependencies]` in the root `Cargo.toml`. Member crates reference them with `dep.workspace = true`.
 - Only add dependencies to the workspace when a PR first needs them.
 - Prefer crates with minimal transitive dependencies.
+- Platform-specific dependencies (Unix-only `nix`, macOS-only `security-framework`) are declared under `[target.'cfg(unix)'.dependencies]` / `[target.'cfg(target_os = "macos")'.dependencies]` in the crate's `Cargo.toml`. Code guarded by `#[cfg(unix)]` / `#[cfg(target_os = "macos")]` stays in the same module — do not split platform variants into separate files.
 
 ### Git Conventions
 

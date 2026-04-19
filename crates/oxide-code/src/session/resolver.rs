@@ -54,13 +54,19 @@ pub(crate) async fn resolve_session(
         store.list()?
     };
 
+    let scope_hint = if all {
+        ""
+    } else {
+        " in this project (use --all to search every project)"
+    };
+
     let session_id = match mode {
         ResumeMode::Fresh => unreachable!("handled above"),
         ResumeMode::Latest => sessions
             .into_iter()
             .next()
             .map(|s| s.session_id)
-            .context("no sessions to resume")?,
+            .with_context(|| format!("no sessions to resume{scope_hint}"))?,
         ResumeMode::Prefix(prefix) => {
             let mut matched = sessions
                 .into_iter()
@@ -69,7 +75,7 @@ pub(crate) async fn resolve_session(
             let first = matched.next();
             let second = matched.next();
             match (first, second) {
-                (None, _) => bail!("no session matching prefix '{prefix}'"),
+                (None, _) => bail!("no session matching prefix '{prefix}'{scope_hint}"),
                 (Some(only), None) => only,
                 (Some(a), Some(b)) => {
                     let rest: Vec<_> = matched.collect();

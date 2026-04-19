@@ -67,22 +67,35 @@ pub(crate) trait AgentSink: Send + Sync {
 
 // ── Channel Sink (TUI) ──
 
+/// Capacity of the bounded agent-event channel. `StreamToken` fires
+/// ~30-60/s, so 4096 gives tens of seconds of headroom before a stalled
+/// TUI surfaces `TrySendError::Full`.
+pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
+
 /// Sends agent events through an `mpsc` channel for TUI consumption.
 pub(crate) struct ChannelSink {
-    tx: mpsc::UnboundedSender<AgentEvent>,
+    tx: mpsc::Sender<AgentEvent>,
 }
 
 impl ChannelSink {
-    pub(crate) fn new(tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<AgentEvent>) -> Self {
         Self { tx }
     }
 }
 
 impl AgentSink for ChannelSink {
     fn send(&self, event: AgentEvent) -> Result<()> {
-        self.tx
-            .send(event)
-            .map_err(|_| anyhow::anyhow!("TUI channel closed"))
+        use mpsc::error::TrySendError;
+        match self.tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                anyhow::bail!(
+                    "agent event channel is full (capacity {AGENT_EVENT_CHANNEL_CAP}); \
+                     TUI is not draining events fast enough"
+                )
+            }
+            Err(TrySendError::Closed(_)) => anyhow::bail!("TUI channel closed"),
+        }
     }
 }
 
@@ -118,10 +131,11 @@ impl AgentSink for StdioSink {
                 }
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
+                let icon = tool_call_icon(&name);
                 if let Some(title) = tool_call_title(&name, &input) {
-                    eprintln!("⟡ {name}: {title}");
+                    eprintln!("{icon} {name}: {title}");
                 } else {
-                    eprintln!("⟡ {name}");
+                    eprintln!("{icon} {name}");
                 }
             }
             AgentEvent::ToolCallEnd { title, content, .. } => {
@@ -174,9 +188,9 @@ pub(crate) fn tool_call_icon(name: &str) -> &'static str {
 }
 
 /// Creates a linked channel pair: the `ChannelSink` for the agent loop, and
-/// the `UnboundedReceiver` for the TUI.
-pub(crate) fn channel() -> (ChannelSink, mpsc::UnboundedReceiver<AgentEvent>) {
-    let (tx, rx) = mpsc::unbounded_channel();
+/// the bounded `Receiver` for the TUI.
+pub(crate) fn channel() -> (ChannelSink, mpsc::Receiver<AgentEvent>) {
+    let (tx, rx) = mpsc::channel(AGENT_EVENT_CHANNEL_CAP);
     (ChannelSink::new(tx), rx)
 }
 

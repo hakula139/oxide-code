@@ -590,7 +590,10 @@ async fn agent_turn(
         messages.push(tool_result_msg);
     }
 
-    bail!("exceeded {MAX_TOOL_ROUNDS} tool rounds")
+    bail!(
+        "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
+         — this is a safety cap against runaway loops. Ask again with a narrower request."
+    )
 }
 
 // ── Stream Processing ──
@@ -688,13 +691,14 @@ async fn stream_response(
                 if let BlockAccumulator::Text(text) = &acc
                     && !text.is_empty()
                 {
-                    sink.send(AgentEvent::StreamToken(text.clone()))?;
+                    // Display-only; authoritative content stays in `acc`.
+                    _ = sink.send(AgentEvent::StreamToken(text.clone()));
                 }
                 blocks[index] = Some(acc);
             }
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, sink)?;
+                    apply_delta(block, delta, sink);
                 }
             }
             StreamEvent::Error { error } => {
@@ -739,11 +743,12 @@ fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccum
     }
 }
 
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) -> Result<()> {
+fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) {
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            sink.send(AgentEvent::StreamToken(text))?;
+            // Display-only; authoritative content stays in `buf`.
+            _ = sink.send(AgentEvent::StreamToken(text));
         }
         (
             BlockAccumulator::ToolUse { json_buf, .. }
@@ -759,7 +764,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             },
         ) => {
             thinking.push_str(&thinking_delta);
-            sink.send(AgentEvent::ThinkingToken(thinking_delta))?;
+            _ = sink.send(AgentEvent::ThinkingToken(thinking_delta));
         }
         (
             BlockAccumulator::Thinking { signature, .. },
@@ -773,5 +778,4 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
             debug!(?block, ?delta, "ignoring unhandled delta");
         }
     }
-    Ok(())
 }

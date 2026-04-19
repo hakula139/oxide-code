@@ -5,7 +5,9 @@ use serde::Deserialize;
 
 use super::{Tool, ToolOutput};
 
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+/// Per-file size cap for `edit` (10 MB). Generous because legitimate
+/// edits sometimes target large config or data files.
+const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 pub(crate) struct EditTool;
 
@@ -102,13 +104,13 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    if metadata.len() > MAX_FILE_SIZE {
+    if metadata.len() > MAX_EDIT_FILE_SIZE {
         #[expect(
             clippy::cast_precision_loss,
             reason = "file sizes are well within f64 range"
         )]
         let mb = metadata.len() as f64 / (1024.0 * 1024.0);
-        let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
+        let limit_mb = MAX_EDIT_FILE_SIZE / (1024 * 1024);
         return Err(format!(
             "File is too large ({mb:.1} MB, max {limit_mb} MB). \
              Use the bash tool for large-file edits.",
@@ -407,7 +409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
         let err = edit_file(path.to_str().unwrap(), "a", "b", false)
             .await

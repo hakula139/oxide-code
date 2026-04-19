@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -6,8 +7,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
-
-use std::collections::HashMap;
 
 use crate::message::{ContentBlock, Message, Role};
 use crate::tui::component::{Action, Component};
@@ -91,6 +90,10 @@ pub(crate) struct ChatView {
     /// is current. Everything before this offset is already rendered and
     /// cached; only text from here to the next `\n` needs parsing.
     streaming_rendered_boundary: usize,
+    /// Viewport width the streaming cache was rendered at. When the
+    /// viewport resizes mid-stream, the cache must be cleared so lines
+    /// rewrap to the new width.
+    streaming_cached_width: u16,
     /// Thinking tokens accumulated during extended thinking.
     thinking_buffer: String,
 
@@ -114,6 +117,7 @@ impl ChatView {
             streaming_buffer: String::new(),
             streaming_rendered: Vec::new(),
             streaming_rendered_boundary: 0,
+            streaming_cached_width: 0,
             thinking_buffer: String::new(),
             scroll_offset: 0,
             content_height: Cell::new(0),
@@ -232,6 +236,7 @@ impl ChatView {
         self.thinking_buffer.clear();
         self.streaming_rendered.clear();
         self.streaming_rendered_boundary = 0;
+        self.streaming_cached_width = 0;
         if !self.streaming_buffer.is_empty() {
             let content = std::mem::take(&mut self.streaming_buffer);
             self.entries.push(ChatEntry::Assistant(content));
@@ -265,6 +270,14 @@ impl ChatView {
     pub(crate) fn update_layout(&mut self, area: Rect) {
         self.viewport_height = area.height;
         self.viewport_width = area.width;
+        // Resize mid-stream: drop cached lines so the next append rebuilds
+        // them at the new width. Otherwise wrapped lines remain at the old
+        // width and overflow the viewport.
+        if self.streaming_cached_width != 0 && self.streaming_cached_width != area.width {
+            self.streaming_rendered.clear();
+            self.streaming_rendered_boundary = 0;
+            self.streaming_cached_width = 0;
+        }
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
@@ -573,7 +586,7 @@ impl ChatView {
 
         for text_line in visible {
             let expanded = expand_tabs(text_line);
-            let display_text = truncate_line(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
+            let display_text = truncate_to_chars(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
             let line = Line::from(vec![
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(display_text, text_style),
@@ -692,6 +705,13 @@ impl ChatView {
     /// Advance the streaming cache: render newly committed lines and store
     /// them so subsequent frames skip re-parsing the stable prefix.
     fn advance_streaming_cache(&mut self) {
+        // Defer caching until the first frame has measured the viewport.
+        // Otherwise `md_width` would be 0 and the markdown renderer would
+        // skip wrapping, baking unwrapped lines into the cache.
+        if self.viewport_width == 0 {
+            return;
+        }
+
         let boundary = self.streaming_rendered_boundary;
         let tail = &self.streaming_buffer[boundary..];
 
@@ -725,6 +745,7 @@ impl ChatView {
         }
 
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
+        self.streaming_cached_width = self.viewport_width;
     }
 }
 
@@ -804,7 +825,7 @@ fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> 
 }
 
 /// Truncate a string to `max_chars` characters, appending `...` if cut.
-fn truncate_line(s: &str, max_chars: usize) -> String {
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_owned();
     }
@@ -1205,6 +1226,7 @@ mod tests {
     #[test]
     fn commit_streaming_clears_cache() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "line1\nline2\npartial".to_owned();
         chat.advance_streaming_cache();
         assert!(!chat.streaming_rendered.is_empty());
@@ -1212,6 +1234,7 @@ mod tests {
         chat.commit_streaming();
         assert!(chat.streaming_rendered.is_empty());
         assert_eq!(chat.streaming_rendered_boundary, 0);
+        assert_eq!(chat.streaming_cached_width, 0);
         assert!(chat.thinking_buffer.is_empty());
     }
 
@@ -1792,6 +1815,7 @@ mod tests {
     #[test]
     fn push_streaming_lines_cached_and_tail() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "cached line\ntail text".to_owned();
         chat.advance_streaming_cache();
 
@@ -1861,6 +1885,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_no_newline_stays_at_zero() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "no newline here".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(chat.streaming_rendered_boundary, 0);
@@ -1870,6 +1895,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_single_newline() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "first line\nincomplete".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(chat.streaming_rendered_boundary, "first line\n".len());
@@ -1879,6 +1905,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_multiple_newlines() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "line1\nline2\nline3\npartial".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(
@@ -1890,6 +1917,7 @@ mod tests {
     #[test]
     fn advance_streaming_cache_incremental() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
 
         chat.streaming_buffer = "first\n".to_owned();
         chat.advance_streaming_cache();
@@ -1906,8 +1934,40 @@ mod tests {
     #[test]
     fn advance_streaming_cache_trailing_newline_only() {
         let mut chat = test_chat();
+        chat.viewport_width = 80;
         chat.streaming_buffer = "\n".to_owned();
         chat.advance_streaming_cache();
         assert_eq!(chat.streaming_rendered_boundary, 1);
+    }
+
+    #[test]
+    fn advance_streaming_cache_skips_when_viewport_unset() {
+        // Streaming a complete line before the first frame paints must
+        // not bake unwrapped markdown into the cache. The cache stays
+        // empty until update_layout supplies a real width.
+        let mut chat = test_chat();
+        chat.append_stream_token("first complete line\n");
+        assert!(chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_rendered_boundary, 0);
+        assert_eq!(chat.streaming_cached_width, 0);
+
+        chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("second complete line\n");
+        assert!(!chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_cached_width, 80);
+    }
+
+    #[test]
+    fn update_layout_invalidates_cache_on_width_change() {
+        let mut chat = test_chat();
+        chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("a complete line\n");
+        assert!(!chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_cached_width, 80);
+
+        chat.update_layout(Rect::new(0, 0, 40, 24));
+        assert!(chat.streaming_rendered.is_empty());
+        assert_eq!(chat.streaming_rendered_boundary, 0);
+        assert_eq!(chat.streaming_cached_width, 0);
     }
 }

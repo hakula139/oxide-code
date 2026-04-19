@@ -30,7 +30,6 @@ rfind
 rustls
 serde
 serie
-strum
 swatinem
 syntect
 sysname

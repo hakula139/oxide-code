@@ -23,7 +23,7 @@ pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
-    agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::UnboundedSender<UserAction>,
     should_quit: bool,
     /// Whether state has changed since the last render.
@@ -35,7 +35,7 @@ impl App {
         model: String,
         show_thinking: bool,
         cwd: String,
-        agent_rx: mpsc::UnboundedReceiver<AgentEvent>,
+        agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
         history: &[Message],
     ) -> Self {

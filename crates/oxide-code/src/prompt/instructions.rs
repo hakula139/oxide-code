@@ -7,6 +7,12 @@ use tokio::fs;
 /// At each location, the first file found is used.
 const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
+/// Tool-agnostic instruction subdirectories. Each slot pair walks both the
+/// directory itself (e.g. `<dir>/CLAUDE.md`) and one-level-down under each
+/// of these names (e.g. `<dir>/.claude/CLAUDE.md`). Listed here once so a
+/// future "configurable instruction dirs" feature has a single knob to turn.
+const INSTRUCTION_DIRS: &[&str] = &[".claude"];
+
 /// A group of candidate paths to try at a single discovery location.
 ///
 /// Candidates are tried in order; the first file found wins for this slot.
@@ -64,13 +70,15 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
     let mut slots = Vec::new();
 
     if let Some(home) = dirs::home_dir() {
-        slots.push(Slot {
-            candidates: INSTRUCTION_FILENAMES
-                .iter()
-                .map(|f| home.join(".claude").join(f))
-                .collect(),
-            label: "user's global instructions",
-        });
+        for subdir in INSTRUCTION_DIRS {
+            slots.push(Slot {
+                candidates: INSTRUCTION_FILENAMES
+                    .iter()
+                    .map(|f| home.join(subdir).join(f))
+                    .collect(),
+                label: "user's global instructions",
+            });
+        }
     }
 
     if let Some(root) = project_root {
@@ -79,13 +87,15 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
                 candidates: INSTRUCTION_FILENAMES.iter().map(|f| dir.join(f)).collect(),
                 label: "project instructions",
             });
-            slots.push(Slot {
-                candidates: INSTRUCTION_FILENAMES
-                    .iter()
-                    .map(|f| dir.join(".claude").join(f))
-                    .collect(),
-                label: "project instructions (.claude/)",
-            });
+            for subdir in INSTRUCTION_DIRS {
+                slots.push(Slot {
+                    candidates: INSTRUCTION_FILENAMES
+                        .iter()
+                        .map(|f| dir.join(subdir).join(f))
+                        .collect(),
+                    label: "project instructions (.claude/)",
+                });
+            }
         }
     }
 

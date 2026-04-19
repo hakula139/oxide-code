@@ -8,7 +8,10 @@ use serde::Deserialize;
 use super::{Tool, ToolOutput};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
-const MAX_FILE_SIZE: u64 = 1024 * 1024;
+/// Per-file size cap for `grep` (1 MB). Tighter than other file tools
+/// because regex over very large files is the wrong tool — point users
+/// at a dedicated streaming search instead.
+const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
 
 pub(crate) struct GrepTool;
 
@@ -169,8 +172,13 @@ struct GrepParams<'a> {
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
+    // Bound regex compilation. The default size limit is 10 MB; a pattern
+    // like `a{100000}{100000}` would allocate a massive DFA per tool call.
+    // 1 MB is plenty for any real-world search expression.
     let re = regex::RegexBuilder::new(params.pattern)
         .case_insensitive(params.case_insensitive)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
         .build()
         .map_err(|e| format!("Invalid regex: {e}"))?;
 
@@ -218,7 +226,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         let mut files = Vec::new();
         let mut skipped_large = Vec::new();
         if let Ok(meta) = base.metadata()
-            && meta.len() > MAX_FILE_SIZE
+            && meta.len() > MAX_GREP_FILE_SIZE
         {
             skipped_large.push((base.to_path_buf(), meta.len()));
         } else {
@@ -240,7 +248,7 @@ fn collect_files(base: &Path, include_matcher: Option<&globset::GlobMatcher>) ->
         })
         .filter(|entry| {
             if let Ok(meta) = entry.metadata()
-                && meta.len() > MAX_FILE_SIZE
+                && meta.len() > MAX_GREP_FILE_SIZE
             {
                 skipped_large.push((entry.path().to_path_buf(), meta.len()));
                 return false;
@@ -273,7 +281,7 @@ fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], base
     if skipped.is_empty() {
         return;
     }
-    let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
+    let limit_mb = MAX_GREP_FILE_SIZE / (1024 * 1024);
     _ = write!(output, "\n\nSkipped (exceeds {limit_mb} MB size limit):");
     for (path, size) in skipped {
         #[expect(
@@ -844,7 +852,7 @@ mod tests {
         std::fs::write(dir.path().join("small.txt"), "match here\n").unwrap();
         let large = dir.path().join("large.txt");
         let f = std::fs::File::create(&large).unwrap();
-        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
 
         let mut p = params("match");
         p.search_path = Some(dir.path().to_str().unwrap());
@@ -894,7 +902,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let large = dir.path().join("large.txt");
         let f = std::fs::File::create(&large).unwrap();
-        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_GREP_FILE_SIZE + 1).unwrap();
 
         let mut p = params("match");
         p.search_path = Some(large.to_str().unwrap());

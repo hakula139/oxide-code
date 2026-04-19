@@ -196,14 +196,19 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 // ── File Walking ──
 
+/// Depth cap for file-tree walks — guards against pathological trees
+/// (generated code, deep artefact dumps) that `ignore` doesn't filter.
+const MAX_WALK_DEPTH: usize = 64;
+
 /// Returns a gitignore-aware iterator over regular files under `base`.
 ///
 /// Respects `.gitignore`, `.ignore`, `.git/info/exclude`, and global ignore
-/// rules. Stays within the same filesystem to avoid crossing mount points.
-/// Permission errors and symlink loops are silently skipped.
+/// rules. Stays within the same filesystem, caps depth at [`MAX_WALK_DEPTH`],
+/// silently skips permission errors and symlink loops.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)
+        .max_depth(Some(MAX_WALK_DEPTH))
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
@@ -360,17 +365,30 @@ mod tests {
     fn truncate_line_long_gets_truncated() {
         let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
         let result = truncate_line(&long_line);
-        assert!(result.starts_with(&"x".repeat(MAX_LINE_LENGTH)));
-        assert!(result.ends_with(&format!("[{} chars]", MAX_LINE_LENGTH + 100)));
-        assert!(result.len() < long_line.len());
+        let suffix = format!("... [{} chars]", MAX_LINE_LENGTH + 100);
+        // Pin the exact shape: MAX_LINE_LENGTH x's, then the suffix — no
+        // off-by-one slack that would hide a truncation-boundary regression.
+        assert_eq!(result.len(), MAX_LINE_LENGTH + suffix.len());
+        assert_eq!(&result[..MAX_LINE_LENGTH], "x".repeat(MAX_LINE_LENGTH));
+        assert_eq!(&result[MAX_LINE_LENGTH..], suffix);
     }
 
     #[test]
     fn truncate_line_multibyte_safe() {
+        // The 🦀 sits at char `MAX_LINE_LENGTH - 2`, straddling the byte
+        // boundary a naive cut at `MAX_LINE_LENGTH` bytes would land in.
         let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
         line.push('🦀');
         line.push_str(&"b".repeat(100));
         let result = truncate_line(&line);
-        assert!(result.contains("chars]"));
+
+        // Prefix is exactly the first MAX_LINE_LENGTH chars of the body:
+        // (MAX_LINE_LENGTH - 2) a's, then 🦀, then a single b — no partial
+        // emoji bytes, no over-read. Suffix reports the original char count.
+        let (prefix, suffix) = result.split_once("... [").unwrap();
+        let expected_prefix = "a".repeat(MAX_LINE_LENGTH - 2) + "🦀" + "b";
+        assert_eq!(prefix, expected_prefix);
+        assert_eq!(prefix.chars().count(), MAX_LINE_LENGTH);
+        assert_eq!(suffix, format!("{} chars]", MAX_LINE_LENGTH + 99));
     }
 }

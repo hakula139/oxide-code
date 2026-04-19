@@ -348,13 +348,18 @@ mod tests {
         assert!(
             matches!(&entries[0], Entry::Header { session_id, version, .. } if session_id == "s1" && *version == CURRENT_VERSION)
         );
-        assert!(matches!(
-            &entries[1],
-            Entry::Message {
-                parent_uuid: None,
-                ..
-            }
-        ));
+        let Entry::Message {
+            uuid,
+            parent_uuid,
+            message,
+            ..
+        } = &entries[1]
+        else {
+            panic!("expected Entry::Message, got {:?}", &entries[1]);
+        };
+        assert_eq!(uuid.to_string(), "a1b2c3d4-e5f6-7890-abcd-1234567890ef");
+        assert_eq!(*parent_uuid, None);
+        assert_eq!(message.role, crate::message::Role::User);
         assert!(
             matches!(&entries[2], Entry::Title { title, source, .. } if title == "hi" && *source == TitleSource::FirstPrompt)
         );

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
+use crate::util::path::xdg_dir;
+
 const USER_CONFIG_DIR: &str = "ox";
 const USER_CONFIG_FILENAME: &str = "config.toml";
 const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
@@ -126,21 +128,12 @@ fn load_file(path: &Path) -> Option<FileConfig> {
 /// User config: `$XDG_CONFIG_HOME/ox/config.toml`, falling back to
 /// `~/.config/ox/config.toml`.
 fn user_config_path() -> Option<PathBuf> {
-    resolve_user_config(
+    xdg_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         dirs::home_dir(),
+        Path::new(".config"),
+        &Path::new(USER_CONFIG_DIR).join(USER_CONFIG_FILENAME),
     )
-}
-
-/// Resolve the user config path from explicit XDG and home directory values.
-///
-/// Separated from [`user_config_path`] for testability (avoids mutating env
-/// vars, which is `unsafe` in Rust 2024 edition).
-fn resolve_user_config(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    let base = xdg
-        .filter(|p| p.is_absolute())
-        .or_else(|| home.map(|h| h.join(".config")))?;
-    Some(base.join(USER_CONFIG_DIR).join(USER_CONFIG_FILENAME))
 }
 
 /// Walk from CWD upward to find the nearest `ox.toml`.
@@ -373,52 +366,6 @@ mod tests {
     #[test]
     fn load_file_missing_file_returns_none() {
         assert!(load_file(Path::new("/nonexistent/config.toml")).is_none());
-    }
-
-    // ── resolve_user_config ──
-
-    #[test]
-    fn resolve_user_config_prefers_xdg() {
-        let xdg = PathBuf::from("/custom/config");
-        let home = PathBuf::from("/home/user");
-        let result = resolve_user_config(Some(xdg.clone()), Some(home));
-        assert_eq!(
-            result,
-            Some(xdg.join(USER_CONFIG_DIR).join(USER_CONFIG_FILENAME))
-        );
-    }
-
-    #[test]
-    fn resolve_user_config_falls_back_to_home_dot_config() {
-        let home = PathBuf::from("/home/user");
-        let result = resolve_user_config(None, Some(home.clone()));
-        assert_eq!(
-            result,
-            Some(
-                home.join(".config")
-                    .join(USER_CONFIG_DIR)
-                    .join(USER_CONFIG_FILENAME)
-            )
-        );
-    }
-
-    #[test]
-    fn resolve_user_config_ignores_relative_xdg() {
-        let home = PathBuf::from("/home/user");
-        let result = resolve_user_config(Some(PathBuf::from("relative/path")), Some(home.clone()));
-        assert_eq!(
-            result,
-            Some(
-                home.join(".config")
-                    .join(USER_CONFIG_DIR)
-                    .join(USER_CONFIG_FILENAME)
-            )
-        );
-    }
-
-    #[test]
-    fn resolve_user_config_returns_none_without_home_or_xdg() {
-        assert!(resolve_user_config(None, None).is_none());
     }
 
     // ── find_project_config_from ──
