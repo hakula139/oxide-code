@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,11 +11,11 @@ use super::component::{Action, Component};
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::event::{tool_call_icon, tool_call_title};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
+use crate::tool::ToolRegistry;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -26,6 +27,7 @@ pub(crate) struct App {
     input: InputArea,
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::UnboundedSender<UserAction>,
+    tools: Arc<ToolRegistry>,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -39,16 +41,18 @@ impl App {
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::UnboundedSender<UserAction>,
         history: &[Message],
+        tools: Arc<ToolRegistry>,
     ) -> Self {
         let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(history);
+        chat.load_history(history, tools.as_ref());
         Self {
             status_bar: StatusBar::new(theme, model, cwd),
             chat,
             input: InputArea::new(theme),
             agent_rx,
             user_tx,
+            tools,
             should_quit: false,
             dirty: true,
         }
@@ -150,11 +154,14 @@ impl App {
                 self.chat.append_thinking_token(&token);
                 self.status_bar.set_status(Status::Streaming);
             }
-            AgentEvent::ToolCallStart { name, input, .. } => {
+            AgentEvent::ToolCallStart {
+                name, icon, input, ..
+            } => {
                 self.chat.commit_streaming();
-                let icon = tool_call_icon(&name);
-                let title = tool_call_title(&name, &input);
-                let label = title.map_or_else(|| name.clone(), str::to_owned);
+                let label = self
+                    .tools
+                    .summarize_input(&name, &input)
+                    .map_or_else(|| name.clone(), str::to_owned);
                 self.chat.push_tool_call(icon, &label);
                 self.status_bar.set_status(Status::ToolRunning);
             }

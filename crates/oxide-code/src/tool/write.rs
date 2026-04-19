@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 pub(crate) struct WriteTool;
 
@@ -31,6 +31,14 @@ impl Tool for WriteTool {
             },
             "required": ["file_path", "content"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "←"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "file_path")
     }
 
     fn run(
@@ -91,6 +99,21 @@ async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── icon ──
+
+    #[test]
+    fn icon_returns_arrow_left() {
+        assert_eq!(WriteTool.icon(), "←");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_file_path() {
+        let input = serde_json::json!({"file_path": "/tmp/out.txt", "content": "x"});
+        assert_eq!(WriteTool.summarize_input(&input), Some("/tmp/out.txt"));
+    }
 
     // ── run ──
 

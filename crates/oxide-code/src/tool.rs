@@ -95,6 +95,18 @@ pub(crate) trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
 
+    /// Single-character display icon for TUI / stdio rendering.
+    fn icon(&self) -> &'static str {
+        "⟡"
+    }
+
+    /// Returns the most relevant input field as a one-line label
+    /// (e.g., the command for bash, the `file_path` for read / write / edit).
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        let _ = input;
+        None
+    }
+
     fn run(
         &self,
         input: serde_json::Value,
@@ -107,6 +119,15 @@ pub(crate) trait Tool: Send + Sync {
             input_schema: self.input_schema(),
         }
     }
+}
+
+/// Default icon used when a tool name is unknown to the registry.
+pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
+
+/// Extracts a string field from a tool input object. Helper for per-tool
+/// [`Tool::summarize_input`] implementations that simply pluck one key.
+pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    input.get(key).and_then(serde_json::Value::as_str)
 }
 
 // ── Tool Registry ──
@@ -129,6 +150,22 @@ impl ToolRegistry {
 
     pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|t| t.definition()).collect()
+    }
+
+    /// Looks up the display icon for `name`, falling back to
+    /// [`DEFAULT_TOOL_ICON`] when the tool is not registered.
+    pub(crate) fn icon(&self, name: &str) -> &'static str {
+        self.get(name).map_or(DEFAULT_TOOL_ICON, Tool::icon)
+    }
+
+    /// Looks up the per-tool input summary for `name`, returning `None`
+    /// when the tool is not registered or has no summary for `input`.
+    pub(crate) fn summarize_input<'a>(
+        &self,
+        name: &str,
+        input: &'a serde_json::Value,
+    ) -> Option<&'a str> {
+        self.get(name).and_then(|t| t.summarize_input(input))
     }
 }
 
@@ -303,6 +340,36 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["command"]));
+    }
+
+    // ── ToolRegistry::icon ──
+
+    #[test]
+    fn icon_delegates_to_registered_tool() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        assert_eq!(registry.icon("bash"), "$");
+    }
+
+    #[test]
+    fn icon_unknown_tool_returns_default() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
+    }
+
+    // ── ToolRegistry::summarize_input ──
+
+    #[test]
+    fn summarize_input_delegates_to_registered_tool() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let input = serde_json::json!({"command": "echo hi"});
+        assert_eq!(registry.summarize_input("bash", &input), Some("echo hi"));
+    }
+
+    #[test]
+    fn summarize_input_unknown_tool_returns_none() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let input = serde_json::json!({"command": "echo hi"});
+        assert_eq!(registry.summarize_input("nonexistent", &input), None);
     }
 
     // ── resolve_base_dir ──

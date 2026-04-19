@@ -116,22 +116,14 @@ async fn async_main() -> Result<()> {
         resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
-    let tools = create_tool_registry();
+    let tools = Arc::new(create_tool_registry());
 
     if let Some(prompt_text) = cli.prompt {
-        return headless(
-            &client,
-            &tools,
-            &model,
-            show_thinking,
-            &prompt_text,
-            session,
-        )
-        .await;
+        return headless(&client, tools, &model, show_thinking, &prompt_text, session).await;
     }
 
     if cli.no_tui || !std::io::stdout().is_terminal() {
-        return bare_repl(&client, &tools, &model, show_thinking, session, messages).await;
+        return bare_repl(&client, tools, &model, show_thinking, session, messages).await;
     }
 
     run_tui(&client, &model, show_thinking, tools, session, messages).await
@@ -262,7 +254,7 @@ async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     session: SessionManager,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
@@ -289,6 +281,7 @@ async fn run_tui(
         agent_rx,
         user_tx,
         &resumed_messages,
+        Arc::clone(&tools),
     );
 
     let session = Arc::new(Mutex::new(session));
@@ -345,7 +338,7 @@ async fn run_tui(
 
 async fn agent_loop_task(
     client: Client,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::UnboundedReceiver<UserAction>,
     session: Arc<Mutex<SessionManager>>,
@@ -380,13 +373,13 @@ async fn agent_loop_task(
 
 async fn bare_repl(
     client: &Client,
-    tools: &ToolRegistry,
+    tools: Arc<ToolRegistry>,
     model: &str,
     show_thinking: bool,
     session: SessionManager,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
-    let sink = StdioSink::new(show_thinking);
+    let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
@@ -432,7 +425,7 @@ async fn bare_repl(
             // Allow the in-flight turn to be interrupted too; the
             // session state that's already been written persists and
             // resume-side sanitization heals any dangling tool_use.
-            let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+            let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
             let turn_result = tokio::select! {
                 r = turn => r,
                 () = shutdown_signal() => {
@@ -470,13 +463,13 @@ async fn bare_repl(
 
 async fn headless(
     client: &Client,
-    tools: &ToolRegistry,
+    tools: Arc<ToolRegistry>,
     model: &str,
     show_thinking: bool,
     prompt_text: &str,
     session: SessionManager,
 ) -> Result<()> {
-    let sink = StdioSink::new(show_thinking);
+    let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     // Wrap in Mutex so `agent_turn` can lock briefly per write. Only
     // one task touches the session in headless mode, so this is just
     // type-plumbing to match the shared-state signature.
@@ -489,7 +482,7 @@ async fn headless(
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
-    let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+    let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
     let result = tokio::select! {
         r = turn => r,
         () = shutdown_signal() => {

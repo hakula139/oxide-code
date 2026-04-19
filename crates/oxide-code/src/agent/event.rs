@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use anyhow::Result;
+
+use crate::tool::ToolRegistry;
 
 // ── Agent Events ──
 
@@ -21,6 +25,7 @@ pub(crate) enum AgentEvent {
         )]
         id: String,
         name: String,
+        icon: &'static str,
         input: serde_json::Value,
     },
     /// A tool call has finished.
@@ -76,11 +81,15 @@ pub(crate) trait AgentSink: Send + Sync {
 /// and `-p` headless mode.
 pub(crate) struct StdioSink {
     show_thinking: bool,
+    tools: Arc<ToolRegistry>,
 }
 
 impl StdioSink {
-    pub(crate) fn new(show_thinking: bool) -> Self {
-        Self { show_thinking }
+    pub(crate) fn new(show_thinking: bool, tools: Arc<ToolRegistry>) -> Self {
+        Self {
+            show_thinking,
+            tools,
+        }
     }
 }
 
@@ -101,9 +110,10 @@ impl AgentSink for StdioSink {
                     stdout.flush()?;
                 }
             }
-            AgentEvent::ToolCallStart { name, input, .. } => {
-                let icon = crate::tui::event::tool_call_icon(&name);
-                if let Some(title) = crate::tui::event::tool_call_title(&name, &input) {
+            AgentEvent::ToolCallStart {
+                name, icon, input, ..
+            } => {
+                if let Some(title) = self.tools.summarize_input(&name, &input) {
                     eprintln!("{icon} {name}: {title}");
                 } else {
                     eprintln!("{icon} {name}");

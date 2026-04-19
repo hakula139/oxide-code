@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
@@ -39,6 +39,14 @@ impl Tool for ReadTool {
             },
             "required": ["file_path"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "→"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "file_path")
     }
 
     fn run(
@@ -181,6 +189,21 @@ fn strip_bom(text: &str) -> &str {
 mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
+
+    // ── icon ──
+
+    #[test]
+    fn icon_returns_arrow_right() {
+        assert_eq!(ReadTool.icon(), "→");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_file_path() {
+        let input = serde_json::json!({"file_path": "/tmp/foo.rs"});
+        assert_eq!(ReadTool.summarize_input(&input), Some("/tmp/foo.rs"));
+    }
 
     // ── run ──
 

@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 const MAX_RESULTS: usize = 100;
 
@@ -34,6 +34,14 @@ impl Tool for GlobTool {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "✱"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "pattern")
     }
 
     fn run(
@@ -139,6 +147,21 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── icon ──
+
+    #[test]
+    fn icon_returns_star() {
+        assert_eq!(GlobTool.icon(), "✱");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_pattern() {
+        let input = serde_json::json!({"pattern": "**/*.rs"});
+        assert_eq!(GlobTool.summarize_input(&input), Some("**/*.rs"));
+    }
 
     // ── run ──
 
