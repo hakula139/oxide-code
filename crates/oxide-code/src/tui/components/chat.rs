@@ -138,7 +138,29 @@ impl ChatView {
     ///
     /// `RedactedThinking` blocks are intentionally dropped: their body
     /// is opaque ciphertext and carries no human-readable context.
+    ///
+    /// The session JSONL stores an assistant message with all its
+    /// `ToolUse` blocks, then the next user message with all matching
+    /// `ToolResult` blocks — but live rendering emits `(call, result)`
+    /// pairs interleaved. To keep the resumed view faithful, we index
+    /// results by `tool_use_id` first and emit each paired result
+    /// directly after its call. Orphan results (id with no matching
+    /// call, e.g., from a crashed turn) still render at their original
+    /// position with a generic fallback label.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
+        let mut pending_results: HashMap<&str, (&str, bool)> = messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
+                _ => None,
+            })
+            .collect();
+
         let mut tool_labels: HashMap<String, String> = HashMap::new();
         for msg in messages {
             let mut text = String::new();
@@ -164,13 +186,26 @@ impl ChatView {
                             .summarize_input(name, input)
                             .map_or_else(|| name.clone(), str::to_owned);
                         tool_labels.insert(id.clone(), label.clone());
-                        self.entries.push(ChatEntry::ToolCall { icon, label });
+                        self.entries.push(ChatEntry::ToolCall {
+                            icon,
+                            label: label.clone(),
+                        });
+                        if let Some((content, is_error)) = pending_results.remove(id.as_str()) {
+                            self.entries.push(ChatEntry::ToolResult {
+                                label,
+                                content: content.to_owned(),
+                                is_error,
+                            });
+                        }
                     }
+                    // Non-orphan tool_results were already emitted inline
+                    // at the matching tool_use; only orphans reach this
+                    // arm (the pending-map guard ensures that).
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
-                    } => {
+                    } if pending_results.remove(tool_use_id.as_str()).is_some() => {
                         let label = tool_labels
                             .get(tool_use_id)
                             .cloned()
@@ -907,6 +942,88 @@ mod tests {
         assert_eq!(chat.entries.len(), 2);
         assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "hello"));
         assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "hi there"));
+    }
+
+    #[test]
+    fn load_history_multi_tool_turn_pairs_inline_with_orphan_fallback() {
+        // The session JSONL for a multi-tool turn groups calls and
+        // results into separate messages: Assistant[Call₁, Call₂] then
+        // User[Result₁, Result₂]. Live rendering emits them paired:
+        // Call₁ → Result₁ → Call₂ → Result₂. The resumed view must
+        // match that order so scrollback doesn't visibly drift from
+        // how the same content rendered while streaming.
+        //
+        // Mixing in an orphan result ("ghost", no matching call)
+        // verifies the guard on the ToolResult arm: paired results
+        // are consumed inline at their call site, only the orphan
+        // reaches the fallback path and renders at its original
+        // position with the "(result)" label — it must not inherit a
+        // sibling tool's label from `tool_labels`.
+        let mut chat = test_chat();
+        chat.load_history(
+            &[
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "t1".to_owned(),
+                            name: "read".to_owned(),
+                            input: serde_json::json!({"file_path": "a.rs"}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t2".to_owned(),
+                            name: "grep".to_owned(),
+                            input: serde_json::json!({"pattern": "TODO"}),
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "t1".to_owned(),
+                            content: "file a".to_owned(),
+                            is_error: false,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "ghost".to_owned(),
+                            content: "stale output".to_owned(),
+                            is_error: true,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "t2".to_owned(),
+                            content: "3 matches".to_owned(),
+                            is_error: false,
+                        },
+                    ],
+                },
+            ],
+            &test_tools(),
+        );
+        assert_eq!(chat.entries.len(), 5);
+        assert!(matches!(
+            &chat.entries[0],
+            ChatEntry::ToolCall { label, .. } if label == "a.rs"
+        ));
+        assert!(matches!(
+            &chat.entries[1],
+            ChatEntry::ToolResult { label, content, is_error: false }
+                if label == "a.rs" && content == "file a"
+        ));
+        assert!(matches!(
+            &chat.entries[2],
+            ChatEntry::ToolCall { label, .. } if label == "TODO"
+        ));
+        assert!(matches!(
+            &chat.entries[3],
+            ChatEntry::ToolResult { label, content, is_error: false }
+                if label == "TODO" && content == "3 matches"
+        ));
+        assert!(matches!(
+            &chat.entries[4],
+            ChatEntry::ToolResult { label, content, is_error: true }
+                if label == "(result)" && content == "stale output"
+        ));
     }
 
     #[test]
