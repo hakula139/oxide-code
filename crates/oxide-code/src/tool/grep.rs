@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
 /// Per-file size cap for `grep` (1 MB). Tighter than other file tools
@@ -60,6 +60,14 @@ impl Tool for GrepTool {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "⌕"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "pattern")
     }
 
     fn run(
@@ -527,6 +535,21 @@ mod tests {
             case_insensitive: false,
             head_limit: None,
         }
+    }
+
+    // ── icon ──
+
+    #[test]
+    fn icon_is_magnifier() {
+        assert_eq!(GrepTool.icon(), "⌕");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_pattern() {
+        let input = serde_json::json!({"pattern": "TODO"});
+        assert_eq!(GrepTool.summarize_input(&input), Some("TODO"));
     }
 
     // ── run ──

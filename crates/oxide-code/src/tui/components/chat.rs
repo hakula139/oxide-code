@@ -9,8 +9,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::message::{ContentBlock, Message, Role};
+use crate::tool::ToolRegistry;
 use crate::tui::component::{Action, Component};
-use crate::tui::event::{tool_call_icon, tool_call_title};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -138,7 +138,7 @@ impl ChatView {
     ///
     /// `RedactedThinking` blocks are intentionally dropped: their body
     /// is opaque ciphertext and carries no human-readable context.
-    pub(crate) fn load_history(&mut self, messages: &[Message]) {
+    pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
         let mut tool_labels: HashMap<String, String> = HashMap::new();
         for msg in messages {
             let mut text = String::new();
@@ -159,8 +159,9 @@ impl ChatView {
                             self.entries
                                 .push(ChatEntry::Assistant(std::mem::take(&mut text)));
                         }
-                        let icon = tool_call_icon(name);
-                        let label = tool_call_title(name, input)
+                        let icon = tools.icon(name);
+                        let label = tools
+                            .summarize_input(name, input)
                             .map_or_else(|| name.clone(), str::to_owned);
                         tool_labels.insert(id.clone(), label.clone());
                         self.entries.push(ChatEntry::ToolCall { icon, label });
@@ -845,6 +846,17 @@ mod tests {
         ChatView::new(Theme::default(), true)
     }
 
+    fn test_tools() -> ToolRegistry {
+        ToolRegistry::new(vec![
+            Box::new(crate::tool::bash::BashTool),
+            Box::new(crate::tool::read::ReadTool),
+            Box::new(crate::tool::write::WriteTool),
+            Box::new(crate::tool::edit::EditTool),
+            Box::new(crate::tool::glob::GlobTool),
+            Box::new(crate::tool::grep::GrepTool),
+        ])
+    }
+
     /// Count lines produced by `build_text` at a default width.
     fn line_count(chat: &ChatView) -> usize {
         chat.build_text(80).lines.len()
@@ -888,7 +900,10 @@ mod tests {
     #[test]
     fn load_history_populates_user_and_assistant_entries() {
         let mut chat = test_chat();
-        chat.load_history(&[Message::user("hello"), Message::assistant("hi there")]);
+        chat.load_history(
+            &[Message::user("hello"), Message::assistant("hi there")],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 2);
         assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "hello"));
         assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "hi there"));
@@ -897,26 +912,29 @@ mod tests {
     #[test]
     fn load_history_renders_tool_result_after_paired_tool_use() {
         let mut chat = test_chat();
-        chat.load_history(&[
-            Message::user("ask"),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::json!({"command": "ls"}),
-                }],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "output".to_owned(),
-                    is_error: false,
-                }],
-            },
-            Message::assistant("reply"),
-        ]);
+        chat.load_history(
+            &[
+                Message::user("ask"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({"command": "ls"}),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "t1".to_owned(),
+                        content: "output".to_owned(),
+                        is_error: false,
+                    }],
+                },
+                Message::assistant("reply"),
+            ],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 4);
         assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "ask"));
         assert!(matches!(
@@ -936,14 +954,17 @@ mod tests {
         // Unusual but possible after crash sanitization; render with a
         // generic fallback instead of dropping.
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "missing".to_owned(),
-                content: "stderr".to_owned(),
-                is_error: true,
+        chat.load_history(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "missing".to_owned(),
+                    content: "stderr".to_owned(),
+                    is_error: true,
+                }],
             }],
-        }]);
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         let ChatEntry::ToolResult {
             label,
@@ -961,17 +982,20 @@ mod tests {
     #[test]
     fn load_history_joins_multiple_text_blocks() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "first".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "second".to_owned(),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "first".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "second".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         assert!(matches!(&chat.entries[0], ChatEntry::Assistant(t) if t == "first\nsecond"));
     }
@@ -979,38 +1003,44 @@ mod tests {
     #[test]
     fn load_history_skips_whitespace_only_text() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "  \n  ".to_owned(),
+        chat.load_history(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "  \n  ".to_owned(),
+                }],
             }],
-        }]);
+            &test_tools(),
+        );
         assert!(chat.entries.is_empty());
     }
 
     #[test]
     fn load_history_empty_slice_is_noop() {
         let mut chat = test_chat();
-        chat.load_history(&[]);
+        chat.load_history(&[], &test_tools());
         assert!(chat.entries.is_empty());
     }
 
     #[test]
     fn load_history_restores_tool_call_markers_after_assistant_text() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "Let me check that.".to_owned(),
-                },
-                ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::json!({"command": "ls -la"}),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Let me check that.".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({"command": "ls -la"}),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 2);
         assert!(matches!(
             &chat.entries[0],
@@ -1026,21 +1056,24 @@ mod tests {
     #[test]
     fn load_history_renders_consecutive_tool_calls_separately() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "read".to_owned(),
-                    input: serde_json::json!({"file_path": "src/foo.rs"}),
-                },
-                ContentBlock::ToolUse {
-                    id: "t2".to_owned(),
-                    name: "grep".to_owned(),
-                    input: serde_json::json!({"pattern": "TODO"}),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "read".to_owned(),
+                        input: serde_json::json!({"file_path": "src/foo.rs"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".to_owned(),
+                        name: "grep".to_owned(),
+                        input: serde_json::json!({"pattern": "TODO"}),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 2);
         assert!(matches!(
             &chat.entries[0],
@@ -1055,14 +1088,17 @@ mod tests {
     #[test]
     fn load_history_unknown_tool_falls_back_to_tool_name_as_label() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t1".to_owned(),
-                name: "custom_tool".to_owned(),
-                input: serde_json::json!({"arg": "value"}),
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "custom_tool".to_owned(),
+                    input: serde_json::json!({"arg": "value"}),
+                }],
             }],
-        }]);
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
             panic!("expected tool call, got {:?}", chat.entries[0]);
@@ -1074,14 +1110,17 @@ mod tests {
     #[test]
     fn load_history_server_tool_use_renders_like_local_tool_call() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ServerToolUse {
-                id: "srv1".to_owned(),
-                name: "web_search".to_owned(),
-                input: serde_json::json!({"query": "rust"}),
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ServerToolUse {
+                    id: "srv1".to_owned(),
+                    name: "web_search".to_owned(),
+                    input: serde_json::json!({"query": "rust"}),
+                }],
             }],
-        }]);
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
             panic!("expected tool call, got {:?}", chat.entries[0]);
@@ -1093,22 +1132,25 @@ mod tests {
     #[test]
     fn load_history_assistant_text_after_tool_use_emits_new_assistant_entry() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "Checking logs...".to_owned(),
-                },
-                ContentBlock::ToolUse {
-                    id: "t1".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::json!({"command": "tail -f log"}),
-                },
-                ContentBlock::Text {
-                    text: "Looks good.".to_owned(),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Checking logs...".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "bash".to_owned(),
+                        input: serde_json::json!({"command": "tail -f log"}),
+                    },
+                    ContentBlock::Text {
+                        text: "Looks good.".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 3);
         assert!(matches!(
             &chat.entries[0],
@@ -1124,18 +1166,21 @@ mod tests {
     #[test]
     fn load_history_renders_thinking_entries_before_following_text() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "long internal reasoning".to_owned(),
-                    signature: "sig".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "visible reply".to_owned(),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "long internal reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "visible reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 2);
         assert!(matches!(
             &chat.entries[0],
@@ -1150,18 +1195,21 @@ mod tests {
     #[test]
     fn load_history_thinking_entry_is_dropped_when_body_is_whitespace() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "   \n  ".to_owned(),
-                    signature: "sig".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "reply".to_owned(),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "   \n  ".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         assert!(matches!(
             &chat.entries[0],
@@ -1172,17 +1220,20 @@ mod tests {
     #[test]
     fn load_history_redacted_thinking_is_dropped() {
         let mut chat = test_chat();
-        chat.load_history(&[Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::RedactedThinking {
-                    data: "opaque-ciphertext".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "fine".to_owned(),
-                },
-            ],
-        }]);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::RedactedThinking {
+                        data: "opaque-ciphertext".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "fine".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
         assert_eq!(chat.entries.len(), 1);
         assert!(matches!(
             &chat.entries[0],

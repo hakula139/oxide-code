@@ -4,10 +4,12 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+/// Per-file size cap for `read` (10 MB). Accommodates typical large
+/// config / log files while rejecting accidental binary dumps.
+const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 pub(crate) struct ReadTool;
 
@@ -39,6 +41,14 @@ impl Tool for ReadTool {
             },
             "required": ["file_path"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "→"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "file_path")
     }
 
     fn run(
@@ -97,13 +107,13 @@ async fn read_file(
         ));
     }
 
-    if metadata.len() > MAX_FILE_SIZE {
+    if metadata.len() > MAX_READ_FILE_SIZE {
         #[expect(
             clippy::cast_precision_loss,
             reason = "file sizes are well within f64 range"
         )]
         let mb = metadata.len() as f64 / (1024.0 * 1024.0);
-        let limit_mb = MAX_FILE_SIZE / (1024 * 1024);
+        let limit_mb = MAX_READ_FILE_SIZE / (1024 * 1024);
         return Err(format!(
             "File is too large ({mb:.1} MB, max {limit_mb} MB). \
              Use offset and limit to read specific portions.",
@@ -181,6 +191,21 @@ fn strip_bom(text: &str) -> &str {
 mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
+
+    // ── icon ──
+
+    #[test]
+    fn icon_is_arrow_right() {
+        assert_eq!(ReadTool.icon(), "→");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_file_path() {
+        let input = serde_json::json!({"file_path": "/tmp/foo.rs"});
+        assert_eq!(ReadTool.summarize_input(&input), Some("/tmp/foo.rs"));
+    }
 
     // ── run ──
 
@@ -300,7 +325,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_READ_FILE_SIZE + 1).unwrap();
 
         let err = read_file(path.to_str().unwrap(), None, None)
             .await

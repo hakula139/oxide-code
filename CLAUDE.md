@@ -23,6 +23,9 @@ ox     # Start an interactive session
 
 ```text
 .
+├── agent.rs                    # Agent turn loop, stream accumulation, tool dispatch
+├── agent/
+│   └── event.rs                # AgentEvent, UserAction, AgentSink trait, StdioSink
 ├── client.rs                   # Client module root
 ├── client/
 │   ├── anthropic.rs            # Anthropic Messages API streaming client
@@ -31,7 +34,7 @@ ox     # Start an interactive session
 ├── config/
 │   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
-├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
+├── main.rs                     # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
@@ -45,7 +48,8 @@ ox     # Start an interactive session
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
-│   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   ├── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   └── writer.rs               # Session-write helpers (record_session_message, log_session_err)
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout
@@ -63,7 +67,7 @@ ox     # Start an interactive session
 │   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
 │   │   ├── input.rs            # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs           # Status bar (model, spinner, status, working directory)
-│   ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
+│   ├── event.rs                # ChannelSink (mpsc transport for the TUI)
 │   ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
 │   │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
@@ -166,7 +170,7 @@ ox     # Start an interactive session
 - Unit tests in the same file as the code they test (`#[cfg(test)]` module).
 - Integration tests in `tests/` directory for cross-module behavior.
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
-- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`).
+- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`). For parameterless single-behavior functions where the value IS the test, use property form (`icon_is_dollar_sign`), not mechanism form (`icon_returns_dollar_sign`).
 - Use `indoc!` for multi-line string literals in tests.
 - Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.
 - Prefer a concise test suite with full coverage over many minimal tests. Drop tests that are subsumed by more thorough ones. Merge tests that cover the same code path when the combined test remains readable.

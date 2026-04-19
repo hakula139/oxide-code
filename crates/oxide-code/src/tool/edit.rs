@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput};
+use super::{Tool, ToolOutput, extract_input_field};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -44,6 +44,14 @@ impl Tool for EditTool {
             },
             "required": ["file_path", "old_string", "new_string"]
         })
+    }
+
+    fn icon(&self) -> &'static str {
+        "✎"
+    }
+
+    fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
+        extract_input_field(input, "file_path")
     }
 
     fn run(
@@ -192,6 +200,21 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    // ── icon ──
+
+    #[test]
+    fn icon_is_pencil() {
+        assert_eq!(EditTool.icon(), "✎");
+    }
+
+    // ── summarize_input ──
+
+    #[test]
+    fn summarize_input_extracts_file_path() {
+        let input = serde_json::json!({"file_path": "src/main.rs"});
+        assert_eq!(EditTool.summarize_input(&input), Some("src/main.rs"));
+    }
 
     // ── run ──
 

@@ -1,3 +1,4 @@
+mod agent;
 mod client;
 mod config;
 mod message;
@@ -10,28 +11,28 @@ mod util;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::{ArgGroup, Parser};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
-use client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
+use agent::agent_turn;
+use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use client::anthropic::Client;
 use config::Config;
-use message::{ContentBlock, Message, Role, strip_trailing_thinking};
-use prompt::{PromptParts, environment::marketing_name};
+use message::Message;
+use prompt::environment::marketing_name;
 use session::list_view::render_list;
 use session::manager::SessionManager;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
+use session::writer::{log_session_err, record_session_message};
 use tool::{
-    ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry, bash::BashTool, edit::EditTool,
-    glob::GlobTool, grep::GrepTool, read::ReadTool, write::WriteTool,
+    ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
+    write::WriteTool,
 };
-use tui::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 use util::path::tildify;
-
-const MAX_TOOL_ROUNDS: usize = 25;
 
 /// Cached local UTC offset, computed before the tokio runtime starts.
 ///
@@ -116,22 +117,14 @@ async fn async_main() -> Result<()> {
         resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
-    let tools = create_tool_registry();
+    let tools = Arc::new(create_tool_registry());
 
     if let Some(prompt_text) = cli.prompt {
-        return headless(
-            &client,
-            &tools,
-            &model,
-            show_thinking,
-            &prompt_text,
-            session,
-        )
-        .await;
+        return headless(&client, tools, &model, show_thinking, &prompt_text, session).await;
     }
 
     if cli.no_tui || !std::io::stdout().is_terminal() {
-        return bare_repl(&client, &tools, &model, show_thinking, session, messages).await;
+        return bare_repl(&client, tools, &model, show_thinking, session, messages).await;
     }
 
     run_tui(&client, &model, show_thinking, tools, session, messages).await
@@ -176,44 +169,6 @@ fn create_tool_registry() -> ToolRegistry {
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
-}
-
-/// Log session I/O errors without aborting the agent loop.
-///
-/// The first failure within a session is also surfaced to the user via
-/// `sink` (when available) so they know the conversation may not be
-/// saved. Subsequent failures warn-log only to avoid spamming the UI
-/// — the persistence problem has already been announced.
-fn log_session_err(
-    result: anyhow::Result<()>,
-    session: &mut SessionManager,
-    sink: Option<&dyn AgentSink>,
-) {
-    let Err(e) = result else {
-        return;
-    };
-    warn!("session write failed: {e}");
-    if session.record_write_failure()
-        && let Some(sink) = sink
-    {
-        _ = sink.send(AgentEvent::Error(format!(
-            "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
-        )));
-    }
-}
-
-/// Record one message to the session, surfacing any write failure via
-/// `sink`. Holds the session lock only for the duration of the write
-/// so other tasks (and concurrent writes from the same task) see
-/// fresh access instead of blocking behind a long-running agent turn.
-async fn record_session_message(
-    session: &Mutex<SessionManager>,
-    msg: &Message,
-    sink: Option<&dyn AgentSink>,
-) {
-    let mut s = session.lock().await;
-    let r = s.record_message(msg).await;
-    log_session_err(r, &mut s, sink);
 }
 
 /// Wait for any shutdown signal — SIGINT (portable), SIGTERM, or
@@ -262,7 +217,7 @@ async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     session: SessionManager,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
@@ -289,6 +244,7 @@ async fn run_tui(
         agent_rx,
         user_tx,
         &resumed_messages,
+        Arc::clone(&tools),
     );
 
     let session = Arc::new(Mutex::new(session));
@@ -345,7 +301,7 @@ async fn run_tui(
 
 async fn agent_loop_task(
     client: Client,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::UnboundedReceiver<UserAction>,
     session: Arc<Mutex<SessionManager>>,
@@ -380,13 +336,13 @@ async fn agent_loop_task(
 
 async fn bare_repl(
     client: &Client,
-    tools: &ToolRegistry,
+    tools: Arc<ToolRegistry>,
     model: &str,
     show_thinking: bool,
     session: SessionManager,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
-    let sink = StdioSink::new(show_thinking);
+    let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
@@ -432,7 +388,7 @@ async fn bare_repl(
             // Allow the in-flight turn to be interrupted too; the
             // session state that's already been written persists and
             // resume-side sanitization heals any dangling tool_use.
-            let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+            let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
             let turn_result = tokio::select! {
                 r = turn => r,
                 () = shutdown_signal() => {
@@ -470,13 +426,13 @@ async fn bare_repl(
 
 async fn headless(
     client: &Client,
-    tools: &ToolRegistry,
+    tools: Arc<ToolRegistry>,
     model: &str,
     show_thinking: bool,
     prompt_text: &str,
     session: SessionManager,
 ) -> Result<()> {
-    let sink = StdioSink::new(show_thinking);
+    let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     // Wrap in Mutex so `agent_turn` can lock briefly per write. Only
     // one task touches the session in headless mode, so this is just
     // type-plumbing to match the shared-state signature.
@@ -489,7 +445,7 @@ async fn headless(
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
-    let turn = agent_turn(client, tools, &mut messages, &prompt, &sink, &session);
+    let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
     let result = tokio::select! {
         r = turn => r,
         () = shutdown_signal() => {
@@ -512,270 +468,4 @@ async fn headless(
     result?;
     println!();
     Ok(())
-}
-
-// ── Agent Turn (shared across all modes) ──
-
-async fn agent_turn(
-    client: &Client,
-    tools: &ToolRegistry,
-    messages: &mut Vec<Message>,
-    prompt: &PromptParts,
-    sink: &dyn AgentSink,
-    session: &Mutex<SessionManager>,
-) -> Result<()> {
-    let tool_defs = tools.definitions();
-
-    for _ in 0..MAX_TOOL_ROUNDS {
-        strip_trailing_thinking(messages);
-        let blocks = stream_response(client, messages, &tool_defs, prompt, sink).await?;
-
-        let tool_uses: Vec<_> = blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-
-        let assistant_msg = Message {
-            role: Role::Assistant,
-            content: blocks,
-        };
-        record_session_message(session, &assistant_msg, Some(sink)).await;
-        messages.push(assistant_msg);
-
-        if tool_uses.is_empty() {
-            return Ok(());
-        }
-
-        let mut results = Vec::new();
-        for (id, name, input) in tool_uses {
-            _ = sink.send(AgentEvent::ToolCallStart {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            });
-
-            let output = match tools.get(&name) {
-                Some(t) => t.run(input).await,
-                None => ToolOutput {
-                    content: format!("Unknown tool: {name}"),
-                    is_error: true,
-                    metadata: ToolMetadata::default(),
-                },
-            };
-
-            _ = sink.send(AgentEvent::ToolCallEnd {
-                id: id.clone(),
-                title: output.metadata.title.clone(),
-                content: output.content.clone(),
-                is_error: output.is_error,
-            });
-
-            results.push(ContentBlock::ToolResult {
-                tool_use_id: id,
-                content: output.content,
-                is_error: output.is_error,
-            });
-        }
-
-        let tool_result_msg = Message {
-            role: Role::User,
-            content: results,
-        };
-        record_session_message(session, &tool_result_msg, Some(sink)).await;
-        messages.push(tool_result_msg);
-    }
-
-    bail!(
-        "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
-         — this is a safety cap against runaway loops. Ask again with a narrower request."
-    )
-}
-
-// ── Stream Processing ──
-
-#[derive(Debug)]
-enum BlockAccumulator {
-    Text(String),
-    ToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-    ServerToolUse {
-        id: String,
-        name: String,
-        json_buf: String,
-    },
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
-    RedactedThinking {
-        data: String,
-    },
-    /// Placeholder for unrecognized content block types. Absorbs deltas silently
-    /// and produces no [`ContentBlock`] at the end.
-    Skipped,
-}
-
-impl BlockAccumulator {
-    fn into_content_block(self) -> Option<ContentBlock> {
-        match self {
-            Self::Text(text) => Some(ContentBlock::Text { text }),
-            Self::ToolUse { id, name, json_buf } => Some(ContentBlock::ToolUse {
-                id,
-                name,
-                input: parse_tool_json(&json_buf),
-            }),
-            Self::ServerToolUse { id, name, json_buf } => Some(ContentBlock::ServerToolUse {
-                id,
-                name,
-                input: parse_tool_json(&json_buf),
-            }),
-            Self::Thinking {
-                thinking,
-                signature,
-            } => Some(ContentBlock::Thinking {
-                thinking,
-                signature,
-            }),
-            Self::RedactedThinking { data } => Some(ContentBlock::RedactedThinking { data }),
-            Self::Skipped => None,
-        }
-    }
-}
-
-fn parse_tool_json(json_buf: &str) -> serde_json::Value {
-    serde_json::from_str(json_buf).unwrap_or_else(|e| {
-        warn!("malformed tool input JSON: {e}");
-        serde_json::Value::Object(serde_json::Map::new())
-    })
-}
-
-async fn stream_response(
-    client: &Client,
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    prompt: &PromptParts,
-    sink: &dyn AgentSink,
-) -> Result<Vec<ContentBlock>> {
-    let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
-    let mut rx = client.stream_message(
-        messages,
-        &section_refs,
-        prompt.user_context.as_deref(),
-        tools,
-    )?;
-
-    let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
-
-    while let Some(event) = rx.recv().await {
-        let event = event.context("stream error")?;
-
-        match event {
-            StreamEvent::ContentBlockStart {
-                index,
-                content_block,
-            } => {
-                if blocks.len() <= index {
-                    blocks.resize_with(index + 1, || None);
-                }
-                let acc = init_accumulator(content_block, index);
-                // Send initial text to display if non-empty (the API
-                // typically sends empty initial text, but be safe).
-                if let BlockAccumulator::Text(text) = &acc
-                    && !text.is_empty()
-                {
-                    // Display-only; authoritative content stays in `acc`.
-                    _ = sink.send(AgentEvent::StreamToken(text.clone()));
-                }
-                blocks[index] = Some(acc);
-            }
-            StreamEvent::ContentBlockDelta { index, delta } => {
-                if let Some(Some(block)) = blocks.get_mut(index) {
-                    apply_delta(block, delta, sink);
-                }
-            }
-            StreamEvent::Error { error } => {
-                bail!("API error ({}): {}", error.error_type, error.message);
-            }
-            _ => {}
-        }
-    }
-
-    Ok(blocks
-        .into_iter()
-        .flatten()
-        .filter_map(BlockAccumulator::into_content_block)
-        .collect())
-}
-
-fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccumulator {
-    match content_block {
-        ContentBlockInfo::Text { text } => BlockAccumulator::Text(text),
-        ContentBlockInfo::ToolUse { id, name } => BlockAccumulator::ToolUse {
-            id,
-            name,
-            json_buf: String::new(),
-        },
-        ContentBlockInfo::ServerToolUse { id, name } => BlockAccumulator::ServerToolUse {
-            id,
-            name,
-            json_buf: String::new(),
-        },
-        ContentBlockInfo::Thinking {
-            thinking,
-            signature,
-        } => BlockAccumulator::Thinking {
-            thinking,
-            signature,
-        },
-        ContentBlockInfo::RedactedThinking { data } => BlockAccumulator::RedactedThinking { data },
-        ContentBlockInfo::Unknown => {
-            warn!("skipping unknown content block at index {index}");
-            BlockAccumulator::Skipped
-        }
-    }
-}
-
-fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink) {
-    match (block, delta) {
-        (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
-            buf.push_str(&text);
-            // Display-only; authoritative content stays in `buf`.
-            _ = sink.send(AgentEvent::StreamToken(text));
-        }
-        (
-            BlockAccumulator::ToolUse { json_buf, .. }
-            | BlockAccumulator::ServerToolUse { json_buf, .. },
-            Delta::InputJsonDelta { partial_json },
-        ) => {
-            json_buf.push_str(&partial_json);
-        }
-        (
-            BlockAccumulator::Thinking { thinking, .. },
-            Delta::ThinkingDelta {
-                thinking: thinking_delta,
-            },
-        ) => {
-            thinking.push_str(&thinking_delta);
-            _ = sink.send(AgentEvent::ThinkingToken(thinking_delta));
-        }
-        (
-            BlockAccumulator::Thinking { signature, .. },
-            Delta::SignatureDelta {
-                signature: sig_value,
-            },
-        ) => {
-            *signature = sig_value;
-        }
-        (block, delta) => {
-            debug!(?block, ?delta, "ignoring unhandled delta");
-        }
-    }
 }
