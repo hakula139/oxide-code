@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "lint": "markdownlint-cli2 \"**/*.md\"",
+    "spellcheck": "cspell --no-progress \"**/*\""
+  },
+  "devDependencies": {
+    "cspell": "^10.0.0",
+    "markdownlint-cli2": "^0.22.0"
+  }
+}

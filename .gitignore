@@ -1,5 +1,6 @@
 # Build output
 /target/
+/node_modules/
 
 # Python
 /.venv/
