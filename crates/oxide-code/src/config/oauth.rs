@@ -5,7 +5,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::util::{env, lock};
+#[cfg(target_os = "macos")]
+use crate::util::env;
+use crate::util::lock;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
