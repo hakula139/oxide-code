@@ -317,20 +317,6 @@ mod tests {
         }
     }
 
-    // ── parse_tool_json ──
-
-    #[test]
-    fn parse_tool_json_valid_object() {
-        let value = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
-        assert_eq!(value, json!({"command": "ls", "n": 3}));
-    }
-
-    #[test]
-    fn parse_tool_json_malformed() {
-        let value = parse_tool_json("{unclosed");
-        assert_eq!(value, json!({}));
-    }
-
     // ── BlockAccumulator::into_content_block ──
 
     #[test]
@@ -403,6 +389,20 @@ mod tests {
     #[test]
     fn into_content_block_skipped_yields_none() {
         assert!(BlockAccumulator::Skipped.into_content_block().is_none());
+    }
+
+    // ── parse_tool_json ──
+
+    #[test]
+    fn parse_tool_json_valid_object() {
+        let value = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
+        assert_eq!(value, json!({"command": "ls", "n": 3}));
+    }
+
+    #[test]
+    fn parse_tool_json_malformed() {
+        let value = parse_tool_json("{unclosed");
+        assert_eq!(value, json!({}));
     }
 
     // ── init_accumulator ──
