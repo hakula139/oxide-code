@@ -24,7 +24,7 @@ Full-screen redraw on every React state change causes severe flickering in long 
 `Markdown.tsx`, `utils/markdown.ts`
 
 - Two-layer hybrid: `marked` lexer for tokenization, `chalk` for ANSI styling, `cli-highlight` (lazy-loaded via Suspense) for syntax highlighting in code blocks.
-- `StreamingMarkdown` splits content at the last *top-level block boundary* (not line). Maintains a monotonic `useRef` boundary — only the final growing block is re-parsed per delta, giving O(1) amortized cost regardless of total text length.
+- `StreamingMarkdown` splits content at the last _top-level block boundary_ (not line). Maintains a monotonic `useRef` boundary — only the final growing block is re-parsed per delta, giving O(1) amortized cost regardless of total text length.
 - Module-level LRU token cache (500 entries, keyed by content hash) avoids re-parsing on virtual-scroll remount (~3 ms per `marked.lexer` call saved).
 - Fast-path regex check: scans first 500 chars for markdown syntax; if none found, skips the lexer entirely and returns a single paragraph token.
 - Tables are extracted and rendered as React components with flexbox layout; all other content is concatenated into ANSI strings and rendered via `<Ansi>`.
