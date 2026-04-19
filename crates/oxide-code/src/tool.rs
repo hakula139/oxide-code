@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn get_returns_none_for_unknown() {
+    fn get_unknown_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         assert!(registry.get("nonexistent").is_none());
     }
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_unknown_tool_returns_default() {
+    fn icon_unknown_tool_falls_back_to_default() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
     }
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn summarize_input_unknown_tool_returns_none() {
+    fn summarize_input_unknown_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
         assert_eq!(registry.summarize_input("nonexistent", &input), None);

@@ -103,7 +103,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_arrow_left() {
+    fn icon_is_arrow_left() {
         assert_eq!(WriteTool.icon(), "←");
     }
 

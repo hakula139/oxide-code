@@ -195,7 +195,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_arrow_right() {
+    fn icon_is_arrow_right() {
         assert_eq!(ReadTool.icon(), "→");
     }
 

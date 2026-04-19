@@ -54,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_sink_closed_receiver_returns_error() {
+    fn channel_sink_send_after_receiver_dropped() {
         let (sink, rx) = channel();
         drop(rx);
         assert!(sink.send(AgentEvent::TurnComplete).is_err());

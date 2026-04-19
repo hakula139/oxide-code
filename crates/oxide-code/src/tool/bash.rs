@@ -240,7 +240,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_dollar_sign() {
+    fn icon_is_dollar_sign() {
         assert_eq!(BashTool.icon(), "$");
     }
 
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn summarize_input_missing_command_returns_none() {
+    fn summarize_input_missing_command() {
         let input = serde_json::json!({"description": "no command"});
         assert_eq!(BashTool.summarize_input(&input), None);
     }

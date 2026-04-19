@@ -151,7 +151,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_star() {
+    fn icon_is_star() {
         assert_eq!(GlobTool.icon(), "✱");
     }
 

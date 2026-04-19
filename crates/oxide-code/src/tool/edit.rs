@@ -204,7 +204,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_pencil() {
+    fn icon_is_pencil() {
         assert_eq!(EditTool.icon(), "✎");
     }
 

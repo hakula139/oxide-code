@@ -540,7 +540,7 @@ mod tests {
     // ── icon ──
 
     #[test]
-    fn icon_returns_magnifier() {
+    fn icon_is_magnifier() {
         assert_eq!(GrepTool.icon(), "⌕");
     }
 
