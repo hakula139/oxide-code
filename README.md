@@ -56,7 +56,7 @@ The binary will be at `target/release/ox`.
 ```bash
 cargo build                    # Build
 cargo fmt --all --check        # Check formatting
-cargo clippy --all-targets     # Lint (pedantic)
+cargo clippy --all-targets -- -D warnings  # Lint (pedantic, zero warnings)
 cargo test                     # Run tests
 ```
 
