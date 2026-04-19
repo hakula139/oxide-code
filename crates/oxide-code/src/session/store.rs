@@ -43,8 +43,7 @@ pub(crate) struct SessionStore {
 impl SessionStore {
     /// Create a store rooted at the XDG data directory, scoped to the
     /// current working directory. Creates both the root and the
-    /// project subdirectory if needed, and runs a one-time migration
-    /// of any legacy flat-layout sessions into their project subdirs.
+    /// project subdirectory if needed.
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
@@ -55,11 +54,6 @@ impl SessionStore {
         .context("cannot determine session storage directory")?;
 
         create_private_dir_all(&sessions_dir)?;
-
-        // Migrations run oldest-first so each pass operates on the
-        // layout the previous one produced.
-        migrate_flat_layout(&sessions_dir);
-        migrate_add_timestamp_prefix(&sessions_dir);
 
         let project_name = match std::env::current_dir() {
             Ok(cwd) => sanitize_cwd(&cwd),
@@ -552,148 +546,6 @@ fn resolve_chain(
     }
     chain.reverse();
     (chain, Some(tip_uuid))
-}
-
-// ── Migration ──
-
-/// Move any legacy flat-layout session files (`{uuid}.jsonl` directly
-/// inside [`sessions_dir`]) into their project subdirectory based on
-/// each file's header `cwd`, adding the timestamp prefix in the
-/// process. Idempotent and fast when no flat files exist, so it can
-/// run unconditionally at store open time.
-///
-/// Errors on individual files are logged and skipped — a partial
-/// migration is preferable to refusing to open the store entirely.
-fn migrate_flat_layout(sessions_dir: &Path) {
-    let entries = match fs::read_dir(sessions_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(
-                "cannot scan {} for flat-layout migration: {e}",
-                sessions_dir.display()
-            );
-            return;
-        }
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl")
-            || entry.file_type().is_ok_and(|t| t.is_dir())
-        {
-            continue;
-        }
-        if let Err(e) = relocate_flat_session(sessions_dir, &path) {
-            warn!(
-                "skipping flat-layout migration for {}: {e}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-    }
-}
-
-/// Read the header of a legacy flat-layout session file and move it
-/// into the appropriate project subdirectory with a timestamped name.
-fn relocate_flat_session(sessions_dir: &Path, path: &Path) -> Result<()> {
-    let (session_id, cwd, created_at) =
-        read_session_header_parts(path).context("cannot read header for migration")?;
-    let project = sessions_dir.join(sanitize_cwd(Path::new(&cwd)));
-    fs::create_dir_all(&project).with_context(|| format!("cannot create {}", project.display()))?;
-    let target = project.join(session_filename(&session_id, created_at));
-    if target.exists() {
-        bail!("destination already exists: {}", target.display());
-    }
-    fs::rename(path, &target)
-        .with_context(|| format!("rename {} -> {}", path.display(), target.display()))?;
-    debug!("migrated {} to {}", path.display(), target.display());
-    Ok(())
-}
-
-/// Rename `{session_id}.jsonl` files inside each project subdirectory
-/// to `{epoch}-{session_id}.jsonl`. A no-op when every file is already
-/// prefixed.
-///
-/// Called after [`migrate_flat_layout`], so every direct entry in
-/// `sessions_dir` is a project subdirectory.
-fn migrate_add_timestamp_prefix(sessions_dir: &Path) {
-    let entries = match fs::read_dir(sessions_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(
-                "cannot scan {} for timestamp-prefix migration: {e}",
-                sessions_dir.display()
-            );
-            return;
-        }
-    };
-    for project in entries.flatten() {
-        if !project.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        prefix_sessions_in(&project.path());
-    }
-}
-
-fn prefix_sessions_in(dir: &Path) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("cannot scan {} for timestamp prefix: {e}", dir.display());
-            return;
-        }
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // Already prefixed when the stem starts with `{digits}-`.
-        if stem.split_once('-').is_some_and(|(prefix, _)| {
-            !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit())
-        }) {
-            continue;
-        }
-        if let Err(e) = prefix_one_session(&path) {
-            warn!(
-                "skipping timestamp prefix for {}: {e}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-    }
-}
-
-fn prefix_one_session(path: &Path) -> Result<()> {
-    let (session_id, _cwd, created_at) =
-        read_session_header_parts(path).context("cannot read header for migration")?;
-    let parent = path.parent().context("session path missing parent")?;
-    let target = parent.join(session_filename(&session_id, created_at));
-    if target.exists() {
-        bail!("destination already exists: {}", target.display());
-    }
-    fs::rename(path, &target)
-        .with_context(|| format!("rename {} -> {}", path.display(), target.display()))?;
-    debug!("renamed {} to {}", path.display(), target.display());
-    Ok(())
-}
-
-/// Read the first line of a session file and return the fields
-/// migrations need (`session_id`, `cwd`, `created_at`).
-fn read_session_header_parts(path: &Path) -> Result<(String, String, OffsetDateTime)> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut first_line = String::new();
-    BufReader::new(file).read_line(&mut first_line)?;
-    let entry: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
-    match entry {
-        Entry::Header {
-            session_id,
-            cwd,
-            created_at,
-            ..
-        } => Ok((session_id, cwd, created_at)),
-        _ => bail!("first line is not a header"),
-    }
 }
 
 // ── Session Info Extraction ──
@@ -1649,106 +1501,5 @@ mod tests {
         let content = fs::read_to_string(test_session_file(dir.path(), "multi")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3); // header + 2 messages
-    }
-
-    // ── migrate_flat_layout ──
-
-    #[test]
-    fn migrate_flat_layout_moves_files_into_project_subdirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().to_path_buf();
-        fs::create_dir_all(&sessions_dir).unwrap();
-
-        // Seed a legacy flat-layout session whose header points at
-        // "/foo/project".
-        let legacy_path = sessions_dir.join("legacy.jsonl");
-        fs::write(
-            &legacy_path,
-            r#"{"type":"header","session_id":"legacy","cwd":"/foo/project","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
-"#,
-        )
-        .unwrap();
-
-        migrate_flat_layout(&sessions_dir);
-
-        assert!(!legacy_path.exists(), "legacy file should have moved");
-        let project_dir = sessions_dir.join(sanitize_cwd(Path::new("/foo/project")));
-        let moved = find_session_in(&project_dir, "legacy").unwrap();
-        let name = moved
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned());
-        assert_eq!(
-            name.as_deref(),
-            Some("1767225600-legacy.jsonl"),
-            "unexpected migrated filename: {name:?}"
-        );
-    }
-
-    #[test]
-    fn migrate_flat_layout_is_idempotent_and_skips_subdirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().to_path_buf();
-
-        // Pre-existing project subdir with a session already in place.
-        let project = sessions_dir.join("already-scoped");
-        fs::create_dir_all(&project).unwrap();
-        let settled = project.join("kept.jsonl");
-        fs::write(
-            &settled,
-            r#"{"type":"header","session_id":"kept","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
-"#,
-        )
-        .unwrap();
-
-        // Calling the migration twice must leave the file exactly where
-        // it is and not recurse into the subdirectory.
-        migrate_flat_layout(&sessions_dir);
-        migrate_flat_layout(&sessions_dir);
-
-        assert!(settled.exists());
-    }
-
-    // ── migrate_add_timestamp_prefix ──
-
-    #[test]
-    fn migrate_add_timestamp_prefix_renames_legacy_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().to_path_buf();
-        let project = sessions_dir.join("proj");
-        fs::create_dir_all(&project).unwrap();
-
-        let legacy = project.join("sess.jsonl");
-        fs::write(
-            &legacy,
-            r#"{"type":"header","session_id":"sess","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
-"#,
-        )
-        .unwrap();
-
-        migrate_add_timestamp_prefix(&sessions_dir);
-
-        assert!(!legacy.exists(), "legacy unprefixed file should have moved");
-        assert!(project.join("1767225600-sess.jsonl").exists());
-    }
-
-    #[test]
-    fn migrate_add_timestamp_prefix_leaves_already_prefixed_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().to_path_buf();
-        let project = sessions_dir.join("proj");
-        fs::create_dir_all(&project).unwrap();
-
-        let existing = project.join("1700000000-ok.jsonl");
-        fs::write(
-            &existing,
-            r#"{"type":"header","session_id":"ok","cwd":"/x","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
-"#,
-        )
-        .unwrap();
-
-        migrate_add_timestamp_prefix(&sessions_dir);
-
-        assert!(existing.exists(), "already-prefixed file must stay put");
     }
 }
