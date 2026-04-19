@@ -415,15 +415,14 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
 /// can never leave the transcript with two user or two assistant
 /// messages in a row.
 fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
-    let mut i = 0;
-    while i + 1 < messages.len() {
-        if messages[i].role == messages[i + 1].role {
-            let next = messages.remove(i + 1);
-            messages[i].content.extend(next.content);
+    messages.dedup_by(|next, prev| {
+        if prev.role == next.role {
+            prev.content.append(&mut next.content);
+            true
         } else {
-            i += 1;
+            false
         }
-    }
+    });
 }
 
 #[cfg(test)]
