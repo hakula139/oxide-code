@@ -48,7 +48,8 @@ ox     # Start an interactive session
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
-│   └── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   ├── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   └── writer.rs               # Session-write helpers (record_session_message, log_session_err)
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                 # Shell command execution with timeout

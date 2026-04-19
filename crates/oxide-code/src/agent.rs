@@ -9,6 +9,7 @@ use crate::client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
 use crate::session::manager::SessionManager;
+use crate::session::writer::record_session_message;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
@@ -47,7 +48,7 @@ pub(crate) async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        crate::record_session_message(session, &assistant_msg, Some(sink)).await;
+        record_session_message(session, &assistant_msg, Some(sink)).await;
         messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
@@ -90,7 +91,7 @@ pub(crate) async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        crate::record_session_message(session, &tool_result_msg, Some(sink)).await;
+        record_session_message(session, &tool_result_msg, Some(sink)).await;
         messages.push(tool_result_msg);
     }
 

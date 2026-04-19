@@ -27,6 +27,7 @@ use session::list_view::render_list;
 use session::manager::SessionManager;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
+use session::writer::{log_session_err, record_session_message};
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
@@ -168,44 +169,6 @@ fn create_tool_registry() -> ToolRegistry {
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
-}
-
-/// Log session I/O errors without aborting the agent loop.
-///
-/// The first failure within a session is also surfaced to the user via
-/// `sink` (when available) so they know the conversation may not be
-/// saved. Subsequent failures warn-log only to avoid spamming the UI
-/// — the persistence problem has already been announced.
-fn log_session_err(
-    result: anyhow::Result<()>,
-    session: &mut SessionManager,
-    sink: Option<&dyn AgentSink>,
-) {
-    let Err(e) = result else {
-        return;
-    };
-    warn!("session write failed: {e}");
-    if session.record_write_failure()
-        && let Some(sink) = sink
-    {
-        _ = sink.send(AgentEvent::Error(format!(
-            "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
-        )));
-    }
-}
-
-/// Record one message to the session, surfacing any write failure via
-/// `sink`. Holds the session lock only for the duration of the write
-/// so other tasks (and concurrent writes from the same task) see
-/// fresh access instead of blocking behind a long-running agent turn.
-pub(crate) async fn record_session_message(
-    session: &Mutex<SessionManager>,
-    msg: &Message,
-    sink: Option<&dyn AgentSink>,
-) {
-    let mut s = session.lock().await;
-    let r = s.record_message(msg).await;
-    log_session_err(r, &mut s, sink);
 }
 
 /// Wait for any shutdown signal — SIGINT (portable), SIGTERM, or
