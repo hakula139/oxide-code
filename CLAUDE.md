@@ -80,6 +80,10 @@ ox     # Start an interactive session
 
 ## Coding Conventions
 
+### Trait Design
+
+- Per-instance metadata (display name, icon, input summary) goes on the trait, not in a separate `match name { ... }` table. Adding a new implementation should require editing only the new file, not switch arms scattered across the codebase.
+
 ### Error Handling
 
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
@@ -111,6 +115,7 @@ ox     # Start an interactive session
 - Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
 - Order helper functions after their caller (top-down reading order).
 - When adding new fields to structs or variants to enums, place them at the most semantically appropriate position among existing members, not simply appended at the bottom.
+- A type used by N callers across M modules belongs in the module that names the **contract**, not the module of the first **implementation**. If `tui::event::AgentSink` is implemented by both a TUI channel and a stdio writer, the trait belongs in `agent::` (the contract), not `tui::` (one implementation).
 
 ### Visibility
 
@@ -132,6 +137,7 @@ ox     # Start an interactive session
 - Versions centralized in `[workspace.dependencies]` in the root `Cargo.toml`. Member crates reference them with `dep.workspace = true`.
 - Only add dependencies to the workspace when a PR first needs them.
 - Prefer crates with minimal transitive dependencies.
+- Platform-specific dependencies (Unix-only `nix`, macOS-only `security-framework`) are declared under `[target.'cfg(unix)'.dependencies]` / `[target.'cfg(target_os = "macos")'.dependencies]` in the crate's `Cargo.toml`. Code guarded by `#[cfg(unix)]` / `#[cfg(target_os = "macos")]` stays in the same module — do not split platform variants into separate files.
 
 ### Git Conventions
 
