@@ -186,11 +186,11 @@ ox     # Start an interactive session
 Run after implementation and before review:
 
 ```bash
-cargo fmt --all --check                            # formatting
-cargo build
-cargo clippy --all-targets -- -D warnings          # zero warnings (pedantic lints)
-cargo test
-cargo llvm-cov --ignore-filename-regex 'main\.rs'  # check test coverage
+cargo fmt --all --check                            # Check formatting
+cargo build                                        # Build
+cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
+cargo test                                         # Run tests
+cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
 ```
 
 ## Code Review

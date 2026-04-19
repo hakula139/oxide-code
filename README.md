@@ -1,6 +1,7 @@
 # oxide-code
 
 [![CI](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml/badge.svg)](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/hakula139/oxide-code/graph/badge.svg)](https://codecov.io/gh/hakula139/oxide-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A terminal-based AI coding assistant written in Rust, inspired by [Claude Code].
@@ -54,10 +55,11 @@ The binary will be at `target/release/ox`.
 ## Development
 
 ```bash
-cargo build                    # Build
-cargo fmt --all --check        # Check formatting
-cargo clippy --all-targets -- -D warnings  # Lint (pedantic, zero warnings)
-cargo test                     # Run tests
+cargo fmt --all --check                            # Check formatting
+cargo build                                        # Build
+cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
+cargo test                                         # Run tests
+cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
 ```
 
 CI runs these same checks on every push and pull request via GitHub Actions.

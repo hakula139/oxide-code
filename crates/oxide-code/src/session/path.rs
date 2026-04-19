@@ -91,8 +91,8 @@ mod tests {
 
     #[test]
     fn sanitize_cwd_replaces_other_reserved_chars_with_dash() {
-        let out = sanitize_cwd(Path::new("/pro ject/with spaces&symbols!"));
-        assert_eq!(out, "pro-ject-with-spaces-symbols");
+        let out = sanitize_cwd(Path::new("/sub dir/with spaces&symbols!"));
+        assert_eq!(out, "sub-dir-with-spaces-symbols");
     }
 
     #[test]
