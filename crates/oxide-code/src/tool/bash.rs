@@ -89,9 +89,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    // Put the shell in its own process group so we can SIGKILL the entire
-    // tree on timeout. Without this, a command like `(sleep 3600; …) &`
-    // leaks the background job after the direct bash process exits.
+    // Own process group so timeout can kill the whole tree, not just bash —
+    // otherwise `(sleep 3600; …) &` outlives the direct child.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -119,10 +118,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             };
         }
         Err(_) => {
-            // Child is dropped at this point → kill_on_drop sends SIGKILL to
-            // bash. We still have the pgid of the process group we created,
-            // so explicitly kill the whole group to catch any grandchildren
-            // that backgrounded themselves.
+            // kill_on_drop handles bash; killpg catches any backgrounded
+            // grandchildren still in the same process group.
             #[cfg(unix)]
             kill_process_group(pgid);
             return ToolOutput {
@@ -178,16 +175,9 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
 
 // ── Process Group Cleanup ──
 
-/// Best-effort SIGKILL of an entire process group on Unix.
-///
-/// Uses `nix::sys::signal::killpg`, a safe wrapper around the libc
-/// `killpg(2)` syscall. Going through libc directly instead of shelling
-/// out to `/bin/kill` avoids the ~subprocess of overhead per timeout and
-/// sidesteps any PATH / binary-availability variation across distros
-/// (the initial shell-out implementation failed on the Ubuntu CI runner).
-/// The `unsafe` is inside `nix`, not our crate, so `unsafe_code = "forbid"`
-/// still holds here. Errors are ignored — if the group has already exited
-/// (`ESRCH`) the cleanup is done; other failures are best-effort anyway.
+/// Best-effort SIGKILL of an entire process group on Unix via the safe
+/// `nix` wrapper around `killpg(2)`. Errors are ignored (`ESRCH` just
+/// means the group already exited).
 #[cfg(unix)]
 fn kill_process_group(pgid: Option<u32>) {
     use nix::sys::signal::{Signal, killpg};

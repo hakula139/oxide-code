@@ -82,10 +82,9 @@ async fn read_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    // Reject anything that isn't a regular file. `is_dir()` alone lets pseudo
-    // files slip through: /dev/urandom et al. report `metadata.len() == 0`,
-    // which bypasses the size gate below, and `tokio::fs::read` then streams
-    // without bound and exhausts memory.
+    // Reject non-regular files: pseudo-files like /dev/urandom report
+    // len() == 0, bypassing the size gate below, and would stream without
+    // bound through tokio::fs::read.
     let file_type = metadata.file_type();
     if file_type.is_dir() {
         return Err(format!(

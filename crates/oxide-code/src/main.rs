@@ -691,9 +691,7 @@ async fn stream_response(
                 if let BlockAccumulator::Text(text) = &acc
                     && !text.is_empty()
                 {
-                    // Display-only event. Drop on a full channel rather
-                    // than canceling the turn — the full content is
-                    // accumulating in `acc` and will still be recorded.
+                    // Display-only; authoritative content stays in `acc`.
                     _ = sink.send(AgentEvent::StreamToken(text.clone()));
                 }
                 blocks[index] = Some(acc);
@@ -749,9 +747,7 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            // Display-only delta. Authoritative content lives in `buf`;
-            // dropping the token on a full TUI channel costs display
-            // fidelity but not data integrity.
+            // Display-only; authoritative content stays in `buf`.
             _ = sink.send(AgentEvent::StreamToken(text));
         }
         (

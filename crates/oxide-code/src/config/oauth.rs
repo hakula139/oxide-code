@@ -105,14 +105,12 @@ pub async fn load_token() -> Result<String> {
     }
 }
 
-/// Load credentials from the best available source.
+/// Load credentials, preferring the macOS Keychain over the file.
 ///
-/// On macOS, the Keychain is the authoritative source — preferred whenever
-/// present, with the credentials file as a fallback. This keeps trust inverted
-/// from the more-permissive file: an attacker who can write `~/.claude/.credentials.json`
-/// cannot override a valid Keychain entry by claiming a far-future expiry.
-/// Near-expired Keychain entries are still used; [`is_near_expiry`] triggers a
-/// refresh that writes both sources back in sync.
+/// File contents are user-writable, so an attacker with write access to
+/// `~/.claude/.credentials.json` could otherwise spoof a far-future expiry
+/// to override a valid Keychain entry. Near-expired Keychain entries still
+/// trigger a refresh that re-syncs both sources.
 #[cfg(target_os = "macos")]
 fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
     if let Some(kc) = read_keychain() {
@@ -166,21 +164,16 @@ fn keychain_account() -> Option<String> {
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    // Reassert permissions before parsing so a file that is later rejected
-    // (corrupt JSON, etc.) still gets tightened — the user will retry.
+    // Reassert before parsing so a file we later reject still gets tightened.
     enforce_private_mode(path);
-    let parsed =
-        serde_json::from_str(&content).context("failed to parse Claude Code credentials")?;
-    Ok(parsed)
+    serde_json::from_str(&content).context("failed to parse Claude Code credentials")
 }
 
-/// Reassert owner-only permissions on the credentials file.
+/// Reassert owner-only (`0o600`) permissions on the credentials file.
 ///
-/// `claude` normally creates the file with `0o600`, but older versions or a
-/// user who `cp`'d the file may have left laxer perms in place. We reapply
-/// the strict mode every time we read so the window of exposure is bounded.
-/// Failures are logged at debug level — we have no fallback but shouldn't
-/// prevent the user from authenticating.
+/// Bounds the exposure window for files left with laxer perms by an older
+/// `claude` or by `cp`. Failures are logged at debug level only — we have
+/// no fallback but shouldn't block authentication.
 #[cfg(unix)]
 fn enforce_private_mode(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -253,12 +246,9 @@ struct RefreshResponse {
 /// Write refreshed tokens back to the credentials file (and macOS Keychain),
 /// preserving unknown fields.
 ///
-/// The file is replaced atomically via write-to-temp + rename so a crash
-/// between the open-truncate and the final write cannot leave the file
-/// empty or half-written — a corruption there would invalidate login for
-/// both `ox` and `claude`.
-///
-/// Must be called while holding the [`LockGuard`] from [`acquire_lock`].
+/// Replaces the file atomically (temp + rename) so a crash mid-write cannot
+/// invalidate login for both `ox` and `claude`. Must be called while holding
+/// the [`LockGuard`] from [`acquire_lock`].
 fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
     let mut json: serde_json::Value =
@@ -294,9 +284,8 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
 }
 
 /// Write `bytes` to `path` atomically with owner-only (`0o600`) permissions
-/// on Unix. Creates a sibling `.tmp.<uuid>` file, chmods it, then renames —
-/// the rename is atomic on POSIX, so any reader sees either the old or the
-/// new content, never a truncated state.
+/// on Unix. Creates a sibling `.tmp.<uuid>` file then renames — the rename
+/// is atomic on POSIX, so readers always see either the old or new content.
 fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

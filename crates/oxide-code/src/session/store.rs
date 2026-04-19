@@ -332,14 +332,13 @@ impl SessionStore {
     }
 }
 
-/// Create `path` (and any missing parents) with owner-only (`0o700`)
-/// permissions on Unix.
+/// Create `path` (and parents) with owner-only (`0o700`) perms on Unix.
 ///
-/// Session files themselves are created `0o600`, but without tight
-/// parent perms the session IDs, project names, and mtimes would be
-/// visible to every local user via `ls`. Passing the mode to
-/// `DirBuilder` means the *first* syscall produces a private directory,
-/// closing the TOCTOU window a post-create `chmod` would leave open.
+/// Session files are already `0o600`, but lax parent-dir perms would leak
+/// session IDs, project names, and mtimes via `ls`. Passing the mode to
+/// `DirBuilder` applies it in the create syscall, closing the TOCTOU gap
+/// a post-create `chmod` would leave. Already-existing directories then
+/// get a best-effort tighten (no-op on POSIX-less mounts).
 fn create_private_dir_all(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -352,9 +351,6 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
         .create(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
 
-    // `recursive(true)` skips the mode on already-existing directories,
-    // so tighten them post-hoc. Failures are logged; startup should not
-    // block on a perms tweak (e.g., NFS without POSIX perms).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -365,13 +361,9 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reject session IDs that could escape the project subdirectory or
-/// trip up platform-specific filename handling.
-///
-/// Restricts to ASCII alphanumerics, `-`, and `_`, bounded at 64 characters.
-/// This covers the canonical 36-char UUID v4 our generator emits while also
-/// rejecting path separators (`/`, `\`), NUL, parent-dir references, control
-/// characters, and reserved-in-Windows chars (`:`, `?`, `|`, `*`, `<`, `>`).
+/// Restrict session IDs to ASCII alphanumerics + `-_`, max 64 chars.
+/// Covers our 36-char UUID v4 while rejecting path separators, NUL,
+/// control chars, and Windows-reserved chars.
 fn validate_session_id(session_id: &str) -> Result<()> {
     let ok = !session_id.is_empty()
         && session_id.len() <= 64

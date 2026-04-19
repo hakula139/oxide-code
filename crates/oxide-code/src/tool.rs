@@ -196,20 +196,15 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 // ── File Walking ──
 
-/// Depth cap for file-tree walks.
-///
-/// The `ignore` crate bounds symlink cycles within the same filesystem, but
-/// a non-ignored directory tree of unbounded depth (generated code, mount
-/// points, artefact dumps) can still monopolize `spawn_blocking` threads.
-/// 64 covers anything a real source tree contains.
+/// Depth cap for file-tree walks — guards against pathological trees
+/// (generated code, deep artefact dumps) that `ignore` doesn't filter.
 const MAX_WALK_DEPTH: usize = 64;
 
 /// Returns a gitignore-aware iterator over regular files under `base`.
 ///
 /// Respects `.gitignore`, `.ignore`, `.git/info/exclude`, and global ignore
-/// rules. Stays within the same filesystem to avoid crossing mount points,
-/// and caps recursion depth at [`MAX_WALK_DEPTH`]. Permission errors and
-/// symlink loops are silently skipped.
+/// rules. Stays within the same filesystem, caps depth at [`MAX_WALK_DEPTH`],
+/// silently skips permission errors and symlink loops.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)

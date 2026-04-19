@@ -290,11 +290,9 @@ impl Client {
             HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
         );
 
-        // Anthropic sends keepalive events at least every ~15 s during streaming,
-        // so a 60 s read timeout catches slowloris-style dribble without false
-        // positives on healthy streams. The connect timeout is separate and
-        // tighter; the whole-request `timeout` is omitted because a single
-        // assistant response can legitimately take several minutes.
+        // No whole-request timeout — assistant responses can legitimately
+        // run for minutes. The 60 s read timeout catches slowloris dribble;
+        // Anthropic sends keepalives every ~15 s on healthy streams.
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
@@ -522,9 +520,8 @@ async fn stream_sse(
     }
 
     let mut stream = response.bytes_stream();
-    // Byte buffer (not String) so a UTF-8 multibyte sequence split across
-    // network chunks is reassembled intact. `String::from_utf8_lossy` on raw
-    // chunks would inject U+FFFD at the boundary instead.
+    // Byte buffer: reassembles UTF-8 sequences split across chunk boundaries
+    // intact (`from_utf8_lossy` would inject U+FFFD at the boundary).
     let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
@@ -532,11 +529,7 @@ async fn stream_sse(
         buf.extend_from_slice(&chunk);
 
         loop {
-            // SSE frames are terminated by a blank line (\n\n).
             let Some(end) = buf.windows(2).position(|w| w == b"\n\n") else {
-                // Only flag an oversized buffer when we cannot find a
-                // terminator — a single arriving chunk carrying many
-                // complete frames is fine regardless of total size.
                 if buf.len() > MAX_SSE_FRAME_BYTES {
                     bail!(
                         "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without \
@@ -555,6 +548,7 @@ async fn stream_sse(
                 }
             };
 
+            // A single malformed frame should not poison the whole turn.
             match parse_sse_frame(frame) {
                 Ok(Some(event)) => {
                     if tx.send(Ok(event)).await.is_err() {
@@ -562,10 +556,7 @@ async fn stream_sse(
                     }
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    // A single malformed frame should not poison the whole turn.
-                    debug!("skipping malformed SSE frame: {e:#}");
-                }
+                Err(e) => debug!("skipping malformed SSE frame: {e:#}"),
             }
         }
     }
@@ -575,17 +566,10 @@ async fn stream_sse(
 
 /// Parse a single SSE frame into a [`StreamEvent`].
 ///
-/// SSE format:
-///
-/// ```text
-/// event: content_block_delta
-/// data: {"type":"content_block_delta", ...}
-/// ```
-///
-/// Per the SSE spec, multiple `data:` lines in one frame are concatenated
-/// with `\n`. Anthropic's protocol currently uses single-line data fields,
-/// but supporting the spec defensively costs nothing and avoids silently
-/// dropping all-but-the-last line if the format evolves.
+/// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
+/// Anthropic currently emits single-line data, but we follow the spec
+/// so a future multi-line payload doesn't silently lose everything
+/// but the last line.
 fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 

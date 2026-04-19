@@ -67,13 +67,9 @@ pub(crate) trait AgentSink: Send + Sync {
 
 // ── Channel Sink (TUI) ──
 
-/// Capacity of the bounded agent-event channel.
-///
-/// `StreamToken` events fire once per delta (roughly ~30-60/s during a
-/// response), so this gives tens of seconds of headroom if the TUI
-/// momentarily stalls on terminal I/O. A bound prevents the queue from
-/// growing unboundedly when the TUI is completely wedged, and errors out
-/// loudly instead of silently consuming memory.
+/// Capacity of the bounded agent-event channel. `StreamToken` fires
+/// ~30-60/s, so 4096 gives tens of seconds of headroom before a stalled
+/// TUI surfaces `TrySendError::Full`.
 pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
 /// Sends agent events through an `mpsc` channel for TUI consumption.

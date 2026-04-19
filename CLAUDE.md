@@ -83,7 +83,7 @@ ox     # Start an interactive session
 ### Error Handling
 
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
-- Library error types: `thiserror::Error` derive for errors that callers need to match on.
+- Reach for `thiserror::Error` only when callers need to match on error variants (no current uses; add the dep when the first one lands).
 - Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
 
 ### Lint Suppression
@@ -126,11 +126,6 @@ ox     # Start an interactive session
 
 - Prefer raw strings (`r"..."`) when the string contains characters that would need escaping. Always use the minimum delimiter level needed (`r"..."` → `r#"..."#` → `r##"..."##`).
 - Use `indoc!` / `formatdoc!` for multiline string content so the literal can be indented with surrounding code. Inline at the call site when the string is used once; use a named constant only when it is shared or very large. Avoid `\n` escapes and `\x20` workarounds for multiline content.
-
-### Enum String Mappings
-
-- Use `strum` derives (`AsRefStr`, `EnumString`, `EnumIter`) for enum ↔ string conversions instead of handwritten matches.
-- Keep manual `Display` impls when the display form differs from the serialized form (e.g., titlecase vs. lowercase).
 
 ### Dependencies
 
