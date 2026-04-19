@@ -586,7 +586,7 @@ impl ChatView {
 
         for text_line in visible {
             let expanded = expand_tabs(text_line);
-            let display_text = truncate_line(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
+            let display_text = truncate_to_chars(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
             let line = Line::from(vec![
                 Span::styled(TOOL_OUTPUT_PREFIX, border_style),
                 Span::styled(display_text, text_style),
@@ -825,7 +825,7 @@ fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> 
 }
 
 /// Truncate a string to `max_chars` characters, appending `...` if cut.
-fn truncate_line(s: &str, max_chars: usize) -> String {
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_owned();
     }
