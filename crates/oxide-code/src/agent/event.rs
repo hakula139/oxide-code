@@ -25,7 +25,6 @@ pub(crate) enum AgentEvent {
         )]
         id: String,
         name: String,
-        icon: &'static str,
         input: serde_json::Value,
     },
     /// A tool call has finished.
@@ -110,9 +109,8 @@ impl AgentSink for StdioSink {
                     stdout.flush()?;
                 }
             }
-            AgentEvent::ToolCallStart {
-                name, icon, input, ..
-            } => {
+            AgentEvent::ToolCallStart { name, input, .. } => {
+                let icon = self.tools.icon(&name);
                 if let Some(title) = self.tools.summarize_input(&name, &input) {
                     eprintln!("{icon} {name}: {title}");
                 } else {

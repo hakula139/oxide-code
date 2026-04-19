@@ -60,7 +60,6 @@ pub(crate) async fn agent_turn(
             _ = sink.send(AgentEvent::ToolCallStart {
                 id: id.clone(),
                 name: name.clone(),
-                icon: tools.icon(&name),
                 input: input.clone(),
             });
 

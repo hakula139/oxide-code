@@ -154,10 +154,9 @@ impl App {
                 self.chat.append_thinking_token(&token);
                 self.status_bar.set_status(Status::Streaming);
             }
-            AgentEvent::ToolCallStart {
-                name, icon, input, ..
-            } => {
+            AgentEvent::ToolCallStart { name, input, .. } => {
                 self.chat.commit_streaming();
+                let icon = self.tools.icon(&name);
                 let label = self
                     .tools
                     .summarize_input(&name, &input)
