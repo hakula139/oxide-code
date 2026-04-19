@@ -5,6 +5,20 @@ use crate::agent::event::{AgentEvent, AgentSink};
 use crate::message::Message;
 use crate::session::manager::SessionManager;
 
+/// Record one message to the session, surfacing any write failure via
+/// `sink`. Holds the session lock only for the duration of the write
+/// so other tasks (and concurrent writes from the same task) see
+/// fresh access instead of blocking behind a long-running agent turn.
+pub(crate) async fn record_session_message(
+    session: &Mutex<SessionManager>,
+    msg: &Message,
+    sink: Option<&dyn AgentSink>,
+) {
+    let mut s = session.lock().await;
+    let r = s.record_message(msg).await;
+    log_session_err(r, &mut s, sink);
+}
+
 /// Log session I/O errors without aborting the agent loop.
 ///
 /// The first failure within a session is also surfaced to the user via
@@ -27,18 +41,4 @@ pub(crate) fn log_session_err(
             "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
         )));
     }
-}
-
-/// Record one message to the session, surfacing any write failure via
-/// `sink`. Holds the session lock only for the duration of the write
-/// so other tasks (and concurrent writes from the same task) see
-/// fresh access instead of blocking behind a long-running agent turn.
-pub(crate) async fn record_session_message(
-    session: &Mutex<SessionManager>,
-    msg: &Message,
-    sink: Option<&dyn AgentSink>,
-) {
-    let mut s = session.lock().await;
-    let r = s.record_message(msg).await;
-    log_session_err(r, &mut s, sink);
 }
