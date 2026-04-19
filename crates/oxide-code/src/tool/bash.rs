@@ -124,7 +124,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             // so explicitly kill the whole group to catch any grandchildren
             // that backgrounded themselves.
             #[cfg(unix)]
-            kill_process_group(pgid).await;
+            kill_process_group(pgid);
             return ToolOutput {
                 content: format!("Command timed out after {}ms", timeout.as_millis()),
                 is_error: true,
@@ -180,26 +180,24 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
 
 /// Best-effort SIGKILL of an entire process group on Unix.
 ///
-/// Shelled out to an absolute-path `/bin/kill` because the `unsafe_code =
-/// "forbid"` lint blocks a direct `libc::killpg`, and we don't want to pull
-/// in `nix` just for this one call. The hardcoded path avoids PATH-based
-/// resolution so a user-local `kill` binary on `PATH` cannot be invoked on
-/// every timeout. POSIX places `kill` at `/bin/kill` on macOS and every
-/// Linux distro we target. Ignoring errors is fine — if `/bin/kill` is
-/// missing or the group has already exited, the best-effort cleanup is
-/// already done.
+/// Uses `nix::sys::signal::killpg`, a safe wrapper around the libc
+/// `killpg(2)` syscall. Going through libc directly instead of shelling
+/// out to `/bin/kill` avoids the ~subprocess of overhead per timeout and
+/// sidesteps any PATH / binary-availability variation across distros
+/// (the initial shell-out implementation failed on the Ubuntu CI runner).
+/// The `unsafe` is inside `nix`, not our crate, so `unsafe_code = "forbid"`
+/// still holds here. Errors are ignored — if the group has already exited
+/// (`ESRCH`) the cleanup is done; other failures are best-effort anyway.
 #[cfg(unix)]
-async fn kill_process_group(pgid: Option<u32>) {
-    let Some(pgid) = pgid else { return };
+fn kill_process_group(pgid: Option<u32>) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
 
-    let _ = Command::new("/bin/kill")
-        .arg("-KILL")
-        .arg(format!("-{pgid}"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+    let Some(pgid) = pgid else { return };
+    let Ok(pgid_signed) = i32::try_from(pgid) else {
+        return;
+    };
+    let _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
 }
 
 // ── Output Truncation ──

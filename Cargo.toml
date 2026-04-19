@@ -24,6 +24,7 @@ futures = "0.3"
 globset = "0.4"
 ignore = "0.4"
 indoc = "2"
+nix = { version = "0.30", default-features = false, features = ["signal"] }
 platform-info = "2"
 pulldown-cmark = "0.13"
 ratatui = "0.30"
