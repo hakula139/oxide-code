@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
 use agent::agent_turn;
+use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 use client::anthropic::Client;
 use config::Config;
 use message::Message;
@@ -30,7 +31,6 @@ use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
 };
-use tui::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 use util::path::tildify;
 
 /// Cached local UTC offset, computed before the tokio runtime starts.

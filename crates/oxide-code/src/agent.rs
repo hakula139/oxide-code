@@ -1,13 +1,15 @@
+pub(crate) mod event;
+
 use anyhow::{Context, Result, bail};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
 use crate::session::manager::SessionManager;
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
-use crate::tui::event::{AgentEvent, AgentSink};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 

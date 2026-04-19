@@ -23,6 +23,9 @@ ox     # Start an interactive session
 
 ```text
 .
+├── agent.rs                    # Agent turn loop, stream accumulation, tool dispatch
+├── agent/
+│   └── event.rs                # AgentEvent, UserAction, AgentSink trait, StdioSink
 ├── client.rs                   # Client module root
 ├── client/
 │   ├── anthropic.rs            # Anthropic Messages API streaming client
@@ -31,7 +34,7 @@ ox     # Start an interactive session
 ├── config/
 │   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
-├── main.rs                     # CLI entry point, agent loop, TUI / REPL / headless dispatch
+├── main.rs                     # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                  # Conversation message types
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
@@ -63,7 +66,7 @@ ox     # Start an interactive session
 │   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
 │   │   ├── input.rs            # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs           # Status bar (model, spinner, status, working directory)
-│   ├── event.rs                # AgentEvent, UserAction, AgentSink trait, ChannelSink, StdioSink
+│   ├── event.rs                # ChannelSink (mpsc transport for the TUI)
 │   ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
 │   │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
