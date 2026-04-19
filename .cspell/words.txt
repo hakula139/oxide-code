@@ -20,6 +20,7 @@ indoc
 insta
 isatty
 mpsc
+onig
 println
 pulldown
 RAII
