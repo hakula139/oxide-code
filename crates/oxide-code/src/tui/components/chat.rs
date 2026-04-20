@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::agent::event::UserAction;
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::Message;
+use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::ToolRegistry;
 use crate::tui::component::Component;
 use crate::tui::markdown::render_markdown;
@@ -130,114 +131,54 @@ impl ChatView {
 
     /// Populate the chat history from resumed session messages.
     ///
-    /// Renders user / assistant text, assistant tool-call markers, and
-    /// the paired tool results so a resumed view matches the live one
-    /// visually. Thinking blocks are rendered only when
-    /// [`ChatView::show_thinking`] is on — this mirrors claude-code's
-    /// "verbose / transcript" gating (thinking is valuable context but
-    /// noisy by default).
-    ///
-    /// `RedactedThinking` blocks are intentionally dropped: their body
-    /// is opaque ciphertext and carries no human-readable context.
-    ///
-    /// The session JSONL stores an assistant message with all its
-    /// `ToolUse` blocks, then the next user message with all matching
-    /// `ToolResult` blocks — but live rendering emits `(call, result)`
-    /// pairs interleaved. To keep the resumed view faithful, we index
-    /// results by `tool_use_id` first and emit each paired result
-    /// directly after its call. Orphan results (id with no matching
-    /// call, e.g., from a crashed turn) still render at their original
-    /// position with a generic fallback label.
+    /// Projects the transcript into [`Interaction`]s (see
+    /// [`walk_transcript`]) so a resumed view matches live rendering —
+    /// paired tool calls and results appear together, orphan results get a
+    /// fallback label, and `RedactedThinking` / whitespace-only blocks are
+    /// dropped upstream. Thinking entries are stored unconditionally here;
+    /// the renderer gates their display on [`ChatView::show_thinking`], so
+    /// flipping the toggle does not require reloading the session.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
-        let mut pending_results: HashMap<&str, (&str, bool)> = messages
-            .iter()
-            .flat_map(|m| m.content.iter())
-            .filter_map(|b| match b {
-                ContentBlock::ToolResult {
+        let mut labels: HashMap<&str, String> = HashMap::new();
+        for interaction in walk_transcript(messages) {
+            match interaction {
+                Interaction::UserText(text) => self.entries.push(ChatEntry::User(text)),
+                Interaction::AssistantText(text) => {
+                    self.entries.push(ChatEntry::Assistant(text));
+                }
+                Interaction::AssistantThinking(text) => {
+                    self.entries.push(ChatEntry::Thinking(text.to_owned()));
+                }
+                Interaction::ToolCall { id, name, input } => {
+                    let icon = tools.icon(name);
+                    let label = tools
+                        .summarize_input(name, input)
+                        .map_or_else(|| name.to_owned(), str::to_owned);
+                    labels.insert(id, label.clone());
+                    self.entries.push(ChatEntry::ToolCall { icon, label });
+                }
+                Interaction::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
-                } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
-                _ => None,
-            })
-            .collect();
-
-        let mut tool_labels: HashMap<String, String> = HashMap::new();
-        for msg in messages {
-            let mut text = String::new();
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text: t } if !t.trim().is_empty() => {
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(t);
-                    }
-                    ContentBlock::ToolUse { id, name, input }
-                    | ContentBlock::ServerToolUse { id, name, input } => {
-                        // Flush any accumulated text so entries render
-                        // in source order (assistant text, then the
-                        // tool call it preceded).
-                        if !text.is_empty() {
-                            self.entries
-                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
-                        }
-                        let icon = tools.icon(name);
-                        let label = tools
-                            .summarize_input(name, input)
-                            .map_or_else(|| name.clone(), str::to_owned);
-                        tool_labels.insert(id.clone(), label.clone());
-                        self.entries.push(ChatEntry::ToolCall {
-                            icon,
-                            label: label.clone(),
-                        });
-                        if let Some((content, is_error)) = pending_results.remove(id.as_str()) {
-                            self.entries.push(ChatEntry::ToolResult {
-                                label,
-                                content: content.to_owned(),
-                                is_error,
-                            });
-                        }
-                    }
-                    // Non-orphan tool_results were already emitted inline
-                    // at the matching tool_use; only orphans reach this
-                    // arm (the pending-map guard ensures that).
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
+                } => {
+                    let label = labels
+                        .get(tool_use_id)
+                        .cloned()
+                        .unwrap_or_else(|| "(result)".to_owned());
+                    self.entries.push(ChatEntry::ToolResult {
+                        label,
+                        content: content.to_owned(),
                         is_error,
-                    } if pending_results.remove(tool_use_id.as_str()).is_some() => {
-                        let label = tool_labels
-                            .get(tool_use_id)
-                            .cloned()
-                            .unwrap_or_else(|| "(result)".to_owned());
-                        self.entries.push(ChatEntry::ToolResult {
-                            label,
-                            content: content.clone(),
-                            is_error: *is_error,
-                        });
-                    }
-                    ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
-                        // Keep Thinking entries unconditionally — the
-                        // renderer (see the main `match entry` block)
-                        // honors `show_thinking` to decide whether to
-                        // emit rows. Storing them means flipping the
-                        // toggle doesn't require reloading the session.
-                        if !text.is_empty() {
-                            self.entries
-                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
-                        }
-                        self.entries.push(ChatEntry::Thinking(thinking.clone()));
-                    }
-                    _ => {}
+                    });
                 }
-            }
-            if !text.is_empty() {
-                let entry = match msg.role {
-                    Role::User => ChatEntry::User(text),
-                    Role::Assistant => ChatEntry::Assistant(text),
-                };
-                self.entries.push(entry);
+                Interaction::OrphanToolResult { content, is_error } => {
+                    self.entries.push(ChatEntry::ToolResult {
+                        label: "(result)".to_owned(),
+                        content: content.to_owned(),
+                        is_error,
+                    });
+                }
             }
         }
     }
@@ -869,6 +810,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::message::{ContentBlock, Role};
 
     fn test_chat() -> ChatView {
         ChatView::new(Theme::default(), true)

@@ -44,6 +44,7 @@ ox     # Start an interactive session
 ├── session.rs                  # Session module root
 ├── session/
 │   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── history.rs              # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
 │   ├── list_view.rs            # `ox --list` table rendering (writes to any `impl Write`)
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
