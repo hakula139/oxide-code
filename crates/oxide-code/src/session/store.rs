@@ -1305,10 +1305,7 @@ mod tests {
         )
         .unwrap();
         let err = read_session_id_from_path(&path).unwrap_err().to_string();
-        assert!(
-            err.contains("does not begin with a header"),
-            "got: {err}",
-        );
+        assert!(err.contains("does not begin with a header"), "got: {err}");
     }
 
     #[test]

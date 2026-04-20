@@ -231,10 +231,7 @@ mod tests {
     fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
         for raw in ["", "   ", "\t\n"] {
             let arg = Some(raw.to_owned());
-            let err = normalize_resume_arg(Some(&arg))
-                .err()
-                .unwrap()
-                .to_string();
+            let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
             assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
             assert!(err.contains("bare"), "{raw:?} → {err:?}");
         }
