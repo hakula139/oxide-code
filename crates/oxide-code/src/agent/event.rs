@@ -43,10 +43,6 @@ pub(crate) enum AgentEvent {
     TurnComplete,
     /// A newly-generated session title (e.g., AI-generated via Haiku). The
     /// TUI updates the status bar slot; other sinks ignore it.
-    #[expect(
-        dead_code,
-        reason = "constructed by the AI-title generator in a later commit; kept here so the TUI consumer is already wired"
-    )]
     SessionTitleUpdated(String),
     /// A fatal error from the API or agent loop.
     Error(String),

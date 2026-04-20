@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
@@ -71,6 +71,13 @@ pub(crate) struct SessionManager {
     /// `Some`, the initial [`Entry::Title`] was already written (either
     /// this run or by the previous run before resume).
     first_user_prompt: Option<String>,
+    /// Set exactly once, when [`record_message`][Self::record_message]
+    /// writes the first-prompt title on a fresh session. Callers drain it
+    /// via [`take_ai_title_seed`][Self::take_ai_title_seed] to kick off
+    /// background AI-title generation. Stays `None` on resumed sessions
+    /// (the first-prompt title is already on disk) so we don't overwrite
+    /// a previous run's AI title after resume.
+    ai_title_seed: Option<String>,
     /// UUID of the last recorded [`Entry::Message`]. Used as
     /// `parent_uuid` for the next recorded message, forming the
     /// conversation chain.
@@ -101,6 +108,7 @@ impl SessionManager {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt: None,
+            ai_title_seed: None,
             last_message_uuid: None,
             finished: false,
             write_failed: false,
@@ -183,6 +191,7 @@ impl SessionManager {
             initial_message_count: message_count,
             message_count,
             first_user_prompt,
+            ai_title_seed: None,
             last_message_uuid: data.last_uuid,
             finished: false,
             write_failed: false,
@@ -228,6 +237,10 @@ impl SessionManager {
             // persistence here — the in-memory title is lost either
             // way; we just refuse to silently replace it.
             self.first_user_prompt = Some(text.to_owned());
+            // Seed the AI title generator with the full prompt (not the
+            // first-prompt truncation) so Haiku has full context. Taken
+            // at most once per session; resumed sessions don't set this.
+            self.ai_title_seed = Some(text.to_owned());
             writer.append(&Entry::Title {
                 title: truncate_title(text, MAX_TITLE_LEN),
                 source: TitleSource::FirstPrompt,
@@ -274,6 +287,30 @@ impl SessionManager {
 
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Return (and clear) the seed text that should be passed to the AI
+    /// title generator. Returns `Some` at most once per session — right
+    /// after the first user prompt has been recorded on a fresh session.
+    /// Subsequent calls return `None`, as do all calls on resumed
+    /// sessions.
+    pub(crate) fn take_ai_title_seed(&mut self) -> Option<String> {
+        self.ai_title_seed.take()
+    }
+
+    /// Append an AI-generated title to the session file. Latest
+    /// [`Entry::Title`] wins on tail scan, so this supersedes the
+    /// first-prompt title for both `--list` output and later resumes.
+    pub(crate) fn append_ai_title(&mut self, title: &str) -> Result<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .context("cannot append AI title before the session file is materialized")?;
+        writer.append(&Entry::Title {
+            title: title.to_owned(),
+            source: TitleSource::AiGenerated,
+            updated_at: OffsetDateTime::now_utc(),
+        })
     }
 
     /// Mark a write failure and report whether this is the first one.
@@ -1027,6 +1064,91 @@ mod tests {
             .filter(|l| l.contains(r#""type":"summary""#))
             .count();
         assert_eq!(summary_count, 1);
+    }
+
+    // ── take_ai_title_seed ──
+
+    #[tokio::test]
+    async fn take_ai_title_seed_yields_first_prompt_once_on_fresh_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+
+        // No messages recorded yet → no seed.
+        assert!(manager.take_ai_title_seed().is_none());
+
+        // First user message seeds; second call drains to None.
+        manager
+            .record_message(&Message::user("Fix login bug"))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.take_ai_title_seed().as_deref(),
+            Some("Fix login bug")
+        );
+        assert!(manager.take_ai_title_seed().is_none());
+
+        // Subsequent user messages don't re-seed.
+        manager
+            .record_message(&Message::user("follow up"))
+            .await
+            .unwrap();
+        assert!(manager.take_ai_title_seed().is_none());
+    }
+
+    #[tokio::test]
+    async fn take_ai_title_seed_is_empty_on_resume_even_when_file_has_first_prompt_only() {
+        // Resumed sessions already have a first-prompt title on disk;
+        // we don't try to regenerate the AI title here. (If the original
+        // run's AI generation failed, resume still skips — matches
+        // claude-code's one-shot haikuTitleAttemptedRef behaviour.)
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
+        drop(original);
+
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        assert!(resumed.take_ai_title_seed().is_none());
+    }
+
+    // ── append_ai_title ──
+
+    #[tokio::test]
+    async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+        let sid = manager.session_id().to_owned();
+        manager
+            .record_message(&Message::user("Fix login bug"))
+            .await
+            .unwrap();
+
+        manager.append_ai_title("Fix auth flow for mobile").unwrap();
+        manager.finish().unwrap();
+        drop(manager);
+
+        // Tail scan picks the latest-updated_at title, so the AI title
+        // wins over the first-prompt title.
+        let sessions = store.list().unwrap();
+        let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
+        assert_eq!(
+            session.title.as_ref().unwrap().title,
+            "Fix auth flow for mobile"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_ai_title_errors_before_session_file_materializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let err = manager.append_ai_title("whatever").unwrap_err().to_string();
+        assert!(err.contains("materialized"), "got: {err}");
     }
 
     // ── record_write_failure ──

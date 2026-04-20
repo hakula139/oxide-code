@@ -329,6 +329,21 @@ async fn agent_loop_task(
                 let user_msg = Message::user(&text);
                 record_session_message(&session, &user_msg, Some(&sink)).await;
                 messages.push(user_msg);
+
+                // Fire the AI title generator exactly once per fresh
+                // session, right after the first user prompt lands on
+                // disk. Resumed sessions already have the seed cleared,
+                // so this take() is always None after the first trip
+                // through this branch.
+                if let Some(seed) = session.lock().await.take_ai_title_seed() {
+                    session::title_generator::spawn(
+                        client.clone(),
+                        Arc::clone(&session),
+                        sink.clone(),
+                        seed,
+                    );
+                }
+
                 let prompt = prompt::build_prompt(client.model()).await;
                 let turn_result =
                     agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;

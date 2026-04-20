@@ -437,10 +437,6 @@ impl Client {
     ///
     /// Non-text content blocks (`tool_use`, thinking, …) are filtered out
     /// so callers get the assistant's user-visible answer directly.
-    #[expect(
-        dead_code,
-        reason = "consumed by the AI-title generator in the next commit; the HTTP pipeline is reviewable on its own here"
-    )]
     pub async fn complete(
         &self,
         model: &str,
