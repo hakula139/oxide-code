@@ -108,12 +108,17 @@ async fn generate_and_record(
     Ok(())
 }
 
-/// Parse Haiku's response as the `{"title": "..."}` JSON envelope, with a
-/// whitespace-trimmed plain-text fallback for the case where Haiku skips
-/// the JSON wrapper entirely (rare, but cheap to support).
+/// Parse Haiku's response as the `{"title": "..."}` JSON envelope, or
+/// bail with enough context for the caller's warn-log.
 ///
-/// Handles Haiku's common tic of wrapping the JSON in a ```` ```json ```` fence
-/// by stripping any leading / trailing fence before attempting to parse.
+/// The envelope is mandatory. A bare plain-text response is almost
+/// always Haiku's conversational refusal to the title task ("I'd be
+/// happy to help! However, I need more details…" for short prompts
+/// like `hi`), and using that prose as the title is worse than keeping
+/// the first-prompt title we already wrote to disk.
+///
+/// Triple-backtick code fences (`` ```json … ``` ``) are stripped
+/// first — Haiku wraps the envelope that way on some gateways.
 fn parse_title(response: &str) -> Result<String> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
@@ -121,13 +126,28 @@ fn parse_title(response: &str) -> Result<String> {
     }
 
     let unwrapped = strip_code_fence(trimmed);
-    if let Ok(TitleEnvelope { title }) = serde_json::from_str::<TitleEnvelope>(unwrapped) {
-        let cleaned = title.trim();
-        if !cleaned.is_empty() {
-            return Ok(cleaned.to_owned());
-        }
+    let TitleEnvelope { title } = serde_json::from_str(unwrapped).with_context(|| {
+        format!(
+            "response is not a title envelope: {}",
+            truncate_for_log(unwrapped)
+        )
+    })?;
+    let cleaned = title.trim();
+    if cleaned.is_empty() {
+        bail!("title envelope had an empty title field");
     }
-    Ok(unwrapped.to_owned())
+    Ok(cleaned.to_owned())
+}
+
+/// Cap a string for inclusion in a log / error message. Haiku refusals
+/// run long; truncate so the warn-log stays readable.
+fn truncate_for_log(s: &str) -> String {
+    const LOG_CAP: usize = 120;
+    if s.chars().count() <= LOG_CAP {
+        return s.to_owned();
+    }
+    let head: String = s.chars().take(LOG_CAP).collect();
+    format!("{head}…")
 }
 
 /// Strip a surrounding triple-backtick markdown code fence (with an
@@ -179,18 +199,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_title_falls_back_to_raw_on_empty_title_field() {
-        // Haiku returned the envelope but an empty title — fall back to
-        // the raw response so we don't silently end up with nothing.
-        let raw = r#"{"title": ""}"#;
-        let out = parse_title(raw).unwrap();
-        assert_eq!(out, raw);
+    fn parse_title_errors_on_empty_title_field() {
+        // An envelope with an empty title is as useless as no title at
+        // all. Bail so the first-prompt fallback stays in place.
+        let err = parse_title(r#"{"title": ""}"#).unwrap_err().to_string();
+        assert!(err.contains("empty title"), "got: {err}");
     }
 
     #[test]
-    fn parse_title_falls_back_to_trimmed_plain_text() {
-        let out = parse_title("  Refactor API client  ").unwrap();
-        assert_eq!(out, "Refactor API client");
+    fn parse_title_errors_on_plain_text_response() {
+        // Haiku's conversational refusal ("I'd be happy to help!
+        // However, I need more details…") would otherwise land on the
+        // status bar as a multi-sentence "title". Require the JSON
+        // envelope so the first-prompt title survives instead.
+        let err = parse_title("I'd be happy to help! However, I need more details.")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a title envelope"), "got: {err}");
     }
 
     #[test]
@@ -243,6 +268,25 @@ mod tests {
     fn strip_code_fence_handles_no_opening_newline() {
         // Single-line fenced block — no language tag, no newline.
         assert_eq!(strip_code_fence("```body```"), "body");
+    }
+
+    // ── truncate_for_log ──
+
+    #[test]
+    fn truncate_for_log_passes_short_strings_through() {
+        assert_eq!(truncate_for_log("short"), "short");
+    }
+
+    #[test]
+    fn truncate_for_log_caps_long_strings_with_ellipsis() {
+        let long = "a".repeat(500);
+        let out = truncate_for_log(&long);
+        assert!(out.ends_with('…'), "got: {out:?}");
+        assert!(
+            out.chars().count() <= 121,
+            "got {} chars",
+            out.chars().count()
+        );
     }
 
     // ── truncate_prompt ──
