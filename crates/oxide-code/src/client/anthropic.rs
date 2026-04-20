@@ -572,20 +572,34 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
 /// Strip the `[1m]` tag (if any) from a caller-supplied model string,
 /// returning the canonical API model ID. The tag is a client-side
 /// convention — the Anthropic API rejects it on the wire.
+///
+/// Matching is case-insensitive so [`has_1m_tag`] and this helper agree
+/// on every accepted spelling; otherwise a tag like `[1M]` would opt
+/// into the 1M beta while still leaking into the request `model` field,
+/// producing an `unknown model` 400.
 fn api_model_id(model: &str) -> &str {
-    model
-        .split_once("[1m]")
-        .map_or(model, |(base, _)| base.trim_end())
+    tag_offset(model).map_or(model, |i| model[..i].trim_end())
 }
 
 /// Whether `model` is tagged `[1m]`, i.e. the user is explicitly opting
-/// into the 1M-context window. The tag is case-insensitive to match
-/// claude-code. Auto-gating 1M on model family alone would 400 on
-/// subscriptions / gateways that don't include 1M access — the same
-/// subscription-mismatch class of bug that forced per-model beta gating
-/// for Haiku; making 1M explicit avoids it entirely.
+/// into the 1M-context window.
+///
+/// Auto-gating 1M on model family alone would 400 on subscriptions /
+/// gateways that don't include 1M access — the same subscription-
+/// mismatch class of bug that forced per-model beta gating for Haiku.
+/// Making 1M explicit sidesteps that class entirely.
 fn has_1m_tag(model: &str) -> bool {
-    model.to_lowercase().contains("[1m]")
+    tag_offset(model).is_some()
+}
+
+/// Byte offset of the `[1m]` tag in `model`, case-insensitive. Shared by
+/// [`has_1m_tag`] and [`api_model_id`] so the two never disagree on
+/// whether a tag is present.
+///
+/// Model IDs are ASCII by convention (`claude-opus-4-7[1M]`), so the
+/// byte indices of `model.to_lowercase()` line up with `model`'s.
+fn tag_offset(model: &str) -> Option<usize> {
+    model.to_lowercase().find("[1m]")
 }
 
 /// Serialize the JSON request body for [`Client::complete`]. Extracted
@@ -1625,6 +1639,15 @@ mod tests {
     fn api_model_id_trims_trailing_space_before_tag() {
         // Tolerate sloppy user input like `"claude-opus-4-7 [1m]"`.
         assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_strips_uppercase_tag() {
+        // Regression: `has_1m_tag` was case-insensitive while
+        // `api_model_id` was not, so `[1M]` opted into the 1M beta but
+        // still leaked the tag into the API `model` field, producing an
+        // `unknown model` 400. Both now share `tag_offset`.
+        assert_eq!(api_model_id("claude-opus-4-7[1M]"), "claude-opus-4-7");
     }
 
     #[test]
