@@ -103,7 +103,7 @@ pub(crate) trait Tool: Send + Sync {
     /// Returns the most relevant input field as a one-line label
     /// (e.g., the command for bash, the `file_path` for read / write / edit).
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
-        let _ = input;
+        _ = input;
         None
     }
 

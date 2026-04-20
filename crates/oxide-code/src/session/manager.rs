@@ -732,11 +732,11 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let result = SessionManager::resume(&store, &session_id).await;
-        let err = match result {
-            Ok(_) => panic!("expected resume to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = SessionManager::resume(&store, &session_id)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no messages to resume"), "got: {err}");
     }
 

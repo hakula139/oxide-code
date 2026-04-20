@@ -231,11 +231,10 @@ mod tests {
     fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
         for raw in ["", "   ", "\t\n"] {
             let arg = Some(raw.to_owned());
-            let result = normalize_resume_arg(Some(&arg));
-            let err = match result {
-                Ok(_) => panic!("{raw:?} should have been rejected"),
-                Err(e) => e.to_string(),
-            };
+            let err = normalize_resume_arg(Some(&arg))
+                .err()
+                .unwrap()
+                .to_string();
             assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
             assert!(err.contains("bare"), "{raw:?} → {err:?}");
         }
@@ -291,10 +290,11 @@ mod tests {
     async fn resolve_session_bare_continue_errors_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let err = match resolve_session(&store, "m", Some(&None), false).await {
-            Ok(_) => panic!("expected failure — no sessions to resume"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&None), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no sessions"), "got: {err}");
     }
 
@@ -311,10 +311,11 @@ mod tests {
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
-        let err = match resolve_session(&store, "m", Some(&prefix_arg), false).await {
-            Ok(_) => panic!("expected prefix miss to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no session matching prefix"), "got: {err}");
     }
 
@@ -345,10 +346,11 @@ mod tests {
         let prefix = prefix_char.to_string();
 
         let prefix_arg = Some(prefix.clone());
-        let err = match resolve_session(&store, "m", Some(&prefix_arg), false).await {
-            Ok(_) => panic!("expected ambiguous prefix to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("ambiguous prefix"), "got: {err}");
         assert!(err.contains(&prefix), "got: {err}");
     }
@@ -390,10 +392,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let arg = Some("/does/not/exist.jsonl".to_owned());
-        let err = match resolve_session(&store, "m", Some(&arg), false).await {
-            Ok(_) => panic!("expected missing path to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("session not found"), "got: {err}");
     }
 
@@ -447,10 +450,11 @@ mod tests {
 
         // Error path under `all = true` omits the "use --all" hint.
         let missing = Some("zzzz".to_owned());
-        let err = match resolve_session(&store, "m", Some(&missing), true).await {
-            Ok(_) => panic!("expected prefix miss under --all to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&missing), true)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(
             !err.contains("use --all"),
             "hint should not suggest --all when already set: {err}",

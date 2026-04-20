@@ -911,13 +911,11 @@ mod tests {
     }
 
     fn new_err_message(result: Result<Client>) -> String {
-        // `Client` does not derive `Debug`, so `.unwrap_err()` doesn't
-        // compile; this helper keeps the error-path tests readable
-        // without forcing a blanket derive on the production type.
-        match result {
-            Ok(_) => panic!("expected Client::new to fail"),
-            Err(e) => format!("{e:#}"),
-        }
+        // `Client` doesn't derive `Debug`, so `.unwrap_err()` doesn't
+        // compile. Take the `.err()` route instead — `Option::unwrap`
+        // has no Debug bound, and the panic path lives inside std
+        // rather than our test.
+        format!("{:#}", result.err().unwrap())
     }
 
     #[test]
