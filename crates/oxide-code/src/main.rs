@@ -224,7 +224,10 @@ async fn run_tui(
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
-    let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
+    // 32 is plenty: UserAction fires at human typing speed. Bounded so a
+    // stalled agent loop surfaces `try_send` failure instead of growing the
+    // queue without bound.
+    let (user_tx, user_rx) = mpsc::channel::<UserAction>(32);
 
     let cwd = std::env::current_dir()
         .as_deref()
@@ -303,7 +306,7 @@ async fn agent_loop_task(
     client: Client,
     tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
-    mut user_rx: mpsc::UnboundedReceiver<UserAction>,
+    mut user_rx: mpsc::Receiver<UserAction>,
     session: Arc<Mutex<SessionManager>>,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {

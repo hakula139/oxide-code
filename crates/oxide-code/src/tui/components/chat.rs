@@ -8,9 +8,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use crate::agent::event::UserAction;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolRegistry;
-use crate::tui::component::{Action, Component};
+use crate::tui::component::Component;
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -321,7 +322,7 @@ impl ChatView {
 }
 
 impl Component for ChatView {
-    fn handle_event(&mut self, event: &Event) -> Option<Action> {
+    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..

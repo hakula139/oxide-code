@@ -7,7 +7,7 @@ use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
-use super::component::{Action, Component};
+use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
@@ -26,7 +26,7 @@ pub(crate) struct App {
     chat: ChatView,
     input: InputArea,
     agent_rx: mpsc::Receiver<AgentEvent>,
-    user_tx: mpsc::UnboundedSender<UserAction>,
+    user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
     should_quit: bool,
     /// Whether state has changed since the last render.
@@ -39,7 +39,7 @@ impl App {
         show_thinking: bool,
         cwd: String,
         agent_rx: mpsc::Receiver<AgentEvent>,
-        user_tx: mpsc::UnboundedSender<UserAction>,
+        user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
         tools: Arc<ToolRegistry>,
     ) -> Self {
@@ -112,7 +112,7 @@ impl App {
             Event::Key(..) => {
                 // Input area handles typing, submit, and quit.
                 if let Some(action) = self.input.handle_event(event) {
-                    self.handle_action(action);
+                    self.dispatch_user_action(action);
                 }
                 // When input is disabled (streaming), scroll keys go to chat.
                 if !self.input.is_enabled() {
@@ -128,19 +128,22 @@ impl App {
         self.dirty = true;
     }
 
-    fn handle_action(&mut self, action: Action) {
-        match action {
-            Action::SubmitPrompt(text) => {
+    /// Translate a user action into UI state changes, then forward it to the
+    /// agent loop over the bounded channel. `try_send` would only fail if the
+    /// agent task has died; in that case `should_quit` tears down the TUI on
+    /// the next iteration so nothing is lost.
+    fn dispatch_user_action(&mut self, action: UserAction) {
+        match &action {
+            UserAction::SubmitPrompt(text) => {
                 self.chat.push_user_message(text.clone());
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Streaming);
-                _ = self.user_tx.send(UserAction::SubmitPrompt(text));
             }
-            Action::Quit => {
-                _ = self.user_tx.send(UserAction::Quit);
+            UserAction::Quit => {
                 self.should_quit = true;
             }
         }
+        _ = self.user_tx.try_send(action);
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {

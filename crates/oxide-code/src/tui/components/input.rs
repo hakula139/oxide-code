@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::component::{Action, Component};
+use crate::agent::event::UserAction;
+use crate::tui::component::Component;
 use crate::tui::theme::Theme;
 
 /// Maximum number of visible content lines before the input stops growing.
@@ -83,7 +84,7 @@ impl InputArea {
 }
 
 impl Component for InputArea {
-    fn handle_event(&mut self, event: &Event) -> Option<Action> {
+    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         // Ctrl+C / Ctrl+D always quits, even when disabled.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('c' | 'd'),
@@ -91,7 +92,7 @@ impl Component for InputArea {
             ..
         }) = event
         {
-            return Some(Action::Quit);
+            return Some(UserAction::Quit);
         }
 
         if !self.enabled {
@@ -223,7 +224,7 @@ impl InputArea {
             .max(1)
     }
 
-    fn submit(&mut self) -> Option<Action> {
+    fn submit(&mut self) -> Option<UserAction> {
         let content: String = self.textarea.lines().join("\n");
         let trimmed = content.trim().to_owned();
         if trimmed.is_empty() {
@@ -235,7 +236,7 @@ impl InputArea {
         self.textarea.cut();
         self.scroll_top.set(0);
 
-        Some(Action::SubmitPrompt(trimmed))
+        Some(UserAction::SubmitPrompt(trimmed))
     }
 }
 
@@ -361,14 +362,14 @@ mod tests {
     fn handle_event_ctrl_c_returns_quit() {
         let mut input = test_input();
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(Action::Quit)));
+        assert!(matches!(action, Some(UserAction::Quit)));
     }
 
     #[test]
     fn handle_event_ctrl_d_returns_quit() {
         let mut input = test_input();
         let action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(Action::Quit)));
+        assert!(matches!(action, Some(UserAction::Quit)));
     }
 
     #[test]
@@ -376,7 +377,7 @@ mod tests {
         let mut input = test_input();
         input.set_enabled(false);
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(Action::Quit)));
+        assert!(matches!(action, Some(UserAction::Quit)));
     }
 
     #[test]
@@ -428,7 +429,7 @@ mod tests {
         )));
 
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(Action::SubmitPrompt(s)) if s == "hi"));
+        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "hi"));
     }
 
     // ── submit ──
@@ -469,6 +470,6 @@ mod tests {
         )));
 
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(Action::SubmitPrompt(s)) if s == "a"));
+        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "a"));
     }
 }

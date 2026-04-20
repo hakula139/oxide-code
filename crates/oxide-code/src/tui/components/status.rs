@@ -4,7 +4,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::tui::component::{Action, Component};
+use crate::agent::event::UserAction;
+use crate::tui::component::Component;
 use crate::tui::theme::Theme;
 
 /// Braille spinner animation frames (~80 ms per frame at 60 FPS ticks).
@@ -70,7 +71,7 @@ impl StatusBar {
 }
 
 impl Component for StatusBar {
-    fn handle_event(&mut self, _event: &Event) -> Option<Action> {
+    fn handle_event(&mut self, _event: &Event) -> Option<UserAction> {
         None
     }
 
