@@ -312,6 +312,15 @@ impl Client {
         &self.config.model
     }
 
+    /// Client-side session id carried in `x-claude-code-session-id` /
+    /// billing metadata. Exposed for tests to assert on the id that
+    /// [`Client::new`] plumbed through (either the caller-supplied
+    /// value or an auto-generated UUID v4).
+    #[cfg(test)]
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Stream a message response from the Anthropic API.
     ///
     /// `system_sections` are the static system prompt sections (one text
@@ -735,6 +744,85 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    // ── Client::new / Client::model ──
+    //
+    // Client construction is 0% covered today because `stream_message` /
+    // `complete` need a live HTTP mock (tracked as Tier 3 of the
+    // integration-tests plan). These tests exercise the non-HTTP
+    // portions — header validation, UUID defaulting, getter contracts —
+    // that are reachable via the constructor alone.
+
+    fn make_config(auth: Auth) -> Config {
+        Config {
+            auth,
+            model: "claude-sonnet-4-6".to_owned(),
+            base_url: "https://example.invalid".to_owned(),
+            max_tokens: 128,
+            thinking: None,
+            show_thinking: false,
+        }
+    }
+
+    #[test]
+    fn new_with_api_key_succeeds_and_exposes_model() {
+        let client = Client::new(make_config(Auth::ApiKey("sk-test".to_owned())), None).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_with_oauth_token_succeeds_and_exposes_model() {
+        let client = Client::new(make_config(Auth::OAuth("oauth-token".to_owned())), None).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_none_session_id_generates_a_uuid() {
+        let client = Client::new(make_config(Auth::ApiKey("k".to_owned())), None).unwrap();
+        let sid = client.session_id();
+        let parsed = Uuid::parse_str(sid)
+            .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
+        assert_eq!(parsed.get_version_num(), 4);
+    }
+
+    #[test]
+    fn new_preserves_explicit_session_id() {
+        let sid = "11111111-2222-4333-8444-555555555555".to_owned();
+        let client =
+            Client::new(make_config(Auth::ApiKey("k".to_owned())), Some(sid.clone())).unwrap();
+        assert_eq!(client.session_id(), sid);
+    }
+
+    fn new_err_message(result: Result<Client>) -> String {
+        // `Client` does not derive `Debug`, so `.unwrap_err()` doesn't
+        // compile; this helper keeps the error-path tests readable
+        // without forcing a blanket derive on the production type.
+        match result {
+            Ok(_) => panic!("expected Client::new to fail"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_api_key_containing_invalid_header_bytes() {
+        // reqwest's HeaderValue::from_str rejects control chars like \n;
+        // this exercises the early-error path in the API-key arm that
+        // isn't otherwise reachable via the happy-path config loader.
+        let err = new_err_message(Client::new(
+            make_config(Auth::ApiKey("bad\nkey".to_owned())),
+            Some("sid".to_owned()),
+        ));
+        assert!(err.to_ascii_lowercase().contains("header"));
+    }
+
+    #[test]
+    fn new_rejects_oauth_token_containing_invalid_header_bytes() {
+        let err = new_err_message(Client::new(
+            make_config(Auth::OAuth("bad\rtoken".to_owned())),
+            Some("sid".to_owned()),
+        ));
+        assert!(err.to_ascii_lowercase().contains("header"));
+    }
 
     // ── StreamEvent ──
 
