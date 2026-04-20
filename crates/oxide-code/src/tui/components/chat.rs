@@ -530,22 +530,40 @@ impl ChatView {
         width: usize,
     ) {
         push_section_gap(lines);
+        lines.extend(self.render_assistant_block(content, width, true));
+    }
 
-        // The markdown renderer wraps to (width - 4) so the 4-char
-        // border prefix doesn't push content past the terminal edge.
+    /// Render an assistant markdown block with the assistant border.
+    ///
+    /// `starts_new_turn` controls the first line's prefix: `true` emits the
+    /// assistant icon ([`ASSISTANT_PREFIX`]), `false` emits a plain
+    /// [`BORDER_PREFIX`] so the block continues a previous turn (used by the
+    /// streaming cache after the first cached line has already been emitted).
+    ///
+    /// The markdown renderer wraps to `width - BORDER_PREFIX.len()` so the
+    /// border prefix doesn't push content past the terminal edge.
+    fn render_assistant_block(
+        &self,
+        content: &str,
+        width: usize,
+        starts_new_turn: bool,
+    ) -> Vec<Line<'static>> {
         let bar_style = self.theme.secondary();
         let md_width = width.saturating_sub(BORDER_PREFIX.len());
         let rendered = render_markdown(content, &self.theme, md_width);
-        let mut first = true;
-        for line in rendered.lines {
-            let prefix = if first {
-                ASSISTANT_PREFIX
-            } else {
-                BORDER_PREFIX
-            };
-            first = false;
-            lines.push(border_markdown_line(line, prefix, bar_style));
-        }
+        rendered
+            .lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let prefix = if i == 0 && starts_new_turn {
+                    ASSISTANT_PREFIX
+                } else {
+                    BORDER_PREFIX
+                };
+                border_markdown_line(line, prefix, bar_style)
+            })
+            .collect()
     }
 
     // ── Tool Calls ──
@@ -668,73 +686,50 @@ impl ChatView {
     // ── Streaming ──
 
     fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
-        let bar_style = self.theme.secondary();
-
-        // Show icon + separator only when this is a new assistant turn
+        // Show a blank separator when the streaming text begins a new turn
         // (not a continuation of a committed assistant entry).
-        let is_new_turn = !self
-            .entries
-            .last()
-            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
-        if is_new_turn && !lines.is_empty() {
+        let new_turn = self.streaming_starts_new_turn();
+        if new_turn && !lines.is_empty() {
             lines.push(Line::raw(""));
         }
 
-        // Emit cached lines from the stable prefix (already rendered).
-        // The first cached line already carries the icon from advance_streaming_cache.
-        for line in &self.streaming_rendered {
-            lines.push(line.clone());
+        // Emit already-rendered cached lines from the stable prefix.
+        lines.extend(self.streaming_rendered.iter().cloned());
+
+        // The cache is populated only after the viewport has been measured
+        // (advance_streaming_cache defers otherwise), so the tail may still
+        // contain complete lines before the last `\n`. Render those as
+        // markdown; render whatever is past the last `\n` as plain text
+        // (partial markdown re-parses mid-token would flicker).
+        let tail = &self.streaming_buffer[self.streaming_rendered_boundary..];
+        if tail.is_empty() {
+            return;
         }
 
-        // Render only the new chunk beyond the cached boundary.
-        let buf = &self.streaming_buffer;
-        let tail = &buf[self.streaming_rendered_boundary..];
-        let md_width = width.saturating_sub(BORDER_PREFIX.len());
+        // `cache_empty` gates the first-line icon: if the cache already holds
+        // lines, the new chunk is a continuation of the turn regardless of
+        // whether the turn itself started fresh.
+        let cache_empty = self.streaming_rendered.is_empty();
+        let (committed, trailing) = match tail.rfind('\n') {
+            Some(nl) => (&tail[..nl], &tail[nl + 1..]),
+            None => ("", tail),
+        };
 
-        // Determine whether the next rendered line is the very first
-        // line of this assistant turn (needs icon prefix).
-        let needs_icon = is_new_turn && self.streaming_rendered.is_empty();
+        if !committed.is_empty() {
+            lines.extend(self.render_assistant_block(committed, width, new_turn && cache_empty));
+        }
 
-        if let Some(rel_boundary) = tail.rfind('\n') {
-            let new_committed = &tail[..rel_boundary];
-            let trailing = &tail[rel_boundary + 1..];
-
-            if !new_committed.is_empty() {
-                let rendered = render_markdown(new_committed, &self.theme, md_width);
-                let mut first = needs_icon;
-                for line in rendered.lines {
-                    let prefix = if first {
-                        ASSISTANT_PREFIX
-                    } else {
-                        BORDER_PREFIX
-                    };
-                    first = false;
-                    lines.push(border_markdown_line(line, prefix, bar_style));
-                }
-            }
-
-            if !trailing.is_empty() {
-                let prefix = if needs_icon && new_committed.is_empty() {
-                    ASSISTANT_PREFIX
-                } else {
-                    BORDER_PREFIX
-                };
-                lines.push(border_markdown_line(
-                    Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
-                    prefix,
-                    bar_style,
-                ));
-            }
-        } else if !tail.is_empty() {
-            let prefix = if needs_icon {
+        if !trailing.is_empty() {
+            let starts_here = new_turn && cache_empty && committed.is_empty();
+            let prefix = if starts_here {
                 ASSISTANT_PREFIX
             } else {
                 BORDER_PREFIX
             };
             lines.push(border_markdown_line(
-                Line::from(Span::styled(tail.to_owned(), self.theme.text())),
+                Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
                 prefix,
-                bar_style,
+                self.theme.secondary(),
             ));
         }
     }
@@ -751,38 +746,35 @@ impl ChatView {
 
         let boundary = self.streaming_rendered_boundary;
         let tail = &self.streaming_buffer[boundary..];
-
         let Some(rel_boundary) = tail.rfind('\n') else {
             return;
         };
 
         let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
         if !new_committed.is_empty() {
-            let bar_style = self.theme.secondary();
-            let md_width = usize::from(self.viewport_width).saturating_sub(BORDER_PREFIX.len());
-            let rendered = render_markdown(new_committed, &self.theme, md_width);
-
-            // The first cached line of a new assistant turn gets the icon prefix.
-            let is_new_turn = !self
-                .entries
-                .last()
-                .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
-            let mut first = is_new_turn && self.streaming_rendered.is_empty();
-
-            for line in rendered.lines {
-                let prefix = if first {
-                    ASSISTANT_PREFIX
-                } else {
-                    BORDER_PREFIX
-                };
-                first = false;
-                self.streaming_rendered
-                    .push(border_markdown_line(line, prefix, bar_style));
-            }
+            let new_turn = self.streaming_starts_new_turn();
+            let cache_empty = self.streaming_rendered.is_empty();
+            let rendered = self.render_assistant_block(
+                new_committed,
+                self.viewport_width.into(),
+                new_turn && cache_empty,
+            );
+            self.streaming_rendered.extend(rendered);
         }
 
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
         self.streaming_cached_width = self.viewport_width;
+    }
+
+    /// Whether the next streaming chunk begins a fresh assistant turn. The
+    /// answer is `false` when the most recent committed entry is already an
+    /// assistant message, which means we're splicing more tokens onto the
+    /// same visible block and should suppress the leading icon / blank gap.
+    fn streaming_starts_new_turn(&self) -> bool {
+        !self
+            .entries
+            .last()
+            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)))
     }
 }
 
