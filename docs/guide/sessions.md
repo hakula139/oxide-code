@@ -61,6 +61,15 @@ ox -c --all        # latest session anywhere
 ox -c a1b2 -a      # prefix match across all projects
 ```
 
+Resume from an explicit file path — useful for sessions copied between machines or living outside the configured store root:
+
+```bash
+ox -c ./conversation.jsonl
+ox -c /home/me/archive/2026-04/session.jsonl
+```
+
+An argument is treated as a path when it contains a path separator or ends with `.jsonl`; otherwise it's matched against session IDs.
+
 When resuming, the full conversation history is loaded and sent to the model as context. New messages are appended to the existing session file, so the conversation keeps its original session ID.
 
 Two processes can resume the same session at the same time — this is intentional. Each process picks up the transcript as it exists at load time and appends new messages; the recorded messages form a UUID chain, so on the next resume `ox` walks the chain and follows the newest branch. A "losing" branch still lives in the file (you can inspect it manually) but is invisible to subsequent replays.
@@ -85,7 +94,7 @@ Each file contains these line types (tagged by `type`):
 
 1. A **header** on the first line — session metadata (ID, working directory, model, timestamp, format version).
 2. **Message** lines with the full conversation (user / assistant turns, tool calls, tool results), each with a stable `uuid` and chain link (`parent_uuid`) to the previous message.
-3. **Title** lines — the session title (truncated first user prompt by default; may be replaced later by an AI-generated or user-provided title). The latest occurrence wins.
+3. **Title** lines — the session title. A first-prompt title is written immediately on the first user message. In the TUI, a background Haiku call also generates a concise AI title (3-7 words) and appends it shortly after; the latest-updated title wins in the tail scan, so listings and resumes surface the AI-generated one once it lands. Failures keep the first-prompt title in place.
 4. A **summary** line on clean exit with the final message count. Missing if the session was interrupted.
 
 ## Headless and REPL Modes

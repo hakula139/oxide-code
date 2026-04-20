@@ -90,9 +90,19 @@ The header's `created_at` reflects the moment `ox` was launched, not the moment 
 
 ## Session Resume
 
-`ox -c` resumes the most recent session in the current project. `ox -c <prefix>` resumes by session ID prefix match. `--all` / `-a` extends either to every project; a specific session ID also resolves cross-project automatically via the `find_session_path` fallback.
+`ox -c` resumes the most recent session in the current project. `ox -c <prefix>` resumes by session ID prefix match. `ox -c <path.jsonl>` resumes from an explicit filesystem path — the classifier routes arguments containing a path separator or ending in `.jsonl` (case-insensitive) to the path code path, leaving UUID-shaped prefixes (hex + `-` only) on the store-lookup path. `--all` / `-a` extends prefix / latest resume to every project; a specific session ID also resolves cross-project automatically via the `find_session_path` fallback.
 
 Resume reopens the **existing** session file in append mode. Messages are loaded into memory, sanitized (see below), and sent to the model as context. New messages are appended to the same file. The `parent_uuid` of the first new message references the UUID of the tip of the loaded chain, keeping the conversation threaded.
+
+The load pass also surfaces the newest `Entry::Title` (max `updated_at`, so AI-generated titles win over first-prompt titles) and hands it to the TUI status bar alongside the messages — one file read does both jobs.
+
+## AI-Generated Titles
+
+The first user prompt of a fresh session seeds a background title generator (`session::title_generator`). A detached tokio task calls `claude-haiku-4-5` via `Client::complete` with a sentence-case 3-7 word prompt adapted from claude-code's `generateSessionTitle`, then appends an `Entry::Title { source: AiGenerated, updated_at: now }` so the tail-scan pickup in listings and subsequent resumes finds it in place of the first-prompt fallback. The generator also pushes `AgentEvent::SessionTitleUpdated(String)` through the same sink the agent loop uses, so the TUI status bar refreshes live.
+
+Trigger is one-shot per fresh session — `SessionManager::record_message` seeds `ai_title_seed` exactly when it writes the first-prompt title, and the agent loop drains the seed with `take_ai_title_seed()` right after recording the user message. Resumed sessions never set the seed, so a retried session in a later process inherits whatever title the original run managed to write (or keeps the first-prompt fallback if that run's generation failed). Matches claude-code's `haikuTitleAttemptedRef` semantics.
+
+Failure modes (network hiccup, rate-limit, Haiku returns non-JSON) all warn-log only; the first-prompt title stays visible on disk and in the UI. AI title generation runs in TUI mode only — REPL / headless modes skip the spawn since there's no live status bar to update, but the session file still keeps the first-prompt title for `ox --list`.
 
 ### Fork-friendly concurrency
 
@@ -173,5 +183,6 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 | Listing scan          | Head (line 1 header + line 2 title) + tail (4 KiB) | First-prompt title lives at line 2 and is never re-appended, so a pure tail scan misses it once the file exceeds the window                                                                                                                                           |
 | Listing sort key      | File mtime, session_id tiebreak                    | Reflects "last used" — resumed sessions bubble up — and is free (no extra I/O beyond the stat already needed)                                                                                                                                                         |
 | Concurrent access     | Fork-on-conflict via UUID DAG (no file lock)       | Two resumers both append; loader walks the DAG and picks the newest leaf. Matches claude-code's `loadMessagesFromJsonlPath` and its `--fork-session` feature. Writes under `PIPE_BUF` (4 KiB) are atomic; larger interleaved writes are warn-skipped on read          |
-| Write batching        | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md` #1)                                                                                                                               |
+| Write batching        | None (immediate flush)                             | CLI workload is low-frequency; revisit if profiling shows `fsync` is a bottleneck (tracked in `.claude/plans/session-follow-ups.md`)                                                                                                                                  |
+| AI titles             | Fire-and-forget detached task on first prompt      | Matches claude-code's `generateSessionTitle` — one-shot Haiku call on fresh sessions, JSON envelope prompt, warn-log on failure. Tail scan picks the newer `updated_at` so the AI title supersedes the first-prompt fallback automatically on listings and resumes    |
 | Compression           | Deferred                                           | Separate phase per roadmap; new entry type added without migration via `Unknown` catch-all                                                                                                                                                                            |
