@@ -58,6 +58,32 @@ Additional useful betas:
 | `effort-2025-11-24`               | Effort control                 |
 | `advanced-tool-use-2025-11-20`    | Tool search (first-party only) |
 
+#### Per-model beta sets
+
+The accepted beta set differs per model family and per call type (agentic chat vs one-shot utility). Sending an unsupported beta — most commonly `context-1m-2025-08-07` to Haiku — trips gateway validation with HTTP 400 `invalid_request_error`. The mapping claude-code applies in `claude-code/src/utils/betas.ts`:
+
+Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first, producing a visual staircase of narrowing checkmarks.
+
+| Beta                              | Opus 4 / Sonnet 4 | Opus 4.6 / Sonnet 4.6 | Haiku 4 (agentic) | Haiku (one-shot) |
+| --------------------------------- | ----------------- | --------------------- | ----------------- | ---------------- |
+| `claude-code-20250219`            | ✓                 | ✓                     | ✓                 | —                |
+| `oauth-2025-04-20` (OAuth only)   | ✓                 | ✓                     | ✓                 | ✓                |
+| `context-management-2025-06-27`   | ✓                 | ✓                     | ✓                 | —                |
+| `prompt-caching-scope-2026-01-05` | ✓                 | ✓                     | ✓                 | —                |
+| `interleaved-thinking-2025-05-14` | ✓                 | ✓                     | —                 | —                |
+| `context-1m-2025-08-07`           | —                 | ✓                     | —                 | —                |
+| `effort-2025-11-24`               | —                 | ✓                     | —                 | —                |
+
+Key rules:
+
+- **Haiku + `context-1m`** — rejected (Haiku has a 200K window).
+- **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
+- **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
+- **Opus 4 / Sonnet 4** below 4.6 get thinking + context-management but not the 1M or effort betas.
+- **Unknown model aliases** (e.g., `claude-opus-4-7` on a custom gateway) fall through substring matching on the family stem, so they inherit the Opus-4 set but not Opus-4.6-only betas.
+
+oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, and overrides the `anthropic-beta` header per request so the streaming chat and the Haiku title generator each get the right subset.
+
 ### 2. System prompt prefix (as a separate block)
 
 The `system` parameter must be sent as an **array of text blocks**, not a plain string. The identity prefix must occupy its own block:

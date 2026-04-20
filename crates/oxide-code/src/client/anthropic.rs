@@ -239,15 +239,6 @@ impl Client {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
-        let mut betas = vec![
-            CLAUDE_CODE_BETA_HEADER,
-            CONTEXT_1M_BETA_HEADER,
-            CONTEXT_MANAGEMENT_BETA_HEADER,
-            EFFORT_BETA_HEADER,
-            INTERLEAVED_THINKING_BETA_HEADER,
-            PROMPT_CACHING_SCOPE_BETA_HEADER,
-        ];
-
         match &config.auth {
             Auth::ApiKey(key) => {
                 let mut value = HeaderValue::from_str(key)?;
@@ -258,12 +249,14 @@ impl Client {
                 let mut value = HeaderValue::from_str(&format!("Bearer {token}"))?;
                 value.set_sensitive(true);
                 headers.insert(AUTHORIZATION, value);
-                betas.push(OAUTH_BETA_HEADER);
             }
         }
 
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-        headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
+        // `anthropic-beta` is set per-request by [`compute_betas`] because
+        // the accepted set varies per target model (Haiku rejects 1M /
+        // effort / interleaved-thinking on most gateways) and per call type
+        // (agentic chat vs one-shot Haiku title call).
         headers.insert(
             "anthropic-dangerous-direct-browser-access",
             HeaderValue::from_static("true"),
@@ -424,9 +417,10 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
+        let betas = compute_betas(&self.config.model, &self.config.auth, true).join(",");
 
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, body, &tx).await;
+            let result = stream_sse(&http, &url, betas, body, &tx).await;
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
@@ -465,7 +459,14 @@ impl Client {
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        let response = self.http.post(&url).body(body).send().await?;
+        let betas = compute_betas(model, &self.config.auth, false).join(",");
+        let response = self
+            .http
+            .post(&url)
+            .header("anthropic-beta", betas)
+            .body(body)
+            .send()
+            .await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -491,6 +492,78 @@ impl Client {
 fn build_metadata(session_id: &str) -> RequestMetadata {
     let user_id = serde_json::json!({ "session_id": session_id }).to_string();
     RequestMetadata { user_id }
+}
+
+/// Compute the `anthropic-beta` header value for a request targeting
+/// `model`. Model families accept different beta sets — Haiku rejects
+/// `context-1m`, `effort`, and `interleaved-thinking` on most gateways —
+/// and non-agentic one-shot calls (title generation, future compaction /
+/// classifier helpers) skip the agent-oriented betas the streaming chat
+/// needs.
+///
+/// The gating rules follow the capability tests documented in
+/// `docs/research/anthropic-api.md` → "Per-model beta sets". Substring
+/// matching mirrors the same canonical-name check the gateway performs,
+/// so a custom alias like `claude-opus-4-7` still lights up Opus-family
+/// betas until its base capabilities are explicitly known.
+fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str> {
+    let m = model.to_lowercase();
+    let is_haiku = m.contains("haiku");
+    let is_opus_4 = m.contains("opus-4");
+    let is_sonnet_4 = m.contains("sonnet-4");
+    let is_haiku_4 = m.contains("haiku-4");
+    let is_opus_46 = m.contains("opus-4-6");
+    let is_sonnet_46 = m.contains("sonnet-4-6");
+
+    let mut out = Vec::with_capacity(7);
+
+    // Order mirrors `docs/research/anthropic-api.md` → Per-model beta sets:
+    // identity / auth first, then universal agentic betas, then the
+    // model-tier-gated ones. Keeps the capability matrix readable in one
+    // place across the table and the code.
+
+    // Identity / auth ─────────────────────────────────────────────────
+
+    // Gateway tag: required for non-Haiku OAuth on 1P (429 without it).
+    // Non-agentic Haiku one-shots skip it; agentic Haiku calls re-add it.
+    if !is_haiku || is_agentic {
+        out.push(CLAUDE_CODE_BETA_HEADER);
+    }
+    if matches!(auth, Auth::OAuth(_)) {
+        out.push(OAUTH_BETA_HEADER);
+    }
+
+    // Universal agentic ───────────────────────────────────────────────
+
+    // Context management: Opus 4 / Sonnet 4 / Haiku 4. Utility calls
+    // have no tool-clearing or thinking-preservation need.
+    if is_agentic && (is_opus_4 || is_sonnet_4 || is_haiku_4) {
+        out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
+    }
+    // Prompt-caching scope: 1P-intended but no-op on 3P when `scope` is
+    // omitted on `cache_control` blocks (our current behavior). Kept on
+    // agentic calls only — title / utility responses don't need caching.
+    if is_agentic {
+        out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
+    }
+
+    // Model-tier-gated ────────────────────────────────────────────────
+
+    // Interleaved thinking: 3P gateways accept only Opus 4 / Sonnet 4;
+    // never Haiku. Non-agentic one-shots don't use thinking regardless.
+    if is_agentic && (is_opus_4 || is_sonnet_4) {
+        out.push(INTERLEAVED_THINKING_BETA_HEADER);
+    }
+    // 1M context: Opus 4.6 / Sonnet 4.6 only. Haiku has a 200K window.
+    if is_opus_46 || is_sonnet_46 {
+        out.push(CONTEXT_1M_BETA_HEADER);
+    }
+    // Effort control: Opus 4.6 / Sonnet 4.6 only.
+    if is_agentic && (is_opus_46 || is_sonnet_46) {
+        out.push(EFFORT_BETA_HEADER);
+    }
+
+    out
 }
 
 /// Serialize the JSON request body for [`Client::complete`]. Extracted
@@ -654,10 +727,16 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
+    betas: String,
     body: String,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    let response = http.post(url).body(body).send().await?;
+    let response = http
+        .post(url)
+        .header("anthropic-beta", betas)
+        .body(body)
+        .send()
+        .await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1388,5 +1467,93 @@ mod tests {
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    // ── compute_betas ──
+
+    fn api_key() -> Auth {
+        Auth::ApiKey("k".to_owned())
+    }
+
+    fn oauth() -> Auth {
+        Auth::OAuth("t".to_owned())
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_sends_full_set() {
+        let betas = compute_betas("claude-opus-4-6", &api_key(), true);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+        assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(!betas.contains(&OAUTH_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_oauth_adds_oauth_header() {
+        let betas = compute_betas("claude-opus-4-6", &oauth(), true);
+        assert!(betas.contains(&OAUTH_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_sonnet_45_omits_1m_and_effort() {
+        // Sonnet 4.5 has neither 1M context nor effort support.
+        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true);
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_haiku_4_omits_1m_effort_and_thinking() {
+        // This is the failing-in-the-wild case: Haiku 4 must not carry
+        // context-1m / interleaved-thinking / effort on 3P gateways.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), true);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_is_minimal() {
+        // The title-generator one-shot: no agent-oriented betas, no
+        // gateway tag. API-key + Haiku → empty.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), false);
+        assert!(betas.is_empty(), "expected empty, got {betas:?}");
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_oauth_only_carries_oauth_tag() {
+        let betas = compute_betas("claude-haiku-4-5", &oauth(), false);
+        assert_eq!(betas, vec![OAUTH_BETA_HEADER]);
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_non_haiku_keeps_claude_code_tag() {
+        // Non-Haiku non-agentic (hypothetical compaction / classifier on
+        // Sonnet): still needs the gateway tag because OAuth 1P rejects
+        // non-Haiku without it.
+        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&OAUTH_BETA_HEADER));
+        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_unknown_alias_resolves_on_substring_match() {
+        // User-picked alias like claude-opus-4-7 inherits the Opus-4
+        // family's agentic set (thinking + context-management), but no
+        // 4-6-only betas (1M, effort).
+        let betas = compute_betas("claude-opus-4-7", &api_key(), true);
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&EFFORT_BETA_HEADER));
     }
 }
