@@ -111,19 +111,36 @@ async fn generate_and_record(
 /// Parse Haiku's response as the `{"title": "..."}` JSON envelope, with a
 /// whitespace-trimmed plain-text fallback for the case where Haiku skips
 /// the JSON wrapper entirely (rare, but cheap to support).
+///
+/// Handles Haiku's common tic of wrapping the JSON in a ```` ```json ```` fence
+/// by stripping any leading / trailing fence before attempting to parse.
 fn parse_title(response: &str) -> Result<String> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
         bail!("empty response");
     }
 
-    if let Ok(TitleEnvelope { title }) = serde_json::from_str::<TitleEnvelope>(trimmed) {
+    let unwrapped = strip_code_fence(trimmed);
+    if let Ok(TitleEnvelope { title }) = serde_json::from_str::<TitleEnvelope>(unwrapped) {
         let cleaned = title.trim();
         if !cleaned.is_empty() {
             return Ok(cleaned.to_owned());
         }
     }
-    Ok(trimmed.to_owned())
+    Ok(unwrapped.to_owned())
+}
+
+/// Strip a surrounding triple-backtick markdown code fence (with an
+/// optional `json` / `text` / … language tag) from `s`, returning the
+/// inner body trimmed of whitespace. Leaves any input that isn't wrapped
+/// in a fence untouched.
+fn strip_code_fence(s: &str) -> &str {
+    let Some(rest) = s.strip_prefix("```") else {
+        return s;
+    };
+    let body_start = rest.find('\n').map_or(0, |i| i + 1);
+    let body = &rest[body_start..];
+    body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
 /// Truncate `text` to at most `max_chars` characters, preferring the tail
@@ -179,6 +196,38 @@ mod tests {
     #[test]
     fn parse_title_errors_on_empty_response() {
         assert!(parse_title("   ").is_err());
+    }
+
+    #[test]
+    fn parse_title_unwraps_json_code_fence() {
+        // Haiku on some gateways wraps the JSON envelope in a fenced block.
+        let raw = "```json\n{\n  \"title\": \"Fix the login flow\"\n}\n```";
+        assert_eq!(parse_title(raw).unwrap(), "Fix the login flow");
+    }
+
+    #[test]
+    fn parse_title_unwraps_bare_code_fence() {
+        let raw = "```\n{\"title\":\"Add OAuth auth\"}\n```";
+        assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
+    }
+
+    // ── strip_code_fence ──
+
+    #[test]
+    fn strip_code_fence_leaves_unwrapped_text_alone() {
+        assert_eq!(strip_code_fence("hello"), "hello");
+        assert_eq!(strip_code_fence(r#"{"title":"x"}"#), r#"{"title":"x"}"#);
+    }
+
+    #[test]
+    fn strip_code_fence_handles_language_tag() {
+        assert_eq!(strip_code_fence("```json\nbody\n```"), "body");
+    }
+
+    #[test]
+    fn strip_code_fence_handles_no_opening_newline() {
+        // Single-line fenced block — no language tag, no newline.
+        assert_eq!(strip_code_fence("```body```"), "body");
     }
 
     // ── truncate_prompt ──
