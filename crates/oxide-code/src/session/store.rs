@@ -1309,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn read_session_id_from_path_rejects_unparseable_first_line() {
+    fn read_session_id_from_path_rejects_unparsable_first_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("garbage.jsonl");
         fs::write(&path, "not json\n").unwrap();
