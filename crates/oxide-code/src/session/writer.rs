@@ -43,8 +43,12 @@ pub(crate) fn log_session_err(
     if session.record_write_failure()
         && let Some(sink) = sink
     {
+        // `{e:#}` flattens the anyhow cause chain — the outer context
+        // is usually "failed to write session file" while the
+        // actionable root (permission denied, disk full, …) lives
+        // beneath. Plain `Display` would hide it.
         _ = sink.send(AgentEvent::Error(format!(
-            "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
+            "Session write failed: {e:#}. Conversation history may be incomplete; further write errors will be silent."
         )));
     }
 }
@@ -147,15 +151,28 @@ mod tests {
 
     #[tokio::test]
     async fn log_session_err_first_failure_notifies_via_sink() {
+        // Feed a two-level cause chain so the `{e:#}` format actually
+        // has something to flatten — regression for the bug where
+        // `Display` alone would hide the actionable root cause
+        // (permission denied, disk full, …) under a generic outer
+        // context ("failed to write session file").
         let dir = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::start(&test_store(dir.path()), "m");
         let sink = CapturingSink::new();
 
-        log_session_err(Err(anyhow!("disk full")), &mut manager, Some(&sink));
+        let err = anyhow!("permission denied").context("failed to write session file");
+        log_session_err(Err(err), &mut manager, Some(&sink));
 
         let errors = sink.errors();
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("disk full"), "{errors:?}");
+        assert!(
+            errors[0].contains("failed to write session file"),
+            "outer context missing: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("permission denied"),
+            "root cause should be flattened into the message: {errors:?}"
+        );
         assert!(
             errors[0].contains("silent"),
             "message should warn that future errors will be quiet: {errors:?}"

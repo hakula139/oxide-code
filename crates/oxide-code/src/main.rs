@@ -349,7 +349,13 @@ async fn agent_loop_task(
                 let turn_result =
                     agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;
                 if let Err(e) = turn_result {
-                    _ = sink.send(AgentEvent::Error(e.to_string()));
+                    // `{e:#}` flattens the anyhow cause chain into one
+                    // string ("stream error: API error (HTTP 503): ...").
+                    // Plain `Display` would drop everything below the
+                    // outermost context and surface only "stream error",
+                    // which doesn't distinguish a transient gateway 5xx
+                    // from a permanent config error.
+                    _ = sink.send(AgentEvent::Error(format!("{e:#}")));
                 }
                 _ = sink.send(AgentEvent::TurnComplete);
             }
