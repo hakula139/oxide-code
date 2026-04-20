@@ -201,13 +201,23 @@ mod tests {
     #[test]
     fn parse_title_unwraps_json_code_fence() {
         // Haiku on some gateways wraps the JSON envelope in a fenced block.
-        let raw = "```json\n{\n  \"title\": \"Fix the login flow\"\n}\n```";
+        let raw = indoc! {r#"
+            ```json
+            {
+              "title": "Fix the login flow"
+            }
+            ```
+        "#};
         assert_eq!(parse_title(raw).unwrap(), "Fix the login flow");
     }
 
     #[test]
     fn parse_title_unwraps_bare_code_fence() {
-        let raw = "```\n{\"title\":\"Add OAuth auth\"}\n```";
+        let raw = indoc! {r#"
+            ```
+            {"title":"Add OAuth auth"}
+            ```
+        "#};
         assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
     }
 
@@ -221,7 +231,12 @@ mod tests {
 
     #[test]
     fn strip_code_fence_handles_language_tag() {
-        assert_eq!(strip_code_fence("```json\nbody\n```"), "body");
+        let raw = indoc! {"
+            ```json
+            body
+            ```
+        "};
+        assert_eq!(strip_code_fence(raw), "body");
     }
 
     #[test]
