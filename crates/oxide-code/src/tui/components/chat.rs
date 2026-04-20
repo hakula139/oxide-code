@@ -1919,6 +1919,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_text_renders_loaded_thinking_entry_when_show_thinking_is_enabled() {
+        // The live-streaming tests above cover `thinking_buffer`, but
+        // resumed sessions re-enter via `load_history` and populate
+        // `entries` with `ChatEntry::Thinking`. `build_text` has a
+        // separate branch for that path — cover it explicitly.
+        let mut chat = test_chat();
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "resumed reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking..."), "header missing: {text}");
+        assert!(
+            text.contains("resumed reasoning"),
+            "thinking body missing: {text}",
+        );
+    }
+
+    #[test]
+    fn build_text_hides_loaded_thinking_entry_when_show_thinking_is_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking..."), "leaked header: {text}");
+        assert!(!text.contains("private reasoning"), "leaked body: {text}");
+        assert!(text.contains("reply"), "text reply should still render");
+    }
+
     // ── push_streaming_lines ──
 
     #[test]
