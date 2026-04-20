@@ -64,7 +64,7 @@ ox     # Start an interactive session
 ├── tui.rs                      # TUI module root
 ├── tui/
 │   ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
-│   ├── component.rs            # Component trait and Action enum
+│   ├── component.rs            # Component trait (components report UserAction back to the agent loop)
 │   ├── components.rs           # Components module root
 │   ├── components/
 │   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
