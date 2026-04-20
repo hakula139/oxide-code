@@ -525,8 +525,8 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
     // capability-gated ones. Keeps the matrix readable across the table
     // and the code.
 
-    // Identity / auth ─────────────────────────────────────────────────
-
+    // Identity / auth.
+    //
     // Gateway tag: required for non-Haiku OAuth on 1P (429 without it).
     // Non-agentic Haiku one-shots skip it; agentic Haiku calls re-add it.
     if !is_haiku || is_agentic {
@@ -536,8 +536,7 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
         out.push(OAUTH_BETA_HEADER);
     }
 
-    // Universal agentic ───────────────────────────────────────────────
-
+    // Universal agentic.
     if is_agentic && caps.context_management {
         out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
     }
@@ -548,8 +547,7 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
         out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
     }
 
-    // Capability-gated ────────────────────────────────────────────────
-
+    // Capability-gated.
     if is_agentic && caps.interleaved_thinking {
         out.push(INTERLEAVED_THINKING_BETA_HEADER);
     }
