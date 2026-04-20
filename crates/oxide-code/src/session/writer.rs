@@ -1,3 +1,9 @@
+//! Thin I/O helpers on top of [`SessionManager`].
+//!
+//! Centralizes the "take the session lock, call `record_message`, route
+//! any failure through [`log_session_err`]" boilerplate so the TUI, bare
+//! REPL, and headless modes share one recording path.
+
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -40,5 +46,135 @@ pub(crate) fn log_session_err(
         _ = sink.send(AgentEvent::Error(format!(
             "Session write failed: {e}. Conversation history may be incomplete; further write errors will be silent."
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use anyhow::{Result, anyhow};
+
+    use super::super::store::{test_session_file, test_store};
+    use super::*;
+
+    /// Recording sink: captures every event the helper emits so tests
+    /// can assert both "sent exactly this" and "sent nothing".
+    struct CapturingSink {
+        events: StdMutex<Vec<AgentEvent>>,
+    }
+
+    impl CapturingSink {
+        fn new() -> Self {
+            Self {
+                events: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn errors(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::Error(msg) => Some(msg.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl AgentSink for CapturingSink {
+        fn send(&self, event: AgentEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    // ── record_session_message ──
+
+    #[tokio::test]
+    async fn record_session_message_writes_through_to_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let manager = SessionManager::start(&store, "m");
+        let sid = manager.session_id().to_owned();
+        let session = Mutex::new(manager);
+
+        record_session_message(&session, &Message::user("hello"), None).await;
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(content.contains(r#""type":"message""#));
+        assert!(content.contains("hello"));
+    }
+
+    // ── log_session_err ──
+
+    #[tokio::test]
+    async fn log_session_err_is_noop_on_ok() {
+        // Ok short-circuits before `record_write_failure`, so the sticky
+        // flag must stay clear; the next genuine failure should still
+        // get surfaced to the sink.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let sink = CapturingSink::new();
+        log_session_err(Ok(()), &mut manager, Some(&sink));
+        assert!(sink.errors().is_empty());
+
+        log_session_err(Err(anyhow!("real failure")), &mut manager, Some(&sink));
+        assert_eq!(sink.errors().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn log_session_err_err_without_sink_only_warns() {
+        // No sink means the caller already teared down the UI (finish()
+        // after TUI restore). The failure flag still flips so a later
+        // call with a sink won't duplicate the notification.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+
+        log_session_err(Err(anyhow!("write blew up")), &mut manager, None);
+
+        // Flag is set — a subsequent failure on the same manager should
+        // no longer reach a sink.
+        let sink = CapturingSink::new();
+        log_session_err(Err(anyhow!("second failure")), &mut manager, Some(&sink));
+        assert!(
+            sink.errors().is_empty(),
+            "subsequent failure must not re-notify",
+        );
+    }
+
+    #[tokio::test]
+    async fn log_session_err_first_failure_notifies_via_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let sink = CapturingSink::new();
+
+        log_session_err(Err(anyhow!("disk full")), &mut manager, Some(&sink));
+
+        let errors = sink.errors();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("disk full"), "{errors:?}");
+        assert!(
+            errors[0].contains("silent"),
+            "message should warn that future errors will be quiet: {errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_session_err_subsequent_failure_stays_silent() {
+        // Two failures on the same manager, both with a sink: the sink
+        // sees exactly one Error event. Sticky-suppression is what lets
+        // mid-conversation disk-full errors not drown the user.
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let sink = CapturingSink::new();
+
+        log_session_err(Err(anyhow!("first")), &mut manager, Some(&sink));
+        log_session_err(Err(anyhow!("second")), &mut manager, Some(&sink));
+        log_session_err(Err(anyhow!("third")), &mut manager, Some(&sink));
+
+        assert_eq!(sink.errors().len(), 1);
     }
 }
