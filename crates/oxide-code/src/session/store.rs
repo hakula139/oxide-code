@@ -1273,6 +1273,62 @@ mod tests {
         assert!(err.contains("newer than supported"), "got: {err}");
     }
 
+    // ── read_session_id_from_path ──
+
+    #[test]
+    fn read_session_id_from_path_returns_header_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("standalone.jsonl");
+        fs::write(
+            &path,
+            indoc! {r#"
+                {"type":"header","session_id":"abc-123","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+                {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-01-01T00:00:01Z"}
+            "#},
+        )
+        .unwrap();
+        assert_eq!(read_session_id_from_path(&path).unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn read_session_id_from_path_rejects_non_header_first_line() {
+        // A file whose first line parses as a valid `Entry` but of the
+        // wrong variant (e.g., a bare message without a header above
+        // it) hits the explicit `bail!` inside the let-else, which the
+        // "not JSON at all" path never reaches.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headless.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-01-01T00:00:01Z"}
+"#,
+        )
+        .unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("does not begin with a header"),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn read_session_id_from_path_rejects_unparseable_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.jsonl");
+        fs::write(&path, "not json\n").unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("not a valid header"), "got: {err}");
+    }
+
+    #[test]
+    fn read_session_id_from_path_errors_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_session_id_from_path(&dir.path().join("ghost.jsonl"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
+    }
+
     // ── list ──
 
     #[tokio::test]
