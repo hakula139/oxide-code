@@ -41,11 +41,11 @@ pub(crate) async fn resolve_session(
     model: &str,
     resume: Option<&Option<String>>,
     all: bool,
-) -> Result<(SessionManager, Vec<Message>)> {
+) -> Result<(SessionManager, Vec<Message>, Option<String>)> {
     let mode = normalize_resume_arg(resume)?;
     if matches!(mode, ResumeMode::Fresh) {
         let session = SessionManager::start(store, model);
-        return Ok((session, Vec::new()));
+        return Ok((session, Vec::new(), None));
     }
 
     let sessions = if all {
@@ -89,9 +89,9 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let (session, messages) = SessionManager::resume(store, &session_id).await?;
+    let (session, messages, title) = SessionManager::resume(store, &session_id).await?;
     debug!("resuming session {session_id}");
-    Ok((session, messages))
+    Ok((session, messages, title))
 }
 
 /// Trim and classify a `--continue` argument into a [`ResumeMode`].
@@ -209,8 +209,9 @@ mod tests {
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let (_session, messages) = resolve_session(&store, "m", None, false).await.unwrap();
+        let (_session, messages, title) = resolve_session(&store, "m", None, false).await.unwrap();
         assert!(messages.is_empty());
+        assert!(title.is_none());
         assert!(
             std::fs::read_dir(test_project_dir(dir.path()))
                 .unwrap()
@@ -301,10 +302,11 @@ mod tests {
         // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
-        let (resumed, messages) = resolve_session(&store, "m", Some(&arg), false)
+        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.session_id(), full_id);
         assert_eq!(messages.len(), 1);
+        assert_eq!(title.as_deref(), Some("hello"));
     }
 }

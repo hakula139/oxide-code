@@ -117,7 +117,7 @@ impl SessionManager {
     pub(crate) async fn resume(
         store: &SessionStore,
         session_id: &str,
-    ) -> Result<(Self, Vec<Message>)> {
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
         let mut data = store.load_session_data(session_id)?;
         sanitize_resumed_messages(&mut data.messages);
         // Run the emptiness check *after* sanitization. Otherwise a
@@ -138,6 +138,7 @@ impl SessionManager {
             .find_map(extract_user_text)
             .map(String::from);
         let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
+        let title = data.title.map(|t| t.title);
 
         let manager = Self {
             store: store.clone(),
@@ -151,7 +152,7 @@ impl SessionManager {
             finished: false,
             write_failed: false,
         };
-        Ok((manager, data.messages))
+        Ok((manager, data.messages, title))
     }
 
     /// Record a conversation message to the session file.
@@ -476,7 +477,8 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
@@ -495,7 +497,8 @@ mod tests {
             .unwrap();
         drop(original); // no finish() — simulates a crash
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
     }
@@ -519,7 +522,8 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
@@ -577,7 +581,8 @@ mod tests {
             .unwrap();
         drop(original); // crash before tool_result
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 2);
         let assistant = &messages[1];
         assert_eq!(assistant.role, Role::Assistant);
@@ -620,7 +625,8 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(
             messages.len(),
             1,
@@ -695,7 +701,8 @@ mod tests {
             .unwrap();
         drop(original); // crash before next assistant response
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 4, "sentinel should be appended");
         assert_eq!(messages[3].role, Role::Assistant);
         assert!(
@@ -719,7 +726,7 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::user("follow up"))
             .await
@@ -770,7 +777,7 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::assistant("Done."))
             .await
@@ -975,7 +982,7 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed.finish().unwrap();
         drop(resumed);
 

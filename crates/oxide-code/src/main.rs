@@ -113,7 +113,7 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages) =
+    let (session, messages, title) =
         resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
@@ -127,7 +127,16 @@ async fn async_main() -> Result<()> {
         return bare_repl(&client, tools, &model, show_thinking, session, messages).await;
     }
 
-    run_tui(&client, &model, show_thinking, tools, session, messages).await
+    run_tui(
+        &client,
+        &model,
+        show_thinking,
+        tools,
+        session,
+        messages,
+        title,
+    )
+    .await
 }
 
 // ── Session Helpers ──
@@ -220,6 +229,7 @@ async fn run_tui(
     tools: Arc<ToolRegistry>,
     session: SessionManager,
     resumed_messages: Vec<Message>,
+    resumed_title: Option<String>,
 ) -> Result<()> {
     tui::terminal::install_panic_hook();
 
@@ -244,6 +254,7 @@ async fn run_tui(
         display_model,
         show_thinking,
         cwd,
+        resumed_title,
         agent_rx,
         user_tx,
         &resumed_messages,

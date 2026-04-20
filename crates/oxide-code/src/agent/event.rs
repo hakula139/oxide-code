@@ -41,6 +41,13 @@ pub(crate) enum AgentEvent {
     /// The current assistant turn is complete (text-only response, no more
     /// tool calls).
     TurnComplete,
+    /// A newly-generated session title (e.g., AI-generated via Haiku). The
+    /// TUI updates the status bar slot; other sinks ignore it.
+    #[expect(
+        dead_code,
+        reason = "constructed by the AI-title generator in a later commit; kept here so the TUI consumer is already wired"
+    )]
+    SessionTitleUpdated(String),
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -130,6 +137,10 @@ impl AgentSink for StdioSink {
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 println!();
+            }
+            AgentEvent::SessionTitleUpdated(_) => {
+                // Titles are a TUI-only affordance; the stdio sink has no
+                // persistent header to rewrite.
             }
             AgentEvent::Error(msg) => {
                 eprintln!("Error: {msg}");

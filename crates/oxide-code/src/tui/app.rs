@@ -34,10 +34,15 @@ pub(crate) struct App {
 }
 
 impl App {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "ctor wires the full surface (display config, IPC channels, resumed state, tool registry); a builder would obscure which dependencies App owns"
+    )]
     pub(crate) fn new(
         model: String,
         show_thinking: bool,
         cwd: String,
+        title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
@@ -46,8 +51,10 @@ impl App {
         let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, tools.as_ref());
+        let mut status_bar = StatusBar::new(theme, model, cwd);
+        status_bar.set_title(title);
         Self {
-            status_bar: StatusBar::new(theme, model, cwd),
+            status_bar,
             chat,
             input: InputArea::new(theme),
             agent_rx,
@@ -179,6 +186,9 @@ impl App {
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
+            }
+            AgentEvent::SessionTitleUpdated(title) => {
+                self.status_bar.set_title(Some(title));
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);

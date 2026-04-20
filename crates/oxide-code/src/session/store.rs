@@ -177,6 +177,7 @@ impl SessionStore {
         let mut reader = BufReader::new(file);
         let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
         let mut referenced: HashSet<Uuid> = HashSet::new();
+        let mut latest_title: Option<TitleInfo> = None;
         let mut buf = Vec::new();
         let mut line_no: u32 = 0;
 
@@ -241,6 +242,18 @@ impl SessionStore {
                         },
                     );
                 }
+                // Track the newest title so the TUI's status bar and any
+                // future surface can display it on resume without a second
+                // pass over the file. AI-generated titles appended later beat
+                // the first-prompt title by `updated_at`.
+                Entry::Title {
+                    title, updated_at, ..
+                } if latest_title
+                    .as_ref()
+                    .is_none_or(|cur| updated_at > cur.updated_at) =>
+                {
+                    latest_title = Some(TitleInfo { title, updated_at });
+                }
                 _ => {}
             }
         }
@@ -249,6 +262,7 @@ impl SessionStore {
         Ok(SessionData {
             messages,
             last_uuid,
+            title: latest_title,
         })
     }
 
@@ -473,6 +487,10 @@ pub(crate) struct SessionData {
     /// `parent_uuid` for the first newly-recorded message. `None` if the
     /// file contains no messages.
     pub(crate) last_uuid: Option<Uuid>,
+    /// Latest [`Entry::Title`] in the file (max `updated_at`). `None` when
+    /// no title was ever recorded (e.g., the session exited before the
+    /// first user prompt).
+    pub(crate) title: Option<TitleInfo>,
 }
 
 // ── File Opening ──
