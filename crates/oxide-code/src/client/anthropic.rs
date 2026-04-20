@@ -426,11 +426,112 @@ impl Client {
         Ok(rx)
     }
 
+    /// Send a single non-streaming completion request and return the
+    /// concatenated text of the assistant's response.
+    ///
+    /// Used for background helpers like AI title generation — a one-shot
+    /// `prompt → answer` call that bypasses the tools / thinking / dynamic
+    /// context plumbing the interactive stream needs. The auth pipeline
+    /// (OAuth vs API key, billing attestation) still applies so the same
+    /// client works for both auth modes.
+    ///
+    /// Non-text content blocks (`tool_use`, thinking, …) are filtered out
+    /// so callers get the assistant's user-visible answer directly.
+    #[expect(
+        dead_code,
+        reason = "consumed by the AI-title generator in the next commit; the HTTP pipeline is reviewable on its own here"
+    )]
+    pub async fn complete(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let messages = [Message::user(user)];
+
+        let billing_header = matches!(self.config.auth, Auth::OAuth(_)).then(|| {
+            let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
+            billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
+        });
+
+        // System blocks: billing → identity prefix → user-supplied prompt.
+        // Identity prefix is a cheap safety net — Haiku may not require it
+        // but non-Haiku models return 429 for OAuth without it, and the
+        // model (`model` param) is caller-controlled.
+        let mut system_blocks = Vec::with_capacity(3);
+        if let Some(ref header) = billing_header {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: header,
+                cache_control: None,
+            });
+        }
+        system_blocks.push(SystemBlock {
+            r#type: "text",
+            text: SYSTEM_PROMPT_PREFIX,
+            cache_control: None,
+        });
+        if !system.is_empty() {
+            system_blocks.push(SystemBlock {
+                r#type: "text",
+                text: system,
+                cache_control: None,
+            });
+        }
+
+        let mut body = serde_json::to_string(&CreateMessageRequest {
+            model,
+            max_tokens,
+            stream: false,
+            metadata: self.build_metadata(),
+            system: system_blocks,
+            tools: None,
+            thinking: None,
+            messages: &messages,
+        })
+        .context("failed to serialize request")?;
+
+        if billing_header.is_some() {
+            body = billing::inject_cch(&body);
+        }
+
+        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
+        debug!(model, body_len = body.len(), "sending completion request");
+
+        let response = self.http.post(&url).body(body).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("API error (HTTP {status}): {body}");
+        }
+
+        let CompletionResponse { content } = response
+            .json()
+            .await
+            .context("failed to parse completion response")?;
+        Ok(content
+            .into_iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Build the `metadata.user_id` field as a stringified JSON object.
     fn build_metadata(&self) -> RequestMetadata {
         let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
         RequestMetadata { user_id }
     }
+}
+
+/// Shape we accept back from the non-streaming `/v1/messages` endpoint.
+/// The API sends many more fields (`id`, `role`, `model`, `stop_reason`,
+/// `usage`); we only care about the content blocks — serde ignores the rest.
+#[derive(Deserialize)]
+struct CompletionResponse {
+    content: Vec<ContentBlock>,
 }
 
 /// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
@@ -836,6 +937,39 @@ mod tests {
         let (statics, dynamic) = split_at_boundary(sections);
         assert_eq!(statics, vec!["intro", "tasks"]);
         assert!(dynamic.is_empty());
+    }
+
+    // ── CompletionResponse ──
+
+    #[test]
+    fn completion_response_deserializes_and_filters_non_text_blocks() {
+        // The non-streaming endpoint can hand back tool_use, thinking, and
+        // plain text blocks. Client::complete concatenates the Text blocks
+        // and drops the rest; assert the pieces we rely on here.
+        let body = r#"{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type":"thinking","thinking":"pondering","signature":"sig"},
+                {"type":"text","text":"Fix auth bug"},
+                {"type":"tool_use","id":"t1","name":"noop","input":{}},
+                {"type":"text","text":" and friends"}
+            ],
+            "usage": {"input_tokens":10,"output_tokens":5}
+        }"#;
+        let parsed: CompletionResponse = serde_json::from_str(body).unwrap();
+        let joined: String = parsed
+            .content
+            .into_iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, "Fix auth bug and friends");
     }
 
     // ── first_user_text ──
