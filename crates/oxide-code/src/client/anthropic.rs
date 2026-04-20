@@ -444,53 +444,14 @@ impl Client {
         user: &str,
         max_tokens: u32,
     ) -> Result<String> {
-        let messages = [Message::user(user)];
-
-        let billing_header = matches!(self.config.auth, Auth::OAuth(_)).then(|| {
-            let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
-            billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
-        });
-
-        // System blocks: billing → identity prefix → user-supplied prompt.
-        // Identity prefix is a cheap safety net — Haiku may not require it
-        // but non-Haiku models return 429 for OAuth without it, and the
-        // model (`model` param) is caller-controlled.
-        let mut system_blocks = Vec::with_capacity(3);
-        if let Some(ref header) = billing_header {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: header,
-                cache_control: None,
-            });
-        }
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: SYSTEM_PROMPT_PREFIX,
-            cache_control: None,
-        });
-        if !system.is_empty() {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: system,
-                cache_control: None,
-            });
-        }
-
-        let mut body = serde_json::to_string(&CreateMessageRequest {
+        let body = build_completion_body(
             model,
+            system,
+            user,
             max_tokens,
-            stream: false,
-            metadata: self.build_metadata(),
-            system: system_blocks,
-            tools: None,
-            thinking: None,
-            messages: &messages,
-        })
-        .context("failed to serialize request")?;
-
-        if billing_header.is_some() {
-            body = billing::inject_cch(&body);
-        }
+            &self.config.auth,
+            &self.session_id,
+        )?;
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
@@ -506,20 +467,98 @@ impl Client {
             .json()
             .await
             .context("failed to parse completion response")?;
-        Ok(content
-            .into_iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text),
-                _ => None,
-            })
-            .collect())
+        Ok(join_text_blocks(content))
     }
 
     /// Build the `metadata.user_id` field as a stringified JSON object.
     fn build_metadata(&self) -> RequestMetadata {
-        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
-        RequestMetadata { user_id }
+        build_metadata(&self.session_id)
     }
+}
+
+/// Shared `metadata.user_id` builder used by both the streaming and
+/// non-streaming request paths. Kept at file scope so
+/// [`build_completion_body`] can call it without pulling in `&Client`.
+fn build_metadata(session_id: &str) -> RequestMetadata {
+    let user_id = serde_json::json!({ "session_id": session_id }).to_string();
+    RequestMetadata { user_id }
+}
+
+/// Serialize the JSON request body for [`Client::complete`]. Extracted
+/// so the billing-header / identity-prefix / system-block assembly can
+/// be asserted on without a live HTTP client — the HTTP leg of
+/// [`Client::complete`] is covered by a `TcpListener` integration test
+/// further down.
+///
+/// System block order matches [`Client::stream_message`]:
+///   1. Billing header (OAuth only; no `cache_control`, injected with `cch`)
+///   2. Identity prefix (required for non-Haiku OAuth, cheap safety net)
+///   3. Caller-supplied system prompt (omitted when empty)
+fn build_completion_body(
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    auth: &Auth,
+    session_id: &str,
+) -> Result<String> {
+    let messages = [Message::user(user)];
+
+    let billing_header = matches!(auth, Auth::OAuth(_)).then(|| {
+        let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
+        billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
+    });
+
+    let mut system_blocks = Vec::with_capacity(3);
+    if let Some(ref header) = billing_header {
+        system_blocks.push(SystemBlock {
+            r#type: "text",
+            text: header,
+            cache_control: None,
+        });
+    }
+    system_blocks.push(SystemBlock {
+        r#type: "text",
+        text: SYSTEM_PROMPT_PREFIX,
+        cache_control: None,
+    });
+    if !system.is_empty() {
+        system_blocks.push(SystemBlock {
+            r#type: "text",
+            text: system,
+            cache_control: None,
+        });
+    }
+
+    let mut body = serde_json::to_string(&CreateMessageRequest {
+        model,
+        max_tokens,
+        stream: false,
+        metadata: build_metadata(session_id),
+        system: system_blocks,
+        tools: None,
+        thinking: None,
+        messages: &messages,
+    })
+    .context("failed to serialize request")?;
+
+    if billing_header.is_some() {
+        body = billing::inject_cch(&body);
+    }
+    Ok(body)
+}
+
+/// Flatten a `messages.create` response's content array into the
+/// assistant's user-visible text. Extracted so the filter logic is
+/// reusable and independently testable.
+fn join_text_blocks(content: Vec<ContentBlock>) -> String {
+    content
+        .into_iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shape we accept back from the non-streaming `/v1/messages` endpoint.
@@ -935,13 +974,153 @@ mod tests {
         assert!(dynamic.is_empty());
     }
 
-    // ── CompletionResponse ──
+    // ── build_metadata ──
 
     #[test]
-    fn completion_response_deserializes_and_filters_non_text_blocks() {
+    fn build_metadata_wraps_session_id_in_stringified_json() {
+        // The API accepts `metadata.user_id` as a string, not a nested
+        // object — claude-code stringifies a JSON object with `session_id`
+        // (and sometimes `device_id` / `account_uuid`). Round-trip check
+        // keeps the contract explicit.
+        let meta = build_metadata("abc-123");
+        let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
+        assert_eq!(parsed["session_id"], "abc-123");
+    }
+
+    // ── build_completion_body ──
+
+    fn parse_body(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("serialized body must be valid JSON")
+    }
+
+    #[test]
+    fn build_completion_body_shapes_non_streaming_request_with_no_tools_or_thinking() {
+        // stream=false, tools omitted, thinking omitted — the
+        // non-streaming path must not accidentally carry interactive
+        // plumbing; Haiku would reject `thinking` with 400 and extra
+        // tools would waste tokens.
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        assert_eq!(v["model"], "claude-haiku-4-5");
+        assert_eq!(v["max_tokens"], 40);
+        assert_eq!(v["stream"], false);
+        assert!(v.get("tools").is_none(), "tools must be omitted: {v}");
+        assert!(v.get("thinking").is_none(), "thinking must be omitted: {v}");
+        let user = &v["messages"][0];
+        assert_eq!(user["role"], "user");
+        assert_eq!(user["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn build_completion_body_api_key_skips_billing_header_keeps_identity_prefix() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys-prompt",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        // API-key path: only identity prefix + user-supplied system.
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(system[1]["text"], "sys-prompt");
+        assert!(
+            !body.contains("x-anthropic-billing-header:"),
+            "API-key requests must not emit billing attestation: {body}",
+        );
+    }
+
+    #[test]
+    fn build_completion_body_oauth_injects_billing_header_and_cch() {
+        // OAuth must emit an initial billing block (Claude Code's fingerprint
+        // contract) and the placeholder `cch=00000` must be replaced by an
+        // actual 5-hex-digit tag via `inject_cch`.
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys-prompt",
+            "Fix login",
+            40,
+            &Auth::OAuth("t".to_owned()),
+            "sid",
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3, "expected billing + identity + user: {v}");
+        let first = system[0]["text"].as_str().unwrap();
+        assert!(
+            first.starts_with("x-anthropic-billing-header:"),
+            "first block must be the billing header: {first}",
+        );
+        assert!(
+            first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")),
+            "billing header should name the current CLI version: {first}",
+        );
+        assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(system[2]["text"], "sys-prompt");
+        assert!(
+            !body.contains("cch=00000"),
+            "placeholder `cch=00000` must have been replaced by a real tag: {body}",
+        );
+    }
+
+    #[test]
+    fn build_completion_body_empty_system_omits_caller_block_but_keeps_identity_prefix() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        // Identity prefix must survive even without a caller system
+        // prompt; non-Haiku OAuth requests rely on its presence in
+        // block 0 (API-key case here, but same contract).
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+    }
+
+    #[test]
+    fn build_completion_body_routes_session_id_into_metadata() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "unique-sid-789",
+        )
+        .unwrap();
+        assert!(
+            body.contains("unique-sid-789"),
+            "session_id must flow into metadata.user_id: {body}",
+        );
+    }
+
+    // ── join_text_blocks / CompletionResponse ──
+
+    #[test]
+    fn join_text_blocks_concatenates_text_and_drops_tool_and_thinking_blocks() {
         // The non-streaming endpoint can hand back tool_use, thinking, and
-        // plain text blocks. Client::complete concatenates the Text blocks
-        // and drops the rest; assert the pieces we rely on here.
+        // plain text blocks. `join_text_blocks` concatenates the Text blocks
+        // and drops the rest; exercising via the response-shape path also
+        // pins the `CompletionResponse` deserializer on live-like JSON.
         let body = r#"{
             "id": "msg_1",
             "type": "message",
@@ -957,15 +1136,20 @@ mod tests {
             "usage": {"input_tokens":10,"output_tokens":5}
         }"#;
         let parsed: CompletionResponse = serde_json::from_str(body).unwrap();
-        let joined: String = parsed
-            .content
-            .into_iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(joined, "Fix auth bug and friends");
+        assert_eq!(join_text_blocks(parsed.content), "Fix auth bug and friends");
+    }
+
+    #[test]
+    fn join_text_blocks_returns_empty_for_tool_only_response() {
+        // Defensive: if Haiku returns only a tool_use (ignoring our
+        // "JSON envelope" instruction), we must not surface it — the
+        // caller treats empty as "parse failure, keep first-prompt title".
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "t1".to_owned(),
+            name: "noop".to_owned(),
+            input: serde_json::Value::Null,
+        }];
+        assert_eq!(join_text_blocks(blocks), "");
     }
 
     // ── first_user_text ──
