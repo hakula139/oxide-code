@@ -419,4 +419,41 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(title.as_deref(), Some("hello"));
     }
+
+    #[tokio::test]
+    async fn resolve_session_all_widens_scope_to_list_all() {
+        // `--all` flips the listing from `store.list()` (current project only)
+        // to `store.list_all()` (every project subdir). The prefix match
+        // then resolves across projects and the error hint drops the
+        // "in this project" qualifier. Exercising the `all = true` branch
+        // here also covers the empty `scope_hint`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("all scope"))
+            .await
+            .unwrap();
+        drop(original);
+
+        let arg = Some(full_id[..10].to_owned());
+        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), true)
+            .await
+            .unwrap();
+        assert_eq!(resumed.session_id(), full_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(title.as_deref(), Some("all scope"));
+
+        // Error path under `all = true` omits the "use --all" hint.
+        let missing = Some("zzzz".to_owned());
+        let err = match resolve_session(&store, "m", Some(&missing), true).await {
+            Ok(_) => panic!("expected prefix miss under --all to bail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            !err.contains("use --all"),
+            "hint should not suggest --all when already set: {err}",
+        );
+    }
 }

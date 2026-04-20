@@ -488,6 +488,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_empty_cwd_drops_cwd_slot_entirely() {
+        // When the bar is constructed without a cwd (e.g., current_dir
+        // failed), the cwd branch must short-circuit — no trailing gap,
+        // no stray right margin. Rendering at a generous width exercises
+        // the `cwd.is_empty()` guard without racing the title-dropped path.
+        let bar = StatusBar::new(Theme::default(), "test-model".to_owned(), String::new());
+        let output = render_to_string(&bar, 120);
+        assert!(output.contains("ox"));
+        assert!(output.contains("test-model"));
+        assert!(output.contains("ready"));
+        assert!(
+            !output.contains('~'),
+            "no tildified path should appear: {output:?}",
+        );
+    }
+
+    // ── handle_event ──
+
+    #[test]
+    fn handle_event_is_inert() {
+        // The status bar observes state via setters (`set_status`,
+        // `set_title`, `tick`); crossterm events pass through untouched.
+        let mut bar = test_bar();
+        let key = Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(bar.handle_event(&key).is_none());
+    }
+
+    // ── fit_layout ──
+
+    #[test]
+    fn fit_layout_keeps_both_slots_when_everything_fits() {
+        // Wide bar: core + title + cwd all fit with room to spare.
+        assert_eq!(fit_layout(80, 25, 10, 10), (true, true));
+    }
+
+    #[test]
+    fn fit_layout_drops_title_before_cwd_when_combined_too_wide() {
+        // core (25) + title (10) + cwd (10) = 45, too wide for 40. cwd alone
+        // fits (35 < 40). Title is sacrificed — cwd carries location context
+        // that's harder to recover elsewhere.
+        assert_eq!(fit_layout(40, 25, 10, 10), (false, true));
+    }
+
+    #[test]
+    fn fit_layout_keeps_title_when_cwd_is_too_wide_to_fit_alone() {
+        // core (25) + cwd (20) = 45, too wide for 40 — cwd drops.
+        // core (25) + title (5) = 30 < 40 — title survives.
+        // Fallback arm: when cwd can't fit anywhere, show the title instead
+        // of an empty right side.
+        assert_eq!(fit_layout(40, 25, 5, 20), (true, false));
+    }
+
+    #[test]
+    fn fit_layout_drops_both_when_nothing_extra_fits() {
+        // core already fills the bar; neither optional slot earns its column.
+        assert_eq!(fit_layout(26, 25, 5, 5), (false, false));
+    }
+
     // ── truncate_title ──
 
     #[test]
