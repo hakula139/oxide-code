@@ -236,27 +236,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    //! State-transition tests for the `App` reducer.
-    //!
-    //! `App::run` and `App::render` require a real terminal so they stay
-    //! untested here. Everything else — construction, event dispatch,
-    //! agent-event reducing, and turn bookkeeping — is pure state
-    //! mutation over a plain `App` value, so we build one without a
-    //! terminal and assert on the observable side effects (status, chat,
-    //! input, and the outbound user channel).
-
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::tool::ToolRegistry;
 
-    /// Returns an `App` in its default "idle, empty transcript" state,
-    /// paired with the two channel ends callers need to drive or drain
-    /// it. `rx` is the `user_tx` consumer (for assertions on dispatched
-    /// actions); `agent_tx` is the `agent_rx` producer (unused by these
-    /// tests but kept alive so `agent_rx.recv()` doesn't return `None`
-    /// and tripping `should_quit` in production code paths we don't
-    /// exercise here).
+    // `App::run` / `App::render` need a real terminal and stay untested
+    // here; every other method is pure state mutation over `App`, which
+    // these tests drive by constructing one without a terminal and
+    // asserting on the observable side effects.
+
+    /// Fresh idle `App` plus the `user_tx` consumer (for forwarded-action
+    /// assertions) and the `agent_tx` producer (kept alive so the
+    /// `agent_rx` side doesn't close on construction).
     fn test_app(
         title: Option<&str>,
     ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {

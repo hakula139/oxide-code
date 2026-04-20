@@ -495,14 +495,15 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 
 /// Serialize the JSON request body for [`Client::complete`]. Extracted
 /// so the billing-header / identity-prefix / system-block assembly can
-/// be asserted on without a live HTTP client — the HTTP leg of
-/// [`Client::complete`] is covered by a `TcpListener` integration test
-/// further down.
+/// be asserted on without a live HTTP client; the HTTP leg of
+/// [`Client::complete`] is covered behind a wiremock harness (see
+/// `docs/roadmap.md` → Test Coverage).
 ///
 /// System block order matches [`Client::stream_message`]:
-///   1. Billing header (OAuth only; no `cache_control`, injected with `cch`)
-///   2. Identity prefix (required for non-Haiku OAuth, cheap safety net)
-///   3. Caller-supplied system prompt (omitted when empty)
+///
+/// 1. Billing header (OAuth only; no `cache_control`, injected with `cch`).
+/// 2. Identity prefix (required for non-Haiku OAuth, cheap safety net).
+/// 3. Caller-supplied system prompt (omitted when empty).
 fn build_completion_body(
     model: &str,
     system: &str,
