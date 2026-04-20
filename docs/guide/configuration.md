@@ -38,6 +38,17 @@ All sections and fields are optional. Project config (`ox.toml`) overrides user 
 | `base_url`   | string  | `https://api.anthropic.com` | API base URL            |
 | `max_tokens` | integer | `16384`                     | Max tokens per response |
 
+#### 1M context window — `[1m]` tag
+
+Append `[1m]` to `model` to opt into the 1M-context window on models that support it (Opus 4.6+, Sonnet 4.6+):
+
+```toml
+[client]
+model = "claude-opus-4-7[1m]"
+```
+
+The tag is stripped before the model string reaches the wire — it's a client-side convention matching claude-code. We don't auto-enable 1M based on the model family because subscriptions and third-party gateways vary in whether 1M access is included, and silently sending the beta header produces `HTTP 400 long context beta not available for this subscription`. Explicit opt-in sidesteps that entire class of error.
+
 ### `[tui]` — Terminal UI
 
 | Key             | Type    | Default | Description            |

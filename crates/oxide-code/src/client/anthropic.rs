@@ -398,7 +398,8 @@ impl Client {
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
-            model: &self.config.model,
+            // `[1m]` is a client-side tag; strip before the wire.
+            model: api_model_id(&self.config.model),
             max_tokens: self.config.max_tokens,
             stream: true,
             metadata: self.build_metadata(),
@@ -501,6 +502,12 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 /// classifier helpers) skip the agent-oriented betas the streaming chat
 /// needs.
 ///
+/// The `[1m]` suffix on a model string is a user opt-in to the 1M-context
+/// window, following claude-code's convention. It toggles
+/// [`CONTEXT_1M_BETA_HEADER`] independently of the model family so we
+/// don't auto-attach the beta for users whose subscription or gateway
+/// doesn't include 1M access.
+///
 /// The gating rules follow the capability tests documented in
 /// `docs/research/anthropic-api.md` → "Per-model beta sets". Substring
 /// matching mirrors the same canonical-name check the gateway performs,
@@ -512,8 +519,12 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
     let is_opus_4 = m.contains("opus-4");
     let is_sonnet_4 = m.contains("sonnet-4");
     let is_haiku_4 = m.contains("haiku-4");
-    let is_opus_46 = m.contains("opus-4-6");
-    let is_sonnet_46 = m.contains("sonnet-4-6");
+    // "Opus 4.6 and newer". Conservative explicit list — bumped here as
+    // each new Opus / Sonnet minor release lands, because betas like
+    // `effort-*` are model-capability-gated and we don't want to
+    // auto-claim support for versions that don't actually carry it.
+    let is_opus_ge_46 = m.contains("opus-4-6") || m.contains("opus-4-7");
+    let is_sonnet_ge_46 = m.contains("sonnet-4-6") || m.contains("sonnet-4-7");
 
     let mut out = Vec::with_capacity(7);
 
@@ -554,16 +565,38 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
     if is_agentic && (is_opus_4 || is_sonnet_4) {
         out.push(INTERLEAVED_THINKING_BETA_HEADER);
     }
-    // 1M context: Opus 4.6 / Sonnet 4.6 only. Haiku has a 200K window.
-    if is_opus_46 || is_sonnet_46 {
+    // 1M context: explicit user opt-in via the `[1m]` model suffix.
+    // Family-based auto-enable would 400 on subscriptions / gateways
+    // that don't carry 1M access (see `has_1m_tag` doc for the full
+    // rationale).
+    if has_1m_tag(model) {
         out.push(CONTEXT_1M_BETA_HEADER);
     }
-    // Effort control: Opus 4.6 / Sonnet 4.6 only.
-    if is_agentic && (is_opus_46 || is_sonnet_46) {
+    // Effort control: Opus 4.6+ / Sonnet 4.6+ only.
+    if is_agentic && (is_opus_ge_46 || is_sonnet_ge_46) {
         out.push(EFFORT_BETA_HEADER);
     }
 
     out
+}
+
+/// Strip the `[1m]` tag (if any) from a caller-supplied model string,
+/// returning the canonical API model ID. The tag is a client-side
+/// convention — the Anthropic API rejects it on the wire.
+fn api_model_id(model: &str) -> &str {
+    model
+        .split_once("[1m]")
+        .map_or(model, |(base, _)| base.trim_end())
+}
+
+/// Whether `model` is tagged `[1m]`, i.e. the user is explicitly opting
+/// into the 1M-context window. The tag is case-insensitive to match
+/// claude-code. Auto-gating 1M on model family alone would 400 on
+/// subscriptions / gateways that don't include 1M access — the same
+/// subscription-mismatch class of bug that forced per-model beta gating
+/// for Haiku; making 1M explicit avoids it entirely.
+fn has_1m_tag(model: &str) -> bool {
+    model.to_lowercase().contains("[1m]")
 }
 
 /// Serialize the JSON request body for [`Client::complete`]. Extracted
@@ -614,7 +647,8 @@ fn build_completion_body(
     }
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
-        model,
+        // `[1m]` is a client-side tag; strip before the wire.
+        model: api_model_id(model),
         max_tokens,
         stream: false,
         metadata: build_metadata(session_id),
@@ -1480,15 +1514,27 @@ mod tests {
     }
 
     #[test]
-    fn compute_betas_agentic_opus_46_sends_full_set() {
+    fn compute_betas_agentic_opus_46_plain_omits_context_1m() {
+        // Plain `opus-4-6` without the `[1m]` tag does NOT auto-enable
+        // 1M context. This is the subscription-safety behavior: a
+        // gateway without 1M access would 400 the request if we sent
+        // `context-1m-2025-08-07` by default.
         let betas = compute_betas("claude-opus-4-6", &api_key(), true);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
         assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(!betas.contains(&OAUTH_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_with_1m_tag_adds_context_1m() {
+        // Explicit `[1m]` user opt-in → 1M beta flows.
+        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true);
+        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     #[test]
@@ -1546,14 +1592,45 @@ mod tests {
     }
 
     #[test]
-    fn compute_betas_unknown_alias_resolves_on_substring_match() {
-        // User-picked alias like claude-opus-4-7 inherits the Opus-4
-        // family's agentic set (thinking + context-management), but no
-        // 4-6-only betas (1M, effort).
+    fn compute_betas_opus_47_inherits_ge_46_effort() {
+        // Opus 4.7 matches the "opus-4-6 or newer" predicate so it gets
+        // `effort`, without needing a hand-update each release.
         let betas = compute_betas("claude-opus-4-7", &api_key(), true);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_opus_47_with_1m_tag_adds_context_1m() {
+        let betas = compute_betas("claude-opus-4-7[1m]", &api_key(), true);
+        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    // ── api_model_id / has_1m_tag ──
+
+    #[test]
+    fn api_model_id_strips_1m_tag() {
+        assert_eq!(api_model_id("claude-opus-4-7[1m]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_leaves_plain_model_untouched() {
+        assert_eq!(api_model_id("claude-opus-4-7"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_trims_trailing_space_before_tag() {
+        // Tolerate sloppy user input like `"claude-opus-4-7 [1m]"`.
+        assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn has_1m_tag_is_case_insensitive() {
+        assert!(has_1m_tag("claude-opus-4-7[1m]"));
+        assert!(has_1m_tag("claude-opus-4-7[1M]"));
+        assert!(!has_1m_tag("claude-opus-4-7"));
     }
 }
