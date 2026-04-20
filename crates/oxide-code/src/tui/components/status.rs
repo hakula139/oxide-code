@@ -126,7 +126,7 @@ impl Component for StatusBar {
         let core_width: usize = core.iter().map(Span::width).sum();
 
         // Title: `│ title` inserted between model and status when there is
-        // room. Truncated to MAX_TITLE_WIDTH, ellipsized if longer.
+        // room. Truncated to MAX_TITLE_WIDTH with a trailing ellipsis.
         let title_slot = self
             .title
             .as_deref()

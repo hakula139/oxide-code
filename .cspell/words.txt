@@ -15,7 +15,6 @@ dedupe
 deserialize
 disambiguable
 dtolnay
-ellipsized
 EACCES
 ESRCH
 feff
@@ -55,7 +54,6 @@ tokio
 toolu
 tracing
 unmaterialized
-unparseable
 unresumable
 urandom
 venv

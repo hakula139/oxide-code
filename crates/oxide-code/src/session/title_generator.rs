@@ -95,7 +95,7 @@ async fn generate_and_record(
         .complete(HAIKU_MODEL, SYSTEM_PROMPT, &prompt, MAX_TOKENS)
         .await
         .context("Haiku completion failed")?;
-    let title = parse_title(&raw).context("Haiku returned an unparseable title")?;
+    let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
     // Hold the session lock only for the append. `append_ai_title` does
     // one small write + flush; holding longer would block new user
