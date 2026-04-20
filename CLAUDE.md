@@ -36,6 +36,7 @@ ox     # Start an interactive session
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
 ├── main.rs                     # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                  # Conversation message types
+├── model.rs                    # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)

@@ -40,7 +40,7 @@ All sections and fields are optional. Project config (`ox.toml`) overrides user 
 
 #### 1M context window — `[1m]` tag
 
-Append `[1m]` to `model` to opt into the 1M-context window on models that support it (Opus 4.6+, Sonnet 4.6+):
+Append `[1m]` to `model` to opt into the 1M-context window on models that support it — any Sonnet 4.x, plus Opus 4.6 and newer:
 
 ```toml
 [client]
@@ -48,6 +48,8 @@ model = "claude-opus-4-7[1m]"
 ```
 
 The tag is stripped before the model string reaches the wire — it's a client-side convention matching claude-code. We don't auto-enable 1M based on the model family because subscriptions and third-party gateways vary in whether 1M access is included, and silently sending the beta header produces `HTTP 400 long context beta not available for this subscription`. Explicit opt-in sidesteps that entire class of error.
+
+If you tag a model that doesn't actually support 1M (e.g. `claude-haiku-4-5[1m]` — Haiku has a 200K window), the tag is silently dropped rather than forwarded to the API.
 
 ### `[tui]` — Terminal UI
 

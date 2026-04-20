@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod config;
 mod message;
+mod model;
 mod prompt;
 mod session;
 mod tool;

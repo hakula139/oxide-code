@@ -496,42 +496,34 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 }
 
 /// Compute the `anthropic-beta` header value for a request targeting
-/// `model`. Model families accept different beta sets — Haiku rejects
-/// `context-1m`, `effort`, and `interleaved-thinking` on most gateways —
-/// and non-agentic one-shot calls (title generation, future compaction /
-/// classifier helpers) skip the agent-oriented betas the streaming chat
-/// needs.
+/// `model`. Each beta is gated on a specific `Capabilities` flag from
+/// the [`crate::model`] lookup table, so adding or bumping a model only
+/// means editing that one table — this function stays fixed.
 ///
-/// The `[1m]` suffix on a model string is a user opt-in to the 1M-context
-/// window, following claude-code's convention. It toggles
-/// [`CONTEXT_1M_BETA_HEADER`] independently of the model family so we
-/// don't auto-attach the beta for users whose subscription or gateway
-/// doesn't include 1M access.
+/// `is_agentic` distinguishes the streaming chat path (full beta set)
+/// from one-shot utility calls (title generation, future compaction /
+/// classifiers) that skip agent-oriented betas so the request stays
+/// minimal and gateway-friendly.
 ///
-/// The gating rules follow the capability tests documented in
-/// `docs/research/anthropic-api.md` → "Per-model beta sets". Substring
-/// matching mirrors the same canonical-name check the gateway performs,
-/// so a custom alias like `claude-opus-4-7` still lights up Opus-family
-/// betas until its base capabilities are explicitly known.
+/// `[1m]` on the model string is a user opt-in to the 1M-context
+/// window, following the upstream convention. It toggles
+/// [`CONTEXT_1M_BETA_HEADER`] independently of the capability table so
+/// the user can force-enable on a gateway that supports 1M even when
+/// the table row doesn't claim it — and conversely, subscription
+/// mismatches don't auto-400 because we're not attaching the beta
+/// silently.
 fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str> {
-    let m = model.to_lowercase();
-    let is_haiku = m.contains("haiku");
-    let is_opus_4 = m.contains("opus-4");
-    let is_sonnet_4 = m.contains("sonnet-4");
-    let is_haiku_4 = m.contains("haiku-4");
-    // "Opus 4.6 and newer". Conservative explicit list — bumped here as
-    // each new Opus / Sonnet minor release lands, because betas like
-    // `effort-*` are model-capability-gated and we don't want to
-    // auto-claim support for versions that don't actually carry it.
-    let is_opus_ge_46 = m.contains("opus-4-6") || m.contains("opus-4-7");
-    let is_sonnet_ge_46 = m.contains("sonnet-4-6") || m.contains("sonnet-4-7");
+    let caps = crate::model::lookup(model)
+        .map(|info| info.capabilities)
+        .unwrap_or_default();
+    let is_haiku = model.to_lowercase().contains("haiku");
 
     let mut out = Vec::with_capacity(7);
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta sets:
     // identity / auth first, then universal agentic betas, then the
-    // model-tier-gated ones. Keeps the capability matrix readable in one
-    // place across the table and the code.
+    // capability-gated ones. Keeps the matrix readable across the table
+    // and the code.
 
     // Identity / auth ─────────────────────────────────────────────────
 
@@ -546,9 +538,7 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
 
     // Universal agentic ───────────────────────────────────────────────
 
-    // Context management: Opus 4 / Sonnet 4 / Haiku 4. Utility calls
-    // have no tool-clearing or thinking-preservation need.
-    if is_agentic && (is_opus_4 || is_sonnet_4 || is_haiku_4) {
+    if is_agentic && caps.context_management {
         out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
     }
     // Prompt-caching scope: 1P-intended but no-op on 3P when `scope` is
@@ -558,22 +548,21 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
         out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
     }
 
-    // Model-tier-gated ────────────────────────────────────────────────
+    // Capability-gated ────────────────────────────────────────────────
 
-    // Interleaved thinking: 3P gateways accept only Opus 4 / Sonnet 4;
-    // never Haiku. Non-agentic one-shots don't use thinking regardless.
-    if is_agentic && (is_opus_4 || is_sonnet_4) {
+    if is_agentic && caps.interleaved_thinking {
         out.push(INTERLEAVED_THINKING_BETA_HEADER);
     }
-    // 1M context: explicit user opt-in via the `[1m]` model suffix.
-    // Family-based auto-enable would 400 on subscriptions / gateways
-    // that don't carry 1M access (see `has_1m_tag` doc for the full
-    // rationale).
-    if has_1m_tag(model) {
+    // 1M context: explicit user opt-in via the `[1m]` model suffix,
+    // cross-checked against the model's capability flag so an
+    // unsupported tag (e.g. `claude-haiku-4[1m]`) silently no-ops
+    // rather than 400ing with `invalid_request_error`. Family-based
+    // auto-enable without the tag would break subscriptions that
+    // don't carry 1M access (see `has_1m_tag` doc for the rationale).
+    if has_1m_tag(model) && caps.context_1m {
         out.push(CONTEXT_1M_BETA_HEADER);
     }
-    // Effort control: Opus 4.6+ / Sonnet 4.6+ only.
-    if is_agentic && (is_opus_ge_46 || is_sonnet_ge_46) {
+    if is_agentic && caps.effort {
         out.push(EFFORT_BETA_HEADER);
     }
 
@@ -1544,13 +1533,24 @@ mod tests {
     }
 
     #[test]
-    fn compute_betas_agentic_sonnet_45_omits_1m_and_effort() {
-        // Sonnet 4.5 has neither 1M context nor effort support.
+    fn compute_betas_agentic_sonnet_45_plain_has_thinking_but_not_effort() {
+        // Sonnet 4.5 supports 1M via tag per upstream, but does not
+        // support effort. Plain (no `[1m]`) → no 1M beta.
         let betas = compute_betas("claude-sonnet-4-5", &api_key(), true);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_haiku_4_with_1m_tag_silently_drops_1m() {
+        // `claude-haiku-4-5[1m]` is a user mistake: Haiku has a 200K
+        // window. Rather than 400ing on the gateway, we cross-check
+        // `has_1m_tag` against `Capabilities::context_1m` and strip
+        // the beta.
+        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true);
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
     #[test]

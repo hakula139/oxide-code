@@ -64,26 +64,26 @@ The accepted beta set differs per model family and per call type (agentic chat v
 
 Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first, producing a visual staircase of narrowing checkmarks.
 
-| Beta                              | Opus 4 / Sonnet 4 | Opus 4.6+ / Sonnet 4.6+ | Haiku 4 (agentic) | Haiku (one-shot) |
-| --------------------------------- | ----------------- | ----------------------- | ----------------- | ---------------- |
-| `claude-code-20250219`            | ✓                 | ✓                       | ✓                 | —                |
-| `oauth-2025-04-20` (OAuth only)   | ✓                 | ✓                       | ✓                 | ✓                |
-| `context-management-2025-06-27`   | ✓                 | ✓                       | ✓                 | —                |
-| `prompt-caching-scope-2026-01-05` | ✓                 | ✓                       | ✓                 | —                |
-| `interleaved-thinking-2025-05-14` | ✓                 | ✓                       | —                 | —                |
-| `context-1m-2025-08-07`           | opt-in via `[1m]` | opt-in via `[1m]`       | —                 | —                |
-| `effort-2025-11-24`               | —                 | ✓                       | —                 | —                |
+| Beta                              | Opus 4.x (< 4.6) | Opus 4.6+         | Sonnet 4.x (< 4.6) | Sonnet 4.6+       | Haiku 4.x (agentic) | Haiku (one-shot) |
+| --------------------------------- | ---------------- | ----------------- | ------------------ | ----------------- | ------------------- | ---------------- |
+| `claude-code-20250219`            | ✓                | ✓                 | ✓                  | ✓                 | ✓                   | —                |
+| `oauth-2025-04-20` (OAuth only)   | ✓                | ✓                 | ✓                  | ✓                 | ✓                   | ✓                |
+| `context-management-2025-06-27`   | ✓                | ✓                 | ✓                  | ✓                 | ✓                   | —                |
+| `prompt-caching-scope-2026-01-05` | ✓                | ✓                 | ✓                  | ✓                 | ✓                   | —                |
+| `interleaved-thinking-2025-05-14` | ✓                | ✓                 | ✓                  | ✓                 | —                   | —                |
+| `context-1m-2025-08-07`           | —                | opt-in via `[1m]` | opt-in via `[1m]`  | opt-in via `[1m]` | —                   | —                |
+| `effort-2025-11-24`               | —                | ✓                 | —                  | ✓                 | —                   | —                |
 
 Key rules:
 
-- **Haiku + `context-1m`** — rejected (Haiku has a 200K window).
+- **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
 - **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
-- **Opus 4 / Sonnet 4** below 4.6 get thinking + context-management but not the effort beta.
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
-- **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-4-7` inherits the Opus-4.6+ bucket (effort) because the predicate is "Opus 4.6 or newer"; bump the predicate when future releases change capabilities.
+- **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
+- **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas; bump the `MODELS` table when a new family lands.
 
-oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, and overrides the `anthropic-beta` header per request so the streaming chat and the Haiku title generator each get the right subset.
+oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, which consults the ground-truth `Capabilities` flags in `crate::model::MODELS`. New models ship by adding a row to that table — no changes to the beta logic needed.
 
 ### 2. System prompt prefix (as a separate block)
 
