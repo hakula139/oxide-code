@@ -135,11 +135,7 @@ impl SessionStore {
     )]
     pub(crate) async fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("session not found: {}", path.display()))?;
-        Ok(SessionWriter { file })
+        open_append_at(&path)
     }
 
     /// Load a session's message chain and return the UUID of its tip
@@ -172,98 +168,7 @@ impl SessionStore {
     /// are warn-skipped and do not fail the load.
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
         let path = self.find_session_path(session_id)?;
-        let file =
-            File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
-        let mut reader = BufReader::new(file);
-        let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
-        let mut referenced: HashSet<Uuid> = HashSet::new();
-        let mut latest_title: Option<TitleInfo> = None;
-        let mut buf = Vec::new();
-        let mut line_no: u32 = 0;
-
-        // Read byte-by-line instead of `BufReader::lines()`. A crash
-        // during `writeln!` can leave the last record truncated —
-        // mid-byte of a multibyte UTF-8 codepoint in the worst case —
-        // and `lines()` propagates `InvalidData` there, failing the
-        // entire resume. Doing the decode ourselves lets us warn-skip
-        // bad lines with the same resilience we already apply to
-        // malformed JSON, and tolerate a missing trailing newline.
-        loop {
-            buf.clear();
-            let read = reader
-                .read_until(b'\n', &mut buf)
-                .with_context(|| format!("read error at line {}", line_no + 1))?;
-            if read == 0 {
-                break;
-            }
-            line_no += 1;
-            let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
-            if without_newline.is_empty() {
-                continue;
-            }
-            let line = match std::str::from_utf8(without_newline) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("skipping non-utf8 entry at line {line_no}: {e}");
-                    continue;
-                }
-            };
-            let entry: Entry = match serde_json::from_str(line) {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("skipping malformed entry at line {line_no}: {e}");
-                    continue;
-                }
-            };
-            match entry {
-                Entry::Header { version, .. } if version > CURRENT_VERSION => {
-                    bail!(
-                        "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
-                    );
-                }
-                Entry::Message {
-                    uuid,
-                    parent_uuid,
-                    message,
-                    timestamp,
-                } => {
-                    if let Some(p) = parent_uuid {
-                        referenced.insert(p);
-                    }
-                    // Last-append-wins on duplicate UUIDs — a retry or
-                    // partial-write recovery could replay an entry, and
-                    // we prefer the most recent representation.
-                    nodes.insert(
-                        uuid,
-                        ChainNode {
-                            parent_uuid,
-                            message,
-                            timestamp,
-                        },
-                    );
-                }
-                // Track the newest title so the TUI's status bar and any
-                // future surface can display it on resume without a second
-                // pass over the file. AI-generated titles appended later beat
-                // the first-prompt title by `updated_at`.
-                Entry::Title {
-                    title, updated_at, ..
-                } if latest_title
-                    .as_ref()
-                    .is_none_or(|cur| updated_at > cur.updated_at) =>
-                {
-                    latest_title = Some(TitleInfo { title, updated_at });
-                }
-                _ => {}
-            }
-        }
-
-        let (messages, last_uuid) = resolve_chain(nodes, &referenced);
-        Ok(SessionData {
-            messages,
-            last_uuid,
-            title: latest_title,
-        })
+        load_session_data_from_path(&path)
     }
 
     /// List sessions for the current project, sorted by file mtime
@@ -341,6 +246,136 @@ impl SessionStore {
             project_dir,
         })
     }
+}
+
+// ── Path-keyed primitives ──
+
+/// Open an existing session file in append mode by path. Underlies
+/// [`SessionStore::open_append`] (which resolves the path first) and
+/// `SessionManager::resume_from_path` (which bypasses the store entirely
+/// for sessions living outside the XDG project subdirectories).
+pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
+    let file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("session not found: {}", path.display()))?;
+    Ok(SessionWriter { file })
+}
+
+/// Load session data from an explicit path. See
+/// [`SessionStore::load_session_data`] for the description of DAG-based
+/// chain resolution and fault-tolerant parsing — this is the underlying
+/// primitive, used both by the store lookup and by the external-path
+/// resume flow.
+pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
+    let file =
+        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
+    let mut referenced: HashSet<Uuid> = HashSet::new();
+    let mut latest_title: Option<TitleInfo> = None;
+    let mut buf = Vec::new();
+    let mut line_no: u32 = 0;
+
+    // Read byte-by-line instead of `BufReader::lines()`. A crash during
+    // `writeln!` can leave the last record truncated — mid-byte of a
+    // multibyte UTF-8 codepoint in the worst case — and `lines()`
+    // propagates `InvalidData` there, failing the entire resume. Doing the
+    // decode ourselves lets us warn-skip bad lines with the same
+    // resilience we already apply to malformed JSON, and tolerate a
+    // missing trailing newline.
+    loop {
+        buf.clear();
+        let read = reader
+            .read_until(b'\n', &mut buf)
+            .with_context(|| format!("read error at line {}", line_no + 1))?;
+        if read == 0 {
+            break;
+        }
+        line_no += 1;
+        let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        if without_newline.is_empty() {
+            continue;
+        }
+        let line = match std::str::from_utf8(without_newline) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("skipping non-utf8 entry at line {line_no}: {e}");
+                continue;
+            }
+        };
+        let entry: Entry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("skipping malformed entry at line {line_no}: {e}");
+                continue;
+            }
+        };
+        match entry {
+            Entry::Header { version, .. } if version > CURRENT_VERSION => {
+                bail!(
+                    "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
+                );
+            }
+            Entry::Message {
+                uuid,
+                parent_uuid,
+                message,
+                timestamp,
+            } => {
+                if let Some(p) = parent_uuid {
+                    referenced.insert(p);
+                }
+                // Last-append-wins on duplicate UUIDs — a retry or
+                // partial-write recovery could replay an entry, and we
+                // prefer the most recent representation.
+                nodes.insert(
+                    uuid,
+                    ChainNode {
+                        parent_uuid,
+                        message,
+                        timestamp,
+                    },
+                );
+            }
+            // Track the newest title so the TUI's status bar and any
+            // future surface can display it on resume without a second
+            // pass over the file. AI-generated titles appended later beat
+            // the first-prompt title by `updated_at`.
+            Entry::Title {
+                title, updated_at, ..
+            } if latest_title
+                .as_ref()
+                .is_none_or(|cur| updated_at > cur.updated_at) =>
+            {
+                latest_title = Some(TitleInfo { title, updated_at });
+            }
+            _ => {}
+        }
+    }
+
+    let (messages, last_uuid) = resolve_chain(nodes, &referenced);
+    Ok(SessionData {
+        messages,
+        last_uuid,
+        title: latest_title,
+    })
+}
+
+/// Read just the `session_id` from a session file's header (line 1).
+/// Used by external-path resume so callers can key the resumed
+/// [`SessionManager`] on the file's declared identity rather than its path.
+pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
+    let file =
+        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let mut first_line = String::new();
+    BufReader::new(file).read_line(&mut first_line)?;
+    let Entry::Header { session_id, .. } = serde_json::from_str(first_line.trim())
+        .with_context(|| format!("first line of {} is not a valid header", path.display()))?
+    else {
+        bail!("{} does not begin with a header", path.display());
+    };
+    Ok(session_id)
 }
 
 /// Create `path` (and parents) with owner-only (`0o700`) perms on Unix.

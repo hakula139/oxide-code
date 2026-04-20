@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use time::OffsetDateTime;
@@ -6,7 +7,10 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
-use super::store::{SessionStore, SessionWriter};
+use super::store::{
+    SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
+    read_session_id_from_path,
+};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
@@ -118,19 +122,50 @@ impl SessionManager {
         store: &SessionStore,
         session_id: &str,
     ) -> Result<(Self, Vec<Message>, Option<String>)> {
-        let mut data = store.load_session_data(session_id)?;
+        let data = store.load_session_data(session_id)?;
+        let writer = store.open_append(session_id).await?;
+        Self::from_resumed_data(store, session_id.to_owned(), data, writer)
+    }
+
+    /// Resume a session from an explicit file path, bypassing the XDG
+    /// project subdirectory lookup entirely. Used by `ox -c <path.jsonl>`
+    /// to pick up sessions that were copied between machines or that live
+    /// outside the configured store root.
+    ///
+    /// The manager still carries the current store so downstream code (like
+    /// future slash commands that create sibling sessions) has a reference
+    /// point; it is never used on the resumed path since
+    /// [`record_message`][Self::record_message] skips the
+    /// `store.create()` branch when `pending_header` is `None`.
+    pub(crate) fn resume_from_path(
+        store: &SessionStore,
+        path: &Path,
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+        let session_id = read_session_id_from_path(path)?;
+        let data = load_session_data_from_path(path)?;
+        let writer = open_append_at(path)?;
+        Self::from_resumed_data(store, session_id, data, writer)
+    }
+
+    /// Shared tail of [`resume`][Self::resume] and
+    /// [`resume_from_path`][Self::resume_from_path]: sanitize the loaded
+    /// transcript, reject empty results, and build the manager.
+    fn from_resumed_data(
+        store: &SessionStore,
+        session_id: String,
+        mut data: SessionData,
+        writer: SessionWriter,
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
         sanitize_resumed_messages(&mut data.messages);
-        // Run the emptiness check *after* sanitization. Otherwise a
-        // file that loads into a non-empty vector but becomes empty
-        // after sanitize (all unresolved tool_use + orphan tool_result,
-        // or sanitization dropped every turn) would slip through with
+        // Run the emptiness check *after* sanitization. Otherwise a file
+        // that loads into a non-empty vector but becomes empty after
+        // sanitize (all unresolved tool_use + orphan tool_result, or
+        // sanitization dropped every turn) would slip through with
         // `last_message_uuid = data.last_uuid`, and the next recorded
         // message would chain to a UUID that's no longer in view.
         if data.messages.is_empty() {
             bail!("session {session_id} has no messages to resume");
         }
-
-        let writer = store.open_append(session_id).await?;
 
         let first_user_prompt = data
             .messages
@@ -144,7 +179,7 @@ impl SessionManager {
             store: store.clone(),
             pending_header: None,
             writer: Some(writer),
-            session_id: session_id.to_owned(),
+            session_id,
             initial_message_count: message_count,
             message_count,
             first_user_prompt,
