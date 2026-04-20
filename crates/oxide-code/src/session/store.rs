@@ -155,8 +155,7 @@ impl SessionStore {
     /// 4. Walks back via `parent_uuid` to the root, reverses → linear
     ///    chain from root to tip.
     ///
-    /// The "newest-leaf wins" policy matches claude-code's
-    /// `loadMessagesFromJsonlPath` and means the losing branch on a
+    /// The "newest-leaf wins" policy means the losing branch on a
     /// concurrent-resume fork stays in the file but is invisible to
     /// later resumes. The trade-off is documented in
     /// [`Self::open_append`].
@@ -1034,8 +1033,7 @@ mod tests {
     async fn load_session_data_picks_newest_leaf_on_fork() {
         // Two processes resumed and each appended — forming a fork
         // in the UUID DAG. `load_session_data` must pick the newest
-        // leaf as the tip and walk back to the shared ancestor,
-        // matching claude-code's `loadMessagesFromJsonlPath`.
+        // leaf as the tip and walk back to the shared ancestor.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("fork")).await.unwrap();

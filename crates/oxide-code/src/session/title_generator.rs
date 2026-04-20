@@ -1,9 +1,8 @@
 //! Background AI session title generator.
 //!
-//! Mirrors Claude Code's `generateSessionTitle` (see `../claude-code/src/
-//! utils/sessionTitle.ts`): once a fresh session has recorded its first
-//! user prompt, spawn a detached task that asks Haiku for a concise
-//! 3-7 word sentence-case title, append it to the session file as a new
+//! Once a fresh session has recorded its first user prompt, spawn a
+//! detached task that asks Haiku for a concise 3-7 word sentence-case
+//! title, append it to the session file as a new
 //! [`Entry::Title`][crate::session::entry::Entry::Title] with source
 //! [`AiGenerated`][crate::session::entry::TitleSource::AiGenerated], and
 //! push an [`AgentEvent::SessionTitleUpdated`] so the TUI status bar
@@ -27,8 +26,8 @@ use crate::client::anthropic::Client;
 use crate::session::manager::SessionManager;
 use crate::session::writer::log_session_err;
 
-/// Haiku model used for title generation. Matches claude-code's
-/// `getSmallFastModel()` default; small and fast, OAuth-compatible.
+/// Haiku model used for title generation. Small and fast, OAuth-compatible,
+/// and cheap enough to fire on every fresh session without thought.
 const HAIKU_MODEL: &str = "claude-haiku-4-5";
 
 /// Output budget for the title response. 40 tokens comfortably fits the
@@ -37,13 +36,12 @@ const HAIKU_MODEL: &str = "claude-haiku-4-5";
 const MAX_TOKENS: u32 = 40;
 
 /// Clamp on the prompt we feed Haiku. Long first messages occasionally
-/// contain pasted code or logs; truncating to 1 000 chars matches
-/// claude-code's `MAX_CONVERSATION_TEXT` and keeps the title request
-/// small and predictable.
+/// contain pasted code or logs; truncating to 1 000 chars keeps the title
+/// request small, predictable, and cheap regardless of input size.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. Kept close to claude-code's (sentence-case, 3-7 words,
-/// JSON envelope) so we get the same output shape.
+/// Title prompt. Constrains the output to sentence-case, 3-7 words, wrapped
+/// in a JSON envelope so [`parse_title`] can extract the title reliably.
 const SYSTEM_PROMPT: &str = indoc! {r#"
     Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
@@ -129,8 +127,9 @@ fn parse_title(response: &str) -> Result<String> {
 }
 
 /// Truncate `text` to at most `max_chars` characters, preferring the tail
-/// when the input is long (recent context wins). Matches claude-code's
-/// `extractConversationText` behaviour for long-prompt sessions.
+/// when the input is long. The tail of a long first message is usually the
+/// actual request (setup, pasted logs, or context appear earlier), so the
+/// title signal lives there.
 fn truncate_prompt(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();

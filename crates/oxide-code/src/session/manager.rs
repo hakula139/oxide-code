@@ -43,8 +43,9 @@ const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]"
 /// Files are created lazily — [`start`][Self::start] only allocates a
 /// session ID and stages the header in memory, and the on-disk file is
 /// materialized by the first [`record_message`][Self::record_message]
-/// call. A session that exits before any message is recorded leaves
-/// no artifact behind, mirroring claude-code's `sessionStorage` model.
+/// call. A session that exits before any message is recorded leaves no
+/// artifact behind, so `ox` then quit never litters the session list
+/// with empty, unresumable rows.
 pub(crate) struct SessionManager {
     /// Cloned at construction so [`record_message`] can lazily call
     /// `store.create()` once the first message arrives. `SessionStore`
@@ -1000,10 +1001,10 @@ mod tests {
     #[tokio::test]
     async fn finish_empty_session_leaves_no_file() {
         // A session that exits without recording any message must not
-        // appear in `--list` or be resumable. Mirrors claude-code's
-        // sessionStorage, which materializes the file lazily on the
-        // first append. See the bug report on PR #13: `ox` then quit
-        // produced an unresumable "(untitled), 0 msgs" entry.
+        // appear in `--list` or be resumable — the file is materialized
+        // lazily on the first append. See the bug report on PR #13:
+        // `ox` then quit produced an unresumable "(untitled), 0 msgs"
+        // entry.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut manager = SessionManager::start(&store, "m");
@@ -1100,8 +1101,8 @@ mod tests {
     async fn take_ai_title_seed_is_empty_on_resume_even_when_file_has_first_prompt_only() {
         // Resumed sessions already have a first-prompt title on disk;
         // we don't try to regenerate the AI title here. (If the original
-        // run's AI generation failed, resume still skips — matches
-        // claude-code's one-shot haikuTitleAttemptedRef behaviour.)
+        // run's AI generation failed, resume still skips — AI titles are
+        // one-shot per session.)
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionManager::start(&store, "m");
