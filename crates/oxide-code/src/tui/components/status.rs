@@ -74,6 +74,21 @@ impl StatusBar {
         self.status = status;
     }
 
+    /// Current status. Exposed for observable state in sibling-module
+    /// tests (e.g., `tui::app`) so assertions don't have to reach
+    /// through private fields.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> Status {
+        self.status
+    }
+
+    /// Current title slot, or `None` when no title is set. Same
+    /// rationale as [`status`][Self::status].
+    #[cfg(test)]
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
     /// Advance the spinner animation. Call on each tick when not idle.
     /// Returns `true` if the spinner frame changed (caller should mark dirty).
     pub(crate) fn tick(&mut self) -> bool {

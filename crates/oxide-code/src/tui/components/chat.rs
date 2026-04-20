@@ -243,6 +243,22 @@ impl ChatView {
         self.entries.push(ChatEntry::Error(msg.to_owned()));
     }
 
+    /// Number of committed chat entries. Exposed for observable state in
+    /// sibling-module tests (`tui::app`) so they don't need to reach
+    /// through the private `entries` field.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the tail entry is an [`ChatEntry::Error`]. Same rationale
+    /// as [`entry_count`][Self::entry_count] — lets `tui::app` tests
+    /// assert on error dispatch without exposing `ChatEntry` itself.
+    #[cfg(test)]
+    pub(crate) fn last_is_error(&self) -> bool {
+        matches!(self.entries.last(), Some(ChatEntry::Error(_)))
+    }
+
     /// Update cached viewport height and sync scroll position. Called by
     /// [`App`](super::super::app::App) after each frame.
     pub(crate) fn update_layout(&mut self, area: Rect) {
