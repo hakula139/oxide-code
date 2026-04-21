@@ -47,5 +47,6 @@ nix.workspace = true
 security-framework.workspace = true
 
 [dev-dependencies]
+temp-env.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
