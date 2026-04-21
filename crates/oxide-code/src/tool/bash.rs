@@ -237,10 +237,6 @@ mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
-    // The name / icon / schema contract lives in `tool::tests` so it
-    // runs uniformly across every tool. Per-tool tests focus on runtime
-    // behavior (subprocess lifecycle, output shaping, timeouts).
-
     // ── run ──
 
     #[tokio::test]

@@ -536,9 +536,6 @@ mod tests {
             head_limit: None,
         }
     }
-
-    // Name / icon / schema coverage lives in `tool::tests`.
-
     // ── run ──
 
     #[tokio::test]

@@ -304,6 +304,7 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use super::bash::BashTool;
@@ -326,41 +327,48 @@ mod tests {
         ]
     }
 
+    // ── ToolOutput::from_result ──
+
+    #[test]
+    fn from_result_ok_clears_is_error() {
+        let out = ToolOutput::from_result(Ok("success".into()));
+        assert!(!out.is_error);
+        assert_eq!(out.content, "success");
+    }
+
+    #[test]
+    fn from_result_err_sets_is_error() {
+        let out = ToolOutput::from_result(Err("something went wrong".into()));
+        assert!(out.is_error);
+        assert_eq!(out.content, "something went wrong");
+    }
+
     // ── Tool trait contract (all tools) ──
 
     #[test]
     fn every_tool_exposes_non_empty_name_description_and_object_schema() {
         for t in all_tools() {
-            assert!(!t.name().is_empty(), "name empty");
-            assert!(
-                !t.description().is_empty(),
-                "description empty: {}",
-                t.name()
-            );
+            let name = t.name();
+            assert!(!name.is_empty(), "tool with empty name in catalog");
+            assert!(!t.description().is_empty(), "{name}: empty description");
             let schema = t.input_schema();
-            assert_eq!(schema["type"], "object", "schema type: {}", t.name());
+            assert_eq!(schema["type"], "object", "{name}: schema type");
             assert!(
                 schema["properties"].is_object(),
-                "schema.properties: {}",
-                t.name(),
+                "{name}: schema.properties"
             );
-            assert!(
-                schema["required"].is_array(),
-                "schema.required: {}",
-                t.name(),
-            );
+            assert!(schema["required"].is_array(), "{name}: schema.required");
         }
     }
 
     #[test]
     fn tool_catalog_names_and_icons_are_unique() {
-        // Two tools with the same `name()` would make registry lookup
-        // ambiguous; two with the same `icon()` would make the TUI
-        // tool-call rows indistinguishable.
+        // Duplicate names collide in registry lookup; duplicate icons
+        // make the TUI tool-call rows indistinguishable.
         let tools = all_tools();
-        let names: std::collections::HashSet<_> = tools.iter().map(|t| t.name()).collect();
+        let names: HashSet<_> = tools.iter().map(|t| t.name()).collect();
         assert_eq!(names.len(), tools.len(), "duplicate name");
-        let icons: std::collections::HashSet<_> = tools.iter().map(|t| t.icon()).collect();
+        let icons: HashSet<_> = tools.iter().map(|t| t.icon()).collect();
         assert_eq!(icons.len(), tools.len(), "duplicate icon");
     }
 
@@ -434,22 +442,6 @@ mod tests {
                 t.name(),
             );
         }
-    }
-
-    // ── ToolOutput::from_result ──
-
-    #[test]
-    fn from_result_ok_clears_is_error() {
-        let out = ToolOutput::from_result(Ok("success".into()));
-        assert!(!out.is_error);
-        assert_eq!(out.content, "success");
-    }
-
-    #[test]
-    fn from_result_err_sets_is_error() {
-        let out = ToolOutput::from_result(Err("something went wrong".into()));
-        assert!(out.is_error);
-        assert_eq!(out.content, "something went wrong");
     }
 
     // ── ToolRegistry::get ──

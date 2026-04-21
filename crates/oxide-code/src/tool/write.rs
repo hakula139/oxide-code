@@ -99,9 +99,6 @@ async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Name / icon / schema coverage lives in `tool::tests`.
-
     // ── run ──
 
     #[tokio::test]

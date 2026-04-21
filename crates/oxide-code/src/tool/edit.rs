@@ -200,9 +200,6 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-
-    // Name / icon / schema coverage lives in `tool::tests`.
-
     // ── run ──
 
     #[tokio::test]

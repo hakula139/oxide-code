@@ -191,9 +191,6 @@ fn strip_bom(text: &str) -> &str {
 mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
-
-    // Name / icon / schema coverage lives in `tool::tests`.
-
     // ── run ──
 
     #[tokio::test]

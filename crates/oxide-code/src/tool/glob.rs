@@ -147,9 +147,6 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Name / icon / schema coverage lives in `tool::tests`.
-
     // ── run ──
 
     #[tokio::test]
