@@ -108,10 +108,8 @@ pub(crate) struct TitleInfo {
 #[derive(Debug, Clone)]
 pub(crate) struct ExitInfo {
     pub(crate) message_count: u32,
-    #[expect(
-        dead_code,
-        reason = "parsed from the summary entry but unused by list output today"
-    )]
+    /// Drives the latest-wins tiebreak in `store::read_session_info`
+    /// when a resumed session has appended more than one summary.
     pub(crate) updated_at: OffsetDateTime,
 }
 

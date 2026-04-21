@@ -105,7 +105,7 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 
 ## Listing
 
-`ox --list` walks the current project subdirectory by default; `--all` / `-a` widens the scope to every project. For each file the scanner reads the header (line 1), optionally an `Entry::Title` on line 2, and tails the last ~4 KB for the latest re-appended `Title` and `Summary`.
+`ox --list` walks the current project subdirectory by default; `--all` / `-a` widens the scope to every project. For each file the scanner reads the header (line 1), then streams the rest of the file tracking the latest `Entry::Title` (by `updated_at`) and `Entry::Summary`. A cheap prefix pre-filter on the `"type"` discriminator keeps message lines off the full-parse hot path so listing stays effectively I/O-bound even on multi-megabyte transcripts. A head-plus-fixed-tail scan is faster on paper but drops AI-generated titles when the first user turn produces a large tool_result that pushes the mid-file title out of any bounded tail window.
 
 - Head scan catches the first-prompt title; tail scan overrides with any later AI-generated / user-provided title — the newer `updated_at` wins.
 - Sessions without a title show `(untitled)` (first recorded message was not a user text turn, e.g., a tool-result-only continuation).
