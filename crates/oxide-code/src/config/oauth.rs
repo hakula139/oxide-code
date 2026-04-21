@@ -1,3 +1,13 @@
+//! Claude Code OAuth credentials.
+//!
+//! Loads the OAuth access token from the macOS Keychain (service
+//! `"Claude Code-credentials"`) and `~/.claude/.credentials.json`,
+//! preferring whichever has the later expiry. Refreshes via the
+//! Anthropic token endpoint when the access token is expired or about
+//! to expire, writing the new pair back to both sources. A directory-
+//! based advisory lock keeps two `ox` instances from refreshing
+//! concurrently and clobbering each other's tokens.
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

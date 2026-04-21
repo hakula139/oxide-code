@@ -1,3 +1,11 @@
+//! Tool dispatch.
+//!
+//! The [`Tool`] trait defines what the agent can invoke; the concrete
+//! tools live in submodules (`bash`, `edit`, `glob`, `grep`, `read`,
+//! `write`). [`ToolRegistry`] holds the set exposed to the model
+//! along with its JSON schema; [`ToolOutput`] carries the wire result
+//! back to the model plus structured [`ToolMetadata`] for UI display.
+
 pub(crate) mod bash;
 pub(crate) mod edit;
 pub(crate) mod glob;

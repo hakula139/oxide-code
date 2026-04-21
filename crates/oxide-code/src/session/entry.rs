@@ -1,3 +1,10 @@
+//! JSONL entry schema for session files.
+//!
+//! Each session file is a sequence of [`Entry`] values, one per line.
+//! The format is forward-compatible: [`Entry::Unknown`] absorbs entry
+//! types this reader doesn't recognize, so newer writers can emit
+//! additional variants without breaking older readers.
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;

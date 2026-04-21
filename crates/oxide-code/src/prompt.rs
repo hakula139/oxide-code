@@ -1,3 +1,11 @@
+//! System prompt assembly.
+//!
+//! Builds [`PromptParts`]: static sections (identity, guidance, tool
+//! use) that live in the API `system` parameter and cache globally,
+//! plus a `<system-reminder>`-wrapped user context (CLAUDE.md, date)
+//! prepended to the messages array so per-session content doesn't
+//! invalidate the static cache.
+
 pub(crate) mod environment;
 mod instructions;
 mod sections;

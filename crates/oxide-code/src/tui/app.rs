@@ -1,3 +1,12 @@
+//! Root TUI application.
+//!
+//! [`App`] owns every component (chat, input, status), holds the
+//! cross-task channels, and runs the `tokio::select!` loop that
+//! multiplexes crossterm events, agent events, user actions, and a
+//! 60 FPS render tick. Render coalescing (dirty flag + timer) keeps
+//! redraw work proportional to state change rather than event
+//! throughput.
+
 use std::sync::Arc;
 use std::time::Duration;
 

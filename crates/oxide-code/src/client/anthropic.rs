@@ -1,3 +1,18 @@
+//! Anthropic Messages API streaming client.
+//!
+//! [`Client::stream_message`] drives the main agent loop: assembles
+//! the request (identity prefix, billing attestation for OAuth,
+//! static / dynamic system-block split for cache reuse), POSTs
+//! `/v1/messages` with SSE streaming, and forwards parsed
+//! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] covers
+//! non-streaming one-shots (title generation today, future
+//! classifiers) with optional JSON-schema-constrained output.
+//!
+//! Per-request `anthropic-beta` headers are computed from the model's
+//! [`crate::model::Capabilities`] via [`compute_betas`], so gateways
+//! that reject unsupported betas (Haiku, subscriptions without 1M)
+//! don't 400 on spurious feature flags.
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};

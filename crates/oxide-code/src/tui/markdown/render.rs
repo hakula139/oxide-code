@@ -1,3 +1,12 @@
+//! Markdown → [`ratatui::text::Text`] renderer.
+//!
+//! Walks the pulldown-cmark event stream and produces styled lines
+//! sized to a fixed terminal width. Supports inline formatting, code
+//! blocks (syntect-highlighted via [`super::highlight`]), lists,
+//! blockquotes, tables (box-drawing borders with column alignment),
+//! and horizontal rules. Wrapping is block-aware so word breaks
+//! respect the enclosing block's continuation indent.
+
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};

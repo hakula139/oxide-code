@@ -1,3 +1,10 @@
+//! Binary entry point.
+//!
+//! Parses CLI flags, loads [`Config`], resolves which session to
+//! resume (if any), and dispatches into one of three run modes: TUI
+//! (default), bare REPL (`--no-tui`), or headless one-shot (`-p`).
+//! Signal handling and session summary writes on abort live here.
+
 mod agent;
 mod client;
 mod config;

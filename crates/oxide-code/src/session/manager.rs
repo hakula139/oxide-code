@@ -1,3 +1,17 @@
+//! Session lifecycle.
+//!
+//! [`SessionManager`] owns the on-disk session file handle for the
+//! lifetime of one `ox` run: [`start`][SessionManager::start] creates
+//! a fresh session, [`resume`][SessionManager::resume] loads an
+//! existing one and reopens it for append,
+//! [`record_message`][SessionManager::record_message] appends each
+//! assistant / tool-result message, and
+//! [`finish`][SessionManager::finish] writes the exit summary.
+//!
+//! [`sanitize_resumed_messages`] is the core repair pass — it turns
+//! a mid-turn crash or partial JSONL write into a transcript the API
+//! will accept as the prefix of a new turn.
+
 use std::collections::HashSet;
 use std::path::Path;
 

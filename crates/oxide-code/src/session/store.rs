@@ -1,3 +1,15 @@
+//! Session file I/O.
+//!
+//! [`SessionStore`] locates sessions (`$XDG_DATA_HOME/ox/sessions/
+//! {project}/`), creates new ones, resolves prefix lookups, and lists
+//! them for `ox --list`. [`SessionWriter`] is the append-only handle
+//! the manager writes through.
+//!
+//! Listing reads the header (line 1) and streams the rest of the file
+//! so the latest re-appended title and summary win regardless of
+//! where they sit — titles buried behind multi-KB tool-result lines
+//! are a real shape on long sessions.
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
