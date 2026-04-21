@@ -2143,4 +2143,86 @@ mod tests {
         assert_eq!(chat.streaming_rendered_boundary, 0);
         assert_eq!(chat.streaming_cached_width, 0);
     }
+
+    // ── render ──
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
+        chat.update_layout(Rect::new(0, 0, width, height));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                chat.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
+    #[test]
+    fn render_empty_shows_welcome_screen() {
+        let mut chat = test_chat();
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+    }
+
+    #[test]
+    fn render_user_and_assistant_interleaved() {
+        let mut chat = test_chat();
+        chat.push_user_message("what is 2 + 2?".into());
+        chat.append_stream_token("The answer is 4.");
+        chat.commit_streaming();
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_followed_by_result() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "echo hi");
+        chat.push_tool_result("ran echo", "hi", false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_result_overflow_shows_line_count() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        let long = (0..MAX_TOOL_OUTPUT_LINES + 3)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chat.push_tool_result("ls out", &long, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 14));
+    }
+
+    #[test]
+    fn render_error_entry_is_styled_distinctly() {
+        let mut chat = test_chat();
+        chat.push_error("API error (HTTP 503): overloaded");
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 4));
+    }
+
+    #[test]
+    fn render_history_with_resumed_thinking_block() {
+        // Resumed history feeds into ChatView via load_history; with
+        // show_thinking = true the thinking block must render dimmed
+        // between the user prompt and the assistant text.
+        let mut chat = ChatView::new(Theme::default(), true);
+        let tools = test_tools();
+        let history = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "pondering...".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text { text: "Hi!".into() },
+                ],
+            },
+        ];
+        chat.load_history(&history, &tools);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
 }

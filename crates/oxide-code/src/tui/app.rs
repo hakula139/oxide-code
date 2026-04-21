@@ -216,30 +216,33 @@ impl App {
     // ── Rendering ──
 
     fn render(&mut self, terminal: &mut Tui) -> Result<()> {
-        let input_height = self.input.height();
-
-        // Capture areas for post-render layout update.
         let mut chat_area = ratatui::layout::Rect::default();
-
         draw_sync(terminal, |frame| {
-            let chunks = Layout::vertical([
-                Constraint::Length(2),            // status bar (content + border)
-                Constraint::Min(1),               // chat view
-                Constraint::Length(input_height), // input area
-            ])
-            .split(frame.area());
-
-            self.status_bar.render(frame, chunks[0]);
-            self.chat.render(frame, chunks[1]);
-            self.input.render(frame, chunks[2]);
-
-            chat_area = chunks[1];
+            chat_area = self.draw_frame(frame);
         })?;
-
-        // Update layout bookkeeping outside the render closure.
+        // Layout bookkeeping lives outside the render closure.
         self.chat.update_layout(chat_area);
-
         Ok(())
+    }
+
+    /// Lays out the three panels (status bar, chat, input) into the
+    /// frame and dispatches to each component's `render`. Returns the
+    /// chat area so the caller can update scroll-cache bookkeeping.
+    /// Backend-agnostic (takes `&mut Frame`) so `TestBackend` tests can
+    /// exercise the same layout logic as the live crossterm path.
+    fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
+        let input_height = self.input.height();
+        let chunks = Layout::vertical([
+            Constraint::Length(2),            // status bar (content + border)
+            Constraint::Min(1),               // chat view
+            Constraint::Length(input_height), // input area
+        ])
+        .split(frame.area());
+
+        self.status_bar.render(frame, chunks[0]);
+        self.chat.render(frame, chunks[1]);
+        self.input.render(frame, chunks[2]);
+        chunks[1]
     }
 }
 
@@ -514,5 +517,56 @@ mod tests {
         app.input.set_enabled(false);
         app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
         assert!(app.dirty);
+    }
+
+    // ── draw_frame ──
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut chat_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                chat_area = app.draw_frame(frame);
+            })
+            .unwrap();
+        app.chat.update_layout(chat_area);
+        terminal.backend().clone()
+    }
+
+    #[test]
+    fn draw_frame_lays_out_status_chat_and_input_in_order() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
+        insta::assert_snapshot!(render_app(&mut app, 80, 10));
+    }
+
+    #[test]
+    fn draw_frame_with_conversation_and_tool_call() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_user_message("what files are here?".into());
+        app.chat.push_tool_call("$", "ls");
+        app.chat
+            .push_tool_result("ran ls", "README.md\nCargo.toml", false);
+        app.chat.append_stream_token("Two files.");
+        app.chat.commit_streaming();
+        insta::assert_snapshot!(render_app(&mut app, 60, 12));
+    }
+
+    #[test]
+    fn draw_frame_streaming_shows_spinner_and_disables_input_border() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
+        app.handle_agent_event(AgentEvent::StreamToken("part".into()));
+        insta::assert_snapshot!(render_app(&mut app, 60, 8));
+    }
+
+    #[test]
+    fn draw_frame_narrow_width_still_renders_all_three_panels() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("narrow"));
+        app.chat.push_user_message("hi".into());
+        insta::assert_snapshot!(render_app(&mut app, 40, 8));
     }
 }

@@ -587,4 +587,57 @@ mod tests {
         assert!(out.ends_with('…'));
         assert!(out.width() <= 5, "got width {}: {out:?}", out.width());
     }
+
+    // ── render ──
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_status(bar: &mut StatusBar, width: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                bar.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
+    fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
+        let mut bar = StatusBar::new(Theme::default(), "claude-opus-4-7".into(), cwd.into());
+        bar.set_title(title.map(ToOwned::to_owned));
+        bar
+    }
+
+    #[test]
+    fn render_idle_with_title_shows_marketing_model_name_and_cwd() {
+        let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_idle_without_title_leaves_slot_unused() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_streaming_shows_spinner_and_status_label() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::Streaming);
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_tool_running_status() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::ToolRunning);
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_narrow_width_truncates_cwd_and_title() {
+        let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
+        insta::assert_snapshot!(render_status(&mut bar, 40));
+    }
 }

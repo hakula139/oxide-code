@@ -1,0 +1,16 @@
+---
+source: crates/oxide-code/src/tui/app.rs
+expression: "render_app(&mut app, 60, 12)"
+---
+"  ox │ test-model │ ready                           ~/test  "
+"────────────────────────────────────────────────────────────"
+"❯ ▎ what files are here?                                    "
+"                                                            "
+"  ▎ $ ls                                                    "
+"  ▎   ✓ ran ls                                              "
+"  ▎     README.md                                           "
+"  ▎     Cargo.toml                                          "
+"                                                            "
+"────────────────────────────────────────────────────────────"
+" Ask anything...                                            "
+"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit           "

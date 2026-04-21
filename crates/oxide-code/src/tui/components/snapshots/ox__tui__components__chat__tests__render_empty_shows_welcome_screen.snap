@@ -1,0 +1,12 @@
+---
+source: crates/oxide-code/src/tui/components/chat.rs
+expression: "render_chat(&mut chat, 60, 8)"
+---
+"                                                            "
+"                                                            "
+"                       Welcome to ox                        "
+"                   Ask anything to begin.                   "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "

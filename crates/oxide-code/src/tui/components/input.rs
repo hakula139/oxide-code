@@ -472,4 +472,74 @@ mod tests {
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "a"));
     }
+
+    // ── render ──
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Renders `input` to a fresh `TestBackend` at `size` and returns
+    /// the backend for snapshot comparison.
+    fn render_to_backend(input: &InputArea, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
+    fn type_text(input: &mut InputArea, text: &str) {
+        for ch in text.chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+    }
+
+    #[test]
+    fn render_empty_shows_placeholder_and_hint_line() {
+        let input = test_input();
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_with_text_shows_content_and_cursor_row() {
+        let mut input = test_input();
+        type_text(&mut input, "hello world");
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_disabled_dims_style_and_hides_cursor_row() {
+        let mut input = test_input();
+        type_text(&mut input, "pending");
+        input.set_enabled(false);
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_multiline_grows_textarea_region() {
+        let mut input = test_input();
+        type_text(&mut input, "line 1");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 2");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 3");
+        insta::assert_snapshot!(render_to_backend(&input, 60, input.height()));
+    }
+
+    #[test]
+    fn render_long_line_wraps_and_engages_scroll_offset() {
+        // Narrow width forces word-wrap; typing past the visible row
+        // engages scroll_top so the cursor stays on-screen.
+        let mut input = test_input();
+        type_text(
+            &mut input,
+            "a long input that overflows a narrow terminal and forces the textarea to wrap",
+        );
+        insta::assert_snapshot!(render_to_backend(&input, 30, 5));
+    }
 }
