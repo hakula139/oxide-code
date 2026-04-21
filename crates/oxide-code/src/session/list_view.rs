@@ -222,6 +222,25 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    // ── render_list ──
+
+    #[test]
+    fn render_list_empty_store_returns_no_sessions_notice() {
+        // Covers the `render_list → render_sessions` glue; empty store
+        // keeps the test fixture-free.
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::test_store(dir.path());
+        let mut buf = Vec::new();
+        render_list(&mut buf, &store, false, UtcOffset::UTC, None).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "No sessions found in this project.\n",
+        );
+
+        let mut buf = Vec::new();
+        render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
+    }
     // ── render_sessions ──
 
     #[test]

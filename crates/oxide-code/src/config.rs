@@ -99,6 +99,11 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
     use super::*;
 
     // ── ThinkingConfig ──
@@ -107,5 +112,212 @@ mod tests {
     fn thinking_config_adaptive_serializes() {
         let json = serde_json::to_value(&ThinkingConfig::Adaptive).unwrap();
         assert_eq!(json["type"], "adaptive");
+    }
+
+    // ── Config::load ──
+
+    /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
+    /// nothing bleeds in from the caller's environment; `ANTHROPIC_API_KEY`
+    /// ships with a non-empty default so tests land on the `ApiKey` arm
+    /// and never consult the real OAuth credential sources.
+    const ENV_KEYS: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MAX_TOKENS",
+        "OX_SHOW_THINKING",
+        "XDG_CONFIG_HOME",
+    ];
+
+    fn write_user_config(xdg_dir: &Path, body: &str) {
+        let config_dir = xdg_dir.join("ox");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), body).unwrap();
+    }
+
+    /// Baseline env list (every [`ENV_KEYS`] entry unset, `ANTHROPIC_API_KEY`
+    /// set to `"sk-default"`) with `overrides` applied on top. Panics if
+    /// an override key is not in [`ENV_KEYS`] so a misspelling surfaces
+    /// immediately. Returns a `Vec` because `temp_env::async_with_vars`
+    /// takes `AsRef<[(K, Option<V>)]>`.
+    fn env_vars(
+        overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
+    ) -> Vec<(&'static str, Option<String>)> {
+        let known: HashSet<&'static str> = ENV_KEYS.iter().copied().collect();
+        let mut out: Vec<(&'static str, Option<String>)> = ENV_KEYS
+            .iter()
+            .copied()
+            .map(|k| {
+                (
+                    k,
+                    (k == "ANTHROPIC_API_KEY").then(|| "sk-default".to_owned()),
+                )
+            })
+            .collect();
+        for (key, value) in overrides {
+            assert!(known.contains(key), "env key {key:?} not in ENV_KEYS");
+            if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = value;
+            }
+        }
+        out
+    }
+
+    fn xdg(dir: &TempDir) -> (&'static str, Option<String>) {
+        (
+            "XDG_CONFIG_HOME",
+            Some(dir.path().to_string_lossy().into_owned()),
+        )
+    }
+
+    fn env(key: &'static str, value: &str) -> (&'static str, Option<String>) {
+        (key, Some(value.to_owned()))
+    }
+
+    #[tokio::test]
+    async fn load_defaults_apply_when_no_config_and_no_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.model, DEFAULT_MODEL);
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
+        assert!(!config.show_thinking);
+        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
+    }
+
+    #[tokio::test]
+    async fn load_env_overrides_every_client_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            env("ANTHROPIC_BASE_URL", "https://example.invalid"),
+            env("ANTHROPIC_MAX_TOKENS", "64"),
+            env("OX_SHOW_THINKING", "1"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.model, "claude-opus-4-7");
+        assert_eq!(config.base_url, "https://example.invalid");
+        assert_eq!(config.max_tokens, 64);
+        assert!(config.show_thinking);
+    }
+
+    #[tokio::test]
+    async fn load_user_config_supplies_values_without_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+                base_url = "https://config-file.invalid"
+                max_tokens = 128
+
+                [tui]
+                show_thinking = true
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.model, "claude-sonnet-4-6");
+        assert_eq!(config.base_url, "https://config-file.invalid");
+        assert_eq!(config.max_tokens, 128);
+        assert!(config.show_thinking);
+    }
+
+    #[tokio::test]
+    async fn load_env_beats_config_file_field_by_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+                max_tokens = 128
+
+                [tui]
+                show_thinking = true
+            "#},
+        );
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            // `max_tokens` env is unset — the file value must win.
+            env("OX_SHOW_THINKING", "0"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.model, "claude-opus-4-7");
+        assert_eq!(config.max_tokens, 128);
+        assert!(!config.show_thinking, "env `0` overrides file `true`");
+    }
+
+    #[tokio::test]
+    async fn load_env_api_key_beats_file_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                api_key = "sk-from-file"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "sk-from-env")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-from-env"));
+    }
+
+    #[tokio::test]
+    async fn load_file_api_key_used_when_env_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                api_key = "sk-from-file"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-from-file"));
+    }
+
+    #[tokio::test]
+    async fn load_invalid_max_tokens_env_falls_through_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {"
+                [client]
+                max_tokens = 128
+            "},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MAX_TOKENS", "not-a-number")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.max_tokens, 128,
+            "unparsable env must fall through to file value",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_adaptive_thinking_is_always_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert!(matches!(config.thinking, Some(ThinkingConfig::Adaptive)));
     }
 }

@@ -98,7 +98,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .kill_on_drop(true);
 
     // Own process group so timeout can kill the whole tree, not just bash —
-    // otherwise `(sleep 3600; …) &` outlives the direct child.
+    // otherwise `(sleep 3600; ...) &` outlives the direct child.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -236,27 +236,6 @@ fn truncate_output(content: &mut String) {
 mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
-
-    // ── icon ──
-
-    #[test]
-    fn icon_is_dollar_sign() {
-        assert_eq!(BashTool.icon(), "$");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_command() {
-        let input = serde_json::json!({"command": "ls -la"});
-        assert_eq!(BashTool.summarize_input(&input), Some("ls -la"));
-    }
-
-    #[test]
-    fn summarize_input_missing_command() {
-        let input = serde_json::json!({"description": "no command"});
-        assert_eq!(BashTool.summarize_input(&input), None);
-    }
 
     // ── run ──
 

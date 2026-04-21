@@ -216,44 +216,45 @@ impl App {
     // ── Rendering ──
 
     fn render(&mut self, terminal: &mut Tui) -> Result<()> {
-        let input_height = self.input.height();
-
-        // Capture areas for post-render layout update.
         let mut chat_area = ratatui::layout::Rect::default();
-
         draw_sync(terminal, |frame| {
-            let chunks = Layout::vertical([
-                Constraint::Length(2),            // status bar (content + border)
-                Constraint::Min(1),               // chat view
-                Constraint::Length(input_height), // input area
-            ])
-            .split(frame.area());
-
-            self.status_bar.render(frame, chunks[0]);
-            self.chat.render(frame, chunks[1]);
-            self.input.render(frame, chunks[2]);
-
-            chat_area = chunks[1];
+            chat_area = self.draw_frame(frame);
         })?;
-
-        // Update layout bookkeeping outside the render closure.
         self.chat.update_layout(chat_area);
-
         Ok(())
+    }
+
+    /// Returns the chat area so the caller can refresh scroll-cache
+    /// bookkeeping. Backend-agnostic (takes `&mut Frame`) so `TestBackend`
+    /// tests share the live-crossterm layout path.
+    fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
+        let input_height = self.input.height();
+        let chunks = Layout::vertical([
+            Constraint::Length(2),            // status bar (content + border)
+            Constraint::Min(1),               // chat view
+            Constraint::Length(input_height), // input area
+        ])
+        .split(frame.area());
+
+        self.status_bar.render(frame, chunks[0]);
+        self.chat.render(frame, chunks[1]);
+        self.input.render(frame, chunks[2]);
+        chunks[1]
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::tool::ToolRegistry;
 
-    // `App::run` / `App::render` need a real terminal and stay untested
-    // here; every other method is pure state mutation over `App`, which
-    // these tests drive by constructing one without a terminal and
-    // asserting on the observable side effects.
+    // `App::run` / `App::render` need a real terminal and stay untested.
 
     /// Fresh idle `App` plus the `user_tx` consumer (for forwarded-action
     /// assertions) and the `agent_tx` producer (kept alive so the
@@ -301,6 +302,84 @@ mod tests {
         // value from `SessionData` won't leave a blank slot in the bar.
         let (app, _rx, _agent_tx) = test_app(Some("   \n "));
         assert!(app.status_bar.title().is_none());
+    }
+
+    // ── handle_crossterm_event ──
+
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        // Simulate typing "hi" then Enter — the input area composes the
+        // prompt and returns `SubmitPrompt`, which `handle_crossterm_event`
+        // must pipe into `dispatch_user_action`.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dirty);
+        assert_eq!(app.chat.entry_count(), 1);
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        let forwarded = rx.recv().await.unwrap();
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
+    }
+
+    #[test]
+    fn handle_crossterm_key_ctrl_c_triggers_quit_from_any_mode() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_mouse_is_forwarded_to_chat() {
+        // Mouse events reach `ChatView::handle_event` which consumes them
+        // for scroll. Assert the dirty flag flips so the next tick renders.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
+        // Resize matches the arm that does no per-component work but still
+        // falls through to `self.dirty = true`, so the next tick re-runs
+        // the layout split with the new `frame.area()`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::Resize(80, 24));
+        assert!(app.dirty, "Resize must trigger a re-layout render");
+    }
+
+    #[test]
+    fn handle_crossterm_unknown_event_is_a_noop() {
+        // The `_ => return` arm covers FocusGained/FocusLost/Paste — the
+        // early return here is significant: every other arm falls through
+        // to `self.dirty = true`, so without this branch a stream of
+        // unhandled terminal events would cause continuous re-renders.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::FocusGained);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
+        // When the input is disabled (mid-stream), arrow / page keys
+        // must still reach chat so the user can scroll through output.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.dirty);
     }
 
     // ── dispatch_user_action ──
@@ -436,83 +515,53 @@ mod tests {
         assert_eq!(app.chat.entry_count(), before);
     }
 
-    // ── handle_crossterm_event ──
+    // ── draw_frame ──
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-
-    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, modifiers))
-    }
-
-    #[tokio::test]
-    async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        // Simulate typing "hi" then Enter — the input area composes the
-        // prompt and returns `SubmitPrompt`, which `handle_crossterm_event`
-        // must pipe into `dispatch_user_action`.
-        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
-        app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
-        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(app.dirty);
-        assert_eq!(app.chat.entry_count(), 1);
-        assert_eq!(app.status_bar.status(), Status::Streaming);
-        let forwarded = rx.recv().await.unwrap();
-        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
+    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut chat_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                chat_area = app.draw_frame(frame);
+            })
+            .unwrap();
+        app.chat.update_layout(chat_area);
+        terminal.backend().clone()
     }
 
     #[test]
-    fn handle_crossterm_key_ctrl_c_triggers_quit_from_any_mode() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit);
-        assert!(app.dirty);
+    fn draw_frame_lays_out_status_chat_and_input_in_order() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
+        insta::assert_snapshot!(render_app(&mut app, 80, 10));
     }
 
     #[test]
-    fn handle_crossterm_mouse_is_forwarded_to_chat() {
-        // Mouse events reach `ChatView::handle_event` which consumes them
-        // for scroll. Assert the dirty flag flips so the next tick renders.
+    fn draw_frame_with_conversation_and_tool_call() {
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }));
-        assert!(app.dirty);
+        app.chat.push_user_message("what files are here?".into());
+        app.chat.push_tool_call("$", "ls");
+        app.chat
+            .push_tool_result("ran ls", "README.md\nCargo.toml", false);
+        app.chat.append_stream_token("Two files.");
+        app.chat.commit_streaming();
+        insta::assert_snapshot!(render_app(&mut app, 60, 12));
     }
 
     #[test]
-    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
-        // Resize matches the arm that does no per-component work but still
-        // falls through to `self.dirty = true`, so the next tick re-runs
-        // the layout split with the new `frame.area()`.
+    fn draw_frame_streaming_shows_spinner_in_status_bar() {
+        // The matching input-border style change is validated in
+        // `input::render_disabled_applies_dim_foreground_to_text` — a
+        // text-only snapshot would render identically either way.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dirty = false;
-        app.handle_crossterm_event(&Event::Resize(80, 24));
-        assert!(app.dirty, "Resize must trigger a re-layout render");
+        app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
+        app.handle_agent_event(AgentEvent::StreamToken("part".into()));
+        insta::assert_snapshot!(render_app(&mut app, 60, 8));
     }
 
     #[test]
-    fn handle_crossterm_unknown_event_is_a_noop() {
-        // The `_ => return` arm covers FocusGained/FocusLost/Paste — the
-        // early return here is significant: every other arm falls through
-        // to `self.dirty = true`, so without this branch a stream of
-        // unhandled terminal events would cause continuous re-renders.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dirty = false;
-        app.handle_crossterm_event(&Event::FocusGained);
-        assert!(!app.dirty);
-    }
-
-    #[test]
-    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
-        // When the input is disabled (mid-stream), arrow / page keys
-        // must still reach chat so the user can scroll through output.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.input.set_enabled(false);
-        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
-        assert!(app.dirty);
+    fn draw_frame_narrow_width_still_renders_all_three_panels() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("narrow"));
+        app.chat.push_user_message("hi".into());
+        insta::assert_snapshot!(render_app(&mut app, 40, 8));
     }
 }

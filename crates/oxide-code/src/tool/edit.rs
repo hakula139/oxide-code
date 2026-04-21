@@ -200,22 +200,6 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-
-    // ── icon ──
-
-    #[test]
-    fn icon_is_pencil() {
-        assert_eq!(EditTool.icon(), "✎");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_file_path() {
-        let input = serde_json::json!({"file_path": "src/main.rs"});
-        assert_eq!(EditTool.summarize_input(&input), Some("src/main.rs"));
-    }
-
     // ── run ──
 
     #[tokio::test]

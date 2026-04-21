@@ -724,13 +724,14 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
 }
 
 #[cfg(test)]
-pub(super) const TEST_PROJECT: &str = "test-project";
+pub(crate) const TEST_PROJECT: &str = "test-project";
 
 /// Opens a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
 /// Shared between the `session::store` and `session::manager` test
-/// modules so both exercise the same project-scoping path.
+/// modules (and the cross-module `agent::tests`) so they exercise the
+/// same project-scoping path.
 #[cfg(test)]
-pub(super) fn test_store(dir: &Path) -> SessionStore {
+pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
@@ -816,6 +817,71 @@ mod tests {
             message_count,
             updated_at: datetime!(2026-04-16 12:05:00 UTC),
         }
+    }
+
+    // ── SessionStore::open ──
+
+    /// Isolates [`SessionStore::open`] from the caller's real filesystem.
+    /// Pins `XDG_DATA_HOME` to `xdg` and `HOME` to a parked tempdir so
+    /// the fallback path never lands on the real home.
+    async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::async_with_vars(
+            [
+                ("XDG_DATA_HOME", Some(xdg.to_string_lossy().into_owned())),
+                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+            ],
+            async { SessionStore::open() },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_uses_xdg_data_home_when_set() {
+        let xdg = tempfile::tempdir().unwrap();
+        let store = open_in_isolated_env(xdg.path()).await;
+        let sessions = xdg.path().join(DATA_DIR).join(SESSIONS_DIR);
+        assert_eq!(store.sessions_dir, sessions);
+        assert!(sessions.is_dir(), "sessions root created: {sessions:?}");
+        assert!(store.project_dir.is_dir(), "project dir created");
+        assert!(
+            store.project_dir.starts_with(&sessions),
+            "project dir lives under sessions root",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_creates_private_dirs_with_mode_0o700_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let xdg = tempfile::tempdir().unwrap();
+        let store = open_in_isolated_env(xdg.path()).await;
+        for dir in [&store.sessions_dir, &store.project_dir] {
+            let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{dir:?} must be 0o700, got {mode:o}");
+        }
+    }
+
+    #[tokio::test]
+    async fn open_falls_back_to_home_local_share_when_xdg_unset() {
+        let home = tempfile::tempdir().unwrap();
+        let store = temp_env::async_with_vars(
+            [
+                ("XDG_DATA_HOME", None),
+                ("HOME", Some(home.path().to_string_lossy().into_owned())),
+            ],
+            async { SessionStore::open() },
+        )
+        .await
+        .unwrap();
+        let expected = home
+            .path()
+            .join(".local/share")
+            .join(DATA_DIR)
+            .join(SESSIONS_DIR);
+        assert_eq!(store.sessions_dir, expected);
     }
 
     // ── create ──

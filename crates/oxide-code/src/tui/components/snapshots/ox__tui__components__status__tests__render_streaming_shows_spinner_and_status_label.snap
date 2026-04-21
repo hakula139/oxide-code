@@ -1,0 +1,6 @@
+---
+source: crates/oxide-code/src/tui/components/status.rs
+expression: "render_status(&mut bar, 80)"
+---
+"  ox │ Claude Opus 4.7 │ ⠋ streaming...                        ~/projects/demo  "
+"────────────────────────────────────────────────────────────────────────────────"

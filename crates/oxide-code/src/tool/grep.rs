@@ -536,22 +536,6 @@ mod tests {
             head_limit: None,
         }
     }
-
-    // ── icon ──
-
-    #[test]
-    fn icon_is_magnifier() {
-        assert_eq!(GrepTool.icon(), "⌕");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_pattern() {
-        let input = serde_json::json!({"pattern": "TODO"});
-        assert_eq!(GrepTool.summarize_input(&input), Some("TODO"));
-    }
-
     // ── run ──
 
     #[tokio::test]

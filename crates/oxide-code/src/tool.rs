@@ -304,10 +304,28 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use super::bash::BashTool;
+    use super::edit::EditTool;
+    use super::glob::GlobTool;
+    use super::grep::GrepTool;
+    use super::read::ReadTool;
+    use super::write::WriteTool;
     use super::*;
+
+    /// Every registered tool, to parameterize trait-contract tests.
+    fn all_tools() -> Vec<Box<dyn Tool>> {
+        vec![
+            Box::new(BashTool),
+            Box::new(EditTool),
+            Box::new(GlobTool),
+            Box::new(GrepTool),
+            Box::new(ReadTool),
+            Box::new(WriteTool),
+        ]
+    }
 
     // ── ToolOutput::from_result ──
 
@@ -323,6 +341,107 @@ mod tests {
         let out = ToolOutput::from_result(Err("something went wrong".into()));
         assert!(out.is_error);
         assert_eq!(out.content, "something went wrong");
+    }
+
+    // ── Tool trait contract (all tools) ──
+
+    #[test]
+    fn every_tool_exposes_non_empty_name_description_and_object_schema() {
+        for t in all_tools() {
+            let name = t.name();
+            assert!(!name.is_empty(), "tool with empty name in catalog");
+            assert!(!t.description().is_empty(), "{name}: empty description");
+            let schema = t.input_schema();
+            assert_eq!(schema["type"], "object", "{name}: schema type");
+            assert!(
+                schema["properties"].is_object(),
+                "{name}: schema.properties"
+            );
+            assert!(schema["required"].is_array(), "{name}: schema.required");
+        }
+    }
+
+    #[test]
+    fn tool_catalog_names_and_icons_are_unique() {
+        // Duplicate names collide in registry lookup; duplicate icons
+        // make the TUI tool-call rows indistinguishable.
+        let tools = all_tools();
+        let names: HashSet<_> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names.len(), tools.len(), "duplicate name");
+        let icons: HashSet<_> = tools.iter().map(|t| t.icon()).collect();
+        assert_eq!(icons.len(), tools.len(), "duplicate icon");
+    }
+
+    #[test]
+    fn tool_catalog_icons_match_the_published_prefix_set() {
+        // Pins the published icons — see docs / roadmap TUI section.
+        let expected = [
+            ("bash", "$"),
+            ("edit", "✎"),
+            ("glob", "✱"),
+            ("grep", "⌕"),
+            ("read", "→"),
+            ("write", "←"),
+        ];
+        let tools = all_tools();
+        for (name, icon) in expected {
+            let t = tools
+                .iter()
+                .find(|t| t.name() == name)
+                .unwrap_or_else(|| panic!("tool {name} missing from catalog"));
+            assert_eq!(t.icon(), icon, "tool {name}: expected icon {icon}");
+        }
+    }
+
+    #[test]
+    fn tool_summarize_input_plucks_the_primary_field() {
+        // Table of (tool, input JSON, expected summary). Each entry pins
+        // which field the TUI's tool-call label sources from.
+        let cases = [
+            ("bash", serde_json::json!({"command": "ls"}), Some("ls")),
+            (
+                "edit",
+                serde_json::json!({
+                    "file_path": "/a/b.rs",
+                    "old_string": "x",
+                    "new_string": "y",
+                }),
+                Some("/a/b.rs"),
+            ),
+            (
+                "glob",
+                serde_json::json!({"pattern": "**/*.rs"}),
+                Some("**/*.rs"),
+            ),
+            ("grep", serde_json::json!({"pattern": "fn "}), Some("fn ")),
+            (
+                "read",
+                serde_json::json!({"file_path": "/a/b.rs"}),
+                Some("/a/b.rs"),
+            ),
+            (
+                "write",
+                serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
+                Some("/a/b.rs"),
+            ),
+        ];
+        let tools = all_tools();
+        for (name, input, expected) in &cases {
+            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            assert_eq!(t.summarize_input(input), *expected, "tool {name}");
+        }
+    }
+
+    #[test]
+    fn tool_summarize_input_returns_none_when_primary_field_missing() {
+        let tools = all_tools();
+        for t in &tools {
+            assert!(
+                t.summarize_input(&serde_json::json!({})).is_none(),
+                "tool {} returned Some on empty input",
+                t.name(),
+            );
+        }
     }
 
     // ── ToolRegistry::get ──

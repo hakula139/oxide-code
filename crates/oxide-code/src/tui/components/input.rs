@@ -243,6 +243,9 @@ impl InputArea {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
 
     use super::*;
 
@@ -291,69 +294,6 @@ mod tests {
             input.textarea.insert_newline();
         }
         assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
-    }
-
-    // ── visual_line_count ──
-
-    #[test]
-    fn visual_line_count_no_width_falls_back_to_logical() {
-        let mut input = test_input();
-        // last_width is 0 (no render yet), so falls back to logical count.
-        assert_eq!(input.visual_line_count(), 1);
-
-        input.textarea.insert_newline();
-        assert_eq!(input.visual_line_count(), 2);
-    }
-
-    #[test]
-    fn visual_line_count_wraps_long_line() {
-        let mut input = test_input();
-        input.last_width.set(10);
-        // Insert a 25-char line: wraps to ceil(25/10) = 3 visual lines.
-        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        assert_eq!(input.visual_line_count(), 3);
-    }
-
-    #[test]
-    fn visual_line_count_mixed_logical_and_wrapped() {
-        let mut input = test_input();
-        input.last_width.set(10);
-        // Line 1: 5 chars (fits in 10) -> 1 visual line.
-        for ch in "hello".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        input.textarea.insert_newline();
-        // Line 2: 15 chars -> ceil(15/10) = 2 visual lines.
-        for ch in "abcdefghijklmno".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        assert_eq!(input.visual_line_count(), 3);
-    }
-
-    #[test]
-    fn height_accounts_for_visual_wrapping() {
-        let mut input = test_input();
-        input.last_width.set(10);
-        // Single logical line, 25 chars -> 3 visual lines.
-        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
-            input.textarea.input(Event::Key(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::NONE,
-            )));
-        }
-        // 3 content + 1 border + 1 hint = 5
-        assert_eq!(input.height(), 5);
     }
 
     // ── handle_event ──
@@ -430,6 +370,150 @@ mod tests {
 
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "hi"));
+    }
+
+    // ── render ──
+
+    fn render_to_backend(input: &InputArea, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                input.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
+    fn type_text(input: &mut InputArea, text: &str) {
+        for ch in text.chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+    }
+
+    #[test]
+    fn render_empty_shows_placeholder_and_hint_line() {
+        let input = test_input();
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_with_text_shows_typed_content() {
+        let mut input = test_input();
+        type_text(&mut input, "hello world");
+        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+    }
+
+    #[test]
+    fn render_disabled_applies_dim_foreground_to_text() {
+        // Enable/disable only changes per-cell styling, which a text-only
+        // snapshot collapses. Inspect the buffer directly instead.
+        let theme = Theme::default();
+        let mut input = InputArea::new(theme);
+        type_text(&mut input, "pending");
+
+        let enabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(0, 1))
+            .unwrap()
+            .fg;
+        input.set_enabled(false);
+        let disabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(0, 1))
+            .unwrap()
+            .fg;
+
+        assert_eq!(enabled_fg, theme.text().fg.unwrap());
+        assert_eq!(disabled_fg, theme.dim().fg.unwrap());
+        assert_ne!(enabled_fg, disabled_fg);
+    }
+
+    #[test]
+    fn render_multiline_grows_textarea_region() {
+        let mut input = test_input();
+        type_text(&mut input, "line 1");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 2");
+        input.textarea.insert_newline();
+        type_text(&mut input, "line 3");
+        insta::assert_snapshot!(render_to_backend(&input, 60, input.height()));
+    }
+
+    #[test]
+    fn render_long_line_wraps_and_engages_scroll_offset() {
+        // Narrow width forces word-wrap; typing past the visible row
+        // engages scroll_top so the cursor stays on-screen.
+        let mut input = test_input();
+        type_text(
+            &mut input,
+            "a long input that overflows a narrow terminal and forces the textarea to wrap",
+        );
+        insta::assert_snapshot!(render_to_backend(&input, 30, 5));
+    }
+    // ── visual_line_count ──
+
+    #[test]
+    fn visual_line_count_no_width_falls_back_to_logical() {
+        let mut input = test_input();
+        // last_width is 0 (no render yet), so falls back to logical count.
+        assert_eq!(input.visual_line_count(), 1);
+
+        input.textarea.insert_newline();
+        assert_eq!(input.visual_line_count(), 2);
+    }
+
+    #[test]
+    fn visual_line_count_wraps_long_line() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Insert a 25-char line: wraps to ceil(25/10) = 3 visual lines.
+        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(input.visual_line_count(), 3);
+    }
+
+    #[test]
+    fn visual_line_count_mixed_logical_and_wrapped() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Line 1: 5 chars (fits in 10) -> 1 visual line.
+        for ch in "hello".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        input.textarea.insert_newline();
+        // Line 2: 15 chars -> ceil(15/10) = 2 visual lines.
+        for ch in "abcdefghijklmno".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(input.visual_line_count(), 3);
+    }
+
+    #[test]
+    fn height_accounts_for_visual_wrapping() {
+        let mut input = test_input();
+        input.last_width.set(10);
+        // Single logical line, 25 chars -> 3 visual lines.
+        for ch in "abcdefghijklmnopqrstuvwxy".chars() {
+            input.textarea.input(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        // 3 content + 1 border + 1 hint = 5
+        assert_eq!(input.height(), 5);
     }
 
     // ── submit ──

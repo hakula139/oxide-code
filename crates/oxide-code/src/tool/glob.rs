@@ -147,22 +147,6 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── icon ──
-
-    #[test]
-    fn icon_is_star() {
-        assert_eq!(GlobTool.icon(), "✱");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_pattern() {
-        let input = serde_json::json!({"pattern": "**/*.rs"});
-        assert_eq!(GlobTool.summarize_input(&input), Some("**/*.rs"));
-    }
-
     // ── run ──
 
     #[tokio::test]

@@ -13,6 +13,7 @@ CREAT
 creds
 crossterm
 dedupe
+deque
 deserialize
 disambiguable
 dtolnay

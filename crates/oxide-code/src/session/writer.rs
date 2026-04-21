@@ -45,7 +45,7 @@ pub(crate) fn log_session_err(
     {
         // `{e:#}` flattens the anyhow cause chain — the outer context
         // is usually "failed to write session file" while the
-        // actionable root (permission denied, disk full, …) lives
+        // actionable root (permission denied, disk full, ...) lives
         // beneath. Plain `Display` would hide it.
         _ = sink.send(AgentEvent::Error(format!(
             "Session write failed: {e:#}. Conversation history may be incomplete; further write errors will be silent."
@@ -154,7 +154,7 @@ mod tests {
         // Feed a two-level cause chain so the `{e:#}` format actually
         // has something to flatten — regression for the bug where
         // `Display` alone would hide the actionable root cause
-        // (permission denied, disk full, …) under a generic outer
+        // (permission denied, disk full, ...) under a generic outer
         // context ("failed to write session file").
         let dir = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::start(&test_store(dir.path()), "m");

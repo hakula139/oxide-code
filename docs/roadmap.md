@@ -71,18 +71,25 @@ The project direction is simple:
 - On Unix, session files are created with mode `0o600` so verbatim tool output (which may include secrets) stays owner-only.
 - Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header. AI title generation runs in TUI only — REPL / headless keep the first-prompt title on disk so listings stay accurate.
 
+### Testing
+
+- 97%+ line coverage (measured via `cargo llvm-cov --ignore-filename-regex 'main\.rs'`).
+- `wiremock` for HTTP round-trip coverage of the Anthropic streaming client, the non-streaming completion path, the OAuth token-refresh flow, and `session::title_generator::generate_and_record`.
+- `ratatui::backend::TestBackend` + `insta` snapshots for `InputArea`, `ChatView`, `StatusBar`, and `App::draw_frame` at representative sizes and states. Review updates via `cargo insta review`.
+- `temp-env` for the `Config::load` precedence matrix (env > user config > defaults), `util::env::{string, bool}` empty-is-absent semantics, and `SessionStore::open` XDG / HOME resolution.
+- An `AgentClient` trait with an in-process fake drives `agent_turn` end-to-end: happy path, multi-round tool dispatch, unknown-tool recovery, `MAX_TOOL_ROUNDS` safety cap, and mid-stream error propagation.
+- Parameterized Tool-trait-contract tests assert every tool's `name`, `description`, `input_schema`, `icon`, and `summarize_input` uniformly.
+
 ## Current Focus
 
 ### Terminal UI (Remaining)
 
 - Viewport virtualization for long conversations.
 
-### Test Coverage
+### Test Coverage (Remaining)
 
-- Integration test infrastructure — `insta` snapshot tests for TUI render methods, `temp-env` for config env var testing, `wiremock` for Anthropic SSE streaming client.
-- Unit tests for `App::handle_action` / `App::handle_agent_event` — pure reducer logic extracted for testability.
-- `TestBackend`-based render tests for `InputArea::render` — border style, cursor placement, hint line content.
 - `StdioSink::send` formatting tests — extract per-variant formatting into a testable helper, then unit-test ANSI escapes, title display, and trimmed output.
+- `App::run` event loop — requires a full terminal / crossterm mock; deferred as low value-per-effort (the reducer methods it drives are all independently covered).
 
 ### Tool & Prompt Enhancements
 

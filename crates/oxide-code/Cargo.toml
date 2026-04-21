@@ -47,4 +47,7 @@ nix.workspace = true
 security-framework.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
+temp-env.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true

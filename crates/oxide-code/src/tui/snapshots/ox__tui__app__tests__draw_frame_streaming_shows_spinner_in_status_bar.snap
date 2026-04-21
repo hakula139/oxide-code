@@ -1,0 +1,12 @@
+---
+source: crates/oxide-code/src/tui/app.rs
+expression: "render_app(&mut app, 60, 8)"
+---
+"  ox │ test-model │ ⠋ streaming...                  ~/test  "
+"────────────────────────────────────────────────────────────"
+"❯ ▎ working...                                              "
+"                                                            "
+"                                                            "
+"────────────────────────────────────────────────────────────"
+" Ask anything...                                            "
+"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit           "

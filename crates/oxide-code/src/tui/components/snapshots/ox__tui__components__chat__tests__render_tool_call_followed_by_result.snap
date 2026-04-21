@@ -1,0 +1,14 @@
+---
+source: crates/oxide-code/src/tui/components/chat.rs
+expression: "render_chat(&mut chat, 60, 10)"
+---
+"  ▎ $ echo hi                                               "
+"  ▎   ✓ ran echo                                            "
+"  ▎     hi                                                  "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
