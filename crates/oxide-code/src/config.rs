@@ -99,6 +99,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -114,14 +115,11 @@ mod tests {
     }
 
     // ── Config::load ──
-    //
-    // Pins XDG_CONFIG_HOME to an isolated tempdir and sets
-    // `ANTHROPIC_API_KEY` to steer into the ApiKey auth branch, so the
-    // tests never reach the OAuth file-discovery path that depends on
-    // the caller's real home directory.
 
-    /// Keys the tests control. Always passed to `with_vars` together so
-    /// nothing bleeds in from the caller's environment.
+    /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
+    /// nothing bleeds in from the caller's environment; `ANTHROPIC_API_KEY`
+    /// ships with a non-empty default so tests land on the `ApiKey` arm
+    /// and never consult the real OAuth credential sources.
     const ENV_KEYS: &[&str] = &[
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
@@ -137,32 +135,30 @@ mod tests {
         std::fs::write(config_dir.join("config.toml"), body).unwrap();
     }
 
-    /// Builds an env override list starting from defaults (every
-    /// tracked key unset, except `ANTHROPIC_API_KEY = "sk-default"` so
-    /// the `ApiKey` arm is reached). Overrides replace entries for keys
-    /// already in [`ENV_KEYS`]; passing an unknown key panics so a
-    /// misspelled test key surfaces immediately instead of silently
-    /// expanding the tracked set.
+    /// Baseline env list (every [`ENV_KEYS`] entry unset, `ANTHROPIC_API_KEY`
+    /// set to `"sk-default"`) with `overrides` applied on top. Panics if
+    /// an override key is not in [`ENV_KEYS`] so a misspelling surfaces
+    /// immediately. Returns a `Vec` because `temp_env::async_with_vars`
+    /// takes `AsRef<[(K, Option<V>)]>`.
     fn env_vars(
-        overrides: Vec<(&'static str, Option<String>)>,
+        overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
     ) -> Vec<(&'static str, Option<String>)> {
+        let known: HashSet<&'static str> = ENV_KEYS.iter().copied().collect();
         let mut out: Vec<(&'static str, Option<String>)> = ENV_KEYS
             .iter()
+            .copied()
             .map(|k| {
-                let default = if *k == "ANTHROPIC_API_KEY" {
-                    Some("sk-default".to_owned())
-                } else {
-                    None
-                };
-                (*k, default)
+                (
+                    k,
+                    (k == "ANTHROPIC_API_KEY").then(|| "sk-default".to_owned()),
+                )
             })
             .collect();
         for (key, value) in overrides {
-            let entry = out
-                .iter_mut()
-                .find(|(k, _)| *k == key)
-                .unwrap_or_else(|| panic!("env key {key:?} not in ENV_KEYS"));
-            entry.1 = value;
+            assert!(known.contains(key), "env key {key:?} not in ENV_KEYS");
+            if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = value;
+            }
         }
         out
     }
@@ -281,8 +277,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_file_api_key_used_when_env_is_empty() {
-        // Empty env is treated as absent (empty-is-absent semantics),
-        // so the file's api_key is the effective value.
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),

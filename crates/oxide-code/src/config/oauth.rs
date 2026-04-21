@@ -433,6 +433,11 @@ fn lock_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
     use super::*;
 
     // ── OAuthCredential::expires_at_ms ──
@@ -457,6 +462,158 @@ mod tests {
         assert_eq!(cred.expires_at_ms(), 0);
     }
 
+    // ── load_token ──
+
+    /// Skipped on macOS: `load_credentials` reads the user's Keychain,
+    /// which is user-scoped rather than `$HOME`-scoped and would leak a
+    /// real Claude Code token into the test run.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn load_token_resolves_credentials_relative_to_home() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        write_creds(
+            &claude_dir.join(".credentials.json"),
+            "token-from-home",
+            None,
+            9_999_999_999_999,
+        );
+
+        let token = temp_env::async_with_vars(
+            [("HOME", Some(home.path().to_string_lossy().into_owned()))],
+            async { load_token().await.unwrap() },
+        )
+        .await;
+        assert_eq!(token, "token-from-home");
+    }
+
+    // ── load_token_from ──
+
+    fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: u64) {
+        let mut oauth = serde_json::json!({
+            "accessToken": access,
+            "expiresAt": expires_at,
+        });
+        if let Some(r) = refresh {
+            oauth["refreshToken"] = r.into();
+        }
+        let body = serde_json::json!({ "claudeAiOauth": oauth }).to_string();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_token_from_returns_existing_when_far_from_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
+
+        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
+            .await
+            .unwrap();
+        assert_eq!(token, "tok");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_without_refresh_token_returns_nonexpired_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", None, now_millis() + 60_000);
+
+        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
+            .await
+            .unwrap();
+        assert_eq!(token, "tok");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_without_refresh_token_bails_when_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "tok", None, 0);
+
+        let err = load_token_from(&creds, &lock, "http://unused")
+            .await
+            .expect_err("expired without refresh must bail");
+        assert!(format!("{err:#}").contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn load_token_from_refreshes_near_expiry_and_writes_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "fresh-access",
+                "fresh-refresh",
+                3600,
+            )))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        // Under the 5-min refresh buffer so load_token_from must refresh.
+        write_creds(&creds, "old", Some("old-refresh"), now_millis() + 1_000);
+
+        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
+        assert_eq!(token, "fresh-access");
+
+        let content = std::fs::read_to_string(&creds).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
+        assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
+        let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
+        let now = now_millis();
+        assert!(
+            expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
+            "expiresAt out of band: {expires_at}",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_token_from_refresh_endpoint_down_keeps_existing_token_if_unexpired() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        // Near-expiry but not expired — refresh failure warns + keeps token.
+        write_creds(&creds, "stale", Some("old-refresh"), now_millis() + 60_000);
+
+        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
+        assert_eq!(token, "stale");
+    }
+
+    #[tokio::test]
+    async fn load_token_from_refresh_endpoint_down_bails_if_expired() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        let lock = dir.path().join("lock");
+        write_creds(&creds, "dead", Some("old"), 0);
+
+        let err = load_token_from(&creds, &lock, &server.uri())
+            .await
+            .expect_err("expired + refresh down must bail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
+    }
     // ── read_credentials ──
 
     #[test]
@@ -549,6 +706,90 @@ mod tests {
     #[test]
     fn is_expired_zero() {
         assert!(is_expired(0));
+    }
+
+    // ── refresh_oauth_token ──
+
+    fn ok_refresh_body(access: &str, refresh: &str, expires_in: u64) -> serde_json::Value {
+        serde_json::json!({
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": expires_in,
+            "scope": "user:profile user:inference",
+        })
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_sends_grant_and_client_id_and_returns_parsed_response() {
+        // Captures the request body to pin the wire shape — Anthropic's
+        // token endpoint rejects a request missing `grant_type` or
+        // `client_id`, so regressions there are gateway-level.
+        let server = MockServer::start().await;
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(move |req: &Request| {
+                *captured_clone.lock().unwrap() = serde_json::from_slice(&req.body).ok();
+                ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                    "new-access",
+                    "new-refresh",
+                    3600,
+                ))
+            })
+            .mount(&server)
+            .await;
+
+        let response = refresh_oauth_token(&server.uri(), "old-refresh")
+            .await
+            .unwrap();
+        assert_eq!(response.access_token, "new-access");
+        assert_eq!(response.refresh_token, "new-refresh");
+        assert_eq!(response.expires_in, 3600);
+        assert_eq!(
+            response.scope.as_deref(),
+            Some("user:profile user:inference")
+        );
+
+        let body = captured.lock().unwrap().take().expect("body captured");
+        assert_eq!(body["grant_type"], "refresh_token");
+        assert_eq!(body["refresh_token"], "old-refresh");
+        assert_eq!(body["client_id"], OAUTH_CLIENT_ID);
+        assert_eq!(body["scope"], OAUTH_SCOPES.join(" "));
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_propagates_http_error_with_status_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(r#"{"error":"invalid_grant"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let err = refresh_oauth_token(&server.uri(), "bad")
+            .await
+            .expect_err("expected HTTP error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("401"), "status: {msg}");
+        assert!(msg.contains("invalid_grant"), "body: {msg}");
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_malformed_json_errors_with_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
+            .mount(&server)
+            .await;
+
+        let err = refresh_oauth_token(&server.uri(), "tok")
+            .await
+            .expect_err("expected parse error");
+        assert!(format!("{err:#}").contains("parse"));
     }
 
     // ── write_refreshed_credentials ──
@@ -694,255 +935,5 @@ mod tests {
 
         drop(guard);
         assert!(!lock_path.exists());
-    }
-
-    // ── refresh_oauth_token ──
-
-    use wiremock::matchers::{method, path as wm_path};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-    fn ok_refresh_body(access: &str, refresh: &str, expires_in: u64) -> serde_json::Value {
-        serde_json::json!({
-            "access_token": access,
-            "refresh_token": refresh,
-            "expires_in": expires_in,
-            "scope": "user:profile user:inference",
-        })
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_sends_grant_and_client_id_and_returns_parsed_response() {
-        // Captures the request body to pin the wire shape — Anthropic's
-        // token endpoint rejects a request missing `grant_type` or
-        // `client_id`, so regressions there are gateway-level.
-        let server = MockServer::start().await;
-        let captured: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        let captured_clone = std::sync::Arc::clone(&captured);
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(move |req: &Request| {
-                *captured_clone.lock().unwrap() = serde_json::from_slice(&req.body).ok();
-                ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                    "new-access",
-                    "new-refresh",
-                    3600,
-                ))
-            })
-            .mount(&server)
-            .await;
-
-        let response = refresh_oauth_token(&server.uri(), "old-refresh")
-            .await
-            .unwrap();
-        assert_eq!(response.access_token, "new-access");
-        assert_eq!(response.refresh_token, "new-refresh");
-        assert_eq!(response.expires_in, 3600);
-        assert_eq!(
-            response.scope.as_deref(),
-            Some("user:profile user:inference")
-        );
-
-        let body = captured.lock().unwrap().clone().expect("body captured");
-        assert_eq!(body["grant_type"], "refresh_token");
-        assert_eq!(body["refresh_token"], "old-refresh");
-        assert_eq!(body["client_id"], OAUTH_CLIENT_ID);
-        assert_eq!(body["scope"], OAUTH_SCOPES.join(" "));
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_propagates_http_error_with_status_and_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_string(r#"{"error":"invalid_grant"}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let err = refresh_oauth_token(&server.uri(), "bad")
-            .await
-            .expect_err("expected HTTP error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("401"), "status: {msg}");
-        assert!(msg.contains("invalid_grant"), "body: {msg}");
-    }
-
-    #[tokio::test]
-    async fn refresh_oauth_token_malformed_json_errors_with_context() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
-            .mount(&server)
-            .await;
-
-        let err = refresh_oauth_token(&server.uri(), "tok")
-            .await
-            .expect_err("expected parse error");
-        assert!(format!("{err:#}").contains("parse"));
-    }
-
-    // ── load_token ──
-
-    // Gated off on macOS because the public `load_token` wrapper routes
-    // through `load_credentials`, which consults the user's Keychain
-    // before falling back to the file. The Keychain is user-scoped (not
-    // $HOME-scoped), so a dev running this test on a machine with a
-    // real Claude Code install would read their production token. The
-    // file-only path runs in CI, which is Linux.
-    #[cfg(not(target_os = "macos"))]
-    #[tokio::test]
-    async fn load_token_resolves_credentials_relative_to_home() {
-        let home = tempfile::tempdir().unwrap();
-        let claude_dir = home.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        write_creds(
-            &claude_dir.join(".credentials.json"),
-            "token-from-home",
-            None,
-            9_999_999_999_999,
-        );
-
-        let token = temp_env::async_with_vars(
-            [("HOME", Some(home.path().to_string_lossy().into_owned()))],
-            async { load_token().await.unwrap() },
-        )
-        .await;
-        assert_eq!(token, "token-from-home");
-    }
-
-    // ── load_token_from ──
-
-    fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: i64) {
-        let refresh_line = refresh
-            .map(|r| format!(r#", "refreshToken": "{r}""#))
-            .unwrap_or_default();
-        let body = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{access}"{refresh_line},"expiresAt":{expires_at}}}}}"#,
-        );
-        std::fs::write(path, body).unwrap();
-    }
-
-    #[tokio::test]
-    async fn load_token_from_returns_existing_when_far_from_expiry() {
-        // Token valid for far future → return as-is, no network call.
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
-
-        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
-            .await
-            .unwrap();
-        assert_eq!(token, "tok");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_without_refresh_token_returns_nonexpired_as_is() {
-        // No refresh token + not yet expired → use existing + warn.
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        let future = i64::try_from(now_millis() + 60_000).unwrap();
-        write_creds(&creds, "tok", None, future);
-
-        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
-            .await
-            .unwrap();
-        assert_eq!(token, "tok");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_without_refresh_token_bails_when_expired() {
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, 0);
-
-        let err = load_token_from(&creds, &lock, "http://unused")
-            .await
-            .expect_err("expired without refresh must bail");
-        assert!(format!("{err:#}").contains("expired"));
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refreshes_near_expiry_and_writes_back() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
-                "fresh-access",
-                "fresh-refresh",
-                3600,
-            )))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        // Near-expiry (1 second from now, below the 5-min buffer).
-        let near = i64::try_from(now_millis() + 1_000).unwrap();
-        write_creds(&creds, "old", Some("old-refresh"), near);
-
-        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
-        assert_eq!(token, "fresh-access");
-
-        // The file on disk must carry the refreshed access_token and a
-        // new expiresAt ~3_600_000 ms from now.
-        let content = std::fs::read_to_string(&creds).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
-        assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
-        let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
-        let now = now_millis();
-        assert!(
-            expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
-            "expiresAt out of band: {expires_at}",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refresh_endpoint_down_keeps_existing_token_if_unexpired() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        // Near-expiry (under the 5-min refresh buffer) but not yet
-        // actually expired — refresh failure must warn + preserve token.
-        let near = i64::try_from(now_millis() + 60_000).unwrap();
-        write_creds(&creds, "stale", Some("old-refresh"), near);
-
-        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
-        assert_eq!(token, "stale");
-    }
-
-    #[tokio::test]
-    async fn load_token_from_refresh_endpoint_down_bails_if_expired() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path("/"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let creds = dir.path().join("creds.json");
-        let lock = dir.path().join("lock");
-        write_creds(&creds, "dead", Some("old"), 0);
-
-        let err = load_token_from(&creds, &lock, &server.uri())
-            .await
-            .expect_err("expired + refresh down must bail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
     }
 }
