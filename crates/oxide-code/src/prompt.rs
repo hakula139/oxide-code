@@ -20,10 +20,11 @@ pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC
 /// Assembled prompt split into two API surfaces.
 ///
 /// `system_sections` contains the static system prompt sections — one
-/// per API text block, matching Claude Code's multi-block layout.
-/// `user_context` contains dynamic content (CLAUDE.md, date) that is
-/// prepended to the `messages` array as a `<system-reminder>`-wrapped
-/// user message — matching Claude Code's context injection pattern.
+/// per API text block, so `cache_control` can apply to the static
+/// portion without re-caching on every turn. `user_context` contains
+/// dynamic content (CLAUDE.md, date) that is prepended to the
+/// `messages` array as a `<system-reminder>`-wrapped user message, so
+/// per-session content doesn't invalidate the static cache.
 pub(crate) struct PromptParts {
     pub(crate) system_sections: Vec<String>,
     pub(crate) user_context: Option<String>,
@@ -90,8 +91,9 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
 
 /// Build the `<system-reminder>` user message content from dynamic context.
 ///
-/// CLAUDE.md and date are injected as a synthetic user message, not in the
-/// `system` parameter, matching Claude Code's `prependUserContext()`.
+/// CLAUDE.md and date ride in a synthetic user message rather than the
+/// `system` parameter so per-session content doesn't invalidate the
+/// static-section prompt cache.
 fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     if claude_md.is_empty() {
         return None;

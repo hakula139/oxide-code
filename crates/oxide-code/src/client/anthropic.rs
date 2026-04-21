@@ -50,8 +50,7 @@ struct CreateMessageRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
     /// JSON-schema-constrained output format for one-shot utility calls
-    /// (title generation, future classifiers). Mirrors claude-code's
-    /// `extraBodyParams.output_config`. Must travel alongside the
+    /// (title generation, future classifiers). Must travel alongside the
     /// `structured-outputs-2025-12-15` beta header; both are gated on
     /// `Capabilities::structured_outputs` so unsupported models silently
     /// drop back to free-form text rather than 400ing the gateway.
@@ -89,7 +88,7 @@ impl OutputFormat {
     }
 }
 
-/// Request metadata matching Claude Code's `getAPIMetadata()` format.
+/// Top-level `metadata` object on every outbound request.
 ///
 /// `user_id` is a stringified JSON object containing `session_id` (and
 /// optionally `device_id` / `account_uuid`). The API receives it as a
@@ -354,13 +353,14 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
-    /// `system_sections` are the static system prompt sections (one text
-    /// block per section, matching Claude Code's multi-block layout).
+    /// `system_sections` are the static system prompt sections, each
+    /// shipped as its own `system` text block so `cache_control` can
+    /// apply to the static prefix only.
     ///
     /// `user_context` is a `<system-reminder>`-wrapped string that gets
-    /// prepended to the messages array as a synthetic user message,
-    /// matching Claude Code's `prependUserContext()` pattern. This keeps
-    /// dynamic content (CLAUDE.md) out of the `system` parameter.
+    /// prepended to the messages array as a synthetic user message, so
+    /// dynamic content (CLAUDE.md) stays out of the `system` parameter
+    /// and doesn't invalidate the static cache.
     ///
     /// Returns a channel receiver yielding [`StreamEvent`]s. The caller
     /// should recv events as they arrive for real-time output.
@@ -393,7 +393,7 @@ impl Client {
             None
         };
 
-        // Build system blocks matching Claude Code's `splitSysPromptPrefix`:
+        // Assemble the system-block array:
         //   1. Billing header (no cache_control)
         //   2. Identity prefix (no cache_control)
         //   3. Static sections joined (cache_control: ephemeral, scope: global)
@@ -1266,10 +1266,10 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_session_id_in_stringified_json() {
-        // The API accepts `metadata.user_id` as a string, not a nested
-        // object — claude-code stringifies a JSON object with `session_id`
-        // (and sometimes `device_id` / `account_uuid`). Round-trip check
-        // keeps the contract explicit.
+        // `metadata.user_id` is a stringified JSON object on the wire
+        // (contains `session_id` and optionally `device_id` /
+        // `account_uuid`), not a nested object. Round-trip check keeps
+        // the double-encoding explicit.
         let meta = build_metadata("abc-123");
         let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
         assert_eq!(parsed["session_id"], "abc-123");
@@ -1338,9 +1338,9 @@ mod tests {
 
     #[test]
     fn build_completion_body_oauth_injects_billing_header_and_cch() {
-        // OAuth must emit an initial billing block (Claude Code's fingerprint
-        // contract) and the placeholder `cch=00000` must be replaced by an
-        // actual 5-hex-digit tag via `inject_cch`.
+        // OAuth must emit an initial billing block carrying the version
+        // fingerprint, and the placeholder `cch=00000` must be replaced
+        // by an actual 5-hex-digit tag via `inject_cch`.
         let body = build_completion_body(
             "claude-haiku-4-5",
             "sys-prompt",

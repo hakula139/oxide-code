@@ -121,9 +121,7 @@ fn normalize_node_platform(os: &str) -> &'static str {
 
 // ── Shell Detection ──
 
-/// Extract the shell name from `$SHELL`, matching Claude Code's format.
-///
-/// Returns just the basename (`"zsh"`, `"bash"`) rather than the full path.
+/// Extract the shell basename from `$SHELL` (e.g. `"zsh"`, `"bash"`).
 fn detect_shell() -> String {
     let shell = env::string("SHELL").unwrap_or_else(|| "unknown".to_owned());
     std::path::Path::new(&shell)
