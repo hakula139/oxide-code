@@ -279,19 +279,16 @@ mod tests {
     #[test]
     fn capability_flags_match_upstream_substring_predicates() {
         // Lock every row's substring-derived capability flags to the
-        // upstream `modelSupports*` rules (3P gateway path). The
-        // predicates below are direct translations from
-        // `claude-code/src/utils/{betas,effort,context}.ts`; a mis-bump
-        // or typo that lets these two definitions drift will fail
-        // here instead of silently 400-ing one model family on a
-        // release day.
+        // `modelSupports*`-style rules the third-party gateway expects.
+        // A mis-bump or typo that lets the predicates below drift from
+        // the `MODELS` table will fail here instead of silently
+        // 400-ing one model family on a release day.
         //
         // Structured outputs are an explicit allowlist rather than a
         // substring rule, so they're covered by a separate test below.
         //
-        // Opus 4.7 is our forward projection (the reference tree
-        // predates it), so we skip it here — no upstream predicate
-        // exists to check against.
+        // Opus 4.7 postdates the predicate set we mirror, so we skip
+        // it here — there is no substring rule to check against.
         for info in MODELS {
             if info.id_substr == "claude-opus-4-7" {
                 continue;
