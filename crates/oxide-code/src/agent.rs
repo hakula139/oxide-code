@@ -1050,4 +1050,76 @@ mod tests {
         assert_eq!(stripped.content.len(), 1);
         assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
     }
+
+    #[tokio::test]
+    async fn agent_turn_drives_real_client_over_wiremock() {
+        // Covers <Client as AgentClient>::stream_message on the real
+        // production path — the FakeClient tests above stub the trait
+        // rather than exercise it. Keeps the wiremock surface minimal:
+        // one happy text turn.
+        use crate::client::anthropic::Client;
+        use crate::config::{Auth, Config};
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = indoc::indoc! {r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#};
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            Config {
+                auth: Auth::ApiKey("sk".to_owned()),
+                model: "claude-sonnet-4-6".to_owned(),
+                base_url: server.uri(),
+                max_tokens: 64,
+                thinking: None,
+                show_thinking: false,
+            },
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
+    }
 }

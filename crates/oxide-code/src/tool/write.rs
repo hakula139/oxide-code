@@ -100,20 +100,7 @@ async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool)
 mod tests {
     use super::*;
 
-    // ── icon ──
-
-    #[test]
-    fn icon_is_arrow_left() {
-        assert_eq!(WriteTool.icon(), "←");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_file_path() {
-        let input = serde_json::json!({"file_path": "/tmp/out.txt", "content": "x"});
-        assert_eq!(WriteTool.summarize_input(&input), Some("/tmp/out.txt"));
-    }
+    // Name / icon / schema coverage lives in `tool::tests`.
 
     // ── run ──
 

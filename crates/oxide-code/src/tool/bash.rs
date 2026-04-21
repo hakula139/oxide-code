@@ -237,26 +237,9 @@ mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
-    // ── icon ──
-
-    #[test]
-    fn icon_is_dollar_sign() {
-        assert_eq!(BashTool.icon(), "$");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_command() {
-        let input = serde_json::json!({"command": "ls -la"});
-        assert_eq!(BashTool.summarize_input(&input), Some("ls -la"));
-    }
-
-    #[test]
-    fn summarize_input_missing_command() {
-        let input = serde_json::json!({"description": "no command"});
-        assert_eq!(BashTool.summarize_input(&input), None);
-    }
+    // The name / icon / schema contract lives in `tool::tests` so it
+    // runs uniformly across every tool. Per-tool tests focus on runtime
+    // behavior (subprocess lifecycle, output shaping, timeouts).
 
     // ── run ──
 

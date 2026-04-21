@@ -192,20 +192,7 @@ mod tests {
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
-    // ── icon ──
-
-    #[test]
-    fn icon_is_arrow_right() {
-        assert_eq!(ReadTool.icon(), "→");
-    }
-
-    // ── summarize_input ──
-
-    #[test]
-    fn summarize_input_extracts_file_path() {
-        let input = serde_json::json!({"file_path": "/tmp/foo.rs"});
-        assert_eq!(ReadTool.summarize_input(&input), Some("/tmp/foo.rs"));
-    }
+    // Name / icon / schema coverage lives in `tool::tests`.
 
     // ── run ──
 
