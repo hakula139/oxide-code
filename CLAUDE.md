@@ -196,6 +196,22 @@ cargo test                                         # Run tests
 cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
 ```
 
+### Mutation testing
+
+Coverage reports whether a line ran; mutation testing reports whether
+a mutation of that line would be caught. Run out-of-band before
+large-scope changes ship — it is not part of CI because a full run is
+slow:
+
+```bash
+cargo mutants --package oxide-code
+```
+
+Surviving mutants usually mean a test asserts something too loose
+(e.g., `starts_with` on uniform input, or a wildcard pattern that
+matches every output). Tighten the assertion; if the mutant is
+genuinely equivalent, exclude it with an explanatory comment.
+
 ## Code Review
 
 After verification passes, review for:
