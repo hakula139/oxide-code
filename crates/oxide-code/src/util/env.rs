@@ -1,7 +1,9 @@
+//! Environment-variable readers with empty-is-absent semantics — a
+//! stray empty shell value must never shadow a config-file default.
+
 // ── Readers ──
 
-/// Reads an env var, treating unset and empty as equivalent `None` so a
-/// stray empty value from the shell doesn't shadow a config-file default.
+/// Reads an env var, treating unset and empty as equivalent `None`.
 pub(crate) fn string(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
@@ -30,8 +32,6 @@ mod tests {
 
     #[test]
     fn string_empty_returns_none() {
-        // Empty-is-absent: a stray empty value in the shell must not
-        // shadow a config-file default.
         temp_env::with_var(KEY, Some(""), || {
             assert_eq!(string(KEY), None);
         });
@@ -57,8 +57,6 @@ mod tests {
 
     #[test]
     fn bool_any_other_set_value_is_explicit_false() {
-        // `Some(false)` means "set to something-that-isn't-truthy", an
-        // explicit off override against a config-file `true`.
         for falsy in ["0", "false", "no", "yes", "TRUE"] {
             temp_env::with_var(KEY, Some(falsy), || {
                 assert_eq!(bool(KEY), Some(false), "input={falsy}");

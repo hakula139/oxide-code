@@ -242,6 +242,20 @@ mod tests {
         Mutex::new(mgr)
     }
 
+    // ── title_output_format ──
+
+    #[test]
+    fn title_output_format_matches_title_envelope_shape() {
+        // The schema must line up with [`TitleEnvelope`] so a
+        // schema-conforming response parses via `parse_title`.
+        let fmt = title_output_format();
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
+        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
+        assert_eq!(v["schema"]["additionalProperties"], false);
+    }
+
     // ── generate_and_record ──
 
     #[tokio::test]
@@ -360,20 +374,6 @@ mod tests {
         assert!(msg.contains("503"), "status surfaced: {msg}");
     }
 
-    // ── title_output_format ──
-
-    #[test]
-    fn title_output_format_matches_title_envelope_shape() {
-        // The schema must line up with [`TitleEnvelope`] so a
-        // schema-conforming response parses via `parse_title`.
-        let fmt = title_output_format();
-        let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
-        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
-        assert_eq!(v["schema"]["additionalProperties"], false);
-    }
-
     // ── parse_title ──
 
     #[test]
@@ -436,6 +436,25 @@ mod tests {
         assert_eq!(parse_title(raw).unwrap(), "Add OAuth auth");
     }
 
+    // ── truncate_for_log ──
+
+    #[test]
+    fn truncate_for_log_passes_short_strings_through() {
+        assert_eq!(truncate_for_log("short"), "short");
+    }
+
+    #[test]
+    fn truncate_for_log_caps_long_strings_with_ellipsis() {
+        let long = "a".repeat(500);
+        let out = truncate_for_log(&long);
+        assert!(out.ends_with('…'), "got: {out:?}");
+        assert!(
+            out.chars().count() <= 121,
+            "got {} chars",
+            out.chars().count()
+        );
+    }
+
     // ── strip_code_fence ──
 
     #[test]
@@ -458,25 +477,6 @@ mod tests {
     fn strip_code_fence_handles_no_opening_newline() {
         // Single-line fenced block — no language tag, no newline.
         assert_eq!(strip_code_fence("```body```"), "body");
-    }
-
-    // ── truncate_for_log ──
-
-    #[test]
-    fn truncate_for_log_passes_short_strings_through() {
-        assert_eq!(truncate_for_log("short"), "short");
-    }
-
-    #[test]
-    fn truncate_for_log_caps_long_strings_with_ellipsis() {
-        let long = "a".repeat(500);
-        let out = truncate_for_log(&long);
-        assert!(out.ends_with('…'), "got: {out:?}");
-        assert!(
-            out.chars().count() <= 121,
-            "got {} chars",
-            out.chars().count()
-        );
     }
 
     // ── truncate_prompt ──

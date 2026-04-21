@@ -866,7 +866,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_falls_back_to_home_local_share_when_xdg_unset() {
-        // XDG_DATA_HOME unset → fall back to $HOME/.local/share.
         let home = tempfile::tempdir().unwrap();
         let store = temp_env::async_with_vars(
             [

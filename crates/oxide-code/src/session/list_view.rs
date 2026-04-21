@@ -222,6 +222,25 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
+    // ── render_list ──
+
+    #[test]
+    fn render_list_empty_store_returns_no_sessions_notice() {
+        // Covers the `render_list → render_sessions` glue; empty store
+        // keeps the test fixture-free.
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::test_store(dir.path());
+        let mut buf = Vec::new();
+        render_list(&mut buf, &store, false, UtcOffset::UTC, None).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "No sessions found in this project.\n",
+        );
+
+        let mut buf = Vec::new();
+        render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
+    }
     // ── render_sessions ──
 
     #[test]
@@ -420,26 +439,5 @@ mod tests {
         // raw truncation and return whatever content does fit.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
-    }
-
-    // ── render_list ──
-
-    #[test]
-    fn render_list_empty_store_returns_no_sessions_notice() {
-        // Exercises the `render_list → store.list()/list_all() → render_sessions`
-        // wrapper — the other tests drive render_sessions directly. Using
-        // an empty store keeps the test deterministic (no session fixtures).
-        let dir = tempfile::tempdir().unwrap();
-        let store = super::super::store::test_store(dir.path());
-        let mut buf = Vec::new();
-        render_list(&mut buf, &store, false, UtcOffset::UTC, None).unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "No sessions found in this project.\n",
-        );
-
-        let mut buf = Vec::new();
-        render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
     }
 }
