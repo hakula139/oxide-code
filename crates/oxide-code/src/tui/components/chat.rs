@@ -824,6 +824,8 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> String {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use indoc::indoc;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::message::{ContentBlock, Role};
@@ -1484,23 +1486,6 @@ mod tests {
         assert!(action.is_none());
     }
 
-    // ── render ──
-
-    #[test]
-    fn render_updates_content_height() {
-        let chat = test_chat();
-
-        let backend = ratatui::backend::TestBackend::new(80, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                chat.render(frame, frame.area());
-            })
-            .unwrap();
-        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
-        assert_eq!(chat.content_height.get(), 4);
-    }
-
     // ── scroll_to_bottom ──
 
     #[test]
@@ -2146,9 +2131,6 @@ mod tests {
 
     // ── render ──
 
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
         chat.update_layout(Rect::new(0, 0, width, height));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2158,6 +2140,14 @@ mod tests {
             })
             .unwrap();
         terminal.backend().clone()
+    }
+
+    #[test]
+    fn render_updates_content_height() {
+        let mut chat = test_chat();
+        render_chat(&mut chat, 80, 24);
+        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
+        assert_eq!(chat.content_height.get(), 4);
     }
 
     #[test]

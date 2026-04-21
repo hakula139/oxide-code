@@ -291,7 +291,6 @@ impl Client {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
-        // Auth.
         match &config.auth {
             Auth::ApiKey(key) => {
                 let mut value = HeaderValue::from_str(key)?;
@@ -305,16 +304,15 @@ impl Client {
             }
         }
 
-        // Anthropic service. `anthropic-beta` is set per-request in
-        // `stream_message` / `complete` because the accepted set varies
-        // by model and call type — see [`compute_betas`].
+        // `anthropic-beta` is set per-request in `stream_message` /
+        // `complete` because the accepted set varies by model and call
+        // type — see [`compute_betas`].
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(
             "anthropic-dangerous-direct-browser-access",
             HeaderValue::from_static("true"),
         );
 
-        // Standard HTTP.
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
@@ -382,7 +380,6 @@ impl Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        // Prepend user_context as a synthetic user message (messages[0]).
         let messages_with_context: Vec<Message>;
         let effective_messages: &[Message] = if let Some(ctx) = user_context {
             messages_with_context = std::iter::once(Message::user(ctx))
