@@ -2,7 +2,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Wrap a line to fit within `max_width`, preserving visual indentation
+/// Wraps a line to fit within `max_width`, preserving visual indentation
 /// on continuation lines.
 ///
 /// `continuation_indent` is the number of leading columns consumed by
@@ -96,7 +96,7 @@ fn greedy_word_wrap(
     lines
 }
 
-/// Consume one visual line's worth of characters starting at `start`.
+/// Consumes one visual line's worth of characters starting at `start`.
 ///
 /// Returns the characters for this line and the index of the first
 /// character of the next line.

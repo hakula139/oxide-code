@@ -39,14 +39,14 @@ pub(crate) struct PromptParts {
 }
 
 impl PromptParts {
-    /// Join all system sections into a single string for testing / display.
+    /// Joins all system sections into a single string for testing / display.
     #[cfg(test)]
     fn system_joined(&self) -> String {
         self.system_sections.join("\n\n")
     }
 }
 
-/// Build the prompt parts for the agent.
+/// Builds the prompt parts for the agent.
 ///
 /// Resolves the working directory and git root automatically, then delegates
 /// to [`assemble`].
@@ -60,7 +60,7 @@ pub(crate) async fn build_prompt(model: &str) -> PromptParts {
     assemble(model, cwd.as_deref(), git_root.as_deref()).await
 }
 
-/// Assemble the prompt from explicit path parameters.
+/// Assembles the prompt from explicit path parameters.
 ///
 /// The identity prefix required for OAuth is handled by the API client as a
 /// separate system block. This function builds the remaining prompt content:
@@ -97,7 +97,7 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
     }
 }
 
-/// Build the `<system-reminder>` user message content from dynamic context.
+/// Builds the `<system-reminder>` user message content from dynamic context.
 ///
 /// CLAUDE.md and date ride in a synthetic user message rather than the
 /// `system` parameter so per-session content doesn't invalidate the
@@ -125,7 +125,7 @@ fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     })
 }
 
-/// Find the git repository root from a working directory.
+/// Finds the git repository root from a working directory.
 ///
 /// Returns `None` when not inside a git repository or when `git` is not
 /// available.

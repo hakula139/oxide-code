@@ -43,7 +43,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration from files and environment variables.
+    /// Loads configuration from files and environment variables.
     ///
     /// Precedence (highest wins): env vars > project `ox.toml` > user
     /// `~/.config/ox/config.toml` > built-in defaults.

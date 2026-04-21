@@ -8,7 +8,7 @@ use render::MarkdownRenderer;
 
 use super::theme::Theme;
 
-/// Convert a markdown string to styled ratatui [`Text`].
+/// Converts a markdown string to styled ratatui [`Text`].
 ///
 /// When `width` is non-zero, long lines are word-wrapped to fit within
 /// the given column budget. Continuation lines preserve the current

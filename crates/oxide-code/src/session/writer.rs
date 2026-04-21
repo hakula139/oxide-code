@@ -25,7 +25,7 @@ pub(crate) async fn record_session_message(
     log_session_err(r, &mut s, sink);
 }
 
-/// Log session I/O errors without aborting the agent loop.
+/// Logs session I/O errors without aborting the agent loop.
 ///
 /// The first failure within a session is also surfaced to the user via
 /// `sink` (when available) so they know the conversation may not be

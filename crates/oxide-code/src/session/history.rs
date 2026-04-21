@@ -1,4 +1,4 @@
-//! Convert a loaded session transcript into a display-oriented stream.
+//! Display-oriented reshaping of a loaded session transcript.
 //!
 //! The JSONL layer stores assistant turns as `Message { content: [ToolUse,
 //! ToolUse, ...] }` followed by a single user turn with the matching
@@ -56,7 +56,7 @@ pub(crate) enum Interaction<'a> {
     },
 }
 
-/// Walk a resumed transcript and emit interactions in display order.
+/// Walks a resumed transcript and emits interactions in display order.
 ///
 /// Text blocks inside a single message are merged into one entry; whitespace
 /// only entries are dropped. Tool calls are paired inline with their matching
@@ -124,7 +124,7 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
     out
 }
 
-/// Emit any accumulated `text_buf` as a role-tagged text interaction and
+/// Emits any accumulated `text_buf` as a role-tagged text interaction and
 /// reset the buffer. No-op when the buffer is empty.
 fn flush_text(out: &mut Vec<Interaction<'_>>, text_buf: &mut String, role: Role) {
     if text_buf.is_empty() {

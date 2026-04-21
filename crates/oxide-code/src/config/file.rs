@@ -51,7 +51,7 @@ pub(super) struct TuiConfig {
 // ── Merge ──
 
 impl FileConfig {
-    /// Merge two configs. Fields in `other` take precedence over `self`.
+    /// Merges two configs. Fields in `other` take precedence over `self`.
     fn merge(self, other: Self) -> Self {
         Self {
             client: merge_section(self.client, other.client, ClientConfig::merge),
@@ -83,7 +83,7 @@ impl TuiConfig {
     }
 }
 
-/// Merge two optional config sections. When both are present, merge their
+/// Merges two optional config sections. When both are present, merges their
 /// fields. When only one is present, use it as-is.
 fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> Option<T> {
     match (base, other) {
@@ -94,7 +94,7 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 
 // ── Loading ──
 
-/// Load and merge configuration from user and project TOML files.
+/// Loads and merges configuration from user and project TOML files.
 ///
 /// Precedence (highest wins): project config > user config.
 /// Environment variable overrides are applied later in [`super::Config::load`].
@@ -136,12 +136,12 @@ fn user_config_path() -> Option<PathBuf> {
     )
 }
 
-/// Walk from CWD upward to find the nearest `ox.toml`.
+/// Walks from CWD upward to find the nearest `ox.toml`.
 fn find_project_config() -> Option<PathBuf> {
     find_project_config_from(std::env::current_dir().ok()?)
 }
 
-/// Walk from `start` upward to find the nearest `ox.toml`.
+/// Walks from `start` upward to find the nearest `ox.toml`.
 ///
 /// Separated from [`find_project_config`] for testability (avoids changing
 /// the process CWD).

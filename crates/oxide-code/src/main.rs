@@ -149,7 +149,7 @@ async fn async_main() -> Result<()> {
 
 // ── Session Helpers ──
 
-/// Print a table of recent sessions and exit. With `all = true`, spans
+/// Prints a table of recent sessions and exits. With `all = true`, spans
 /// every project; otherwise scoped to the current working directory.
 fn list_sessions(all: bool) -> Result<()> {
     let store = SessionStore::open()?;
@@ -164,7 +164,7 @@ fn list_sessions(all: bool) -> Result<()> {
     )
 }
 
-/// Detect the terminal width for title truncation in `--list`.
+/// Detects the terminal width for title truncation in `--list`.
 /// Returns `None` when stdout is not a TTY (piped / redirected) or
 /// when the window size cannot be queried — the renderer skips
 /// truncation in either case so downstream tools see the full title.
@@ -188,7 +188,7 @@ fn create_tool_registry() -> ToolRegistry {
     ])
 }
 
-/// Wait for any shutdown signal — SIGINT (portable), SIGTERM, or
+/// Waits for any shutdown signal — SIGINT (portable), SIGTERM, or
 /// SIGHUP (Unix only). Returns when the first signal arrives.
 ///
 /// Installs the handlers lazily on first call. Callers that embed this

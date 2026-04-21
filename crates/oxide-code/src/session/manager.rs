@@ -86,7 +86,7 @@ pub(crate) struct SessionManager {
     /// `Some`, the initial [`Entry::Title`] was already written (either
     /// this run or by the previous run before resume).
     first_user_prompt: Option<String>,
-    /// Set exactly once, when [`record_message`][Self::record_message]
+    /// Populated exactly once, when [`record_message`][Self::record_message]
     /// writes the first-prompt title on a fresh session. Callers drain it
     /// via [`take_ai_title_seed`][Self::take_ai_title_seed] to kick off
     /// background AI-title generation. Stays `None` on resumed sessions
@@ -98,7 +98,7 @@ pub(crate) struct SessionManager {
     /// conversation chain.
     last_message_uuid: Option<Uuid>,
     finished: bool,
-    /// Set the first time a [`record_message`][Self::record_message] or
+    /// Latched the first time a [`record_message`][Self::record_message] or
     /// [`finish`][Self::finish] call returns an error. Lets callers
     /// surface the failure to the user exactly once per session —
     /// subsequent failures warn-log only so we don't spam the UI with
@@ -107,7 +107,7 @@ pub(crate) struct SessionManager {
 }
 
 impl SessionManager {
-    /// Start a new session. Allocates a session ID and stages the
+    /// Starts a new session. Allocates a session ID and stages the
     /// header in memory; the on-disk file is created by the first
     /// [`record_message`][Self::record_message]. A session that exits
     /// without recording any message therefore leaves no file behind,
@@ -275,7 +275,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write the summary entry. No-op if already called, if no message
+    /// Writes the summary entry. No-op if already called, if no message
     /// was ever recorded (fresh session that never materialized a
     /// file), or if this is a resumed session and no new messages were
     /// recorded (avoids accumulating duplicate summaries on empty
@@ -304,7 +304,7 @@ impl SessionManager {
         &self.session_id
     }
 
-    /// Return (and clear) the seed text that should be passed to the AI
+    /// Returns (and clears) the seed text that should be passed to the AI
     /// title generator. Returns `Some` at most once per session — right
     /// after the first user prompt has been recorded on a fresh session.
     /// Subsequent calls return `None`, as do all calls on resumed
@@ -313,7 +313,7 @@ impl SessionManager {
         self.ai_title_seed.take()
     }
 
-    /// Append an AI-generated title to the session file. Latest
+    /// Appends an AI-generated title to the session file. Latest
     /// [`Entry::Title`] wins on tail scan, so this supersedes the
     /// first-prompt title for both `--list` output and later resumes.
     pub(crate) fn append_ai_title(&mut self, title: &str) -> Result<()> {
@@ -365,7 +365,7 @@ fn current_dir_string() -> String {
     }
 }
 
-/// Extract the first non-empty text content from a user message.
+/// Extracts the first non-empty text content from a user message.
 fn extract_user_text(message: &Message) -> Option<&str> {
     if message.role != Role::User {
         return None;
@@ -376,7 +376,7 @@ fn extract_user_text(message: &Message) -> Option<&str> {
     })
 }
 
-/// Truncate a title to `max_len` characters, adding "..." if truncated.
+/// Truncates a title to `max_len` characters, adding "..." if truncated.
 fn truncate_title(s: &str, max_len: usize) -> String {
     let trimmed = s.lines().next().unwrap_or(s).trim();
     if trimmed.chars().count() <= max_len {
@@ -392,7 +392,7 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 
 // ── Resume Sanitization ──
 
-/// Normalize a loaded conversation to a state the API will accept as
+/// Normalizes a loaded conversation to a state the API will accept as
 /// the prefix of a new turn.
 ///
 /// Fixes common crash-induced inconsistencies:
@@ -497,7 +497,7 @@ fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     strip_trailing_thinking(messages);
 }
 
-/// Merge every pair of consecutive same-role messages by extending the
+/// Merges every pair of consecutive same-role messages by extending the
 /// earlier message's content with the later one's and dropping the
 /// later one. Called after filtering / drop passes so that sanitization
 /// can never leave the transcript with two user or two assistant

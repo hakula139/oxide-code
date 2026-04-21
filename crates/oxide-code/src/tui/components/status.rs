@@ -59,7 +59,7 @@ impl StatusBar {
         }
     }
 
-    /// Set or clear the session title displayed between model and status.
+    /// Sets or clears the session title displayed between model and status.
     /// Pass `None` or an empty string to remove the title entirely (the slot
     /// and its separator disappear from the bar).
     pub(crate) fn set_title(&mut self, title: Option<String>) {
@@ -89,7 +89,7 @@ impl StatusBar {
         self.title.as_deref()
     }
 
-    /// Advance the spinner animation. Call on each tick when not idle.
+    /// Advances the spinner animation. Call on each tick when not idle.
     /// Returns `true` if the spinner frame changed (caller should mark dirty).
     pub(crate) fn tick(&mut self) -> bool {
         if self.status == Status::Idle {
@@ -190,7 +190,7 @@ impl StatusBar {
     }
 }
 
-/// Build the `title │` insert. The leading `│` is provided by the separator
+/// Builds the `title │` insert. The leading `│` is provided by the separator
 /// core already places after `model`, so the slot itself is
 /// `[title, trailing_sep]` — inserting it before `status` yields the
 /// `model │ title │ status` sequence without a doubled bar.
@@ -211,7 +211,7 @@ fn slot_width(slot: &Vec<Span<'_>>) -> usize {
     slot.iter().map(Span::width).sum()
 }
 
-/// Truncate `title` to `max_width` columns, appending `…` when shortened.
+/// Truncates `title` to `max_width` columns, appending `…` when shortened.
 /// CJK / emoji are billed at their rendered width via `unicode-width`.
 fn truncate_title(title: &str, max_width: usize) -> String {
     if title.width() <= max_width {

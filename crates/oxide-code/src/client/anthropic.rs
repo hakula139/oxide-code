@@ -91,7 +91,7 @@ pub(crate) struct OutputFormat {
 }
 
 impl OutputFormat {
-    /// Build a `json_schema` output format from a precomputed schema
+    /// Builds a `json_schema` output format from a precomputed schema
     /// value. The schema must already match Anthropic's expectations
     /// (`type: "object"`, `additionalProperties: false`, explicit
     /// `required` array) — we don't validate here.
@@ -484,7 +484,7 @@ impl Client {
         Ok(rx)
     }
 
-    /// Send a single non-streaming completion request and return the
+    /// Sends a single non-streaming completion request and returns the
     /// concatenated text of the assistant's response.
     ///
     /// Used for background helpers like AI title generation — a one-shot
@@ -548,7 +548,7 @@ impl Client {
         Ok(join_text_blocks(content))
     }
 
-    /// Build the `metadata.user_id` field as a stringified JSON object.
+    /// Builds the `metadata.user_id` field as a stringified JSON object.
     fn build_metadata(&self) -> RequestMetadata {
         build_metadata(&self.session_id)
     }
@@ -562,7 +562,7 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
     RequestMetadata { user_id }
 }
 
-/// Compute the `anthropic-beta` header value for a request targeting
+/// Computes the `anthropic-beta` header value for a request targeting
 /// `model`. Each beta is gated on a specific `Capabilities` flag from
 /// the [`crate::model`] lookup table, so adding or bumping a model only
 /// means editing that one table — this function stays fixed.
@@ -659,7 +659,7 @@ pub(crate) fn supports_structured_outputs(model: &str) -> bool {
     crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
 }
 
-/// Strip the `[1m]` tag (if any) from a caller-supplied model string,
+/// Strips the `[1m]` tag (if any) from a caller-supplied model string,
 /// returning the canonical API model ID. The tag is a client-side
 /// convention — the Anthropic API rejects it on the wire.
 ///
@@ -692,7 +692,7 @@ fn tag_offset(model: &str) -> Option<usize> {
     model.to_lowercase().find("[1m]")
 }
 
-/// Serialize the JSON request body for [`Client::complete`]. Extracted
+/// Serializes the JSON request body for [`Client::complete`]. Extracted
 /// so the billing-header / identity-prefix / system-block assembly can
 /// be asserted on without a live HTTP client; the HTTP leg of
 /// [`Client::complete`] is covered behind a wiremock harness (see
@@ -768,7 +768,7 @@ fn build_completion_body(
     Ok(body)
 }
 
-/// Flatten a `messages.create` response's content array into the
+/// Flattens a `messages.create` response's content array into the
 /// assistant's user-visible text. Extracted so the filter logic is
 /// reusable and independently testable.
 fn join_text_blocks(content: Vec<ContentBlock>) -> String {
@@ -789,7 +789,7 @@ struct CompletionResponse {
     content: Vec<ContentBlock>,
 }
 
-/// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
+/// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
 fn normalize_platform(os: &str) -> &'static str {
     match os {
         "macos" => "MacOS",
@@ -803,7 +803,7 @@ fn normalize_platform(os: &str) -> &'static str {
     }
 }
 
-/// Map `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
+/// Maps `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
 fn normalize_arch(arch: &str) -> &'static str {
     match arch {
         "x86" => "x32",
@@ -814,7 +814,7 @@ fn normalize_arch(arch: &str) -> &'static str {
     }
 }
 
-/// Split system sections at the boundary marker into static and dynamic parts.
+/// Splits system sections at the boundary marker into static and dynamic parts.
 ///
 /// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
 /// is excluded from both. Sections before the boundary are static (globally
@@ -843,7 +843,7 @@ fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     }
 }
 
-/// Extract the text of the first user message for fingerprint computation.
+/// Extracts the text of the first user message for fingerprint computation.
 fn first_user_text(messages: &[Message]) -> &str {
     messages
         .iter()
@@ -926,7 +926,7 @@ async fn stream_sse(
     Ok(())
 }
 
-/// Parse a single SSE frame into a [`StreamEvent`].
+/// Parses a single SSE frame into a [`StreamEvent`].
 ///
 /// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
 /// Anthropic currently emits single-line data, but we follow the spec

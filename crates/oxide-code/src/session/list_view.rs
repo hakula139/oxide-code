@@ -133,7 +133,7 @@ fn render_sessions(
     Ok(())
 }
 
-/// Truncate `s` to fit within `max_width` visual columns, appending
+/// Truncates `s` to fit within `max_width` visual columns, appending
 /// `...` when truncation occurs. Width accounting uses
 /// [`UnicodeWidthChar`] so CJK / emoji are billed at their rendered
 /// width. Returns `s` unchanged when it already fits, or an empty

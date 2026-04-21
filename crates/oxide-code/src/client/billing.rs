@@ -15,7 +15,7 @@ const CCH_PLACEHOLDER: &str = "cch=00000";
 
 // ── Public API ──
 
-/// Compute the 3-character hex fingerprint suffix for `cc_version`.
+/// Computes the 3-character hex fingerprint suffix for `cc_version`.
 ///
 /// `SHA-256(salt + chars_at_indices + version)`, take first 3 hex chars.
 /// Character extraction uses Unicode scalar indexing, which matches
@@ -31,7 +31,7 @@ pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> St
     format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_string()
 }
 
-/// Build the billing attribution header with a `cch=00000` placeholder.
+/// Builds the billing attribution header with a `cch=00000` placeholder.
 ///
 /// The placeholder is later replaced by [`inject_cch`] with the computed hash.
 pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
@@ -43,7 +43,7 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
     )
 }
 
-/// Compute xxHash64 of the request body and replace the `cch` placeholder.
+/// Computes xxHash64 of the request body and replaces the `cch` placeholder.
 ///
 /// The hash is computed over the body *with* the placeholder in place,
 /// then the placeholder is replaced with the 5-char hex result. Only the

@@ -14,7 +14,7 @@ use crate::agent::event::UserAction;
 /// (e.g., submitting a prompt, quitting). `None` means "event consumed,
 /// no further action needed".
 pub(crate) trait Component {
-    /// Handle a crossterm event (keyboard, mouse, resize).
+    /// Handles a crossterm event (keyboard, mouse, resize).
     ///
     /// Returns a [`UserAction`] when the event should reach the agent loop
     /// (e.g., a submitted prompt or quit request).

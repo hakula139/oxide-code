@@ -19,7 +19,7 @@ pub(super) struct Environment {
 }
 
 impl Environment {
-    /// Detect the current runtime environment.
+    /// Detects the current runtime environment.
     ///
     /// All detection is best-effort: failures produce fallback values rather
     /// than errors, so the system prompt is always constructible.
@@ -93,19 +93,19 @@ impl Environment {
 
 use crate::model;
 
-/// Map a model ID to its marketing name.
+/// Maps a model ID to its marketing name.
 pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
     model::lookup(model).map(|info| info.marketing)
 }
 
-/// Map a model ID to its knowledge cutoff date.
+/// Maps a model ID to its knowledge cutoff date.
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
     model::lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
 
-/// Map Rust's OS name to Node's `process.platform` values.
+/// Maps Rust's OS name to Node's `process.platform` values.
 ///
 /// Rust's `std::env::consts::OS` returns `"macos"` on macOS, but Claude
 /// Code (via Node) uses `"darwin"`. This mapping ensures the environment
@@ -121,7 +121,7 @@ fn normalize_node_platform(os: &str) -> &'static str {
 
 // ── Shell Detection ──
 
-/// Extract the shell basename from `$SHELL` (e.g. `"zsh"`, `"bash"`).
+/// Extracts the shell basename from `$SHELL` (e.g. `"zsh"`, `"bash"`).
 fn detect_shell() -> String {
     let shell = env::string("SHELL").unwrap_or_else(|| "unknown".to_owned());
     std::path::Path::new(&shell)
@@ -133,7 +133,7 @@ fn detect_shell() -> String {
 
 // ── OS Version Detection ──
 
-/// Detect the OS version via `platform_info::PlatformInfo`.
+/// Detects the OS version via `platform_info::PlatformInfo`.
 ///
 /// Returns a string like `"Darwin 25.3.0"` on macOS or `"Linux 6.1.0"` on
 /// Linux. Falls back to the OS name when detection fails.

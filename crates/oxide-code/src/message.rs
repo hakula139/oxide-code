@@ -80,7 +80,7 @@ impl Message {
 
 // ── Message normalization ──
 
-/// Strip trailing thinking / `redacted_thinking` blocks from the last assistant
+/// Strips trailing thinking / `redacted_thinking` blocks from the last assistant
 /// message. The API rejects assistant messages that end with thinking blocks.
 ///
 /// If stripping removes all content (thinking-only response), a placeholder text

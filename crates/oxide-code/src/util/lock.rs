@@ -17,7 +17,7 @@ pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 pub(crate) const RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Retry an advisory-lock acquisition with fixed-interval backoff.
+/// Retries an advisory-lock acquisition with fixed-interval backoff.
 ///
 /// `try_once` must return:
 /// - `Ok(Some(value))` when the lock was acquired (returned to the
