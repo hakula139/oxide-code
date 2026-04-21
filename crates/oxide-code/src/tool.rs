@@ -85,7 +85,8 @@ impl ToolOutput {
         }
     }
 
-    /// Sets the [`ToolMetadata::title`] field.
+    /// Fluent helper to attach a display title; chains after
+    /// [`from_result`](Self::from_result) at the construction site.
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
         self

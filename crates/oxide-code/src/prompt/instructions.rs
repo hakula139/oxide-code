@@ -38,7 +38,7 @@ struct MemoryFile {
 ///
 /// Discovery locations:
 ///
-/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`
+/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`.
 /// 2. Each directory from project root to CWD (inclusive):
 ///    - `<dir>/CLAUDE.md` or `<dir>/AGENTS.md`
 ///    - `<dir>/.claude/CLAUDE.md` or `<dir>/.claude/AGENTS.md`
