@@ -107,6 +107,10 @@ ox     # Start an interactive session
 - Use `// ── Section Name ──` for section dividers in code (box-drawing character `─`, U+2500).
 - In tests, use `// ── function_name ──` as section headers grouping tests by the function they cover.
 
+### Comments
+
+- Write `//` comments as prose, not structured markdown. If list structure is genuinely useful, promote the comment to `///` so rustdoc renders it. Either way, follow our `**/*.md` markdownlint conventions: blank line before the list, single space after the marker, incremental numbering for ordered lists, no leading-space indent.
+
 ### Blank Lines
 
 - One blank line between top-level items (functions, structs, enums, impls, constants).

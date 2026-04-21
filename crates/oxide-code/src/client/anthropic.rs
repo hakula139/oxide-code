@@ -398,11 +398,12 @@ impl Client {
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
         });
 
-        // System-block order (the boundary marker is filtered):
-        //   1. Billing header (OAuth only; no cache_control).
-        //   2. Identity prefix (no cache_control).
-        //   3. Static sections joined (cache_control: ephemeral, global).
-        //   4. Dynamic sections joined (no cache_control).
+        // System-block order (boundary marker filtered):
+        //
+        // 1. Billing header (OAuth only; no cache_control).
+        // 2. Identity prefix (no cache_control).
+        // 3. Static sections joined (cache_control: ephemeral, global).
+        // 4. Dynamic sections joined (no cache_control).
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
