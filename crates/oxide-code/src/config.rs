@@ -311,7 +311,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             config.max_tokens, 128,
-            "unparseable env must fall through to file value",
+            "unparsable env must fall through to file value",
         );
     }
 
