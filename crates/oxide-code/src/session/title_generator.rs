@@ -213,17 +213,207 @@ struct TitleEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+    use crate::agent::event::AgentSink;
+    use crate::config::{Auth, Config};
+    use crate::message::Message;
+    use crate::session::store::test_store;
+
+    // ── Test fixtures ──
+
+    fn mock_client(base_url: String) -> Client {
+        // Haiku is used by generate_and_record; build a config pointed
+        // at the mock with an API-key auth so no billing attestation
+        // machinery needs mocking out.
+        Client::new(
+            Config {
+                auth: Auth::ApiKey("sk".to_owned()),
+                model: "claude-haiku-4-5".to_owned(),
+                base_url,
+                max_tokens: 128,
+                thinking: None,
+                show_thinking: false,
+            },
+            Some("sid".to_owned()),
+        )
+        .unwrap()
+    }
+
+    fn completion_body(text: &str) -> String {
+        serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        })
+        .to_string()
+    }
+
+    /// Captures every event the code under test sends for assertion.
+    #[derive(Clone)]
+    struct CapturingSink(Arc<StdMutex<Vec<AgentEvent>>>);
+
+    impl CapturingSink {
+        fn new() -> Self {
+            Self(Arc::new(StdMutex::new(Vec::new())))
+        }
+
+        fn events(&self) -> Vec<AgentEvent> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl AgentSink for CapturingSink {
+        fn send(&self, event: AgentEvent) -> Result<()> {
+            self.0.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    /// Session manager with one recorded user message, ready for an
+    /// `append_ai_title` call. `append_ai_title` requires the file to
+    /// have been materialized via `record_message` at least once.
+    async fn prepared_session(dir: &std::path::Path) -> Mutex<SessionManager> {
+        let store = test_store(dir);
+        let mut mgr = SessionManager::start(&store, "claude-haiku-4-5");
+        mgr.record_message(&Message::user("first prompt"))
+            .await
+            .unwrap();
+        Mutex::new(mgr)
+    }
+
+    // ── generate_and_record ──
+
+    #[tokio::test]
+    async fn generate_and_record_happy_path_appends_title_and_notifies_sink() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix login"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = mock_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Fix login")),
+            "sink got SessionTitleUpdated: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_unwraps_code_fenced_json_envelope() {
+        let server = MockServer::start().await;
+        let raw = indoc! {r#"
+            ```json
+            {"title":"Add OAuth auth"}
+            ```
+        "#};
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(raw)))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = mock_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "prompt")
+            .await
+            .unwrap();
+
+        let got = sink.events().into_iter().find_map(|e| match e {
+            AgentEvent::SessionTitleUpdated(t) => Some(t),
+            _ => None,
+        });
+        assert_eq!(got.as_deref(), Some("Add OAuth auth"));
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_conversational_reply_bails_without_updating_title() {
+        // Haiku sometimes answers the prompt instead of titling it. The
+        // bail keeps the first-prompt title on disk and out of the UI.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(
+                "I'd be happy to help! However, I need more details.",
+            )))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = mock_client(server.uri());
+        let sink = CapturingSink::new();
+
+        let err = generate_and_record(&client, &session, &sink, "hi")
+            .await
+            .expect_err("plain prose must fail parsing");
+        assert!(format!("{err:#}").contains("title envelope"));
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(_))),
+            "no title event on parse failure",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_http_error_bails_with_context() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = mock_client(server.uri());
+        let sink = CapturingSink::new();
+
+        let err = generate_and_record(&client, &session, &sink, "hi")
+            .await
+            .expect_err("HTTP error must propagate");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Haiku completion failed"),
+            "outer context: {msg}"
+        );
+        assert!(msg.contains("503"), "status surfaced: {msg}");
+    }
 
     // ── title_output_format ──
 
     #[test]
     fn title_output_format_matches_title_envelope_shape() {
         // The schema must line up with [`TitleEnvelope`] so a
-        // schema-conforming response parses via `parse_title` without
-        // further validation. Pins the contract against accidental
-        // drift in either direction (e.g., renaming the JSON field
-        // without updating the Deserialize target).
+        // schema-conforming response parses via `parse_title`.
         let fmt = title_output_format();
         let v = serde_json::to_value(&fmt).unwrap();
         assert_eq!(v["type"], "json_schema");

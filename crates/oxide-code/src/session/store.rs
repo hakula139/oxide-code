@@ -724,13 +724,14 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
 }
 
 #[cfg(test)]
-pub(super) const TEST_PROJECT: &str = "test-project";
+pub(crate) const TEST_PROJECT: &str = "test-project";
 
 /// Opens a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
 /// Shared between the `session::store` and `session::manager` test
-/// modules so both exercise the same project-scoping path.
+/// modules (and the cross-module `agent::tests`) so they exercise the
+/// same project-scoping path.
 #[cfg(test)]
-pub(super) fn test_store(dir: &Path) -> SessionStore {
+pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 

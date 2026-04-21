@@ -19,9 +19,12 @@ pub(crate) enum AgentEvent {
     ThinkingToken(String),
     /// A tool call has started execution.
     ToolCallStart {
-        #[expect(
-            dead_code,
-            reason = "carried for structural completeness; no consumer reads this field"
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "carried on the contract for future UIs / session replay; cfg(test) assertions read it"
+            )
         )]
         id: String,
         name: String,
@@ -29,9 +32,12 @@ pub(crate) enum AgentEvent {
     },
     /// A tool call has finished.
     ToolCallEnd {
-        #[expect(
-            dead_code,
-            reason = "carried for structural completeness; no consumer reads this field"
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "carried on the contract so a later UI can pair ToolCallEnd with its ToolCallStart; cfg(test) assertions read it"
+            )
         )]
         id: String,
         title: Option<String>,
