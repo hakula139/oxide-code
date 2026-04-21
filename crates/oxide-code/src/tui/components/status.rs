@@ -604,13 +604,16 @@ mod tests {
     }
 
     fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-        let mut bar = StatusBar::new(Theme::default(), "claude-opus-4-7".into(), cwd.into());
+        // Real callers pass the pre-converted marketing name (see
+        // `main::marketing_name`), so the snapshots mirror what users see
+        // on screen rather than the raw API id.
+        let mut bar = StatusBar::new(Theme::default(), "Claude Opus 4.7".into(), cwd.into());
         bar.set_title(title.map(ToOwned::to_owned));
         bar
     }
 
     #[test]
-    fn render_idle_with_title_shows_marketing_model_name_and_cwd() {
+    fn render_idle_with_title_shows_model_title_and_cwd() {
         let mut bar = bar_idle(Some("Fix login flow"), "~/projects/demo");
         insta::assert_snapshot!(render_status(&mut bar, 80));
     }
@@ -636,7 +639,11 @@ mod tests {
     }
 
     #[test]
-    fn render_narrow_width_truncates_cwd_and_title() {
+    fn render_narrow_width_drops_cwd_and_title_slots() {
+        // At 40 cols with cwd "~/projects/demo/long" and a long title,
+        // both slots drop entirely (title first, then cwd) rather than
+        // truncating — ellipsis truncation is exercised by
+        // `render_truncates_long_title_with_ellipsis` at generous widths.
         let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
         insta::assert_snapshot!(render_status(&mut bar, 40));
     }

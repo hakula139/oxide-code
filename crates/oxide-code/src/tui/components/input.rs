@@ -506,18 +506,38 @@ mod tests {
     }
 
     #[test]
-    fn render_with_text_shows_content_and_cursor_row() {
+    fn render_with_text_shows_typed_content() {
         let mut input = test_input();
         type_text(&mut input, "hello world");
         insta::assert_snapshot!(render_to_backend(&input, 60, 3));
     }
 
     #[test]
-    fn render_disabled_dims_style_and_hides_cursor_row() {
-        let mut input = test_input();
+    fn render_disabled_applies_dim_foreground_to_text() {
+        // Enable vs disable only changes per-cell styling (fg color on
+        // the textarea + border), which the text-only snapshot backend
+        // would collapse to identical strings. Inspect the rendered
+        // buffer directly so the assertion actually falsifies on a
+        // regression.
+        let theme = Theme::default();
+        let mut input = InputArea::new(theme);
         type_text(&mut input, "pending");
+
+        let enabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(ratatui::layout::Position::new(0, 1))
+            .unwrap()
+            .fg;
         input.set_enabled(false);
-        insta::assert_snapshot!(render_to_backend(&input, 60, 3));
+        let disabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(ratatui::layout::Position::new(0, 1))
+            .unwrap()
+            .fg;
+
+        assert_eq!(enabled_fg, theme.text().fg.unwrap());
+        assert_eq!(disabled_fg, theme.dim().fg.unwrap());
+        assert_ne!(enabled_fg, disabled_fg);
     }
 
     #[test]
