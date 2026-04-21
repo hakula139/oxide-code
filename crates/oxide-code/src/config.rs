@@ -1,3 +1,10 @@
+//! Configuration loading.
+//!
+//! Layered precedence (highest wins): env vars > project `ox.toml` >
+//! user `~/.config/ox/config.toml` > built-in defaults. Auth follows
+//! the same precedence but terminates at the first source that
+//! resolves (API key env > API key in file > OAuth credentials).
+
 mod file;
 mod oauth;
 
@@ -36,7 +43,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration from files and environment variables.
+    /// Loads configuration from files and environment variables.
     ///
     /// Precedence (highest wins): env vars > project `ox.toml` > user
     /// `~/.config/ox/config.toml` > built-in defaults.

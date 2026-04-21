@@ -1,6 +1,6 @@
 // ── Readers ──
 
-/// Read an env var, treating unset and empty as equivalent `None` so a
+/// Reads an env var, treating unset and empty as equivalent `None` so a
 /// stray empty value from the shell doesn't shadow a config-file default.
 pub(crate) fn string(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())

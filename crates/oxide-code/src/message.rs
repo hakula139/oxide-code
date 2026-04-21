@@ -1,3 +1,10 @@
+//! Conversation message types.
+//!
+//! [`Message`] plus the [`ContentBlock`] variants that make up its
+//! body. Shared between the Anthropic API's wire-level message array,
+//! the JSONL session transcript, and the TUI renderer — a single
+//! `Message` representation the whole agent pipeline agrees on.
+
 use serde::{Deserialize, Serialize};
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -73,7 +80,7 @@ impl Message {
 
 // ── Message normalization ──
 
-/// Strip trailing thinking / `redacted_thinking` blocks from the last assistant
+/// Strips trailing thinking / `redacted_thinking` blocks from the last assistant
 /// message. The API rejects assistant messages that end with thinking blocks.
 ///
 /// If stripping removes all content (thinking-only response), a placeholder text

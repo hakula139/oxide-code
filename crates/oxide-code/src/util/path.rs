@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve an XDG-style directory: prefer `xdg` when set and absolute,
+/// Resolves an XDG-style directory: prefers `xdg` when set and absolute,
 /// otherwise fall back to `home/home_fallback`. Both branches append
 /// `subdir`. Returns `None` when neither base directory is available.
 ///
@@ -21,7 +21,7 @@ pub(crate) fn xdg_dir(
     Some(base.join(subdir))
 }
 
-/// Return `path` as a display string, replacing a `$HOME` prefix with
+/// Returns `path` as a display string, replacing a `$HOME` prefix with
 /// `~/` when applicable. Falls back to the full absolute display when
 /// the home directory cannot be determined or the path does not live
 /// under it.

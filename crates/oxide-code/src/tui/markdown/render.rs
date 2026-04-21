@@ -1,3 +1,12 @@
+//! Markdown → [`ratatui::text::Text`] renderer.
+//!
+//! Walks the pulldown-cmark event stream and produces styled lines
+//! sized to a fixed terminal width. Supports inline formatting, code
+//! blocks (syntect-highlighted via [`super::highlight`]), lists,
+//! blockquotes, tables (box-drawing borders with column alignment),
+//! and horizontal rules. Wrapping is block-aware so word breaks
+//! respect the enclosing block's continuation indent.
+
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,7 +28,7 @@ pub(super) struct MarkdownRenderer<I> {
     pub(super) lines: Vec<Line<'static>>,
 
     // Block-level spacing
-    /// Insert a blank line before the next block element.
+    /// Whether to insert a blank line before the next block element.
     needs_newline: bool,
 
     // Block nesting (lists + blockquotes)
@@ -500,7 +509,7 @@ where
 
     // ── Line Building ──
 
-    /// Start a new output line with indent prefixes and any pending list marker.
+    /// Starts a new output line with indent prefixes and any pending list marker.
     ///
     /// When `self.width` is set, lines that exceed the width budget are
     /// word-wrapped with continuation lines prefixed by the current
@@ -533,7 +542,7 @@ where
         self.wrap_and_push(Line::from(spans));
     }
 
-    /// Wrap `line` against the current width budget (using the indent
+    /// Wraps `line` against the current width budget (using the indent
     /// stack as the continuation prefix) and append the results.
     fn wrap_and_push(&mut self, line: Line<'static>) {
         if self.width == 0 {
@@ -555,7 +564,7 @@ where
         }
     }
 
-    /// Flatten the `indent_stack` into a single span vector, used as the
+    /// Flattens the `indent_stack` into a single span vector, used as the
     /// continuation prefix when wrapping. Entries store the continuation
     /// form (spaces for lists, `> ` for blockquotes) so that wrapped
     /// lines repeat blockquote markers without duplicating list markers.
@@ -566,7 +575,7 @@ where
             .collect()
     }
 
-    /// Append a span to the last line, creating one if needed.
+    /// Appends a span to the last line, creating one if needed.
     fn push_span(&mut self, span: Span<'static>) {
         if let Some(line) = self.lines.last_mut() {
             line.push_span(span);
@@ -599,7 +608,7 @@ where
 
 // ── Table Helpers ──
 
-/// Compute the max display width for each column across all rows.
+/// Computes the max display width for each column across all rows.
 fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<usize> {
     let mut widths = vec![0_usize; col_count];
     for row in rows {
@@ -610,7 +619,7 @@ fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<u
     widths
 }
 
-/// Build a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
+/// Builds a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
 fn build_horizontal_rule(
     col_widths: &[usize],
     style: Style,
@@ -630,7 +639,7 @@ fn build_horizontal_rule(
     Line::from(Span::styled(buf, style))
 }
 
-/// Build a data row: `│ cell │ cell │`, applying alignment and cell style.
+/// Builds a data row: `│ cell │ cell │`, applying alignment and cell style.
 fn build_data_row(
     row: &[Vec<Span<'static>>],
     col_widths: &[usize],

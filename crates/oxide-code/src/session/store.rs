@@ -1,3 +1,15 @@
+//! Session file I/O.
+//!
+//! [`SessionStore`] locates sessions (`$XDG_DATA_HOME/ox/sessions/
+//! {project}/`), creates new ones, resolves prefix lookups, and lists
+//! them for `ox --list`. [`SessionWriter`] is the append-only handle
+//! the manager writes through.
+//!
+//! Listing reads the header (line 1) and streams the rest of the file
+//! so the latest re-appended title and summary win regardless of
+//! where they sit — titles buried behind multi-KB tool-result lines
+//! are a real shape on long sessions.
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -36,7 +48,7 @@ pub(crate) struct SessionStore {
 }
 
 impl SessionStore {
-    /// Create a store rooted at the XDG data directory, scoped to the
+    /// Creates a store rooted at the XDG data directory, scoped to the
     /// current working directory. Creates both the root and the
     /// project subdirectory if needed.
     pub(crate) fn open() -> Result<Self> {
@@ -70,7 +82,7 @@ impl SessionStore {
         })
     }
 
-    /// Create a new session file and write the header entry.
+    /// Creates a new session file and writes the header entry.
     ///
     /// On Unix, the file is created with mode `0o600` so session contents
     /// (verbatim tool output, assistant responses) are not world-readable.
@@ -111,7 +123,7 @@ impl SessionStore {
         Ok(writer)
     }
 
-    /// Open an existing session file in append mode.
+    /// Opens an existing session file in append mode.
     ///
     /// Searches every project subdirectory, not just the current one,
     /// so `ox -c <id>` resumes a session regardless of which project
@@ -133,7 +145,7 @@ impl SessionStore {
         open_append_at(&path)
     }
 
-    /// Load a session's message chain and return the UUID of its tip
+    /// Loads a session's message chain and returns the UUID of its tip
     /// (for parent-chain continuity on resume). Like
     /// [`Self::open_append`], searches every project subdirectory.
     ///
@@ -227,7 +239,7 @@ impl SessionStore {
         bail!("session not found: {session_id}")
     }
 
-    /// Create a store at an explicit directory. Used by tests to bypass
+    /// Creates a store at an explicit directory. Used by tests to bypass
     /// XDG resolution. `project_name` selects the subdirectory inside
     /// `sessions_dir` that acts as the current project.
     #[cfg(test)]
@@ -244,7 +256,7 @@ impl SessionStore {
 
 // ── Path-keyed primitives ──
 
-/// Open an existing session file in append mode by path. Underlies
+/// Opens an existing session file in append mode by path. Underlies
 /// [`SessionStore::open_append`] (which resolves the path first) and
 /// `SessionManager::resume_from_path` (which bypasses the store entirely
 /// for sessions living outside the XDG project subdirectories).
@@ -256,7 +268,7 @@ pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     Ok(SessionWriter { file })
 }
 
-/// Load session data from an explicit path. See
+/// Loads session data from an explicit path. See
 /// [`SessionStore::load_session_data`] for the description of DAG-based
 /// chain resolution and fault-tolerant parsing — this is the underlying
 /// primitive, used both by the store lookup and by the external-path
@@ -356,7 +368,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     })
 }
 
-/// Read just the `session_id` from a session file's header (line 1).
+/// Reads just the `session_id` from a session file's header (line 1).
 /// Used by external-path resume so callers can key the resumed
 /// [`SessionManager`] on the file's declared identity rather than its path.
 pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
@@ -372,7 +384,7 @@ pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(session_id)
 }
 
-/// Create `path` (and parents) with owner-only (`0o700`) perms on Unix.
+/// Creates `path` (and parents) with owner-only (`0o700`) perms on Unix.
 ///
 /// Session files are already `0o600`, but lax parent-dir perms would leak
 /// session IDs, project names, and mtimes via `ls`. Passing the mode to
@@ -416,14 +428,14 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Format a new session filename as `{epoch}-{session_id}.jsonl`. The
+/// Formats a new session filename as `{epoch}-{session_id}.jsonl`. The
 /// epoch prefix gives chronological directory-order listings and stays
 /// fixed-width (10 ASCII digits) through the year 2286.
 fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
     format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
 }
 
-/// Return the path of the first `.jsonl` file in `dir` whose name ends
+/// Returns the path of the first `.jsonl` file in `dir` whose name ends
 /// with `-{session_id}.jsonl`. `None` means "no match in this dir", not
 /// a hard error — the caller can continue searching other locations.
 fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
@@ -450,7 +462,7 @@ fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// Read every `.jsonl` file in `dir` and return the successfully
+/// Reads every `.jsonl` file in `dir` and returns the successfully
 /// parsed [`SessionInfo`] entries, warning and skipping on errors.
 fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
@@ -496,7 +508,7 @@ pub(crate) struct SessionWriter {
 }
 
 impl SessionWriter {
-    /// Serialize an entry as a single JSON line and flush immediately.
+    /// Serializes an entry as a single JSON line and flushes immediately.
     pub(crate) fn append(&mut self, entry: &Entry) -> Result<()> {
         let json = serde_json::to_string(entry).context("failed to serialize entry")?;
         writeln!(self.file, "{json}").context("failed to write entry")?;
@@ -524,7 +536,7 @@ pub(crate) struct SessionData {
 
 // ── File Opening ──
 
-/// Create a new file exclusively (fails if it exists). On Unix, applies
+/// Creates a new file exclusively (fails if it exists). On Unix, applies
 /// `0o600` permissions so session contents aren't world-readable.
 fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
@@ -606,7 +618,7 @@ fn resolve_chain(
 const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Read session info from a JSONL file.
+/// Reads session info from a JSONL file.
 ///
 /// Walks the whole file once, tracking the latest [`Entry::Title`] (by
 /// `updated_at`) and [`Entry::Summary`] (ditto) as it goes. A header
@@ -700,7 +712,7 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     })
 }
 
-/// Parse a JSONL line into a [`TitleInfo`], returning `None` for any
+/// Parses a JSONL line into a [`TitleInfo`], returning `None` for any
 /// line that is not a well-formed [`Entry::Title`].
 fn parse_title(line: &str) -> Option<TitleInfo> {
     match serde_json::from_str(line).ok()? {
@@ -714,7 +726,7 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
 #[cfg(test)]
 pub(super) const TEST_PROJECT: &str = "test-project";
 
-/// Open a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
+/// Opens a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
 /// Shared between the `session::store` and `session::manager` test
 /// modules so both exercise the same project-scoping path.
 #[cfg(test)]
@@ -722,7 +734,7 @@ pub(super) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
-/// Resolve a session file inside [`TEST_PROJECT`] by its session ID.
+/// Resolves a session file inside [`TEST_PROJECT`] by its session ID.
 /// Filenames are prefixed with the creation epoch (see
 /// [`session_filename`]), so tests cannot build the path directly
 /// from a session ID alone; this helper scans the project dir for

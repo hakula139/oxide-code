@@ -1,3 +1,11 @@
+//! System prompt assembly.
+//!
+//! Builds [`PromptParts`]: static sections (identity, guidance, tool
+//! use) that live in the API `system` parameter and cache globally,
+//! plus a `<system-reminder>`-wrapped user context (CLAUDE.md, date)
+//! prepended to the messages array so per-session content doesn't
+//! invalidate the static cache.
+
 pub(crate) mod environment;
 mod instructions;
 mod sections;
@@ -20,24 +28,25 @@ pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC
 /// Assembled prompt split into two API surfaces.
 ///
 /// `system_sections` contains the static system prompt sections — one
-/// per API text block, matching Claude Code's multi-block layout.
-/// `user_context` contains dynamic content (CLAUDE.md, date) that is
-/// prepended to the `messages` array as a `<system-reminder>`-wrapped
-/// user message — matching Claude Code's context injection pattern.
+/// per API text block, so `cache_control` can apply to the static
+/// portion without re-caching on every turn. `user_context` contains
+/// dynamic content (CLAUDE.md, date) that is prepended to the
+/// `messages` array as a `<system-reminder>`-wrapped user message, so
+/// per-session content doesn't invalidate the static cache.
 pub(crate) struct PromptParts {
     pub(crate) system_sections: Vec<String>,
     pub(crate) user_context: Option<String>,
 }
 
 impl PromptParts {
-    /// Join all system sections into a single string for testing / display.
+    /// Joins all system sections into a single string for testing / display.
     #[cfg(test)]
     fn system_joined(&self) -> String {
         self.system_sections.join("\n\n")
     }
 }
 
-/// Build the prompt parts for the agent.
+/// Builds the prompt parts for the agent.
 ///
 /// Resolves the working directory and git root automatically, then delegates
 /// to [`assemble`].
@@ -51,7 +60,7 @@ pub(crate) async fn build_prompt(model: &str) -> PromptParts {
     assemble(model, cwd.as_deref(), git_root.as_deref()).await
 }
 
-/// Assemble the prompt from explicit path parameters.
+/// Assembles the prompt from explicit path parameters.
 ///
 /// The identity prefix required for OAuth is handled by the API client as a
 /// separate system block. This function builds the remaining prompt content:
@@ -88,10 +97,11 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
     }
 }
 
-/// Build the `<system-reminder>` user message content from dynamic context.
+/// Builds the `<system-reminder>` user message content from dynamic context.
 ///
-/// CLAUDE.md and date are injected as a synthetic user message, not in the
-/// `system` parameter, matching Claude Code's `prependUserContext()`.
+/// CLAUDE.md and date ride in a synthetic user message rather than the
+/// `system` parameter so per-session content doesn't invalidate the
+/// static-section prompt cache.
 fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     if claude_md.is_empty() {
         return None;
@@ -115,7 +125,7 @@ fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     })
 }
 
-/// Find the git repository root from a working directory.
+/// Finds the git repository root from a working directory.
 ///
 /// Returns `None` when not inside a git repository or when `git` is not
 /// available.

@@ -1,3 +1,10 @@
+//! Agent turn loop.
+//!
+//! Drives one user → assistant round: streams the model response,
+//! dispatches any tool calls it emits, records each turn to the
+//! session, and stops when the model returns text only or the safety
+//! cap [`MAX_TOOL_ROUNDS`] trips.
+
 pub(crate) mod event;
 
 use anyhow::{Context, Result, bail};

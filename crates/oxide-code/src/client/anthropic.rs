@@ -1,3 +1,18 @@
+//! Anthropic Messages API streaming client.
+//!
+//! [`Client::stream_message`] drives the main agent loop: assembles
+//! the request (identity prefix, billing attestation for OAuth,
+//! static / dynamic system-block split for cache reuse), POSTs
+//! `/v1/messages` with SSE streaming, and forwards parsed
+//! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] covers
+//! non-streaming one-shots (title generation today, future
+//! classifiers) with optional JSON-schema-constrained output.
+//!
+//! Per-request `anthropic-beta` headers are computed from the model's
+//! [`crate::model::Capabilities`] via [`compute_betas`], so gateways
+//! that reject unsupported betas (Haiku, subscriptions without 1M)
+//! don't 400 on spurious feature flags.
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -50,8 +65,7 @@ struct CreateMessageRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
     /// JSON-schema-constrained output format for one-shot utility calls
-    /// (title generation, future classifiers). Mirrors claude-code's
-    /// `extraBodyParams.output_config`. Must travel alongside the
+    /// (title generation, future classifiers). Must travel alongside the
     /// `structured-outputs-2025-12-15` beta header; both are gated on
     /// `Capabilities::structured_outputs` so unsupported models silently
     /// drop back to free-form text rather than 400ing the gateway.
@@ -77,7 +91,7 @@ pub(crate) struct OutputFormat {
 }
 
 impl OutputFormat {
-    /// Build a `json_schema` output format from a precomputed schema
+    /// Builds a `json_schema` output format from a precomputed schema
     /// value. The schema must already match Anthropic's expectations
     /// (`type: "object"`, `additionalProperties: false`, explicit
     /// `required` array) — we don't validate here.
@@ -89,7 +103,7 @@ impl OutputFormat {
     }
 }
 
-/// Request metadata matching Claude Code's `getAPIMetadata()` format.
+/// Top-level `metadata` object on every outbound request.
 ///
 /// `user_id` is a stringified JSON object containing `session_id` (and
 /// optionally `device_id` / `account_uuid`). The API receives it as a
@@ -354,13 +368,14 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
-    /// `system_sections` are the static system prompt sections (one text
-    /// block per section, matching Claude Code's multi-block layout).
+    /// `system_sections` are the static system prompt sections, each
+    /// shipped as its own `system` text block so `cache_control` can
+    /// apply to the static prefix only.
     ///
     /// `user_context` is a `<system-reminder>`-wrapped string that gets
-    /// prepended to the messages array as a synthetic user message,
-    /// matching Claude Code's `prependUserContext()` pattern. This keeps
-    /// dynamic content (CLAUDE.md) out of the `system` parameter.
+    /// prepended to the messages array as a synthetic user message, so
+    /// dynamic content (CLAUDE.md) stays out of the `system` parameter
+    /// and doesn't invalidate the static cache.
     ///
     /// Returns a channel receiver yielding [`StreamEvent`]s. The caller
     /// should recv events as they arrive for real-time output.
@@ -393,7 +408,7 @@ impl Client {
             None
         };
 
-        // Build system blocks matching Claude Code's `splitSysPromptPrefix`:
+        // Assemble the system-block array:
         //   1. Billing header (no cache_control)
         //   2. Identity prefix (no cache_control)
         //   3. Static sections joined (cache_control: ephemeral, scope: global)
@@ -469,7 +484,7 @@ impl Client {
         Ok(rx)
     }
 
-    /// Send a single non-streaming completion request and return the
+    /// Sends a single non-streaming completion request and returns the
     /// concatenated text of the assistant's response.
     ///
     /// Used for background helpers like AI title generation — a one-shot
@@ -533,7 +548,7 @@ impl Client {
         Ok(join_text_blocks(content))
     }
 
-    /// Build the `metadata.user_id` field as a stringified JSON object.
+    /// Builds the `metadata.user_id` field as a stringified JSON object.
     fn build_metadata(&self) -> RequestMetadata {
         build_metadata(&self.session_id)
     }
@@ -547,7 +562,7 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
     RequestMetadata { user_id }
 }
 
-/// Compute the `anthropic-beta` header value for a request targeting
+/// Computes the `anthropic-beta` header value for a request targeting
 /// `model`. Each beta is gated on a specific `Capabilities` flag from
 /// the [`crate::model`] lookup table, so adding or bumping a model only
 /// means editing that one table — this function stays fixed.
@@ -644,7 +659,7 @@ pub(crate) fn supports_structured_outputs(model: &str) -> bool {
     crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
 }
 
-/// Strip the `[1m]` tag (if any) from a caller-supplied model string,
+/// Strips the `[1m]` tag (if any) from a caller-supplied model string,
 /// returning the canonical API model ID. The tag is a client-side
 /// convention — the Anthropic API rejects it on the wire.
 ///
@@ -677,7 +692,7 @@ fn tag_offset(model: &str) -> Option<usize> {
     model.to_lowercase().find("[1m]")
 }
 
-/// Serialize the JSON request body for [`Client::complete`]. Extracted
+/// Serializes the JSON request body for [`Client::complete`]. Extracted
 /// so the billing-header / identity-prefix / system-block assembly can
 /// be asserted on without a live HTTP client; the HTTP leg of
 /// [`Client::complete`] is covered behind a wiremock harness (see
@@ -753,7 +768,7 @@ fn build_completion_body(
     Ok(body)
 }
 
-/// Flatten a `messages.create` response's content array into the
+/// Flattens a `messages.create` response's content array into the
 /// assistant's user-visible text. Extracted so the filter logic is
 /// reusable and independently testable.
 fn join_text_blocks(content: Vec<ContentBlock>) -> String {
@@ -774,7 +789,7 @@ struct CompletionResponse {
     content: Vec<ContentBlock>,
 }
 
-/// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
+/// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
 fn normalize_platform(os: &str) -> &'static str {
     match os {
         "macos" => "MacOS",
@@ -788,7 +803,7 @@ fn normalize_platform(os: &str) -> &'static str {
     }
 }
 
-/// Map `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
+/// Maps `std::env::consts::ARCH` to the Stainless SDK's `normalizeArch` names.
 fn normalize_arch(arch: &str) -> &'static str {
     match arch {
         "x86" => "x32",
@@ -799,7 +814,7 @@ fn normalize_arch(arch: &str) -> &'static str {
     }
 }
 
-/// Split system sections at the boundary marker into static and dynamic parts.
+/// Splits system sections at the boundary marker into static and dynamic parts.
 ///
 /// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
 /// is excluded from both. Sections before the boundary are static (globally
@@ -828,7 +843,7 @@ fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     }
 }
 
-/// Extract the text of the first user message for fingerprint computation.
+/// Extracts the text of the first user message for fingerprint computation.
 fn first_user_text(messages: &[Message]) -> &str {
     messages
         .iter()
@@ -911,7 +926,7 @@ async fn stream_sse(
     Ok(())
 }
 
-/// Parse a single SSE frame into a [`StreamEvent`].
+/// Parses a single SSE frame into a [`StreamEvent`].
 ///
 /// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
 /// Anthropic currently emits single-line data, but we follow the spec
@@ -1266,10 +1281,10 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_session_id_in_stringified_json() {
-        // The API accepts `metadata.user_id` as a string, not a nested
-        // object — claude-code stringifies a JSON object with `session_id`
-        // (and sometimes `device_id` / `account_uuid`). Round-trip check
-        // keeps the contract explicit.
+        // `metadata.user_id` is a stringified JSON object on the wire
+        // (contains `session_id` and optionally `device_id` /
+        // `account_uuid`), not a nested object. Round-trip check keeps
+        // the double-encoding explicit.
         let meta = build_metadata("abc-123");
         let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
         assert_eq!(parsed["session_id"], "abc-123");
@@ -1338,9 +1353,9 @@ mod tests {
 
     #[test]
     fn build_completion_body_oauth_injects_billing_header_and_cch() {
-        // OAuth must emit an initial billing block (Claude Code's fingerprint
-        // contract) and the placeholder `cch=00000` must be replaced by an
-        // actual 5-hex-digit tag via `inject_cch`.
+        // OAuth must emit an initial billing block carrying the version
+        // fingerprint, and the placeholder `cch=00000` must be replaced
+        // by an actual 5-hex-digit tag via `inject_cch`.
         let body = build_completion_body(
             "claude-haiku-4-5",
             "sys-prompt",

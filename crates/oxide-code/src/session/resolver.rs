@@ -33,7 +33,7 @@ pub(crate) enum ResumeMode<'a> {
     Path(&'a Path),
 }
 
-/// Create or resume a session based on CLI flags.
+/// Creates or resumes a session based on CLI flags.
 ///
 /// `resume`:
 /// - `None`: no `--continue` flag → new session.
@@ -111,7 +111,7 @@ pub(crate) async fn resolve_session(
     Ok((session, messages, title))
 }
 
-/// Trim and classify a `--continue` argument into a [`ResumeMode`].
+/// Trims and classifies a `--continue` argument into a [`ResumeMode`].
 /// Empty / whitespace-only prefixes are rejected explicitly so they
 /// cannot silently collapse into "resume latest" — the bare
 /// `--continue` flag already expresses that intent.
@@ -151,7 +151,7 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Join the first `MATCH_PREVIEW_LIMIT` session IDs (truncated to
+/// Joins the first `MATCH_PREVIEW_LIMIT` session IDs (truncated to
 /// 8 chars each) as `aaaaaaaa, bbbbbbbb`, appending `, ...` when more
 /// matches were provided. Drives the ambiguous-prefix error in
 /// [`resolve_session`].

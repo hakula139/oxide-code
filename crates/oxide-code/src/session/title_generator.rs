@@ -82,7 +82,7 @@ fn title_output_format() -> OutputFormat {
     }))
 }
 
-/// Spawn a detached task that asks Haiku for a title, records it on
+/// Spawns a detached task that asks Haiku for a title, records it on
 /// `session`, and notifies `sink`.
 ///
 /// `first_prompt` should be the user's first message text — truncated here
@@ -139,7 +139,7 @@ async fn generate_and_record(
     Ok(())
 }
 
-/// Parse Haiku's response as the `{"title": "..."}` JSON envelope, or
+/// Parses Haiku's response as the `{"title": "..."}` JSON envelope, or
 /// bail with enough context for the caller's warn-log.
 ///
 /// The envelope is mandatory. A bare plain-text response is almost
@@ -181,7 +181,7 @@ fn truncate_for_log(s: &str) -> String {
     format!("{head}…")
 }
 
-/// Strip a surrounding triple-backtick markdown code fence (with an
+/// Strips a surrounding triple-backtick markdown code fence (with an
 /// optional `json` / `text` / … language tag) from `s`, returning the
 /// inner body trimmed of whitespace. Leaves any input that isn't wrapped
 /// in a fence untouched.
@@ -194,7 +194,7 @@ fn strip_code_fence(s: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
-/// Truncate `text` to at most `max_chars` characters, preferring the tail
+/// Truncates `text` to at most `max_chars` characters, preferring the tail
 /// when the input is long. The tail of a long first message is usually the
 /// actual request (setup, pasted logs, or context appear earlier), so the
 /// title signal lives there.

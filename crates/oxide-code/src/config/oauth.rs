@@ -1,3 +1,13 @@
+//! Claude Code OAuth credentials.
+//!
+//! Loads the OAuth access token from the macOS Keychain (service
+//! `"Claude Code-credentials"`) and `~/.claude/.credentials.json`,
+//! preferring whichever has the later expiry. Refreshes via the
+//! Anthropic token endpoint when the access token is expired or about
+//! to expire, writing the new pair back to both sources. A directory-
+//! based advisory lock keeps two `ox` instances from refreshing
+//! concurrently and clobbering each other's tokens.
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -54,7 +64,7 @@ impl OAuthCredential {
 
 // ── Token Loading ──
 
-/// Load an OAuth access token from Claude Code credentials, refreshing
+/// Loads an OAuth access token from Claude Code credentials, refreshing
 /// proactively if the token is within 5 minutes of expiry.
 pub async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
@@ -105,7 +115,7 @@ pub async fn load_token() -> Result<String> {
     }
 }
 
-/// Load credentials, preferring the macOS Keychain over the file.
+/// Loads credentials, preferring the macOS Keychain over the file.
 ///
 /// File contents are user-writable, so an attacker with write access to
 /// `~/.claude/.credentials.json` could otherwise spoof a far-future expiry
@@ -243,7 +253,7 @@ struct RefreshResponse {
     scope: Option<String>,
 }
 
-/// Write refreshed tokens back to the credentials file (and macOS Keychain),
+/// Writes refreshed tokens back to the credentials file (and macOS Keychain),
 /// preserving unknown fields.
 ///
 /// Replaces the file atomically (temp + rename) so a crash mid-write cannot
@@ -283,7 +293,7 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
     Ok(())
 }
 
-/// Write `bytes` to `path` atomically with owner-only (`0o600`) permissions
+/// Writes `bytes` to `path` atomically with owner-only (`0o600`) permissions
 /// on Unix. Creates a sibling `.tmp.<uuid>` file then renames — the rename
 /// is atomic on POSIX, so readers always see either the old or new content.
 fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {

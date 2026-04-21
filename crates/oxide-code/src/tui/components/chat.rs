@@ -183,13 +183,13 @@ impl ChatView {
         }
     }
 
-    /// Append a user message to the chat history.
+    /// Appends a user message to the chat history.
     pub(crate) fn push_user_message(&mut self, text: String) {
         self.entries.push(ChatEntry::User(text));
         self.auto_scroll = true;
     }
 
-    /// Append a streamed token to the current assistant response buffer.
+    /// Appends a streamed token to the current assistant response buffer.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         if !self.thinking_buffer.is_empty() {
             self.thinking_buffer.clear();
@@ -201,7 +201,7 @@ impl ChatView {
         }
     }
 
-    /// Append a thinking token to the thinking display buffer.
+    /// Appends a thinking token to the thinking display buffer.
     pub(crate) fn append_thinking_token(&mut self, token: &str) {
         self.thinking_buffer.push_str(token);
         if self.auto_scroll {
@@ -221,7 +221,7 @@ impl ChatView {
         }
     }
 
-    /// Append a tool call entry with its icon and label.
+    /// Appends a tool call entry with its icon and label.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
         self.entries.push(ChatEntry::ToolCall {
             icon,
@@ -229,7 +229,7 @@ impl ChatView {
         });
     }
 
-    /// Append a tool result summary line with optional output content.
+    /// Appends a tool result summary line with optional output content.
     pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
         self.entries.push(ChatEntry::ToolResult {
             label: label.to_owned(),
@@ -238,7 +238,7 @@ impl ChatView {
         });
     }
 
-    /// Append an error message.
+    /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.entries.push(ChatEntry::Error(msg.to_owned()));
     }
@@ -259,7 +259,7 @@ impl ChatView {
         matches!(self.entries.last(), Some(ChatEntry::Error(_)))
     }
 
-    /// Update cached viewport height and sync scroll position. Called by
+    /// Updates cached viewport height and syncs scroll position. Called by
     /// [`App`](super::super::app::App) after each frame.
     pub(crate) fn update_layout(&mut self, area: Rect) {
         self.viewport_height = area.height;
@@ -691,7 +691,7 @@ impl ChatView {
         }
     }
 
-    /// Advance the streaming cache: render newly committed lines and store
+    /// Advances the streaming cache: renders newly committed lines and stores
     /// them so subsequent frames skip re-parsing the stable prefix.
     fn advance_streaming_cache(&mut self) {
         // Defer caching until the first frame has measured the viewport.
@@ -737,7 +737,7 @@ impl ChatView {
 
 // ── Free Helpers ──
 
-/// Push a blank line separator unless `lines` is empty or already ends
+/// Pushes a blank line separator unless `lines` is empty or already ends
 /// with a blank line.
 fn push_section_gap(lines: &mut Vec<Line<'_>>) {
     let needs_gap = lines.last().is_some_and(|last| last.width() > 0);
@@ -746,7 +746,7 @@ fn push_section_gap(lines: &mut Vec<Line<'_>>) {
     }
 }
 
-/// Push a blank separator (when lines exist) and a styled section label.
+/// Pushes a blank separator (when lines exist) and a styled section label.
 fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
     push_section_gap(lines);
     lines.push(Line::from(vec![
@@ -755,7 +755,7 @@ fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Sty
     ]));
 }
 
-/// Emit bordered lines: the first content line uses `first_prefix` (with
+/// Emits bordered lines: the first content line uses `first_prefix` (with
 /// an icon like `"❯ ▎ "`), subsequent lines use [`BORDER_PREFIX`]. All
 /// lines are wrapped with a styled continuation prefix preserving the bar.
 fn push_bordered_lines(
@@ -785,7 +785,7 @@ fn push_bordered_lines(
     }
 }
 
-/// Build a continuation prefix that keeps the `▎` bar aligned under the
+/// Builds a continuation prefix that keeps the `▎` bar aligned under the
 /// original prefix. For a prefix like `"  ▎ "` (4 cols), produces spans
 /// `["  ", "▎", " "]` where the bar span is styled.
 fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
@@ -803,14 +803,14 @@ fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'stati
     }
 }
 
-/// Prepend a styled border prefix to a markdown-rendered line.
+/// Prepends a styled border prefix to a markdown-rendered line.
 fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> Line<'static> {
     let mut spans = vec![Span::styled(prefix.to_owned(), bar_style)];
     spans.extend(line.spans);
     Line::from(spans)
 }
 
-/// Truncate a string to `max_chars` characters, appending `...` if cut.
+/// Truncates a string to `max_chars` characters, appending `...` if cut.
 fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_owned();
@@ -848,7 +848,7 @@ mod tests {
         chat.build_text(80).lines.len()
     }
 
-    /// Collect all raw text from `build_text` into a single string for
+    /// Collects all raw text from `build_text` into a single string for
     /// substring assertions.
     fn all_text(chat: &ChatView) -> String {
         chat.build_text(80)

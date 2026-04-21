@@ -200,7 +200,7 @@ fn kill_process_group(pgid: Option<u32>) {
 
 // ── Output Truncation ──
 
-/// Truncate output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
+/// Truncates output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
 /// keeping the first and last halves so the LLM sees both the beginning of the
 /// output and the end (where error messages and summaries usually appear).
 fn truncate_output(content: &mut String) {

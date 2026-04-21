@@ -28,7 +28,7 @@ struct MemoryFile {
     label: &'static str,
 }
 
-/// Discover and load instruction files, returning the formatted section for the
+/// Discovers and loads instruction files, returning the formatted section for the
 /// system prompt.
 ///
 /// At each directory level, filenames are checked in
@@ -38,7 +38,7 @@ struct MemoryFile {
 ///
 /// Discovery locations:
 ///
-/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`
+/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`.
 /// 2. Each directory from project root to CWD (inclusive):
 ///    - `<dir>/CLAUDE.md` or `<dir>/AGENTS.md`
 ///    - `<dir>/.claude/CLAUDE.md` or `<dir>/.claude/AGENTS.md`
@@ -60,7 +60,7 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
     render(&files)
 }
 
-/// Build candidate slots — groups of paths to try at each location.
+/// Builds candidate slots — groups of paths to try at each location.
 ///
 /// Each slot lists [`INSTRUCTION_FILENAMES`] in priority order. The global
 /// slot is always included when a home directory exists. Project slots walk
@@ -102,7 +102,7 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
     slots
 }
 
-/// Return every directory from `root` down to `cwd` (inclusive).
+/// Returns every directory from `root` down to `cwd` (inclusive).
 ///
 /// If `cwd` is not a subdirectory of `root`, or `cwd` is `None`, returns
 /// just `[root]`.
