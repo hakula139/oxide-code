@@ -63,22 +63,19 @@ The project direction is simple:
 
 - JSONL-based conversation logs — append-only, one entry per line, immediate flush. Forward-compatible entry types: `header` (session metadata with format `version`), `message` (UUID + `parent_uuid` chain for future forking / partial replay), `title` (re-appendable, with `source`: `first_prompt` / `ai_generated` / `user_provided`), `summary` (exit marker with message count), and an `Unknown` catch-all so new variants land additively.
 - Project-scoped storage at `$XDG_DATA_HOME/ox/sessions/{project}/`, where `{project}` is a filesystem-safe subdirectory name derived from the working directory. One-time migration on startup moves any flat-layout or unprefixed files into place. Files are `{unix_timestamp}-{uuid}.jsonl`.
-- Session resume via `ox -c` (most recent in current project) or `ox -c <id-prefix>` (specific session). `--all` / `-a` widens `--list` and `--continue` across every project; resume by session ID also falls back to other projects automatically. Fork-friendly concurrency — two processes resuming the same session both get append handles immediately; on the next load, the UUID DAG picks the newest-timestamped leaf and walks back via `parent_uuid` to reconstruct a linear chain, so losing fork branches stay in the file for audit but are invisible to later resumes. Matches claude-code's `--fork-session` model.
-- Session listing via `ox --list` / `ox -l` — reads the header (line 1) and line 2 for a first-prompt title, then scans the last 4 KB for a re-appended title or the exit summary. Sorted by file mtime (most recently active first) so resumed sessions bubble to the top. Shows session ID prefix, last-active time (local), message count, and title.
+- Session resume via `ox -c` (most recent in current project), `ox -c <id-prefix>` (specific session), or `ox -c <path.jsonl>` (external file path — useful for sessions migrated between machines). `--all` / `-a` widens `--list` and `--continue` across every project; resume by session ID also falls back to other projects automatically. Fork-friendly concurrency — two processes resuming the same session both get append handles immediately; on the next load, the UUID DAG picks the newest-timestamped leaf and walks back via `parent_uuid` to reconstruct a linear chain, so losing fork branches stay in the file for audit but are invisible to later resumes. Matches claude-code's `--fork-session` model.
+- Session listing via `ox --list` / `ox -l` — reads the header (line 1) and streams the rest of the file for the latest re-appended `Entry::Title` and `Entry::Summary`. Sorted by file mtime (most recently active first) so resumed sessions bubble to the top. Shows session ID prefix, last-active time (local), message count, and title.
+- AI-generated session titles — on the first user prompt of a fresh session, a detached tokio task asks `claude-haiku-4-5` for a concise 3-7 word sentence-case title (via the `structured-outputs-2025-12-15` beta with a `{"title": string}` JSON schema) and appends it as a new `Entry::Title { source: AiGenerated }`. The latest-`updated_at` title wins on listing, so the AI title supersedes the first-prompt fallback automatically; the TUI status bar refreshes live via `AgentEvent::SessionTitleUpdated`. Failures warn-log only — the first-prompt title stays intact.
 - Resume sanitization on load: strips trailing `thinking`, drops unresolved assistant `tool_use` blocks and orphan user `tool_result` blocks (both halves of a crashed tool turn), drops empty messages, merges any adjacent same-role survivors, and injects synthetic user / assistant sentinels at the head or tail when the transcript would otherwise start with assistant or end with an orphan-only user turn — keeps the transcript API-valid after mid-turn crashes or JSONL corruption.
-- Resumed conversation history displayed in the TUI chat view with full fidelity — text, tool calls paired with their results via a per-load `tool_use_id` → label map, and thinking blocks (gated by the `show_thinking` config). `RedactedThinking` blocks are always dropped.
+- Resumed conversation history displayed in the TUI chat view with full fidelity — text, tool calls paired with their results via a per-load `tool_use_id` → label map, and thinking blocks (gated by the `show_thinking` config). `RedactedThinking` blocks are always dropped. The resumed title (first-prompt or AI-generated, whichever has the newer `updated_at`) surfaces in the TUI status bar between model and status.
 - On Unix, session files are created with mode `0o600` so verbatim tool output (which may include secrets) stays owner-only.
-- Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header.
+- Works across all modes (TUI, bare REPL, headless). Session ID flows through to the `x-claude-code-session-id` API header. AI title generation runs in TUI only — REPL / headless keep the first-prompt title on disk so listings stay accurate.
 
 ## Current Focus
 
 ### Terminal UI (Remaining)
 
 - Viewport virtualization for long conversations.
-
-### Session Enhancements
-
-- AI-generated session titles — after the first assistant response, make a background API call (Haiku) to generate a descriptive title from the conversation opening. Update the summary entry asynchronously without blocking the main conversation. Fall back to the current first-prompt truncation if the title call fails.
 
 ### Test Coverage
 

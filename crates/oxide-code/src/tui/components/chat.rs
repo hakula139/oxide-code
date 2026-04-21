@@ -8,9 +8,11 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use crate::message::{ContentBlock, Message, Role};
+use crate::agent::event::UserAction;
+use crate::message::Message;
+use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::ToolRegistry;
-use crate::tui::component::{Action, Component};
+use crate::tui::component::Component;
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -129,114 +131,54 @@ impl ChatView {
 
     /// Populate the chat history from resumed session messages.
     ///
-    /// Renders user / assistant text, assistant tool-call markers, and
-    /// the paired tool results so a resumed view matches the live one
-    /// visually. Thinking blocks are rendered only when
-    /// [`ChatView::show_thinking`] is on — this mirrors claude-code's
-    /// "verbose / transcript" gating (thinking is valuable context but
-    /// noisy by default).
-    ///
-    /// `RedactedThinking` blocks are intentionally dropped: their body
-    /// is opaque ciphertext and carries no human-readable context.
-    ///
-    /// The session JSONL stores an assistant message with all its
-    /// `ToolUse` blocks, then the next user message with all matching
-    /// `ToolResult` blocks — but live rendering emits `(call, result)`
-    /// pairs interleaved. To keep the resumed view faithful, we index
-    /// results by `tool_use_id` first and emit each paired result
-    /// directly after its call. Orphan results (id with no matching
-    /// call, e.g., from a crashed turn) still render at their original
-    /// position with a generic fallback label.
+    /// Projects the transcript into [`Interaction`]s (see
+    /// [`walk_transcript`]) so a resumed view matches live rendering —
+    /// paired tool calls and results appear together, orphan results get a
+    /// fallback label, and `RedactedThinking` / whitespace-only blocks are
+    /// dropped upstream. Thinking entries are stored unconditionally here;
+    /// the renderer gates their display on [`ChatView::show_thinking`], so
+    /// flipping the toggle does not require reloading the session.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
-        let mut pending_results: HashMap<&str, (&str, bool)> = messages
-            .iter()
-            .flat_map(|m| m.content.iter())
-            .filter_map(|b| match b {
-                ContentBlock::ToolResult {
+        let mut labels: HashMap<&str, String> = HashMap::new();
+        for interaction in walk_transcript(messages) {
+            match interaction {
+                Interaction::UserText(text) => self.entries.push(ChatEntry::User(text)),
+                Interaction::AssistantText(text) => {
+                    self.entries.push(ChatEntry::Assistant(text));
+                }
+                Interaction::AssistantThinking(text) => {
+                    self.entries.push(ChatEntry::Thinking(text.to_owned()));
+                }
+                Interaction::ToolCall { id, name, input } => {
+                    let icon = tools.icon(name);
+                    let label = tools
+                        .summarize_input(name, input)
+                        .map_or_else(|| name.to_owned(), str::to_owned);
+                    labels.insert(id, label.clone());
+                    self.entries.push(ChatEntry::ToolCall { icon, label });
+                }
+                Interaction::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
-                } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
-                _ => None,
-            })
-            .collect();
-
-        let mut tool_labels: HashMap<String, String> = HashMap::new();
-        for msg in messages {
-            let mut text = String::new();
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text: t } if !t.trim().is_empty() => {
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(t);
-                    }
-                    ContentBlock::ToolUse { id, name, input }
-                    | ContentBlock::ServerToolUse { id, name, input } => {
-                        // Flush any accumulated text so entries render
-                        // in source order (assistant text, then the
-                        // tool call it preceded).
-                        if !text.is_empty() {
-                            self.entries
-                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
-                        }
-                        let icon = tools.icon(name);
-                        let label = tools
-                            .summarize_input(name, input)
-                            .map_or_else(|| name.clone(), str::to_owned);
-                        tool_labels.insert(id.clone(), label.clone());
-                        self.entries.push(ChatEntry::ToolCall {
-                            icon,
-                            label: label.clone(),
-                        });
-                        if let Some((content, is_error)) = pending_results.remove(id.as_str()) {
-                            self.entries.push(ChatEntry::ToolResult {
-                                label,
-                                content: content.to_owned(),
-                                is_error,
-                            });
-                        }
-                    }
-                    // Non-orphan tool_results were already emitted inline
-                    // at the matching tool_use; only orphans reach this
-                    // arm (the pending-map guard ensures that).
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
+                } => {
+                    let label = labels
+                        .get(tool_use_id)
+                        .cloned()
+                        .unwrap_or_else(|| "(result)".to_owned());
+                    self.entries.push(ChatEntry::ToolResult {
+                        label,
+                        content: content.to_owned(),
                         is_error,
-                    } if pending_results.remove(tool_use_id.as_str()).is_some() => {
-                        let label = tool_labels
-                            .get(tool_use_id)
-                            .cloned()
-                            .unwrap_or_else(|| "(result)".to_owned());
-                        self.entries.push(ChatEntry::ToolResult {
-                            label,
-                            content: content.clone(),
-                            is_error: *is_error,
-                        });
-                    }
-                    ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
-                        // Keep Thinking entries unconditionally — the
-                        // renderer (see the main `match entry` block)
-                        // honors `show_thinking` to decide whether to
-                        // emit rows. Storing them means flipping the
-                        // toggle doesn't require reloading the session.
-                        if !text.is_empty() {
-                            self.entries
-                                .push(ChatEntry::Assistant(std::mem::take(&mut text)));
-                        }
-                        self.entries.push(ChatEntry::Thinking(thinking.clone()));
-                    }
-                    _ => {}
+                    });
                 }
-            }
-            if !text.is_empty() {
-                let entry = match msg.role {
-                    Role::User => ChatEntry::User(text),
-                    Role::Assistant => ChatEntry::Assistant(text),
-                };
-                self.entries.push(entry);
+                Interaction::OrphanToolResult { content, is_error } => {
+                    self.entries.push(ChatEntry::ToolResult {
+                        label: "(result)".to_owned(),
+                        content: content.to_owned(),
+                        is_error,
+                    });
+                }
             }
         }
     }
@@ -301,6 +243,22 @@ impl ChatView {
         self.entries.push(ChatEntry::Error(msg.to_owned()));
     }
 
+    /// Number of committed chat entries. Exposed for observable state in
+    /// sibling-module tests (`tui::app`) so they don't need to reach
+    /// through the private `entries` field.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the tail entry is an [`ChatEntry::Error`]. Same rationale
+    /// as [`entry_count`][Self::entry_count] — lets `tui::app` tests
+    /// assert on error dispatch without exposing `ChatEntry` itself.
+    #[cfg(test)]
+    pub(crate) fn last_is_error(&self) -> bool {
+        matches!(self.entries.last(), Some(ChatEntry::Error(_)))
+    }
+
     /// Update cached viewport height and sync scroll position. Called by
     /// [`App`](super::super::app::App) after each frame.
     pub(crate) fn update_layout(&mut self, area: Rect) {
@@ -321,7 +279,7 @@ impl ChatView {
 }
 
 impl Component for ChatView {
-    fn handle_event(&mut self, event: &Event) -> Option<Action> {
+    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -529,22 +487,40 @@ impl ChatView {
         width: usize,
     ) {
         push_section_gap(lines);
+        lines.extend(self.render_assistant_block(content, width, true));
+    }
 
-        // The markdown renderer wraps to (width - 4) so the 4-char
-        // border prefix doesn't push content past the terminal edge.
+    /// Render an assistant markdown block with the assistant border.
+    ///
+    /// `starts_new_turn` controls the first line's prefix: `true` emits the
+    /// assistant icon ([`ASSISTANT_PREFIX`]), `false` emits a plain
+    /// [`BORDER_PREFIX`] so the block continues a previous turn (used by the
+    /// streaming cache after the first cached line has already been emitted).
+    ///
+    /// The markdown renderer wraps to `width - BORDER_PREFIX.len()` so the
+    /// border prefix doesn't push content past the terminal edge.
+    fn render_assistant_block(
+        &self,
+        content: &str,
+        width: usize,
+        starts_new_turn: bool,
+    ) -> Vec<Line<'static>> {
         let bar_style = self.theme.secondary();
         let md_width = width.saturating_sub(BORDER_PREFIX.len());
         let rendered = render_markdown(content, &self.theme, md_width);
-        let mut first = true;
-        for line in rendered.lines {
-            let prefix = if first {
-                ASSISTANT_PREFIX
-            } else {
-                BORDER_PREFIX
-            };
-            first = false;
-            lines.push(border_markdown_line(line, prefix, bar_style));
-        }
+        rendered
+            .lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let prefix = if i == 0 && starts_new_turn {
+                    ASSISTANT_PREFIX
+                } else {
+                    BORDER_PREFIX
+                };
+                border_markdown_line(line, prefix, bar_style)
+            })
+            .collect()
     }
 
     // ── Tool Calls ──
@@ -667,73 +643,50 @@ impl ChatView {
     // ── Streaming ──
 
     fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
-        let bar_style = self.theme.secondary();
-
-        // Show icon + separator only when this is a new assistant turn
+        // Show a blank separator when the streaming text begins a new turn
         // (not a continuation of a committed assistant entry).
-        let is_new_turn = !self
-            .entries
-            .last()
-            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
-        if is_new_turn && !lines.is_empty() {
+        let new_turn = self.streaming_starts_new_turn();
+        if new_turn && !lines.is_empty() {
             lines.push(Line::raw(""));
         }
 
-        // Emit cached lines from the stable prefix (already rendered).
-        // The first cached line already carries the icon from advance_streaming_cache.
-        for line in &self.streaming_rendered {
-            lines.push(line.clone());
+        // Emit already-rendered cached lines from the stable prefix.
+        lines.extend(self.streaming_rendered.iter().cloned());
+
+        // The cache is populated only after the viewport has been measured
+        // (advance_streaming_cache defers otherwise), so the tail may still
+        // contain complete lines before the last `\n`. Render those as
+        // markdown; render whatever is past the last `\n` as plain text
+        // (partial markdown re-parses mid-token would flicker).
+        let tail = &self.streaming_buffer[self.streaming_rendered_boundary..];
+        if tail.is_empty() {
+            return;
         }
 
-        // Render only the new chunk beyond the cached boundary.
-        let buf = &self.streaming_buffer;
-        let tail = &buf[self.streaming_rendered_boundary..];
-        let md_width = width.saturating_sub(BORDER_PREFIX.len());
+        // `cache_empty` gates the first-line icon: if the cache already holds
+        // lines, the new chunk is a continuation of the turn regardless of
+        // whether the turn itself started fresh.
+        let cache_empty = self.streaming_rendered.is_empty();
+        let (committed, trailing) = match tail.rfind('\n') {
+            Some(nl) => (&tail[..nl], &tail[nl + 1..]),
+            None => ("", tail),
+        };
 
-        // Determine whether the next rendered line is the very first
-        // line of this assistant turn (needs icon prefix).
-        let needs_icon = is_new_turn && self.streaming_rendered.is_empty();
+        if !committed.is_empty() {
+            lines.extend(self.render_assistant_block(committed, width, new_turn && cache_empty));
+        }
 
-        if let Some(rel_boundary) = tail.rfind('\n') {
-            let new_committed = &tail[..rel_boundary];
-            let trailing = &tail[rel_boundary + 1..];
-
-            if !new_committed.is_empty() {
-                let rendered = render_markdown(new_committed, &self.theme, md_width);
-                let mut first = needs_icon;
-                for line in rendered.lines {
-                    let prefix = if first {
-                        ASSISTANT_PREFIX
-                    } else {
-                        BORDER_PREFIX
-                    };
-                    first = false;
-                    lines.push(border_markdown_line(line, prefix, bar_style));
-                }
-            }
-
-            if !trailing.is_empty() {
-                let prefix = if needs_icon && new_committed.is_empty() {
-                    ASSISTANT_PREFIX
-                } else {
-                    BORDER_PREFIX
-                };
-                lines.push(border_markdown_line(
-                    Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
-                    prefix,
-                    bar_style,
-                ));
-            }
-        } else if !tail.is_empty() {
-            let prefix = if needs_icon {
+        if !trailing.is_empty() {
+            let starts_here = new_turn && cache_empty && committed.is_empty();
+            let prefix = if starts_here {
                 ASSISTANT_PREFIX
             } else {
                 BORDER_PREFIX
             };
             lines.push(border_markdown_line(
-                Line::from(Span::styled(tail.to_owned(), self.theme.text())),
+                Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
                 prefix,
-                bar_style,
+                self.theme.secondary(),
             ));
         }
     }
@@ -750,38 +703,35 @@ impl ChatView {
 
         let boundary = self.streaming_rendered_boundary;
         let tail = &self.streaming_buffer[boundary..];
-
         let Some(rel_boundary) = tail.rfind('\n') else {
             return;
         };
 
         let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
         if !new_committed.is_empty() {
-            let bar_style = self.theme.secondary();
-            let md_width = usize::from(self.viewport_width).saturating_sub(BORDER_PREFIX.len());
-            let rendered = render_markdown(new_committed, &self.theme, md_width);
-
-            // The first cached line of a new assistant turn gets the icon prefix.
-            let is_new_turn = !self
-                .entries
-                .last()
-                .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)));
-            let mut first = is_new_turn && self.streaming_rendered.is_empty();
-
-            for line in rendered.lines {
-                let prefix = if first {
-                    ASSISTANT_PREFIX
-                } else {
-                    BORDER_PREFIX
-                };
-                first = false;
-                self.streaming_rendered
-                    .push(border_markdown_line(line, prefix, bar_style));
-            }
+            let new_turn = self.streaming_starts_new_turn();
+            let cache_empty = self.streaming_rendered.is_empty();
+            let rendered = self.render_assistant_block(
+                new_committed,
+                self.viewport_width.into(),
+                new_turn && cache_empty,
+            );
+            self.streaming_rendered.extend(rendered);
         }
 
         self.streaming_rendered_boundary = boundary + rel_boundary + 1;
         self.streaming_cached_width = self.viewport_width;
+    }
+
+    /// Whether the next streaming chunk begins a fresh assistant turn. The
+    /// answer is `false` when the most recent committed entry is already an
+    /// assistant message, which means we're splicing more tokens onto the
+    /// same visible block and should suppress the leading icon / blank gap.
+    fn streaming_starts_new_turn(&self) -> bool {
+        !self
+            .entries
+            .last()
+            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)))
     }
 }
 
@@ -876,6 +826,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::message::{ContentBlock, Role};
 
     fn test_chat() -> ChatView {
         ChatView::new(Theme::default(), true)
@@ -1966,6 +1917,60 @@ mod tests {
             (last_user + 1..thinking).any(|i| lines[i].trim().is_empty()),
             "expected blank separator between user message and thinking block"
         );
+    }
+
+    #[test]
+    fn build_text_renders_loaded_thinking_entry_when_show_thinking_is_enabled() {
+        // The live-streaming tests above cover `thinking_buffer`, but
+        // resumed sessions re-enter via `load_history` and populate
+        // `entries` with `ChatEntry::Thinking`. `build_text` has a
+        // separate branch for that path — cover it explicitly.
+        let mut chat = test_chat();
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "resumed reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking..."), "header missing: {text}");
+        assert!(
+            text.contains("resumed reasoning"),
+            "thinking body missing: {text}",
+        );
+    }
+
+    #[test]
+    fn build_text_hides_loaded_thinking_entry_when_show_thinking_is_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking..."), "leaked header: {text}");
+        assert!(!text.contains("private reasoning"), "leaked body: {text}");
+        assert!(text.contains("reply"), "text reply should still render");
     }
 
     // ── push_streaming_lines ──

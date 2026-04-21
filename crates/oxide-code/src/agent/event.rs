@@ -41,6 +41,9 @@ pub(crate) enum AgentEvent {
     /// The current assistant turn is complete (text-only response, no more
     /// tool calls).
     TurnComplete,
+    /// A newly-generated session title (e.g., AI-generated via Haiku). The
+    /// TUI updates the status bar slot; other sinks ignore it.
+    SessionTitleUpdated(String),
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -131,10 +134,103 @@ impl AgentSink for StdioSink {
                 // Newline after streamed text.
                 println!();
             }
+            AgentEvent::SessionTitleUpdated(_) => {
+                // Titles are a TUI-only affordance; the stdio sink has no
+                // persistent header to rewrite.
+            }
             AgentEvent::Error(msg) => {
                 eprintln!("Error: {msg}");
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolRegistry;
+
+    // ── StdioSink::send ──
+    //
+    // `send` writes to stdout/stderr, which cargo's test harness captures and
+    // discards on success — so these tests exercise the match-arm dispatch
+    // and the Result contract rather than asserting on rendered bytes.
+    // Formatting-assertion tests belong behind an extracted rendering helper
+    // (see `docs/roadmap.md` → Test Coverage).
+
+    fn test_sink(show_thinking: bool) -> StdioSink {
+        StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
+    }
+
+    #[test]
+    fn send_session_title_updated_is_silent_ok() {
+        // AI-generated titles are a TUI-only affordance; the stdio path has
+        // no persistent header to rewrite, so the arm must no-op cleanly.
+        let sink = test_sink(false);
+        sink.send(AgentEvent::SessionTitleUpdated("New title".to_owned()))
+            .unwrap();
+    }
+
+    #[test]
+    fn send_stream_token_writes_body_without_error() {
+        let sink = test_sink(false);
+        sink.send(AgentEvent::StreamToken("hello".to_owned()))
+            .unwrap();
+    }
+
+    #[test]
+    fn send_thinking_token_respects_show_thinking_flag() {
+        // show_thinking = false must swallow the block entirely, not just
+        // strip the dim escape codes — otherwise the stream lines bleed
+        // into the transcript unformatted.
+        test_sink(false)
+            .send(AgentEvent::ThinkingToken("muted".to_owned()))
+            .unwrap();
+        test_sink(true)
+            .send(AgentEvent::ThinkingToken("visible".to_owned()))
+            .unwrap();
+    }
+
+    #[test]
+    fn send_tool_call_start_renders_label_and_falls_back_to_name() {
+        let sink = test_sink(false);
+        sink.send(AgentEvent::ToolCallStart {
+            id: "t1".to_owned(),
+            name: "unregistered".to_owned(),
+            input: serde_json::Value::Null,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn send_tool_call_end_handles_every_field_nullability() {
+        let sink = test_sink(false);
+        sink.send(AgentEvent::ToolCallEnd {
+            id: "t1".to_owned(),
+            title: Some("ls".to_owned()),
+            content: "file1\nfile2\n".to_owned(),
+            is_error: false,
+        })
+        .unwrap();
+        sink.send(AgentEvent::ToolCallEnd {
+            id: "t2".to_owned(),
+            title: None,
+            content: "   \n".to_owned(),
+            is_error: true,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn send_turn_complete_emits_trailing_newline_without_error() {
+        test_sink(false).send(AgentEvent::TurnComplete).unwrap();
+    }
+
+    #[test]
+    fn send_error_routes_message_to_stderr() {
+        test_sink(false)
+            .send(AgentEvent::Error("boom".to_owned()))
+            .unwrap();
     }
 }

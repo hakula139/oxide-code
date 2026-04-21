@@ -1,12 +1,16 @@
 use std::collections::HashSet;
+use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
-use super::store::{SessionStore, SessionWriter};
+use super::store::{
+    SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
+    read_session_id_from_path,
+};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 /// Maximum title length (in characters) derived from the first user prompt.
@@ -39,8 +43,9 @@ const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]"
 /// Files are created lazily — [`start`][Self::start] only allocates a
 /// session ID and stages the header in memory, and the on-disk file is
 /// materialized by the first [`record_message`][Self::record_message]
-/// call. A session that exits before any message is recorded leaves
-/// no artifact behind, mirroring claude-code's `sessionStorage` model.
+/// call. A session that exits before any message is recorded leaves no
+/// artifact behind, so `ox` then quit never litters the session list
+/// with empty, unresumable rows.
 pub(crate) struct SessionManager {
     /// Cloned at construction so [`record_message`] can lazily call
     /// `store.create()` once the first message arrives. `SessionStore`
@@ -67,6 +72,13 @@ pub(crate) struct SessionManager {
     /// `Some`, the initial [`Entry::Title`] was already written (either
     /// this run or by the previous run before resume).
     first_user_prompt: Option<String>,
+    /// Set exactly once, when [`record_message`][Self::record_message]
+    /// writes the first-prompt title on a fresh session. Callers drain it
+    /// via [`take_ai_title_seed`][Self::take_ai_title_seed] to kick off
+    /// background AI-title generation. Stays `None` on resumed sessions
+    /// (the first-prompt title is already on disk) so we don't overwrite
+    /// a previous run's AI title after resume.
+    ai_title_seed: Option<String>,
     /// UUID of the last recorded [`Entry::Message`]. Used as
     /// `parent_uuid` for the next recorded message, forming the
     /// conversation chain.
@@ -97,6 +109,7 @@ impl SessionManager {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt: None,
+            ai_title_seed: None,
             last_message_uuid: None,
             finished: false,
             write_failed: false,
@@ -117,20 +130,51 @@ impl SessionManager {
     pub(crate) async fn resume(
         store: &SessionStore,
         session_id: &str,
-    ) -> Result<(Self, Vec<Message>)> {
-        let mut data = store.load_session_data(session_id)?;
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+        let data = store.load_session_data(session_id)?;
+        let writer = store.open_append(session_id).await?;
+        Self::from_resumed_data(store, session_id.to_owned(), data, writer)
+    }
+
+    /// Resume a session from an explicit file path, bypassing the XDG
+    /// project subdirectory lookup entirely. Used by `ox -c <path.jsonl>`
+    /// to pick up sessions that were copied between machines or that live
+    /// outside the configured store root.
+    ///
+    /// The manager still carries the current store so downstream code (like
+    /// future slash commands that create sibling sessions) has a reference
+    /// point; it is never used on the resumed path since
+    /// [`record_message`][Self::record_message] skips the
+    /// `store.create()` branch when `pending_header` is `None`.
+    pub(crate) fn resume_from_path(
+        store: &SessionStore,
+        path: &Path,
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+        let session_id = read_session_id_from_path(path)?;
+        let data = load_session_data_from_path(path)?;
+        let writer = open_append_at(path)?;
+        Self::from_resumed_data(store, session_id, data, writer)
+    }
+
+    /// Shared tail of [`resume`][Self::resume] and
+    /// [`resume_from_path`][Self::resume_from_path]: sanitize the loaded
+    /// transcript, reject empty results, and build the manager.
+    fn from_resumed_data(
+        store: &SessionStore,
+        session_id: String,
+        mut data: SessionData,
+        writer: SessionWriter,
+    ) -> Result<(Self, Vec<Message>, Option<String>)> {
         sanitize_resumed_messages(&mut data.messages);
-        // Run the emptiness check *after* sanitization. Otherwise a
-        // file that loads into a non-empty vector but becomes empty
-        // after sanitize (all unresolved tool_use + orphan tool_result,
-        // or sanitization dropped every turn) would slip through with
+        // Run the emptiness check *after* sanitization. Otherwise a file
+        // that loads into a non-empty vector but becomes empty after
+        // sanitize (all unresolved tool_use + orphan tool_result, or
+        // sanitization dropped every turn) would slip through with
         // `last_message_uuid = data.last_uuid`, and the next recorded
         // message would chain to a UUID that's no longer in view.
         if data.messages.is_empty() {
             bail!("session {session_id} has no messages to resume");
         }
-
-        let writer = store.open_append(session_id).await?;
 
         let first_user_prompt = data
             .messages
@@ -138,20 +182,22 @@ impl SessionManager {
             .find_map(extract_user_text)
             .map(String::from);
         let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
+        let title = data.title.map(|t| t.title);
 
         let manager = Self {
             store: store.clone(),
             pending_header: None,
             writer: Some(writer),
-            session_id: session_id.to_owned(),
+            session_id,
             initial_message_count: message_count,
             message_count,
             first_user_prompt,
+            ai_title_seed: None,
             last_message_uuid: data.last_uuid,
             finished: false,
             write_failed: false,
         };
-        Ok((manager, data.messages))
+        Ok((manager, data.messages, title))
     }
 
     /// Record a conversation message to the session file.
@@ -192,6 +238,10 @@ impl SessionManager {
             // persistence here — the in-memory title is lost either
             // way; we just refuse to silently replace it.
             self.first_user_prompt = Some(text.to_owned());
+            // Seed the AI title generator with the full prompt (not the
+            // first-prompt truncation) so Haiku has full context. Taken
+            // at most once per session; resumed sessions don't set this.
+            self.ai_title_seed = Some(text.to_owned());
             writer.append(&Entry::Title {
                 title: truncate_title(text, MAX_TITLE_LEN),
                 source: TitleSource::FirstPrompt,
@@ -238,6 +288,30 @@ impl SessionManager {
 
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Return (and clear) the seed text that should be passed to the AI
+    /// title generator. Returns `Some` at most once per session — right
+    /// after the first user prompt has been recorded on a fresh session.
+    /// Subsequent calls return `None`, as do all calls on resumed
+    /// sessions.
+    pub(crate) fn take_ai_title_seed(&mut self) -> Option<String> {
+        self.ai_title_seed.take()
+    }
+
+    /// Append an AI-generated title to the session file. Latest
+    /// [`Entry::Title`] wins on tail scan, so this supersedes the
+    /// first-prompt title for both `--list` output and later resumes.
+    pub(crate) fn append_ai_title(&mut self, title: &str) -> Result<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .context("cannot append AI title before the session file is materialized")?;
+        writer.append(&Entry::Title {
+            title: title.to_owned(),
+            source: TitleSource::AiGenerated,
+            updated_at: OffsetDateTime::now_utc(),
+        })
     }
 
     /// Mark a write failure and report whether this is the first one.
@@ -476,7 +550,8 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
@@ -495,7 +570,8 @@ mod tests {
             .unwrap();
         drop(original); // no finish() — simulates a crash
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
     }
@@ -519,7 +595,8 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
@@ -577,7 +654,8 @@ mod tests {
             .unwrap();
         drop(original); // crash before tool_result
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 2);
         let assistant = &messages[1];
         assert_eq!(assistant.role, Role::Assistant);
@@ -620,7 +698,8 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(
             messages.len(),
             1,
@@ -653,11 +732,11 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let result = SessionManager::resume(&store, &session_id).await;
-        let err = match result {
-            Ok(_) => panic!("expected resume to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = SessionManager::resume(&store, &session_id)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no messages to resume"), "got: {err}");
     }
 
@@ -695,7 +774,8 @@ mod tests {
             .unwrap();
         drop(original); // crash before next assistant response
 
-        let (_resumed, messages) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (_resumed, messages, _title) =
+            SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 4, "sentinel should be appended");
         assert_eq!(messages[3].role, Role::Assistant);
         assert!(
@@ -719,7 +799,7 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::user("follow up"))
             .await
@@ -770,7 +850,7 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed
             .record_message(&Message::assistant("Done."))
             .await
@@ -921,10 +1001,10 @@ mod tests {
     #[tokio::test]
     async fn finish_empty_session_leaves_no_file() {
         // A session that exits without recording any message must not
-        // appear in `--list` or be resumable. Mirrors claude-code's
-        // sessionStorage, which materializes the file lazily on the
-        // first append. See the bug report on PR #13: `ox` then quit
-        // produced an unresumable "(untitled), 0 msgs" entry.
+        // appear in `--list` or be resumable — the file is materialized
+        // lazily on the first append. See the bug report on PR #13:
+        // `ox` then quit produced an unresumable "(untitled), 0 msgs"
+        // entry.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut manager = SessionManager::start(&store, "m");
@@ -975,7 +1055,7 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
         resumed.finish().unwrap();
         drop(resumed);
 
@@ -985,6 +1065,91 @@ mod tests {
             .filter(|l| l.contains(r#""type":"summary""#))
             .count();
         assert_eq!(summary_count, 1);
+    }
+
+    // ── take_ai_title_seed ──
+
+    #[tokio::test]
+    async fn take_ai_title_seed_yields_first_prompt_once_on_fresh_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+
+        // No messages recorded yet → no seed.
+        assert!(manager.take_ai_title_seed().is_none());
+
+        // First user message seeds; second call drains to None.
+        manager
+            .record_message(&Message::user("Fix login bug"))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.take_ai_title_seed().as_deref(),
+            Some("Fix login bug")
+        );
+        assert!(manager.take_ai_title_seed().is_none());
+
+        // Subsequent user messages don't re-seed.
+        manager
+            .record_message(&Message::user("follow up"))
+            .await
+            .unwrap();
+        assert!(manager.take_ai_title_seed().is_none());
+    }
+
+    #[tokio::test]
+    async fn take_ai_title_seed_is_empty_on_resume_even_when_file_has_first_prompt_only() {
+        // Resumed sessions already have a first-prompt title on disk;
+        // we don't try to regenerate the AI title here. (If the original
+        // run's AI generation failed, resume still skips — AI titles are
+        // one-shot per session.)
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("hello"))
+            .await
+            .unwrap();
+        drop(original);
+
+        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        assert!(resumed.take_ai_title_seed().is_none());
+    }
+
+    // ── append_ai_title ──
+
+    #[tokio::test]
+    async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+        let sid = manager.session_id().to_owned();
+        manager
+            .record_message(&Message::user("Fix login bug"))
+            .await
+            .unwrap();
+
+        manager.append_ai_title("Fix auth flow for mobile").unwrap();
+        manager.finish().unwrap();
+        drop(manager);
+
+        // Tail scan picks the latest-updated_at title, so the AI title
+        // wins over the first-prompt title.
+        let sessions = store.list().unwrap();
+        let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
+        assert_eq!(
+            session.title.as_ref().unwrap().title,
+            "Fix auth flow for mobile"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_ai_title_errors_before_session_file_materializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let err = manager.append_ai_title("whatever").unwrap_err().to_string();
+        assert!(err.contains("materialized"), "got: {err}");
     }
 
     // ── record_write_failure ──

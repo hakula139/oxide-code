@@ -49,14 +49,46 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                        |
-| --------------------------------- | ------------------------------ |
-| `interleaved-thinking-2025-05-14` | Extended thinking support      |
-| `context-1m-2025-08-07`           | 1M context window              |
-| `context-management-2025-06-27`   | Context management             |
-| `prompt-caching-scope-2026-01-05` | Prompt caching                 |
-| `effort-2025-11-24`               | Effort control                 |
-| `advanced-tool-use-2025-11-20`    | Tool search (first-party only) |
+| Header                            | Purpose                                             |
+| --------------------------------- | --------------------------------------------------- |
+| `interleaved-thinking-2025-05-14` | Extended thinking support                           |
+| `context-1m-2025-08-07`           | 1M context window                                   |
+| `context-management-2025-06-27`   | Context management                                  |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                                      |
+| `effort-2025-11-24`               | Effort control                                      |
+| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls)  |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                      |
+
+#### Per-model beta sets
+
+The accepted beta set differs per model family and per call type (agentic chat vs one-shot utility). Sending an unsupported beta — most commonly `context-1m-2025-08-07` to Haiku — trips gateway validation with HTTP 400 `invalid_request_error`. The mapping claude-code applies in `claude-code/src/utils/betas.ts`:
+
+Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first, producing a visual staircase of narrowing checkmarks.
+
+Cell legend: `✓` always on, `—` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below).
+
+| Beta                              | Opus 4 (base) | Opus 4.1 / 4.5 | Opus 4.6+ | Sonnet 4 (base) | Sonnet 4.5 | Sonnet 4.6+ | Haiku 4 (base) | Haiku 4.5 (agentic) | Haiku 4.5 (one-shot) |
+| --------------------------------- | ------------- | -------------- | --------- | --------------- | ---------- | ----------- | -------------- | ------------------- | -------------------- |
+| `claude-code-20250219`            | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | —                    |
+| `oauth-2025-04-20` (OAuth only)   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | ✓                    |
+| `context-management-2025-06-27`   | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | —                    |
+| `prompt-caching-scope-2026-01-05` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | ✓              | ✓                   | —                    |
+| `interleaved-thinking-2025-05-14` | ✓             | ✓              | ✓         | ✓               | ✓          | ✓           | —              | —                   | —                    |
+| `context-1m-2025-08-07`           | —             | —              | `[1m]`    | `[1m]`          | `[1m]`     | `[1m]`      | —              | —                   | —                    |
+| `effort-2025-11-24`               | —             | —              | ✓         | —               | —          | ✓           | —              | —                   | —                    |
+| `structured-outputs-2025-12-15`   | —             | `*`            | `*`       | —               | `*`        | `*`         | —              | `*`                 | `*`                  |
+
+Key rules:
+
+- **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
+- **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
+- **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
+- **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
+- **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
+- **`structured-outputs` is per-version and caller-opt-in** — the upstream allowlist is Opus 4.1 / 4.5 / 4.6+, Sonnet 4.5 / 4.6+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag: a schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
+- **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas; bump the `MODELS` table when a new family lands.
+
+oxide-code gates each beta header on the target model in `client::anthropic::compute_betas`, which consults the ground-truth `Capabilities` flags in `crate::model::MODELS`. New models ship by adding a row to that table — no changes to the beta logic needed.
 
 ### 2. System prompt prefix (as a separate block)
 

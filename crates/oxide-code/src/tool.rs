@@ -103,7 +103,7 @@ pub(crate) trait Tool: Send + Sync {
     /// Returns the most relevant input field as a one-line label
     /// (e.g., the command for bash, the `file_path` for read / write / edit).
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
-        let _ = input;
+        _ = input;
         None
     }
 
@@ -267,8 +267,10 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 /// Roughly 32K tokens at ~4 chars / token.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
-/// Per-line character cap for read and grep output. Matches the
-/// `--max-columns` default that ripgrep uses in Claude Code.
+/// Per-line character cap for read and grep output. Long lines (minified
+/// bundles, base64 blobs) rarely help the model and crowd out useful
+/// context; 500 chars captures ~80 code columns with margin for structured
+/// output like `rg --vimgrep` locations.
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
 /// Truncates a line beyond [`MAX_LINE_LENGTH`] characters, appending a

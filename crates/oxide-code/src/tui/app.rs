@@ -7,7 +7,7 @@ use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
-use super::component::{Action, Component};
+use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
@@ -26,7 +26,7 @@ pub(crate) struct App {
     chat: ChatView,
     input: InputArea,
     agent_rx: mpsc::Receiver<AgentEvent>,
-    user_tx: mpsc::UnboundedSender<UserAction>,
+    user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
     should_quit: bool,
     /// Whether state has changed since the last render.
@@ -34,20 +34,27 @@ pub(crate) struct App {
 }
 
 impl App {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "ctor wires the full surface (display config, IPC channels, resumed state, tool registry); a builder would obscure which dependencies App owns"
+    )]
     pub(crate) fn new(
         model: String,
         show_thinking: bool,
         cwd: String,
+        title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
-        user_tx: mpsc::UnboundedSender<UserAction>,
+        user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, tools.as_ref());
+        let mut status_bar = StatusBar::new(theme, model, cwd);
+        status_bar.set_title(title);
         Self {
-            status_bar: StatusBar::new(theme, model, cwd),
+            status_bar,
             chat,
             input: InputArea::new(theme),
             agent_rx,
@@ -112,7 +119,7 @@ impl App {
             Event::Key(..) => {
                 // Input area handles typing, submit, and quit.
                 if let Some(action) = self.input.handle_event(event) {
-                    self.handle_action(action);
+                    self.dispatch_user_action(action);
                 }
                 // When input is disabled (streaming), scroll keys go to chat.
                 if !self.input.is_enabled() {
@@ -128,19 +135,22 @@ impl App {
         self.dirty = true;
     }
 
-    fn handle_action(&mut self, action: Action) {
-        match action {
-            Action::SubmitPrompt(text) => {
+    /// Translate a user action into UI state changes, then forward it to the
+    /// agent loop over the bounded channel. `try_send` would only fail if the
+    /// agent task has died; in that case `should_quit` tears down the TUI on
+    /// the next iteration so nothing is lost.
+    fn dispatch_user_action(&mut self, action: UserAction) {
+        match &action {
+            UserAction::SubmitPrompt(text) => {
                 self.chat.push_user_message(text.clone());
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Streaming);
-                _ = self.user_tx.send(UserAction::SubmitPrompt(text));
             }
-            Action::Quit => {
-                _ = self.user_tx.send(UserAction::Quit);
+            UserAction::Quit => {
                 self.should_quit = true;
             }
         }
+        _ = self.user_tx.try_send(action);
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -176,6 +186,9 @@ impl App {
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
+            }
+            AgentEvent::SessionTitleUpdated(title) => {
+                self.status_bar.set_title(Some(title));
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -218,5 +231,279 @@ impl App {
         self.chat.update_layout(chat_area);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::tool::ToolRegistry;
+
+    // `App::run` / `App::render` need a real terminal and stay untested
+    // here; every other method is pure state mutation over `App`, which
+    // these tests drive by constructing one without a terminal and
+    // asserting on the observable side effects.
+
+    /// Fresh idle `App` plus the `user_tx` consumer (for forwarded-action
+    /// assertions) and the `agent_tx` producer (kept alive so the
+    /// `agent_rx` side doesn't close on construction).
+    fn test_app(
+        title: Option<&str>,
+    ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+        let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(8);
+        let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
+        let app = App::new(
+            "test-model".to_owned(),
+            false,
+            "~/test".to_owned(),
+            title.map(ToOwned::to_owned),
+            agent_rx,
+            user_tx,
+            &[],
+            Arc::new(ToolRegistry::new(Vec::new())),
+        );
+        (app, user_rx, agent_tx)
+    }
+
+    // ── App::new ──
+
+    #[test]
+    fn new_plumbs_resumed_title_into_status_bar() {
+        let (app, _rx, _agent_tx) = test_app(Some("Resumed title"));
+        assert_eq!(app.status_bar.title(), Some("Resumed title"));
+        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.chat.entry_count(), 0);
+        assert!(app.input.is_enabled());
+        assert!(!app.should_quit);
+        assert!(app.dirty, "first frame must render");
+    }
+
+    #[test]
+    fn new_without_title_leaves_slot_unset() {
+        let (app, _rx, _agent_tx) = test_app(None);
+        assert!(app.status_bar.title().is_none());
+    }
+
+    #[test]
+    fn new_whitespace_title_is_filtered_by_status_bar() {
+        // Status bar filters whitespace-only titles, so plumbing such a
+        // value from `SessionData` won't leave a blank slot in the bar.
+        let (app, _rx, _agent_tx) = test_app(Some("   \n "));
+        assert!(app.status_bar.title().is_none());
+    }
+
+    // ── dispatch_user_action ──
+
+    #[tokio::test]
+    async fn dispatch_submit_prompt_updates_chat_status_and_forwards_action() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hello".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1);
+        assert!(!app.input.is_enabled(), "streaming disables input");
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("forwarded action");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
+    }
+
+    #[test]
+    fn dispatch_quit_sets_should_quit_and_leaves_chat_untouched() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::Quit);
+
+        assert!(app.should_quit);
+        assert_eq!(app.chat.entry_count(), 0);
+        // Status bar stays idle — Quit flows past the streaming setup so
+        // the tear-down path doesn't have to un-spinner it.
+        assert_eq!(app.status_bar.status(), Status::Idle);
+    }
+
+    // ── handle_agent_event ──
+
+    #[test]
+    fn handle_session_title_updated_refreshes_status_bar() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated("Fix auth flow".to_owned()));
+        assert_eq!(app.status_bar.title(), Some("Fix auth flow"));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_title_updated_replaces_existing_title() {
+        // AI titles arrive after the first-prompt title is already shown;
+        // the bar must accept the overwrite instead of ignoring the event.
+        let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated("AI-generated".to_owned()));
+        assert_eq!(app.status_bar.title(), Some("AI-generated"));
+    }
+
+    #[test]
+    fn handle_stream_token_switches_to_streaming_and_disables_input() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".to_owned()));
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert!(!app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_tool_call_start_switches_to_tool_running() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "t1".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(app.status_bar.status(), Status::ToolRunning);
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "tool call renders one chat entry",
+        );
+    }
+
+    #[test]
+    fn handle_turn_complete_returns_to_idle_and_reenables_input() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        // Drive into streaming first so TurnComplete has state to tear down.
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert!(!app.input.is_enabled());
+
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert!(app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_error_pushes_error_entry_and_finishes_turn() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("boom".to_owned()));
+        app.handle_agent_event(AgentEvent::Error("API blew up".to_owned()));
+
+        assert!(app.chat.last_is_error(), "error entry appended");
+        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert!(app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_tool_call_end_with_title_pushes_result_entry() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "t1".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        let before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::ToolCallEnd {
+            id: "t1".to_owned(),
+            title: Some("ls /".to_owned()),
+            content: "file1\nfile2\n".to_owned(),
+            is_error: false,
+        });
+        assert_eq!(app.chat.entry_count(), before + 1);
+    }
+
+    #[test]
+    fn handle_tool_call_end_without_title_skips_result_entry() {
+        // `title: None` signals the tool dispatch layer chose to hide the
+        // result (e.g., for tools whose output is purely model-facing).
+        // The chat entry count must not grow in that case.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "t1".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        let before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::ToolCallEnd {
+            id: "t1".to_owned(),
+            title: None,
+            content: "silent".to_owned(),
+            is_error: false,
+        });
+        assert_eq!(app.chat.entry_count(), before);
+    }
+
+    // ── handle_crossterm_event ──
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_submit_forwards_through_input_to_dispatch() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        // Simulate typing "hi" then Enter — the input area composes the
+        // prompt and returns `SubmitPrompt`, which `handle_crossterm_event`
+        // must pipe into `dispatch_user_action`.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.dirty);
+        assert_eq!(app.chat.entry_count(), 1);
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        let forwarded = rx.recv().await.unwrap();
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
+    }
+
+    #[test]
+    fn handle_crossterm_key_ctrl_c_triggers_quit_from_any_mode() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_mouse_is_forwarded_to_chat() {
+        // Mouse events reach `ChatView::handle_event` which consumes them
+        // for scroll. Assert the dirty flag flips so the next tick renders.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_resize_schedules_dirty_for_relayout() {
+        // Resize matches the arm that does no per-component work but still
+        // falls through to `self.dirty = true`, so the next tick re-runs
+        // the layout split with the new `frame.area()`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::Resize(80, 24));
+        assert!(app.dirty, "Resize must trigger a re-layout render");
+    }
+
+    #[test]
+    fn handle_crossterm_unknown_event_is_a_noop() {
+        // The `_ => return` arm covers FocusGained/FocusLost/Paste — the
+        // early return here is significant: every other arm falls through
+        // to `self.dirty = true`, so without this branch a stream of
+        // unhandled terminal events would cause continuous re-renders.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dirty = false;
+        app.handle_crossterm_event(&Event::FocusGained);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn handle_crossterm_scroll_key_routes_to_chat_while_input_disabled() {
+        // When the input is disabled (mid-stream), arrow / page keys
+        // must still reach chat so the user can scroll through output.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.dirty);
     }
 }

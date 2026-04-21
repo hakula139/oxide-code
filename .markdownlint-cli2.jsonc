@@ -48,5 +48,11 @@
     "MD050": { "style": "asterisk" },
   },
 
-  "ignores": [".claude/agent-memory-local/", ".claude/plans/", ".venv/", "node_modules/"],
+  "ignores": [
+    ".claude/agent-memory-local/",
+    ".claude/plans/",
+    ".venv/",
+    "node_modules/",
+    "target/",
+  ],
 }

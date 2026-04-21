@@ -6,6 +6,8 @@
 //! so the resolution logic (parsing, prefix matching, ambiguity
 //! reporting) can be exercised by unit tests.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
@@ -23,6 +25,12 @@ pub(crate) enum ResumeMode<'a> {
     /// `--continue <prefix>` — resume the single session whose ID
     /// starts with the (trimmed, non-empty) prefix.
     Prefix(&'a str),
+    /// `--continue <path.jsonl>` — resume a session file by explicit
+    /// filesystem path, bypassing the XDG project subdirectory lookup.
+    /// Selected when the argument contains a path separator or ends with
+    /// `.jsonl`; any UUID-shaped token is still classified as
+    /// [`Prefix`][Self::Prefix].
+    Path(&'a Path),
 }
 
 /// Create or resume a session based on CLI flags.
@@ -41,11 +49,20 @@ pub(crate) async fn resolve_session(
     model: &str,
     resume: Option<&Option<String>>,
     all: bool,
-) -> Result<(SessionManager, Vec<Message>)> {
+) -> Result<(SessionManager, Vec<Message>, Option<String>)> {
     let mode = normalize_resume_arg(resume)?;
+
+    // Path resumes bypass the store's project-subdir lookup entirely and
+    // can be resolved without listing anything.
+    if let ResumeMode::Path(path) = mode {
+        let (session, messages, title) = SessionManager::resume_from_path(store, path)?;
+        debug!("resuming session from {}", path.display());
+        return Ok((session, messages, title));
+    }
+
     if matches!(mode, ResumeMode::Fresh) {
         let session = SessionManager::start(store, model);
-        return Ok((session, Vec::new()));
+        return Ok((session, Vec::new(), None));
     }
 
     let sessions = if all {
@@ -61,7 +78,7 @@ pub(crate) async fn resolve_session(
     };
 
     let session_id = match mode {
-        ResumeMode::Fresh => unreachable!("handled above"),
+        ResumeMode::Fresh | ResumeMode::Path(_) => unreachable!("handled above"),
         ResumeMode::Latest => sessions
             .into_iter()
             .next()
@@ -89,15 +106,20 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let (session, messages) = SessionManager::resume(store, &session_id).await?;
+    let (session, messages, title) = SessionManager::resume(store, &session_id).await?;
     debug!("resuming session {session_id}");
-    Ok((session, messages))
+    Ok((session, messages, title))
 }
 
 /// Trim and classify a `--continue` argument into a [`ResumeMode`].
 /// Empty / whitespace-only prefixes are rejected explicitly so they
 /// cannot silently collapse into "resume latest" — the bare
 /// `--continue` flag already expresses that intent.
+///
+/// An argument that looks like a path (contains a path separator or ends
+/// with `.jsonl`) is classified as [`ResumeMode::Path`]; otherwise it is
+/// a UUID-shaped prefix. UUIDs contain only hex + `-`, neither of which
+/// trigger the path heuristic, so prefix resume stays unchanged.
 pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
     match resume {
         None => Ok(ResumeMode::Fresh),
@@ -107,9 +129,26 @@ pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<Re
             if trimmed.is_empty() {
                 bail!("empty session ID prefix; use `ox -c` (bare) to resume the latest session");
             }
-            Ok(ResumeMode::Prefix(trimmed))
+            if looks_like_path(trimmed) {
+                Ok(ResumeMode::Path(Path::new(trimmed)))
+            } else {
+                Ok(ResumeMode::Prefix(trimmed))
+            }
         }
     }
+}
+
+/// Classify a `--continue` argument as a path when it either contains a
+/// path separator or uses the `.jsonl` extension (case-insensitive, in
+/// case a user hands us `.JSONL`). UUID v4 strings contain only hex
+/// digits and `-`, so this classifier never mis-routes a valid
+/// session-ID prefix.
+fn looks_like_path(arg: &str) -> bool {
+    arg.contains('/')
+        || arg.contains('\\')
+        || Path::new(arg)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
 /// Join the first `MATCH_PREVIEW_LIMIT` session IDs (truncated to
@@ -133,7 +172,7 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{test_project_dir, test_store};
+    use super::super::store::{test_project_dir, test_session_file, test_store};
     use super::*;
 
     // ── normalize_resume_arg ──
@@ -162,14 +201,37 @@ mod tests {
     }
 
     #[test]
+    fn normalize_resume_arg_classifies_path_arguments() {
+        for raw in [
+            "/abs/path.jsonl",
+            "./relative.jsonl",
+            "sub/dir/session.jsonl",
+            "name.jsonl",           // no separator but has .jsonl suffix
+            r"C:\Users\me\s.jsonl", // windows-shaped
+        ] {
+            let arg = Some(raw.to_owned());
+            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            assert!(
+                matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
+                "{raw:?} should classify as Path",
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
+        // A v4 UUID prefix uses only hex + `-`; neither triggers the path
+        // heuristic, so bare prefixes still resume through the store.
+        let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
+        let mode = normalize_resume_arg(Some(&arg)).unwrap();
+        assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
+    }
+
+    #[test]
     fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
         for raw in ["", "   ", "\t\n"] {
             let arg = Some(raw.to_owned());
-            let result = normalize_resume_arg(Some(&arg));
-            let err = match result {
-                Ok(_) => panic!("{raw:?} should have been rejected"),
-                Err(e) => e.to_string(),
-            };
+            let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
             assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
             assert!(err.contains("bare"), "{raw:?} → {err:?}");
         }
@@ -209,8 +271,9 @@ mod tests {
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let (_session, messages) = resolve_session(&store, "m", None, false).await.unwrap();
+        let (_session, messages, title) = resolve_session(&store, "m", None, false).await.unwrap();
         assert!(messages.is_empty());
+        assert!(title.is_none());
         assert!(
             std::fs::read_dir(test_project_dir(dir.path()))
                 .unwrap()
@@ -224,10 +287,11 @@ mod tests {
     async fn resolve_session_bare_continue_errors_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let err = match resolve_session(&store, "m", Some(&None), false).await {
-            Ok(_) => panic!("expected failure — no sessions to resume"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&None), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no sessions"), "got: {err}");
     }
 
@@ -244,10 +308,11 @@ mod tests {
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
-        let err = match resolve_session(&store, "m", Some(&prefix_arg), false).await {
-            Ok(_) => panic!("expected prefix miss to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("no session matching prefix"), "got: {err}");
     }
 
@@ -278,12 +343,58 @@ mod tests {
         let prefix = prefix_char.to_string();
 
         let prefix_arg = Some(prefix.clone());
-        let err = match resolve_session(&store, "m", Some(&prefix_arg), false).await {
-            Ok(_) => panic!("expected ambiguous prefix to bail"),
-            Err(e) => e.to_string(),
-        };
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("ambiguous prefix"), "got: {err}");
         assert!(err.contains(&prefix), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_resumes_from_external_path() {
+        // A session file living somewhere the store wouldn't search.
+        // The path-based resume must still pick up the title, messages,
+        // and session_id recorded in the header.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("external path test"))
+            .await
+            .unwrap();
+        original.finish().unwrap();
+        let path = test_session_file(dir.path(), &full_id);
+        drop(original);
+
+        // Copy the file outside the project directory to simulate the
+        // "imported from another machine" scenario.
+        let external_dir = tempfile::tempdir().unwrap();
+        let external_path = external_dir.path().join("copied.jsonl");
+        std::fs::copy(&path, &external_path).unwrap();
+
+        let arg = Some(external_path.to_string_lossy().into_owned());
+        let (session, messages, title) = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(session.session_id(), full_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(title.as_deref(), Some("external path test"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_path_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let arg = Some("/does/not/exist.jsonl".to_owned());
+        let err = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
     }
 
     #[tokio::test]
@@ -301,10 +412,49 @@ mod tests {
         // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
-        let (resumed, messages) = resolve_session(&store, "m", Some(&arg), false)
+        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.session_id(), full_id);
         assert_eq!(messages.len(), 1);
+        assert_eq!(title.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_all_widens_scope_to_list_all() {
+        // `--all` flips the listing from `store.list()` (current project only)
+        // to `store.list_all()` (every project subdir). The prefix match
+        // then resolves across projects and the error hint drops the
+        // "in this project" qualifier. Exercising the `all = true` branch
+        // here also covers the empty `scope_hint`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut original = SessionManager::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original
+            .record_message(&Message::user("all scope"))
+            .await
+            .unwrap();
+        drop(original);
+
+        let arg = Some(full_id[..10].to_owned());
+        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), true)
+            .await
+            .unwrap();
+        assert_eq!(resumed.session_id(), full_id);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(title.as_deref(), Some("all scope"));
+
+        // Error path under `all = true` omits the "use --all" hint.
+        let missing = Some("zzzz".to_owned());
+        let err = resolve_session(&store, "m", Some(&missing), true)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            !err.contains("use --all"),
+            "hint should not suggest --all when already set: {err}",
+        );
     }
 }

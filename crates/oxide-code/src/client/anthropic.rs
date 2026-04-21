@@ -22,6 +22,7 @@ const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
+const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
 /// Matches the installed Claude Code version.
 const CLAUDE_CLI_VERSION: &str = "2.1.101";
@@ -48,7 +49,44 @@ struct CreateMessageRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
+    /// JSON-schema-constrained output format for one-shot utility calls
+    /// (title generation, future classifiers). Mirrors claude-code's
+    /// `extraBodyParams.output_config`. Must travel alongside the
+    /// `structured-outputs-2025-12-15` beta header; both are gated on
+    /// `Capabilities::structured_outputs` so unsupported models silently
+    /// drop back to free-form text rather than 400ing the gateway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig<'a>>,
     messages: &'a [Message],
+}
+
+/// Wrapper matching the wire shape `output_config.format = {...}`.
+#[derive(Serialize)]
+struct OutputConfig<'a> {
+    format: &'a OutputFormat,
+}
+
+/// JSON-schema-constrained completion format. Constructed via
+/// [`OutputFormat::json_schema`]; callers typically build one per
+/// request shape (e.g., `{"title": string}`) and pass it by reference
+/// to [`Client::complete`].
+#[derive(Debug, Serialize)]
+pub(crate) struct OutputFormat {
+    r#type: &'static str,
+    schema: serde_json::Value,
+}
+
+impl OutputFormat {
+    /// Build a `json_schema` output format from a precomputed schema
+    /// value. The schema must already match Anthropic's expectations
+    /// (`type: "object"`, `additionalProperties: false`, explicit
+    /// `required` array) — we don't validate here.
+    pub(crate) fn json_schema(schema: serde_json::Value) -> Self {
+        Self {
+            r#type: "json_schema",
+            schema,
+        }
+    }
 }
 
 /// Request metadata matching Claude Code's `getAPIMetadata()` format.
@@ -239,15 +277,6 @@ impl Client {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
-        let mut betas = vec![
-            CLAUDE_CODE_BETA_HEADER,
-            CONTEXT_1M_BETA_HEADER,
-            CONTEXT_MANAGEMENT_BETA_HEADER,
-            EFFORT_BETA_HEADER,
-            INTERLEAVED_THINKING_BETA_HEADER,
-            PROMPT_CACHING_SCOPE_BETA_HEADER,
-        ];
-
         match &config.auth {
             Auth::ApiKey(key) => {
                 let mut value = HeaderValue::from_str(key)?;
@@ -258,12 +287,14 @@ impl Client {
                 let mut value = HeaderValue::from_str(&format!("Bearer {token}"))?;
                 value.set_sensitive(true);
                 headers.insert(AUTHORIZATION, value);
-                betas.push(OAUTH_BETA_HEADER);
             }
         }
 
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-        headers.insert("anthropic-beta", HeaderValue::from_str(&betas.join(","))?);
+        // `anthropic-beta` is set per-request by [`compute_betas`] because
+        // the accepted set varies per target model (Haiku rejects 1M /
+        // effort / interleaved-thinking on most gateways) and per call type
+        // (agentic chat vs one-shot Haiku title call).
         headers.insert(
             "anthropic-dangerous-direct-browser-access",
             HeaderValue::from_static("true"),
@@ -310,6 +341,15 @@ impl Client {
     /// Returns the model name for use in the system prompt.
     pub fn model(&self) -> &str {
         &self.config.model
+    }
+
+    /// Client-side session id carried in `x-claude-code-session-id` /
+    /// billing metadata. Exposed for tests to assert on the id that
+    /// [`Client::new`] plumbed through (either the caller-supplied
+    /// value or an auto-generated UUID v4).
+    #[cfg(test)]
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Stream a message response from the Anthropic API.
@@ -396,13 +436,15 @@ impl Client {
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
-            model: &self.config.model,
+            // `[1m]` is a client-side tag; strip before the wire.
+            model: api_model_id(&self.config.model),
             max_tokens: self.config.max_tokens,
             stream: true,
             metadata: self.build_metadata(),
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
+            output_config: None,
             messages: effective_messages,
         })
         .context("failed to serialize request")?;
@@ -415,9 +457,10 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
+        let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
 
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, body, &tx).await;
+            let result = stream_sse(&http, &url, betas, body, &tx).await;
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
@@ -426,11 +469,309 @@ impl Client {
         Ok(rx)
     }
 
+    /// Send a single non-streaming completion request and return the
+    /// concatenated text of the assistant's response.
+    ///
+    /// Used for background helpers like AI title generation — a one-shot
+    /// `prompt → answer` call that bypasses the tools / thinking / dynamic
+    /// context plumbing the interactive stream needs. The auth pipeline
+    /// (OAuth vs API key, billing attestation) still applies so the same
+    /// client works for both auth modes.
+    ///
+    /// `output_format` optionally constrains the reply to a JSON schema
+    /// via the `structured-outputs-2025-12-15` beta. When the target
+    /// model's [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
+    /// is `false` (e.g., Opus 4.0 base, Sonnet 4.0 base, or an unknown
+    /// future family), both the body field and the beta header are
+    /// silently dropped — the response is free-form text and the caller
+    /// is expected to tolerate schema-missing replies. Mirrors the
+    /// `[1m]`-tag × `context_1m` silent-strip pattern.
+    ///
+    /// Non-text content blocks (`tool_use`, thinking, …) are filtered out
+    /// so callers get the assistant's user-visible answer directly.
+    pub async fn complete(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        output_format: Option<&OutputFormat>,
+    ) -> Result<String> {
+        let effective_format = output_format.filter(|_| supports_structured_outputs(model));
+        let body = build_completion_body(
+            model,
+            system,
+            user,
+            max_tokens,
+            &self.config.auth,
+            &self.session_id,
+            effective_format,
+        )?;
+
+        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
+        debug!(model, body_len = body.len(), "sending completion request");
+
+        let betas =
+            compute_betas(model, &self.config.auth, false, effective_format.is_some()).join(",");
+        let response = self
+            .http
+            .post(&url)
+            .header("anthropic-beta", betas)
+            .body(body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("API error (HTTP {status}): {body}");
+        }
+
+        let CompletionResponse { content } = response
+            .json()
+            .await
+            .context("failed to parse completion response")?;
+        Ok(join_text_blocks(content))
+    }
+
     /// Build the `metadata.user_id` field as a stringified JSON object.
     fn build_metadata(&self) -> RequestMetadata {
-        let user_id = serde_json::json!({ "session_id": self.session_id }).to_string();
-        RequestMetadata { user_id }
+        build_metadata(&self.session_id)
     }
+}
+
+/// Shared `metadata.user_id` builder used by both the streaming and
+/// non-streaming request paths. Kept at file scope so
+/// [`build_completion_body`] can call it without pulling in `&Client`.
+fn build_metadata(session_id: &str) -> RequestMetadata {
+    let user_id = serde_json::json!({ "session_id": session_id }).to_string();
+    RequestMetadata { user_id }
+}
+
+/// Compute the `anthropic-beta` header value for a request targeting
+/// `model`. Each beta is gated on a specific `Capabilities` flag from
+/// the [`crate::model`] lookup table, so adding or bumping a model only
+/// means editing that one table — this function stays fixed.
+///
+/// `is_agentic` distinguishes the streaming chat path (full beta set)
+/// from one-shot utility calls (title generation, future compaction /
+/// classifiers) that skip agent-oriented betas so the request stays
+/// minimal and gateway-friendly.
+///
+/// `want_structured` is the caller's intent to constrain the response
+/// to a JSON schema via [`OutputFormat`]. The beta is only emitted
+/// when both the caller wants it AND the target model claims support
+/// ([`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]).
+/// Mirrors the `[1m]` × `context_1m` cross-check — a mismatch silently
+/// drops back to free-form text rather than 400ing the gateway.
+///
+/// `[1m]` on the model string is a user opt-in to the 1M-context
+/// window, following the upstream convention. It toggles
+/// [`CONTEXT_1M_BETA_HEADER`] independently of the capability table so
+/// the user can force-enable on a gateway that supports 1M even when
+/// the table row doesn't claim it — and conversely, subscription
+/// mismatches don't auto-400 because we're not attaching the beta
+/// silently.
+fn compute_betas(
+    model: &str,
+    auth: &Auth,
+    is_agentic: bool,
+    want_structured: bool,
+) -> Vec<&'static str> {
+    let caps = crate::model::lookup(model)
+        .map(|info| info.capabilities)
+        .unwrap_or_default();
+    let is_haiku = model.to_lowercase().contains("haiku");
+
+    let mut out = Vec::with_capacity(8);
+
+    // Order mirrors `docs/research/anthropic-api.md` → Per-model beta sets:
+    // identity / auth first, then universal agentic betas, then the
+    // capability-gated ones. Keeps the matrix readable across the table
+    // and the code.
+
+    // Identity / auth.
+    //
+    // Gateway tag: required for non-Haiku OAuth on 1P (429 without it).
+    // Non-agentic Haiku one-shots skip it; agentic Haiku calls re-add it.
+    if !is_haiku || is_agentic {
+        out.push(CLAUDE_CODE_BETA_HEADER);
+    }
+    if matches!(auth, Auth::OAuth(_)) {
+        out.push(OAUTH_BETA_HEADER);
+    }
+
+    // Universal agentic.
+    if is_agentic && caps.context_management {
+        out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
+    }
+    // Prompt-caching scope: 1P-intended but no-op on 3P when `scope` is
+    // omitted on `cache_control` blocks (our current behavior). Kept on
+    // agentic calls only — title / utility responses don't need caching.
+    if is_agentic {
+        out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
+    }
+
+    // Capability-gated.
+    if is_agentic && caps.interleaved_thinking {
+        out.push(INTERLEAVED_THINKING_BETA_HEADER);
+    }
+    // 1M context: explicit user opt-in via the `[1m]` model suffix,
+    // cross-checked against the model's capability flag so an
+    // unsupported tag (e.g. `claude-haiku-4[1m]`) silently no-ops
+    // rather than 400ing with `invalid_request_error`. Family-based
+    // auto-enable without the tag would break subscriptions that
+    // don't carry 1M access (see `has_1m_tag` doc for the rationale).
+    if has_1m_tag(model) && caps.context_1m {
+        out.push(CONTEXT_1M_BETA_HEADER);
+    }
+    if is_agentic && caps.effort {
+        out.push(EFFORT_BETA_HEADER);
+    }
+    // Structured outputs: one-shot only. The streaming path never asks
+    // for a schema (agentic turns are free-form), so gating on
+    // `want_structured` alone is enough — no `!is_agentic` guard.
+    if want_structured && caps.structured_outputs {
+        out.push(STRUCTURED_OUTPUTS_BETA_HEADER);
+    }
+
+    out
+}
+
+/// Does the target model accept the `structured-outputs-2025-12-15`
+/// beta? Thin wrapper over the capability table so the title generator
+/// (and future classifiers) can pre-check before building the schema.
+pub(crate) fn supports_structured_outputs(model: &str) -> bool {
+    crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
+}
+
+/// Strip the `[1m]` tag (if any) from a caller-supplied model string,
+/// returning the canonical API model ID. The tag is a client-side
+/// convention — the Anthropic API rejects it on the wire.
+///
+/// Matching is case-insensitive so [`has_1m_tag`] and this helper agree
+/// on every accepted spelling; otherwise a tag like `[1M]` would opt
+/// into the 1M beta while still leaking into the request `model` field,
+/// producing an `unknown model` 400.
+fn api_model_id(model: &str) -> &str {
+    tag_offset(model).map_or(model, |i| model[..i].trim_end())
+}
+
+/// Whether `model` is tagged `[1m]`, i.e. the user is explicitly opting
+/// into the 1M-context window.
+///
+/// Auto-gating 1M on model family alone would 400 on subscriptions /
+/// gateways that don't include 1M access — the same subscription-
+/// mismatch class of bug that forced per-model beta gating for Haiku.
+/// Making 1M explicit sidesteps that class entirely.
+fn has_1m_tag(model: &str) -> bool {
+    tag_offset(model).is_some()
+}
+
+/// Byte offset of the `[1m]` tag in `model`, case-insensitive. Shared by
+/// [`has_1m_tag`] and [`api_model_id`] so the two never disagree on
+/// whether a tag is present.
+///
+/// Model IDs are ASCII by convention (`claude-opus-4-7[1M]`), so the
+/// byte indices of `model.to_lowercase()` line up with `model`'s.
+fn tag_offset(model: &str) -> Option<usize> {
+    model.to_lowercase().find("[1m]")
+}
+
+/// Serialize the JSON request body for [`Client::complete`]. Extracted
+/// so the billing-header / identity-prefix / system-block assembly can
+/// be asserted on without a live HTTP client; the HTTP leg of
+/// [`Client::complete`] is covered behind a wiremock harness (see
+/// `docs/roadmap.md` → Test Coverage).
+///
+/// `output_format` flows into `output_config.format` on the wire —
+/// pre-gated by [`Client::complete`] against
+/// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs],
+/// so by the time we get here the caller has already decided the
+/// target model accepts the beta. The matching
+/// [`STRUCTURED_OUTPUTS_BETA_HEADER`] is emitted by [`compute_betas`]
+/// on the same signal.
+///
+/// System block order matches [`Client::stream_message`]:
+///
+/// 1. Billing header (OAuth only; no `cache_control`, injected with `cch`).
+/// 2. Identity prefix (required for non-Haiku OAuth, cheap safety net).
+/// 3. Caller-supplied system prompt (omitted when empty).
+fn build_completion_body(
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    auth: &Auth,
+    session_id: &str,
+    output_format: Option<&OutputFormat>,
+) -> Result<String> {
+    let messages = [Message::user(user)];
+
+    let billing_header = matches!(auth, Auth::OAuth(_)).then(|| {
+        let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
+        billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
+    });
+
+    let mut system_blocks = Vec::with_capacity(3);
+    if let Some(ref header) = billing_header {
+        system_blocks.push(SystemBlock {
+            r#type: "text",
+            text: header,
+            cache_control: None,
+        });
+    }
+    system_blocks.push(SystemBlock {
+        r#type: "text",
+        text: SYSTEM_PROMPT_PREFIX,
+        cache_control: None,
+    });
+    if !system.is_empty() {
+        system_blocks.push(SystemBlock {
+            r#type: "text",
+            text: system,
+            cache_control: None,
+        });
+    }
+
+    let mut body = serde_json::to_string(&CreateMessageRequest {
+        // `[1m]` is a client-side tag; strip before the wire.
+        model: api_model_id(model),
+        max_tokens,
+        stream: false,
+        metadata: build_metadata(session_id),
+        system: system_blocks,
+        tools: None,
+        thinking: None,
+        output_config: output_format.map(|format| OutputConfig { format }),
+        messages: &messages,
+    })
+    .context("failed to serialize request")?;
+
+    if billing_header.is_some() {
+        body = billing::inject_cch(&body);
+    }
+    Ok(body)
+}
+
+/// Flatten a `messages.create` response's content array into the
+/// assistant's user-visible text. Extracted so the filter logic is
+/// reusable and independently testable.
+fn join_text_blocks(content: Vec<ContentBlock>) -> String {
+    content
+        .into_iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Shape we accept back from the non-streaming `/v1/messages` endpoint.
+/// The API sends many more fields (`id`, `role`, `model`, `stop_reason`,
+/// `usage`); we only care about the content blocks — serde ignores the rest.
+#[derive(Deserialize)]
+struct CompletionResponse {
+    content: Vec<ContentBlock>,
 }
 
 /// Map `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
@@ -508,10 +849,16 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
+    betas: String,
     body: String,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    let response = http.post(url).body(body).send().await?;
+    let response = http
+        .post(url)
+        .header("anthropic-beta", betas)
+        .body(body)
+        .send()
+        .await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -599,6 +946,83 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    // ── Client::new / Client::model ──
+    //
+    // Client construction is 0% covered today because `stream_message` /
+    // `complete` need a live HTTP mock (tracked as Tier 3 of the
+    // integration-tests plan). These tests exercise the non-HTTP
+    // portions — header validation, UUID defaulting, getter contracts —
+    // that are reachable via the constructor alone.
+
+    fn make_config(auth: Auth) -> Config {
+        Config {
+            auth,
+            model: "claude-sonnet-4-6".to_owned(),
+            base_url: "https://example.invalid".to_owned(),
+            max_tokens: 128,
+            thinking: None,
+            show_thinking: false,
+        }
+    }
+
+    #[test]
+    fn new_with_api_key_succeeds_and_exposes_model() {
+        let client = Client::new(make_config(Auth::ApiKey("sk-test".to_owned())), None).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_with_oauth_token_succeeds_and_exposes_model() {
+        let client = Client::new(make_config(Auth::OAuth("oauth-token".to_owned())), None).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_none_session_id_generates_a_uuid() {
+        let client = Client::new(make_config(Auth::ApiKey("k".to_owned())), None).unwrap();
+        let sid = client.session_id();
+        let parsed = Uuid::parse_str(sid)
+            .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
+        assert_eq!(parsed.get_version_num(), 4);
+    }
+
+    #[test]
+    fn new_preserves_explicit_session_id() {
+        let sid = "11111111-2222-4333-8444-555555555555".to_owned();
+        let client =
+            Client::new(make_config(Auth::ApiKey("k".to_owned())), Some(sid.clone())).unwrap();
+        assert_eq!(client.session_id(), sid);
+    }
+
+    fn new_err_message(result: Result<Client>) -> String {
+        // `Client` doesn't derive `Debug`, so `.unwrap_err()` doesn't
+        // compile. Take the `.err()` route instead — `Option::unwrap`
+        // has no Debug bound, and the panic path lives inside std
+        // rather than our test.
+        format!("{:#}", result.err().unwrap())
+    }
+
+    #[test]
+    fn new_rejects_api_key_containing_invalid_header_bytes() {
+        // reqwest's HeaderValue::from_str rejects control chars like \n;
+        // this exercises the early-error path in the API-key arm that
+        // isn't otherwise reachable via the happy-path config loader.
+        let err = new_err_message(Client::new(
+            make_config(Auth::ApiKey("bad\nkey".to_owned())),
+            Some("sid".to_owned()),
+        ));
+        assert!(err.to_ascii_lowercase().contains("header"));
+    }
+
+    #[test]
+    fn new_rejects_oauth_token_containing_invalid_header_bytes() {
+        let err = new_err_message(Client::new(
+            make_config(Auth::OAuth("bad\rtoken".to_owned())),
+            Some("sid".to_owned()),
+        ));
+        assert!(err.to_ascii_lowercase().contains("header"));
+    }
 
     // ── StreamEvent ──
 
@@ -838,6 +1262,221 @@ mod tests {
         assert!(dynamic.is_empty());
     }
 
+    // ── build_metadata ──
+
+    #[test]
+    fn build_metadata_wraps_session_id_in_stringified_json() {
+        // The API accepts `metadata.user_id` as a string, not a nested
+        // object — claude-code stringifies a JSON object with `session_id`
+        // (and sometimes `device_id` / `account_uuid`). Round-trip check
+        // keeps the contract explicit.
+        let meta = build_metadata("abc-123");
+        let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
+        assert_eq!(parsed["session_id"], "abc-123");
+    }
+
+    // ── build_completion_body ──
+
+    fn parse_body(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("serialized body must be valid JSON")
+    }
+
+    #[test]
+    fn build_completion_body_shapes_non_streaming_request_with_no_tools_or_thinking() {
+        // stream=false, tools omitted, thinking omitted — the
+        // non-streaming path must not accidentally carry interactive
+        // plumbing; Haiku would reject `thinking` with 400 and extra
+        // tools would waste tokens.
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+            None,
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        assert_eq!(v["model"], "claude-haiku-4-5");
+        assert_eq!(v["max_tokens"], 40);
+        assert_eq!(v["stream"], false);
+        assert!(v.get("tools").is_none(), "tools must be omitted: {v}");
+        assert!(v.get("thinking").is_none(), "thinking must be omitted: {v}");
+        assert!(
+            v.get("output_config").is_none(),
+            "output_config must stay omitted when no schema is supplied: {v}",
+        );
+        let user = &v["messages"][0];
+        assert_eq!(user["role"], "user");
+        assert_eq!(user["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn build_completion_body_api_key_skips_billing_header_keeps_identity_prefix() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys-prompt",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+            None,
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        // API-key path: only identity prefix + user-supplied system.
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(system[1]["text"], "sys-prompt");
+        assert!(
+            !body.contains("x-anthropic-billing-header:"),
+            "API-key requests must not emit billing attestation: {body}",
+        );
+    }
+
+    #[test]
+    fn build_completion_body_oauth_injects_billing_header_and_cch() {
+        // OAuth must emit an initial billing block (Claude Code's fingerprint
+        // contract) and the placeholder `cch=00000` must be replaced by an
+        // actual 5-hex-digit tag via `inject_cch`.
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys-prompt",
+            "Fix login",
+            40,
+            &Auth::OAuth("t".to_owned()),
+            "sid",
+            None,
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3, "expected billing + identity + user: {v}");
+        let first = system[0]["text"].as_str().unwrap();
+        assert!(
+            first.starts_with("x-anthropic-billing-header:"),
+            "first block must be the billing header: {first}",
+        );
+        assert!(
+            first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")),
+            "billing header should name the current CLI version: {first}",
+        );
+        assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
+        assert_eq!(system[2]["text"], "sys-prompt");
+        assert!(
+            !body.contains("cch=00000"),
+            "placeholder `cch=00000` must have been replaced by a real tag: {body}",
+        );
+    }
+
+    #[test]
+    fn build_completion_body_empty_system_omits_caller_block_but_keeps_identity_prefix() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+            None,
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let system = v["system"].as_array().unwrap();
+        // Identity prefix must survive even without a caller system
+        // prompt; non-Haiku OAuth requests rely on its presence in
+        // block 0 (API-key case here, but same contract).
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+    }
+
+    #[test]
+    fn build_completion_body_with_output_format_emits_output_config_on_wire() {
+        // Structured outputs serialize as `output_config.format` matching
+        // the upstream `extraBodyParams.output_config` shape. The schema
+        // value must round-trip intact — the API validates it.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": false,
+        });
+        let fmt = OutputFormat::json_schema(schema.clone());
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+            Some(&fmt),
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let format = &v["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["schema"], schema);
+    }
+
+    #[test]
+    fn build_completion_body_routes_session_id_into_metadata() {
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "unique-sid-789",
+            None,
+        )
+        .unwrap();
+        assert!(
+            body.contains("unique-sid-789"),
+            "session_id must flow into metadata.user_id: {body}",
+        );
+    }
+
+    // ── join_text_blocks / CompletionResponse ──
+
+    #[test]
+    fn join_text_blocks_concatenates_text_and_drops_tool_and_thinking_blocks() {
+        // The non-streaming endpoint can hand back tool_use, thinking, and
+        // plain text blocks. `join_text_blocks` concatenates the Text blocks
+        // and drops the rest; exercising via the response-shape path also
+        // pins the `CompletionResponse` deserializer on live-like JSON.
+        let body = r#"{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "stop_reason": "end_turn",
+            "content": [
+                {"type":"thinking","thinking":"pondering","signature":"sig"},
+                {"type":"text","text":"Fix auth bug"},
+                {"type":"tool_use","id":"t1","name":"noop","input":{}},
+                {"type":"text","text":" and friends"}
+            ],
+            "usage": {"input_tokens":10,"output_tokens":5}
+        }"#;
+        let parsed: CompletionResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(join_text_blocks(parsed.content), "Fix auth bug and friends");
+    }
+
+    #[test]
+    fn join_text_blocks_returns_empty_for_tool_only_response() {
+        // Defensive: if Haiku returns only a tool_use (ignoring our
+        // "JSON envelope" instruction), we must not surface it — the
+        // caller treats empty as "parse failure, keep first-prompt title".
+        let blocks = vec![ContentBlock::ToolUse {
+            id: "t1".to_owned(),
+            name: "noop".to_owned(),
+            input: serde_json::Value::Null,
+        }];
+        assert_eq!(join_text_blocks(blocks), "");
+    }
+
     // ── first_user_text ──
 
     #[test]
@@ -985,5 +1624,203 @@ mod tests {
         "#};
         let event = parse_sse_frame(frame).unwrap().unwrap();
         assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    // ── compute_betas ──
+
+    fn api_key() -> Auth {
+        Auth::ApiKey("k".to_owned())
+    }
+
+    fn oauth() -> Auth {
+        Auth::OAuth("t".to_owned())
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_plain_omits_context_1m() {
+        // Plain `opus-4-6` without the `[1m]` tag does NOT auto-enable
+        // 1M context. This is the subscription-safety behavior: a
+        // gateway without 1M access would 400 the request if we sent
+        // `context-1m-2025-08-07` by default.
+        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+        assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&OAUTH_BETA_HEADER));
+        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_with_1m_tag_adds_context_1m() {
+        // Explicit `[1m]` user opt-in → 1M beta flows.
+        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false);
+        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_opus_46_oauth_adds_oauth_header() {
+        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false);
+        assert!(betas.contains(&OAUTH_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_sonnet_45_plain_has_thinking_but_not_effort() {
+        // Sonnet 4.5 supports 1M via tag per upstream, but does not
+        // support effort. Plain (no `[1m]`) → no 1M beta.
+        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false);
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_haiku_4_with_1m_tag_silently_drops_1m() {
+        // `claude-haiku-4-5[1m]` is a user mistake: Haiku has a 200K
+        // window. Rather than 400ing on the gateway, we cross-check
+        // `has_1m_tag` against `Capabilities::context_1m` and strip
+        // the beta.
+        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false);
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_agentic_haiku_4_omits_1m_effort_and_thinking() {
+        // This is the failing-in-the-wild case: Haiku 4 must not carry
+        // context-1m / interleaved-thinking / effort on 3P gateways.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(!betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_is_minimal() {
+        // The title-generator one-shot: no agent-oriented betas, no
+        // gateway tag. API-key + Haiku → empty.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), false, false);
+        assert!(betas.is_empty(), "expected empty, got {betas:?}");
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_oauth_only_carries_oauth_tag() {
+        let betas = compute_betas("claude-haiku-4-5", &oauth(), false, false);
+        assert_eq!(betas, vec![OAUTH_BETA_HEADER]);
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_non_haiku_keeps_claude_code_tag() {
+        // Non-Haiku non-agentic (hypothetical compaction / classifier on
+        // Sonnet): still needs the gateway tag because OAuth 1P rejects
+        // non-Haiku without it.
+        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false);
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&OAUTH_BETA_HEADER));
+        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_opus_47_inherits_ge_46_effort() {
+        // Opus 4.7 matches the "opus-4-6 or newer" predicate so it gets
+        // `effort`, without needing a hand-update each release.
+        let betas = compute_betas("claude-opus-4-7", &api_key(), true, false);
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_opus_47_with_1m_tag_adds_context_1m() {
+        let betas = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false);
+        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_with_structured_adds_only_that_beta() {
+        // The title-generator path: one-shot Haiku + structured outputs.
+        // Nothing else in the set (no gateway tag, no caching, no
+        // thinking). Pins the minimal shape we actually send on the wire.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), false, true);
+        assert_eq!(betas, vec![STRUCTURED_OUTPUTS_BETA_HEADER]);
+    }
+
+    #[test]
+    fn compute_betas_structured_silently_drops_on_unsupported_model() {
+        // `claude-haiku-4` (base) predates structured outputs per
+        // upstream. Asking for the beta should be silently dropped,
+        // matching the `[1m]` × `context_1m` cross-check pattern —
+        // otherwise the gateway would 400 on the mismatch.
+        let betas = compute_betas("claude-haiku-4", &api_key(), false, true);
+        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
+    }
+
+    // ── supports_structured_outputs ──
+
+    #[test]
+    fn supports_structured_outputs_reflects_capability_table() {
+        // Haiku 4.5 is in the upstream allowlist; the Haiku 4 base row
+        // is not, and unknown families fall through to no support.
+        assert!(supports_structured_outputs("claude-haiku-4-5"));
+        assert!(supports_structured_outputs("claude-opus-4-7"));
+        assert!(!supports_structured_outputs("claude-haiku-4"));
+        assert!(!supports_structured_outputs("claude-opus-5-0"));
+    }
+
+    // ── OutputFormat ──
+
+    #[test]
+    fn output_format_json_schema_serializes_with_type_and_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+        });
+        let fmt = OutputFormat::json_schema(schema.clone());
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"], schema);
+    }
+
+    // ── api_model_id / has_1m_tag ──
+
+    #[test]
+    fn api_model_id_strips_1m_tag() {
+        assert_eq!(api_model_id("claude-opus-4-7[1m]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_leaves_plain_model_untouched() {
+        assert_eq!(api_model_id("claude-opus-4-7"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_trims_trailing_space_before_tag() {
+        // Tolerate sloppy user input like `"claude-opus-4-7 [1m]"`.
+        assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn api_model_id_strips_uppercase_tag() {
+        // Regression: `has_1m_tag` was case-insensitive while
+        // `api_model_id` was not, so `[1M]` opted into the 1M beta but
+        // still leaked the tag into the API `model` field, producing an
+        // `unknown model` 400. Both now share `tag_offset`.
+        assert_eq!(api_model_id("claude-opus-4-7[1M]"), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn has_1m_tag_is_case_insensitive() {
+        assert!(has_1m_tag("claude-opus-4-7[1m]"));
+        assert!(has_1m_tag("claude-opus-4-7[1M]"));
+        assert!(!has_1m_tag("claude-opus-4-7"));
     }
 }

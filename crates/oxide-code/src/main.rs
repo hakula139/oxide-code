@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod config;
 mod message;
+mod model;
 mod prompt;
 mod session;
 mod tool;
@@ -113,7 +114,7 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages) =
+    let (session, messages, title) =
         resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(session.session_id().to_owned()))?;
 
@@ -127,7 +128,16 @@ async fn async_main() -> Result<()> {
         return bare_repl(&client, tools, &model, show_thinking, session, messages).await;
     }
 
-    run_tui(&client, &model, show_thinking, tools, session, messages).await
+    run_tui(
+        &client,
+        &model,
+        show_thinking,
+        tools,
+        session,
+        messages,
+        title,
+    )
+    .await
 }
 
 // ── Session Helpers ──
@@ -220,11 +230,15 @@ async fn run_tui(
     tools: Arc<ToolRegistry>,
     session: SessionManager,
     resumed_messages: Vec<Message>,
+    resumed_title: Option<String>,
 ) -> Result<()> {
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
-    let (user_tx, user_rx) = mpsc::unbounded_channel::<UserAction>();
+    // 32 is plenty: UserAction fires at human typing speed. Bounded so a
+    // stalled agent loop surfaces `try_send` failure instead of growing the
+    // queue without bound.
+    let (user_tx, user_rx) = mpsc::channel::<UserAction>(32);
 
     let cwd = std::env::current_dir()
         .as_deref()
@@ -241,6 +255,7 @@ async fn run_tui(
         display_model,
         show_thinking,
         cwd,
+        resumed_title,
         agent_rx,
         user_tx,
         &resumed_messages,
@@ -303,7 +318,7 @@ async fn agent_loop_task(
     client: Client,
     tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
-    mut user_rx: mpsc::UnboundedReceiver<UserAction>,
+    mut user_rx: mpsc::Receiver<UserAction>,
     session: Arc<Mutex<SessionManager>>,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
@@ -315,11 +330,32 @@ async fn agent_loop_task(
                 let user_msg = Message::user(&text);
                 record_session_message(&session, &user_msg, Some(&sink)).await;
                 messages.push(user_msg);
+
+                // Fire the AI title generator exactly once per fresh
+                // session, right after the first user prompt lands on
+                // disk. Resumed sessions already have the seed cleared,
+                // so this take() is always None after the first trip
+                // through this branch.
+                if let Some(seed) = session.lock().await.take_ai_title_seed() {
+                    session::title_generator::spawn(
+                        client.clone(),
+                        Arc::clone(&session),
+                        sink.clone(),
+                        seed,
+                    );
+                }
+
                 let prompt = prompt::build_prompt(client.model()).await;
                 let turn_result =
                     agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;
                 if let Err(e) = turn_result {
-                    _ = sink.send(AgentEvent::Error(e.to_string()));
+                    // `{e:#}` flattens the anyhow cause chain into one
+                    // string ("stream error: API error (HTTP 503): ...").
+                    // Plain `Display` would drop everything below the
+                    // outermost context and surface only "stream error",
+                    // which doesn't distinguish a transient gateway 5xx
+                    // from a permanent config error.
+                    _ = sink.send(AgentEvent::Error(format!("{e:#}")));
                 }
                 _ = sink.send(AgentEvent::TurnComplete);
             }

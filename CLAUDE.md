@@ -36,6 +36,7 @@ ox     # Start an interactive session
 │   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
 ├── main.rs                     # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                  # Conversation message types
+├── model.rs                    # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)
 ├── prompt.rs                   # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
@@ -44,11 +45,13 @@ ox     # Start an interactive session
 ├── session.rs                  # Session module root
 ├── session/
 │   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── history.rs              # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
 │   ├── list_view.rs            # `ox --list` table rendering (writes to any `impl Write`)
 │   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   ├── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   ├── title_generator.rs      # Background AI title generation (Haiku) with detached task
 │   └── writer.rs               # Session-write helpers (record_session_message, log_session_err)
 ├── tool.rs                     # Tool trait, registry, definitions
 ├── tool/
@@ -61,7 +64,7 @@ ox     # Start an interactive session
 ├── tui.rs                      # TUI module root
 ├── tui/
 │   ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
-│   ├── component.rs            # Component trait and Action enum
+│   ├── component.rs            # Component trait (components report UserAction back to the agent loop)
 │   ├── components.rs           # Components module root
 │   ├── components/
 │   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display

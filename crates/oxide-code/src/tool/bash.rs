@@ -195,7 +195,7 @@ fn kill_process_group(pgid: Option<u32>) {
     let Ok(pgid_signed) = i32::try_from(pgid) else {
         return;
     };
-    let _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
+    _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
 }
 
 // ── Output Truncation ──

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -15,11 +15,6 @@ use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
-
-/// Tail buffer size for extracting the latest [`Entry::Title`] /
-/// [`Entry::Summary`] without reading the entire file. 4 KB is generous
-/// for a single JSON line.
-const TAIL_BUF_SIZE: u64 = 4096;
 
 // ── SessionStore ──
 
@@ -135,11 +130,7 @@ impl SessionStore {
     )]
     pub(crate) async fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("session not found: {}", path.display()))?;
-        Ok(SessionWriter { file })
+        open_append_at(&path)
     }
 
     /// Load a session's message chain and return the UUID of its tip
@@ -159,8 +150,7 @@ impl SessionStore {
     /// 4. Walks back via `parent_uuid` to the root, reverses → linear
     ///    chain from root to tip.
     ///
-    /// The "newest-leaf wins" policy matches claude-code's
-    /// `loadMessagesFromJsonlPath` and means the losing branch on a
+    /// The "newest-leaf wins" policy means the losing branch on a
     /// concurrent-resume fork stays in the file but is invisible to
     /// later resumes. The trade-off is documented in
     /// [`Self::open_append`].
@@ -172,84 +162,7 @@ impl SessionStore {
     /// are warn-skipped and do not fail the load.
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
         let path = self.find_session_path(session_id)?;
-        let file =
-            File::open(&path).with_context(|| format!("session not found: {}", path.display()))?;
-        let mut reader = BufReader::new(file);
-        let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
-        let mut referenced: HashSet<Uuid> = HashSet::new();
-        let mut buf = Vec::new();
-        let mut line_no: u32 = 0;
-
-        // Read byte-by-line instead of `BufReader::lines()`. A crash
-        // during `writeln!` can leave the last record truncated —
-        // mid-byte of a multibyte UTF-8 codepoint in the worst case —
-        // and `lines()` propagates `InvalidData` there, failing the
-        // entire resume. Doing the decode ourselves lets us warn-skip
-        // bad lines with the same resilience we already apply to
-        // malformed JSON, and tolerate a missing trailing newline.
-        loop {
-            buf.clear();
-            let read = reader
-                .read_until(b'\n', &mut buf)
-                .with_context(|| format!("read error at line {}", line_no + 1))?;
-            if read == 0 {
-                break;
-            }
-            line_no += 1;
-            let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
-            if without_newline.is_empty() {
-                continue;
-            }
-            let line = match std::str::from_utf8(without_newline) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("skipping non-utf8 entry at line {line_no}: {e}");
-                    continue;
-                }
-            };
-            let entry: Entry = match serde_json::from_str(line) {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("skipping malformed entry at line {line_no}: {e}");
-                    continue;
-                }
-            };
-            match entry {
-                Entry::Header { version, .. } if version > CURRENT_VERSION => {
-                    bail!(
-                        "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
-                    );
-                }
-                Entry::Message {
-                    uuid,
-                    parent_uuid,
-                    message,
-                    timestamp,
-                } => {
-                    if let Some(p) = parent_uuid {
-                        referenced.insert(p);
-                    }
-                    // Last-append-wins on duplicate UUIDs — a retry or
-                    // partial-write recovery could replay an entry, and
-                    // we prefer the most recent representation.
-                    nodes.insert(
-                        uuid,
-                        ChainNode {
-                            parent_uuid,
-                            message,
-                            timestamp,
-                        },
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        let (messages, last_uuid) = resolve_chain(nodes, &referenced);
-        Ok(SessionData {
-            messages,
-            last_uuid,
-        })
+        load_session_data_from_path(&path)
     }
 
     /// List sessions for the current project, sorted by file mtime
@@ -327,6 +240,136 @@ impl SessionStore {
             project_dir,
         })
     }
+}
+
+// ── Path-keyed primitives ──
+
+/// Open an existing session file in append mode by path. Underlies
+/// [`SessionStore::open_append`] (which resolves the path first) and
+/// `SessionManager::resume_from_path` (which bypasses the store entirely
+/// for sessions living outside the XDG project subdirectories).
+pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
+    let file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("session not found: {}", path.display()))?;
+    Ok(SessionWriter { file })
+}
+
+/// Load session data from an explicit path. See
+/// [`SessionStore::load_session_data`] for the description of DAG-based
+/// chain resolution and fault-tolerant parsing — this is the underlying
+/// primitive, used both by the store lookup and by the external-path
+/// resume flow.
+pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
+    let file =
+        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
+    let mut referenced: HashSet<Uuid> = HashSet::new();
+    let mut latest_title: Option<TitleInfo> = None;
+    let mut buf = Vec::new();
+    let mut line_no: u32 = 0;
+
+    // Read byte-by-line instead of `BufReader::lines()`. A crash during
+    // `writeln!` can leave the last record truncated — mid-byte of a
+    // multibyte UTF-8 codepoint in the worst case — and `lines()`
+    // propagates `InvalidData` there, failing the entire resume. Doing the
+    // decode ourselves lets us warn-skip bad lines with the same
+    // resilience we already apply to malformed JSON, and tolerate a
+    // missing trailing newline.
+    loop {
+        buf.clear();
+        let read = reader
+            .read_until(b'\n', &mut buf)
+            .with_context(|| format!("read error at line {}", line_no + 1))?;
+        if read == 0 {
+            break;
+        }
+        line_no += 1;
+        let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        if without_newline.is_empty() {
+            continue;
+        }
+        let line = match std::str::from_utf8(without_newline) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("skipping non-utf8 entry at line {line_no}: {e}");
+                continue;
+            }
+        };
+        let entry: Entry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("skipping malformed entry at line {line_no}: {e}");
+                continue;
+            }
+        };
+        match entry {
+            Entry::Header { version, .. } if version > CURRENT_VERSION => {
+                bail!(
+                    "session format version {version} is newer than supported ({CURRENT_VERSION}); please upgrade oxide-code"
+                );
+            }
+            Entry::Message {
+                uuid,
+                parent_uuid,
+                message,
+                timestamp,
+            } => {
+                if let Some(p) = parent_uuid {
+                    referenced.insert(p);
+                }
+                // Last-append-wins on duplicate UUIDs — a retry or
+                // partial-write recovery could replay an entry, and we
+                // prefer the most recent representation.
+                nodes.insert(
+                    uuid,
+                    ChainNode {
+                        parent_uuid,
+                        message,
+                        timestamp,
+                    },
+                );
+            }
+            // Track the newest title so the TUI's status bar and any
+            // future surface can display it on resume without a second
+            // pass over the file. AI-generated titles appended later beat
+            // the first-prompt title by `updated_at`.
+            Entry::Title {
+                title, updated_at, ..
+            } if latest_title
+                .as_ref()
+                .is_none_or(|cur| updated_at > cur.updated_at) =>
+            {
+                latest_title = Some(TitleInfo { title, updated_at });
+            }
+            _ => {}
+        }
+    }
+
+    let (messages, last_uuid) = resolve_chain(nodes, &referenced);
+    Ok(SessionData {
+        messages,
+        last_uuid,
+        title: latest_title,
+    })
+}
+
+/// Read just the `session_id` from a session file's header (line 1).
+/// Used by external-path resume so callers can key the resumed
+/// [`SessionManager`] on the file's declared identity rather than its path.
+pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
+    let file =
+        File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
+    let mut first_line = String::new();
+    BufReader::new(file).read_line(&mut first_line)?;
+    let Entry::Header { session_id, .. } = serde_json::from_str(first_line.trim())
+        .with_context(|| format!("first line of {} is not a valid header", path.display()))?
+    else {
+        bail!("{} does not begin with a header", path.display());
+    };
+    Ok(session_id)
 }
 
 /// Create `path` (and parents) with owner-only (`0o700`) perms on Unix.
@@ -473,6 +516,10 @@ pub(crate) struct SessionData {
     /// `parent_uuid` for the first newly-recorded message. `None` if the
     /// file contains no messages.
     pub(crate) last_uuid: Option<Uuid>,
+    /// Latest [`Entry::Title`] in the file (max `updated_at`). `None` when
+    /// no title was ever recorded (e.g., the session exited before the
+    /// first user prompt).
+    pub(crate) title: Option<TitleInfo>,
 }
 
 // ── File Opening ──
@@ -550,20 +597,30 @@ fn resolve_chain(
 
 // ── Session Info Extraction ──
 
+/// Discriminator prefix for lines [`read_session_info`] cares about
+/// past the header. `Entry` serializes with `#[serde(tag = "type")]`,
+/// which places `type` first in the emitted JSON, so a `starts_with`
+/// on the literal prefix is a reliable and cheap pre-filter — most
+/// session files are dominated by `{"type":"message",...}` lines that
+/// can be skipped without a full serde parse.
+const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
+const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
+
 /// Read session info from a JSONL file.
 ///
-/// Combines a head scan (line 1 header + line 2 optional
-/// [`Entry::Title`] with source [`TitleSource::FirstPrompt`]) with a
-/// tail scan for the latest re-appended [`Entry::Title`] and
-/// [`Entry::Summary`]. The first-prompt title lives at line 2 of the
-/// file and can sit beyond [`TAIL_BUF_SIZE`] once the session grows,
-/// so a pure tail scan would miss it.
+/// Walks the whole file once, tracking the latest [`Entry::Title`] (by
+/// `updated_at`) and [`Entry::Summary`] (ditto) as it goes. A header
+/// +-tail scan is faster but breaks when an AI-generated title lands
+/// early in the file and the first user turn produces a large
+/// `tool_result` that pushes it out of the tail window — the title
+/// disappears even though it sits intact on disk.
 ///
-/// When both a head and a tail title are present, the one with the
-/// newer `updated_at` wins — this lets AI-generated titles (appended
-/// later, landing in the tail window) supersede the first-prompt title.
+/// Most lines are `Entry::Message` entries that this function doesn't
+/// care about; the [`TITLE_LINE_PREFIX`] / [`SUMMARY_LINE_PREFIX`]
+/// cheap pre-filter keeps the full serde parse off the hot path so
+/// listing stays O(bytes read) without meaningful CPU overhead.
 fn read_session_info(path: &Path) -> Result<SessionInfo> {
-    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("cannot stat {}", path.display()))?;
@@ -583,23 +640,49 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         bail!("first line is not a header");
     };
 
-    let mut second_line = String::new();
-    let head_title = if reader.read_line(&mut second_line)? > 0 {
-        parse_title(second_line.trim())
-    } else {
-        None
-    };
-    drop(reader);
-
-    // BufReader's internal buffering may have advanced the underlying file
-    // position past line 2. read_tail_info seeks explicitly to the tail
-    // region, so the post-drop position does not matter.
-    let (tail_title, exit) = read_tail_info(&mut file)?;
-
-    let title = [head_title, tail_title]
-        .into_iter()
-        .flatten()
-        .max_by_key(|t| t.updated_at);
+    let mut title: Option<TitleInfo> = None;
+    let mut exit: Option<ExitInfo> = None;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader
+            .read_until(b'\n', &mut buf)
+            .with_context(|| format!("read error scanning {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let without_newline = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        if without_newline.is_empty() {
+            continue;
+        }
+        // Skip non-UTF-8 garbage rather than failing the whole row:
+        // `load_session_data_from_path` already warn-skips here, and
+        // the listing path should match that resilience so a single
+        // corrupt byte doesn't hide an entire session from `--list`.
+        let Ok(line) = std::str::from_utf8(without_newline) else {
+            continue;
+        };
+        if line.starts_with(TITLE_LINE_PREFIX) {
+            if let Some(t) = parse_title(line)
+                && title
+                    .as_ref()
+                    .is_none_or(|cur| t.updated_at > cur.updated_at)
+            {
+                title = Some(t);
+            }
+        } else if line.starts_with(SUMMARY_LINE_PREFIX)
+            && let Ok(Entry::Summary {
+                message_count,
+                updated_at,
+            }) = serde_json::from_str(line)
+            && exit.as_ref().is_none_or(|cur| updated_at > cur.updated_at)
+        {
+            exit = Some(ExitInfo {
+                message_count,
+                updated_at,
+            });
+        }
+    }
 
     let last_active_at = metadata
         .modified()
@@ -626,46 +709,6 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
         } => Some(TitleInfo { title, updated_at }),
         _ => None,
     }
-}
-
-/// Read the last [`TAIL_BUF_SIZE`] bytes of a file and scan backward
-/// for the latest [`Entry::Title`] and [`Entry::Summary`] entries in
-/// that window. Title may be re-appended (e.g., by an AI-title
-/// feature); the latest supersedes earlier ones.
-fn read_tail_info(file: &mut File) -> Result<(Option<TitleInfo>, Option<ExitInfo>)> {
-    let len = file.metadata()?.len();
-    let offset = len.saturating_sub(TAIL_BUF_SIZE);
-    file.seek(SeekFrom::Start(offset))?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-
-    let mut title: Option<TitleInfo> = None;
-    let mut exit: Option<ExitInfo> = None;
-    for line in buf.lines().rev() {
-        if title.is_some() && exit.is_some() {
-            break;
-        }
-        if title.is_none()
-            && let Some(t) = parse_title(line)
-        {
-            title = Some(t);
-            continue;
-        }
-        if exit.is_none()
-            && let Ok(Entry::Summary {
-                message_count,
-                updated_at,
-            }) = serde_json::from_str(line)
-        {
-            exit = Some(ExitInfo {
-                message_count,
-                updated_at,
-            });
-        }
-    }
-
-    Ok((title, exit))
 }
 
 #[cfg(test)]
@@ -981,8 +1024,7 @@ mod tests {
     async fn load_session_data_picks_newest_leaf_on_fork() {
         // Two processes resumed and each appended — forming a fork
         // in the UUID DAG. `load_session_data` must pick the newest
-        // leaf as the tip and walk back to the shared ancestor,
-        // matching claude-code's `loadMessagesFromJsonlPath`.
+        // leaf as the tip and walk back to the shared ancestor.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("fork")).await.unwrap();
@@ -1222,6 +1264,59 @@ mod tests {
         assert!(err.contains("newer than supported"), "got: {err}");
     }
 
+    // ── read_session_id_from_path ──
+
+    #[test]
+    fn read_session_id_from_path_returns_header_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("standalone.jsonl");
+        fs::write(
+            &path,
+            indoc! {r#"
+                {"type":"header","session_id":"abc-123","cwd":"/","model":"m","created_at":"2026-01-01T00:00:00Z","version":1}
+                {"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-01-01T00:00:01Z"}
+            "#},
+        )
+        .unwrap();
+        assert_eq!(read_session_id_from_path(&path).unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn read_session_id_from_path_rejects_non_header_first_line() {
+        // A file whose first line parses as a valid `Entry` but of the
+        // wrong variant (e.g., a bare message without a header above
+        // it) hits the explicit `bail!` inside the let-else, which the
+        // "not JSON at all" path never reaches.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("headless.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"timestamp":"2026-01-01T00:00:01Z"}
+"#,
+        )
+        .unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("does not begin with a header"), "got: {err}");
+    }
+
+    #[test]
+    fn read_session_id_from_path_rejects_unparsable_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.jsonl");
+        fs::write(&path, "not json\n").unwrap();
+        let err = read_session_id_from_path(&path).unwrap_err().to_string();
+        assert!(err.contains("not a valid header"), "got: {err}");
+    }
+
+    #[test]
+    fn read_session_id_from_path_errors_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_session_id_from_path(&dir.path().join("ghost.jsonl"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
+    }
+
     // ── list ──
 
     #[tokio::test]
@@ -1346,10 +1441,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_finds_first_prompt_title_beyond_tail_window() {
-        // The first-prompt title is written at line 2 and never re-appended.
-        // A pure tail scan misses it once the file exceeds TAIL_BUF_SIZE.
-        // Verify the head scan catches it.
+    async fn list_finds_first_prompt_title_in_long_session() {
+        // Regression guard: a busy session pushes the first-prompt
+        // title (line 2, never re-appended) far from the tail. The
+        // full-file scan must still surface it when no newer title
+        // has been appended.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("long")).await.unwrap();
@@ -1367,14 +1463,50 @@ mod tests {
                 .unwrap();
         }
 
-        let path = test_session_file(dir.path(), "long");
-        assert!(
-            path.metadata().unwrap().len() > TAIL_BUF_SIZE,
-            "test file should exceed the tail window"
-        );
         let sessions = store.list().unwrap();
         let title = sessions[0].title.as_ref().unwrap();
         assert_eq!(title.title, "first prompt");
+    }
+
+    #[tokio::test]
+    async fn list_finds_ai_title_buried_between_head_and_tail() {
+        // Real-world shape: first_prompt title at line 2, one user
+        // message at line 3, ai_generated title at line 4, then a
+        // tool_result so large that line 4 sits outside any plausible
+        // tail window. The old head(2 lines)+tail(4 KB) scan missed
+        // the AI title here; the full-file scan must surface it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("buried")).await.unwrap();
+        writer
+            .append(&Entry::Title {
+                title: "first prompt".to_owned(),
+                source: TitleSource::FirstPrompt,
+                updated_at: datetime!(2026-04-16 12:00:00 UTC),
+            })
+            .unwrap();
+        writer
+            .append(&sample_message_entry(Uuid::new_v4(), "short user text"))
+            .unwrap();
+        writer
+            .append(&Entry::Title {
+                title: "AI picked".to_owned(),
+                source: TitleSource::AiGenerated,
+                updated_at: datetime!(2026-04-16 12:00:05 UTC),
+            })
+            .unwrap();
+        // 16 KB body — comfortably past any tail-scan window.
+        let bulky_body = "x".repeat(16_000);
+        writer
+            .append(&sample_message_entry(Uuid::new_v4(), &bulky_body))
+            .unwrap();
+        writer.append(&sample_summary_entry(2)).unwrap();
+
+        let sessions = store.list().unwrap();
+        let title = sessions[0].title.as_ref().unwrap();
+        assert_eq!(title.title, "AI picked");
+        let exit = sessions[0].exit.as_ref().unwrap();
+        assert_eq!(exit.message_count, 2);
     }
 
     #[tokio::test]
