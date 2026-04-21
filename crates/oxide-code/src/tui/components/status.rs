@@ -21,6 +21,9 @@ const TICKS_PER_FRAME: usize = 5;
 /// leaves breathing room for cwd on the right.
 const MAX_TITLE_WIDTH: usize = 40;
 
+/// Visual width of the `...` truncation marker (three ASCII dots).
+const ELLIPSIS_WIDTH: usize = 3;
+
 /// Status bar at the top of the TUI.
 ///
 /// Displays the product name, model, optional session title, current status
@@ -211,14 +214,17 @@ fn slot_width(slot: &Vec<Span<'_>>) -> usize {
     slot.iter().map(Span::width).sum()
 }
 
-/// Truncates `title` to `max_width` columns, appending `…` when shortened.
+/// Truncates `title` to `max_width` columns, appending `...` when shortened.
 /// CJK / emoji are billed at their rendered width via `unicode-width`.
 fn truncate_title(title: &str, max_width: usize) -> String {
     if title.width() <= max_width {
         return title.to_owned();
     }
-    // Reserve 1 column for the ellipsis.
-    let budget = max_width.saturating_sub(1).max(1);
+    let (budget, tail) = if max_width >= ELLIPSIS_WIDTH {
+        (max_width - ELLIPSIS_WIDTH, "...")
+    } else {
+        (max_width, "")
+    };
     let mut out = String::new();
     let mut used = 0;
     for ch in title.chars() {
@@ -229,7 +235,7 @@ fn truncate_title(title: &str, max_width: usize) -> String {
         out.push(ch);
         used += w;
     }
-    out.push('…');
+    out.push_str(tail);
     out
 }
 
@@ -531,7 +537,10 @@ mod tests {
             "A very long session title that keeps going well past any reasonable width limit";
         bar.set_title(Some(long.to_owned()));
         let output = render_top_row(&mut bar, 200);
-        assert!(output.contains('…'), "expected truncated title: {output:?}");
+        assert!(
+            output.contains("..."),
+            "expected truncated title: {output:?}"
+        );
         assert!(
             !output.contains(long),
             "full title should not render: {output:?}"
@@ -562,7 +571,7 @@ mod tests {
         // Sanity check that the no-title path still renders cwd.
         assert!(output.contains("~/test"));
         assert!(
-            !output.contains('…'),
+            !output.contains("..."),
             "no ellipsis without title: {output:?}"
         );
     }
@@ -592,18 +601,16 @@ mod tests {
 
     #[test]
     fn truncate_title_adds_ellipsis_when_over() {
-        let out = truncate_title("abcdefghij", 5);
-        assert!(out.ends_with('…'), "got: {out:?}");
-        assert_eq!(out.width(), 5);
+        assert_eq!(truncate_title("abcdefghij", 5), "ab...");
     }
 
     #[test]
     fn truncate_title_respects_cjk_width() {
-        // 4 CJK chars * 2 cols = 8 cols total. Budget 5 → keep 1 char (2
-        // cols) + ellipsis (1 col) = 3 cols (fits under 5).
+        // 4 CJK chars * 2 cols = 8 cols total. Budget 5 → keep 1 CJK (2
+        // cols) + ellipsis (3 cols) = 5 cols.
         let out = truncate_title("测试文本", 5);
-        assert!(out.ends_with('…'));
-        assert!(out.width() <= 5, "got width {}: {out:?}", out.width());
+        assert_eq!(out, "测...");
+        assert_eq!(out.width(), 5);
     }
 
     // ── fit_layout ──

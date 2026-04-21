@@ -98,7 +98,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .kill_on_drop(true);
 
     // Own process group so timeout can kill the whole tree, not just bash —
-    // otherwise `(sleep 3600; …) &` outlives the direct child.
+    // otherwise `(sleep 3600; ...) &` outlives the direct child.
     #[cfg(unix)]
     cmd.process_group(0);
 

@@ -144,11 +144,11 @@ async fn generate_and_record(
 ///
 /// The envelope is mandatory. A bare plain-text response is almost
 /// always Haiku's conversational refusal to the title task ("I'd be
-/// happy to help! However, I need more details…" for short prompts
+/// happy to help! However, I need more details..." for short prompts
 /// like `hi`), and using that prose as the title is worse than keeping
 /// the first-prompt title we already wrote to disk.
 ///
-/// Triple-backtick code fences (`` ```json … ``` ``) are stripped
+/// Triple-backtick code fences (`` ```json ... ``` ``) are stripped
 /// first — Haiku wraps the envelope that way on some gateways.
 fn parse_title(response: &str) -> Result<String> {
     let trimmed = response.trim();
@@ -178,11 +178,11 @@ fn truncate_for_log(s: &str) -> String {
         return s.to_owned();
     }
     let head: String = s.chars().take(LOG_CAP).collect();
-    format!("{head}…")
+    format!("{head}...")
 }
 
 /// Strips a surrounding triple-backtick markdown code fence (with an
-/// optional `json` / `text` / … language tag) from `s`, returning the
+/// optional `json` / `text` / ... language tag) from `s`, returning the
 /// inner body trimmed of whitespace. Leaves any input that isn't wrapped
 /// in a fence untouched.
 fn strip_code_fence(s: &str) -> &str {
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn parse_title_errors_on_plain_text_response() {
         // Haiku's conversational refusal ("I'd be happy to help!
-        // However, I need more details…") would otherwise land on the
+        // However, I need more details...") would otherwise land on the
         // status bar as a multi-sentence "title". Require the JSON
         // envelope so the first-prompt title survives instead.
         let err = parse_title("I'd be happy to help! However, I need more details.")
@@ -447,12 +447,8 @@ mod tests {
     fn truncate_for_log_caps_long_strings_with_ellipsis() {
         let long = "a".repeat(500);
         let out = truncate_for_log(&long);
-        assert!(out.ends_with('…'), "got: {out:?}");
-        assert!(
-            out.chars().count() <= 121,
-            "got {} chars",
-            out.chars().count()
-        );
+        assert!(out.ends_with("..."), "got: {out:?}");
+        assert_eq!(out.chars().count(), 123, "got: {out:?}");
     }
 
     // ── strip_code_fence ──
