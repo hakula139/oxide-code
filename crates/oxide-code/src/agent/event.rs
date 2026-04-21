@@ -21,10 +21,7 @@ pub(crate) enum AgentEvent {
     ToolCallStart {
         #[cfg_attr(
             not(test),
-            expect(
-                dead_code,
-                reason = "carried on the contract for future UIs / session replay; cfg(test) assertions read it"
-            )
+            expect(dead_code, reason = "read only by cfg(test) assertions")
         )]
         id: String,
         name: String,
@@ -34,10 +31,7 @@ pub(crate) enum AgentEvent {
     ToolCallEnd {
         #[cfg_attr(
             not(test),
-            expect(
-                dead_code,
-                reason = "carried on the contract so a later UI can pair ToolCallEnd with its ToolCallStart; cfg(test) assertions read it"
-            )
+            expect(dead_code, reason = "read only by cfg(test) assertions")
         )]
         id: String,
         title: Option<String>,
@@ -148,6 +142,35 @@ impl AgentSink for StdioSink {
                 eprintln!("Error: {msg}");
             }
         }
+        Ok(())
+    }
+}
+
+// ── Test Fixtures ──
+
+/// Collects every event the code under test sends so assertions can
+/// inspect both the sequence and the payload. Shared by `agent` and
+/// `session::title_generator` tests (both drive code that writes
+/// through an [`AgentSink`]).
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct CapturingSink(std::sync::Arc<std::sync::Mutex<Vec<AgentEvent>>>);
+
+#[cfg(test)]
+impl CapturingSink {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn events(&self) -> Vec<AgentEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl AgentSink for CapturingSink {
+    fn send(&self, event: AgentEvent) -> Result<()> {
+        self.0.lock().unwrap().push(event);
         Ok(())
     }
 }

@@ -213,77 +213,29 @@ struct TitleEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
+    use std::path::Path;
 
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::agent::event::AgentSink;
-    use crate::config::{Auth, Config};
+    use crate::agent::event::CapturingSink;
+    use crate::client::anthropic::{completion_body, test_client};
+    use crate::config::Auth;
     use crate::message::Message;
     use crate::session::store::test_store;
 
-    // ── Test fixtures ──
+    // ── Fixtures ──
 
-    fn mock_client(base_url: String) -> Client {
-        // Haiku is used by generate_and_record; build a config pointed
-        // at the mock with an API-key auth so no billing attestation
-        // machinery needs mocking out.
-        Client::new(
-            Config {
-                auth: Auth::ApiKey("sk".to_owned()),
-                model: "claude-haiku-4-5".to_owned(),
-                base_url,
-                max_tokens: 128,
-                thinking: None,
-                show_thinking: false,
-            },
-            Some("sid".to_owned()),
-        )
-        .unwrap()
+    fn title_client(base_url: String) -> Client {
+        test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
     }
 
-    fn completion_body(text: &str) -> String {
-        serde_json::json!({
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-haiku-4-5",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 5, "output_tokens": 3}
-        })
-        .to_string()
-    }
-
-    /// Captures every event the code under test sends for assertion.
-    #[derive(Clone)]
-    struct CapturingSink(Arc<StdMutex<Vec<AgentEvent>>>);
-
-    impl CapturingSink {
-        fn new() -> Self {
-            Self(Arc::new(StdMutex::new(Vec::new())))
-        }
-
-        fn events(&self) -> Vec<AgentEvent> {
-            self.0.lock().unwrap().clone()
-        }
-    }
-
-    impl AgentSink for CapturingSink {
-        fn send(&self, event: AgentEvent) -> Result<()> {
-            self.0.lock().unwrap().push(event);
-            Ok(())
-        }
-    }
-
-    /// Session manager with one recorded user message, ready for an
-    /// `append_ai_title` call. `append_ai_title` requires the file to
-    /// have been materialized via `record_message` at least once.
-    async fn prepared_session(dir: &std::path::Path) -> Mutex<SessionManager> {
+    /// Session manager with one user message recorded — the file must
+    /// be materialized before `append_ai_title` will find it.
+    async fn prepared_session(dir: &Path) -> Mutex<SessionManager> {
         let store = test_store(dir);
-        let mut mgr = SessionManager::start(&store, "claude-haiku-4-5");
+        let mut mgr = SessionManager::start(&store, HAIKU_MODEL);
         mgr.record_message(&Message::user("first prompt"))
             .await
             .unwrap();
@@ -296,7 +248,7 @@ mod tests {
     async fn generate_and_record_happy_path_appends_title_and_notifies_sink() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/messages"))
+            .and(wm_path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_string(completion_body(r#"{"title":"Fix login"}"#)),
@@ -306,7 +258,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
-        let client = mock_client(server.uri());
+        let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
         generate_and_record(&client, &session, &sink, "first prompt")
@@ -331,14 +283,14 @@ mod tests {
             ```
         "#};
         Mock::given(method("POST"))
-            .and(path("/v1/messages"))
+            .and(wm_path("/v1/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(raw)))
             .mount(&server)
             .await;
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
-        let client = mock_client(server.uri());
+        let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
         generate_and_record(&client, &session, &sink, "prompt")
@@ -358,7 +310,7 @@ mod tests {
         // bail keeps the first-prompt title on disk and out of the UI.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/messages"))
+            .and(wm_path("/v1/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_string(completion_body(
                 "I'd be happy to help! However, I need more details.",
             )))
@@ -367,7 +319,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
-        let client = mock_client(server.uri());
+        let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
         let err = generate_and_record(&client, &session, &sink, "hi")
@@ -387,14 +339,14 @@ mod tests {
     async fn generate_and_record_http_error_bails_with_context() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/messages"))
+            .and(wm_path("/v1/messages"))
             .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
             .mount(&server)
             .await;
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
-        let client = mock_client(server.uri());
+        let client = title_client(server.uri());
         let sink = CapturingSink::new();
 
         let err = generate_and_record(&client, &session, &sink, "hi")

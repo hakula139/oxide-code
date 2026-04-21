@@ -885,8 +885,56 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     Ok(Some(event))
 }
 
+// ── Test Fixtures ──
+//
+// Shared across `client::anthropic` tests, `session::title_generator`
+// tests, and the `agent::tests` wiremock integration — all three drive
+// a real `Client` against a mock server and need the same defaults
+// (ApiKey auth, session id, 128 max_tokens, no thinking config).
+
+/// Minimal [`Config`] suitable for unit and wiremock tests. Defaults
+/// match every existing call site: `max_tokens = 128`, `thinking = None`,
+/// `show_thinking = false`.
+#[cfg(test)]
+pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
+    Config {
+        auth,
+        model: model.to_owned(),
+        base_url: base_url.into(),
+        max_tokens: 128,
+        thinking: None,
+        show_thinking: false,
+    }
+}
+
+/// [`Client`] on top of [`test_config`], with a fixed session id so the
+/// wire headers carry a deterministic `x-claude-code-session-id`.
+#[cfg(test)]
+pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
+    Client::new(test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
+}
+
+/// Non-streaming Messages-API response body with the given text content.
+/// Model is hardcoded; assertions in tests inspect request-side model
+/// selection, never response-side.
+#[cfg(test)]
+pub(crate) fn completion_body(text: &str) -> String {
+    serde_json::json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-4-5",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": 5, "output_tokens": 3}
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use indoc::indoc;
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -895,27 +943,8 @@ mod tests {
 
     // ── Fixtures ──
 
-    fn make_config(auth: Auth) -> Config {
-        Config {
-            auth,
-            model: "claude-sonnet-4-6".to_owned(),
-            base_url: "https://example.invalid".to_owned(),
-            max_tokens: 128,
-            thinking: None,
-            show_thinking: false,
-        }
-    }
-
-    fn mock_config(base_url: String, auth: Auth, model: &str) -> Config {
-        Config {
-            auth,
-            model: model.to_owned(),
-            base_url,
-            max_tokens: 128,
-            thinking: None,
-            show_thinking: false,
-        }
-    }
+    const OFFLINE_URL: &str = "https://example.invalid";
+    const TEST_MODEL: &str = "claude-sonnet-4-6";
 
     fn api_key() -> Auth {
         Auth::ApiKey("k".to_owned())
@@ -925,7 +954,7 @@ mod tests {
         Auth::OAuth("t".to_owned())
     }
 
-    /// Concatenates SSE frame strings into a valid response body, each
+    /// Concatenates SSE frames into a valid response body, each
     /// followed by the required `\n\n` terminator.
     fn sse_body(frames: &[&str]) -> String {
         let mut body = String::new();
@@ -964,25 +993,11 @@ data: {"type":"message_stop"}"#,
         ])
     }
 
-    /// Minimal non-streaming response body matching Anthropic's Messages API.
-    fn completion_body(text: &str) -> String {
-        serde_json::json!({
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-haiku-4-5",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
-            "usage": {"input_tokens": 5, "output_tokens": 3}
-        })
-        .to_string()
-    }
-
-    /// Serialized body of the last request received by a capturing mock.
-    type Captured<T> = std::sync::Arc<std::sync::Mutex<Option<T>>>;
+    /// Slot for the last request body captured by a wiremock responder.
+    type Captured<T> = Arc<Mutex<Option<T>>>;
 
     fn captured<T>() -> Captured<T> {
-        std::sync::Arc::new(std::sync::Mutex::new(None))
+        Arc::new(Mutex::new(None))
     }
 
     // ── OutputFormat ──
@@ -1162,19 +1177,35 @@ data: {"type":"message_stop"}"#,
 
     #[test]
     fn new_with_api_key_exposes_model() {
-        let client = Client::new(make_config(Auth::ApiKey("sk-test".to_owned())), None).unwrap();
+        let client = Client::new(
+            test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL),
+            None,
+        )
+        .unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-6");
     }
 
     #[test]
     fn new_with_oauth_token_exposes_model() {
-        let client = Client::new(make_config(Auth::OAuth("oauth-token".to_owned())), None).unwrap();
+        let client = Client::new(
+            test_config(
+                OFFLINE_URL,
+                Auth::OAuth("oauth-token".to_owned()),
+                TEST_MODEL,
+            ),
+            None,
+        )
+        .unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-6");
     }
 
     #[test]
     fn new_none_session_id_generates_uuid_v4() {
-        let client = Client::new(make_config(Auth::ApiKey("k".to_owned())), None).unwrap();
+        let client = Client::new(
+            test_config(OFFLINE_URL, Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            None,
+        )
+        .unwrap();
         let sid = client.session_id();
         let parsed = Uuid::parse_str(sid)
             .unwrap_or_else(|_| panic!("auto-generated session_id is not a UUID: {sid:?}"));
@@ -1184,8 +1215,11 @@ data: {"type":"message_stop"}"#,
     #[test]
     fn new_preserves_explicit_session_id() {
         let sid = "11111111-2222-4333-8444-555555555555".to_owned();
-        let client =
-            Client::new(make_config(Auth::ApiKey("k".to_owned())), Some(sid.clone())).unwrap();
+        let client = Client::new(
+            test_config(OFFLINE_URL, Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            Some(sid.clone()),
+        )
+        .unwrap();
         assert_eq!(client.session_id(), sid);
     }
 
@@ -1199,9 +1233,12 @@ data: {"type":"message_stop"}"#,
         ] {
             // `Client` has no Debug derive, so .unwrap_err() doesn't
             // compile — use .err().unwrap() on the Option instead.
-            let err = Client::new(make_config(auth), Some("sid".to_owned()))
-                .err()
-                .unwrap();
+            let err = Client::new(
+                test_config(OFFLINE_URL, auth, TEST_MODEL),
+                Some("sid".to_owned()),
+            )
+            .err()
+            .unwrap();
             assert!(
                 format!("{err:#}").to_ascii_lowercase().contains("header"),
                 "error should mention header: {err:#}",
@@ -1226,7 +1263,7 @@ data: {"type":"message_stop"}"#,
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1283,7 +1320,7 @@ data: {"type":"message_stop"}"#,
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1330,7 +1367,7 @@ data: {"type":"message_stop"}"#,
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1369,7 +1406,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1405,7 +1442,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
                 .await;
 
             let client = Client::new(
-                mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+                test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1437,7 +1474,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1467,7 +1504,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(
+            test_config(
                 server.uri(),
                 Auth::ApiKey("sk-test".to_owned()),
                 "claude-sonnet-4-6",
@@ -1503,7 +1540,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(
+            test_config(
                 server.uri(),
                 Auth::OAuth("tok".to_owned()),
                 "claude-sonnet-4-6",
@@ -1541,7 +1578,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
                 .await;
 
             let client = Client::new(
-                mock_config(server.uri(), auth, "claude-sonnet-4-6"),
+                test_config(server.uri(), auth, "claude-sonnet-4-6"),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1582,7 +1619,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1627,7 +1664,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1651,7 +1688,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
             Some("sid".to_owned()),
         )
         .unwrap();
@@ -1695,7 +1732,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
                 .await;
 
             let client = Client::new(
-                mock_config(server.uri(), api_key(), model),
+                test_config(server.uri(), api_key(), model),
                 Some("sid".to_owned()),
             )
             .unwrap();
@@ -1743,7 +1780,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             .await;
 
         let client = Client::new(
-            mock_config(
+            test_config(
                 server.uri(),
                 Auth::OAuth("tok".to_owned()),
                 "claude-haiku-4-5",

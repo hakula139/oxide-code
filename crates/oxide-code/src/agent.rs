@@ -321,37 +321,442 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::agent::event::CapturingSink;
+    use crate::client::anthropic::{
+        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage, test_client,
+    };
+    use crate::config::Auth;
+    use crate::message::Role;
+    use crate::session::manager::SessionManager;
+    use crate::session::store::test_store;
+    use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
-    /// Captures every event the code under test sends, so assertions can
-    /// inspect both the sequence and the payload.
-    struct CapturingSink {
-        events: StdMutex<Vec<AgentEvent>>,
+    // ── agent_turn ──
+
+    /// In-process fake that hands the agent loop a scripted sequence of
+    /// [`StreamEvent`]s per turn.
+    struct FakeClient {
+        turns: StdMutex<VecDeque<Vec<StreamEvent>>>,
     }
 
-    impl CapturingSink {
-        fn new() -> Self {
+    impl FakeClient {
+        fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
             Self {
-                events: StdMutex::new(Vec::new()),
+                turns: StdMutex::new(turns.into()),
             }
         }
+    }
 
-        fn events(&self) -> Vec<AgentEvent> {
-            self.events.lock().unwrap().clone()
+    impl AgentClient for FakeClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = mpsc::channel(events.len().max(1));
+            for event in events {
+                tx.try_send(Ok(event)).expect("channel capacity");
+            }
+            Ok(rx)
         }
     }
 
-    impl AgentSink for CapturingSink {
-        fn send(&self, event: AgentEvent) -> Result<()> {
-            self.events.lock().unwrap().push(event);
-            Ok(())
+    fn text_turn(text: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: text.into() },
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageStop,
+        ]
+    }
+
+    fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::ToolUse {
+                    id: id.into(),
+                    name: name.into(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::InputJsonDelta {
+                    partial_json: input_json.into(),
+                },
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageStop,
+        ]
+    }
+
+    /// Tool that echoes its input. Exercises the agent's tool-dispatch
+    /// and result-plumbing path without any subprocess machinery.
+    struct EchoTool;
+
+    impl Tool for EchoTool {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+
+        fn description(&self) -> &'static str {
+            "echo the input"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn run(
+            &self,
+            input: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+            Box::pin(async move {
+                ToolOutput {
+                    content: input.to_string(),
+                    is_error: false,
+                    metadata: ToolMetadata {
+                        title: Some("echoed".into()),
+                        ..Default::default()
+                    },
+                }
+            })
         }
     }
 
+    fn empty_prompt() -> PromptParts {
+        PromptParts {
+            system_sections: vec![],
+            user_context: None,
+        }
+    }
+
+    fn test_session(dir: &std::path::Path) -> Mutex<SessionManager> {
+        let store = test_store(dir);
+        Mutex::new(SessionManager::start(&store, "claude-sonnet-4-6"))
+    }
+
+    #[tokio::test]
+    async fn agent_turn_text_only_response_records_assistant_message_and_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("Hello there!")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(
+            matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Hello there!"),
+        );
+        let streamed: Vec<String> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::StreamToken(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, ["Hello there!"]);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_single_tool_call_dispatches_and_completes_on_follow_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":42}"#),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        // Message ordering: user → assistant(tool_use) → user(tool_result) → assistant(text).
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(
+            &messages[1].content[0],
+            ContentBlock::ToolUse { name, .. } if name == "echo",
+        ));
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = &messages[2].content[0]
+        else {
+            panic!("expected ToolResult, got {:?}", messages[2].content[0]);
+        };
+        assert_eq!(tool_use_id, "tool_1");
+        assert_eq!(content, r#"{"v":42}"#);
+        assert!(!is_error);
+        assert!(matches!(
+            &messages[3].content[0],
+            ContentBlock::Text { text } if text == "Done",
+        ));
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallStart { id, name, .. } if id == "tool_1" && name == "echo",
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallEnd { id, title: Some(t), is_error: false, .. }
+                if id == "tool_1" && t == "echoed",
+        )));
+    }
+
+    #[tokio::test]
+    async fn agent_turn_unknown_tool_name_emits_error_result_and_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "nonexistent", r"{}"),
+            text_turn("fallback"),
+        ]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &messages[2].content[0]
+        else {
+            panic!("expected ToolResult");
+        };
+        assert!(is_error, "unknown tool marks tool_result as error");
+        assert!(
+            content.contains("Unknown tool: nonexistent"),
+            "error content: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_max_tool_rounds_bails_with_safety_cap_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let turns: Vec<Vec<StreamEvent>> = (0..MAX_TOOL_ROUNDS)
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .collect();
+        let client = FakeClient::new(turns);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("loop forever")];
+
+        let err = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .expect_err("cap must trip");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&MAX_TOOL_ROUNDS.to_string()),
+            "cap in error: {msg}"
+        );
+        assert!(msg.contains("safety cap"), "explains intent: {msg}");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_mid_stream_error_event_surfaces_as_bail() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![vec![StreamEvent::Error {
+            error: ApiError {
+                error_type: "overloaded_error".into(),
+                message: "Servers overloaded".into(),
+            },
+        }]]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let err = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .expect_err("api error must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("overloaded_error"), "type in error: {msg}");
+        assert!(
+            msg.contains("Servers overloaded"),
+            "message in error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_strips_trailing_thinking_before_next_round() {
+        // A trailing thinking block is legal on the first round but
+        // rejected by the API on the second — agent_turn must strip it
+        // before the follow-up turn.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("done")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "intermediate".into(),
+                    },
+                    ContentBlock::Thinking {
+                        thinking: "reasoning".into(),
+                        signature: "sig".into(),
+                    },
+                ],
+            },
+        ];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let stripped = &messages[1];
+        assert_eq!(stripped.content.len(), 1);
+        assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
+    }
+
+    /// Covers `<Client as AgentClient>::stream_message` on the real
+    /// production path; the `FakeClient` tests above stub the trait.
+    #[tokio::test]
+    async fn agent_turn_drives_real_client_over_wiremock() {
+        let server = MockServer::start().await;
+        let body = indoc::indoc! {r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#};
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(
+            server.uri(),
+            Auth::ApiKey("sk".to_owned()),
+            "claude-sonnet-4-6",
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
+    }
     // ── BlockAccumulator::into_content_block ──
 
     #[test]
@@ -657,469 +1062,5 @@ mod tests {
         };
         assert_eq!(buf, "hi");
         assert!(sink.events().is_empty());
-    }
-
-    // ── agent_turn / stream_response ──
-
-    use crate::client::anthropic::{
-        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
-    };
-    use crate::message::Role;
-    use crate::session::manager::SessionManager;
-    use crate::session::store::test_store;
-    use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
-    use std::future::Future;
-    use std::pin::Pin;
-
-    /// In-process fake that hands the agent loop a scripted sequence of
-    /// [`StreamEvent`]s per turn. Each `stream_message` call drains the
-    /// next `Vec<StreamEvent>` from the front of `turns`.
-    struct FakeClient {
-        turns: StdMutex<std::collections::VecDeque<Vec<StreamEvent>>>,
-    }
-
-    impl FakeClient {
-        fn new(turns: Vec<Vec<StreamEvent>>) -> Self {
-            Self {
-                turns: StdMutex::new(turns.into()),
-            }
-        }
-    }
-
-    impl AgentClient for FakeClient {
-        fn stream_message(
-            &self,
-            _messages: &[Message],
-            _system_sections: &[&str],
-            _user_context: Option<&str>,
-            _tools: &[ToolDefinition],
-        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-            let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
-            let (tx, rx) = mpsc::channel(events.len().max(1));
-            for event in events {
-                tx.try_send(Ok(event)).expect("channel capacity");
-            }
-            Ok(rx)
-        }
-    }
-
-    /// Builds SSE-style frame sequences in compact form: a text turn
-    /// emits the full start / delta / stop envelope, a tool-use turn
-    /// emits the JSON `input_delta` variant, and so on.
-    fn text_turn(text: &str) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::MessageStart {
-                message: MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-sonnet-4-6".into(),
-                    usage: Some(Usage {
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    }),
-                },
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::Text {
-                    text: String::new(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::TextDelta { text: text.into() },
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockInfo::ToolUse {
-                    id: id.into(),
-                    name: name.into(),
-                },
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: Delta::InputJsonDelta {
-                    partial_json: input_json.into(),
-                },
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageStop,
-        ]
-    }
-
-    /// Test tool that just returns its input as the output. Exercises
-    /// the agent's tool-dispatch + result-plumbing path without pulling
-    /// in bash's subprocess machinery.
-    struct EchoTool;
-
-    impl Tool for EchoTool {
-        fn name(&self) -> &'static str {
-            "echo"
-        }
-        fn description(&self) -> &'static str {
-            "echo the input"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            json!({"type": "object"})
-        }
-        fn run(
-            &self,
-            input: serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-            Box::pin(async move {
-                ToolOutput {
-                    content: input.to_string(),
-                    is_error: false,
-                    metadata: ToolMetadata {
-                        title: Some("echoed".into()),
-                        ..Default::default()
-                    },
-                }
-            })
-        }
-    }
-
-    fn empty_prompt() -> PromptParts {
-        PromptParts {
-            system_sections: vec![],
-            user_context: None,
-        }
-    }
-
-    fn test_session(dir: &std::path::Path) -> Mutex<SessionManager> {
-        let store = test_store(dir);
-        Mutex::new(SessionManager::start(&store, "claude-sonnet-4-6"))
-    }
-
-    #[tokio::test]
-    async fn agent_turn_text_only_response_records_assistant_message_and_returns() {
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn("Hello there!")]);
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .unwrap();
-
-        // The assistant message landed in the transcript with the
-        // streamed text verbatim.
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert!(
-            matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Hello there!"),
-        );
-        // Each delta streamed a StreamToken event to the sink.
-        let streamed: Vec<&str> = sink
-            .events()
-            .iter()
-            .filter_map(|e| match e {
-                AgentEvent::StreamToken(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .map(|s| {
-                // Clone out of the borrow so the return type is static.
-                Box::leak(s.to_owned().into_boxed_str()) as &str
-            })
-            .collect();
-        assert_eq!(streamed, ["Hello there!"]);
-    }
-
-    #[tokio::test]
-    async fn agent_turn_single_tool_call_dispatches_and_completes_on_follow_up() {
-        // Turn 1 emits one tool_use; turn 2 returns a final text answer.
-        // The loop must dispatch the tool, append a tool_result user
-        // message, and only then stop.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            tool_use_turn("tool_1", "echo", r#"{"v":42}"#),
-            text_turn("Done"),
-        ]);
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("run echo")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .unwrap();
-
-        // Message ordering: user → assistant(tool_use) → user(tool_result) → assistant(text).
-        assert_eq!(messages.len(), 4);
-        assert!(matches!(
-            &messages[1].content[0],
-            ContentBlock::ToolUse { name, .. } if name == "echo",
-        ));
-        let ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } = &messages[2].content[0]
-        else {
-            panic!("expected ToolResult, got {:?}", messages[2].content[0]);
-        };
-        assert_eq!(tool_use_id, "tool_1");
-        assert_eq!(content, r#"{"v":42}"#);
-        assert!(!is_error);
-        assert!(matches!(
-            &messages[3].content[0],
-            ContentBlock::Text { text } if text == "Done",
-        ));
-
-        // The sink saw ToolCallStart + ToolCallEnd with the matching id.
-        let events = sink.events();
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolCallStart { id, name, .. } if id == "tool_1" && name == "echo",
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolCallEnd { id, title: Some(t), is_error: false, .. }
-                if id == "tool_1" && t == "echoed",
-        )));
-    }
-
-    #[tokio::test]
-    async fn agent_turn_unknown_tool_name_emits_error_result_and_retries() {
-        // The model asks for a tool the registry doesn't know. Agent
-        // must synthesize a tool_result with is_error=true and let the
-        // model try again on the next turn.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![
-            tool_use_turn("tool_1", "nonexistent", r"{}"),
-            text_turn("fallback"),
-        ]);
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .unwrap();
-
-        let ContentBlock::ToolResult {
-            content, is_error, ..
-        } = &messages[2].content[0]
-        else {
-            panic!("expected ToolResult");
-        };
-        assert!(is_error, "unknown tool marks tool_result as error");
-        assert!(
-            content.contains("Unknown tool: nonexistent"),
-            "error content: {content}",
-        );
-    }
-
-    #[tokio::test]
-    async fn agent_turn_max_tool_rounds_bails_with_safety_cap_message() {
-        // A model stuck in a tool-use loop must hit the cap and bail —
-        // not run forever. We script MAX_TOOL_ROUNDS tool turns so the
-        // final loop iteration ends without a text response.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let turns: Vec<Vec<StreamEvent>> = (0..MAX_TOOL_ROUNDS)
-            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
-            .collect();
-        let client = FakeClient::new(turns);
-        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("loop forever")];
-
-        let err = agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .expect_err("cap must trip");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains(&MAX_TOOL_ROUNDS.to_string()),
-            "cap in error: {msg}"
-        );
-        assert!(msg.contains("safety cap"), "explains intent: {msg}");
-    }
-
-    #[tokio::test]
-    async fn agent_turn_mid_stream_error_event_surfaces_as_bail() {
-        // `StreamEvent::Error` inside the scripted turn must flow out as
-        // an `agent_turn` failure carrying the API error payload.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![vec![StreamEvent::Error {
-            error: ApiError {
-                error_type: "overloaded_error".into(),
-                message: "Servers overloaded".into(),
-            },
-        }]]);
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-
-        let err = agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .expect_err("api error must propagate");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("overloaded_error"), "type in error: {msg}");
-        assert!(
-            msg.contains("Servers overloaded"),
-            "message in error: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn agent_turn_strips_trailing_thinking_before_next_round() {
-        // If a prior assistant message ends with a thinking block
-        // (legal on the first round, rejected by the API on the
-        // second), agent_turn must strip it before the follow-up turn.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn("done")]);
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![
-            Message::user("hi"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "intermediate".into(),
-                    },
-                    ContentBlock::Thinking {
-                        thinking: "reasoning".into(),
-                        signature: "sig".into(),
-                    },
-                ],
-            },
-        ];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .unwrap();
-
-        // The original assistant message had its thinking stripped
-        // before the new turn ran.
-        let stripped = &messages[1];
-        assert_eq!(stripped.content.len(), 1);
-        assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
-    }
-
-    #[tokio::test]
-    async fn agent_turn_drives_real_client_over_wiremock() {
-        // Covers <Client as AgentClient>::stream_message on the real
-        // production path — the FakeClient tests above stub the trait
-        // rather than exercise it. Keeps the wiremock surface minimal:
-        // one happy text turn.
-        use crate::client::anthropic::Client;
-        use crate::config::{Auth, Config};
-        use wiremock::matchers::{method, path as wm_path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        let body = indoc::indoc! {r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: message_stop
-data: {"type":"message_stop"}
-
-"#};
-        Mock::given(method("POST"))
-            .and(wm_path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            Config {
-                auth: Auth::ApiKey("sk".to_owned()),
-                model: "claude-sonnet-4-6".to_owned(),
-                base_url: server.uri(),
-                max_tokens: 64,
-                thinking: None,
-                show_thinking: false,
-            },
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
     }
 }
