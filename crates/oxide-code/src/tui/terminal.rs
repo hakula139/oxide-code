@@ -69,10 +69,16 @@ pub(crate) fn restore() {
 /// `WezTerm`, Windows Terminal, tmux).
 ///
 /// Terminals that don't recognize the sequence silently ignore it.
-pub(crate) fn draw_sync(terminal: &mut Tui, f: impl FnOnce(&mut ratatui::Frame)) -> Result<()> {
-    queue!(terminal.backend_mut(), terminal::BeginSynchronizedUpdate,)?;
+///
+/// Generic over the backend writer so tests can drive it with an
+/// in-memory `Vec<u8>`; production callers pass the [`Tui`] alias.
+pub(crate) fn draw_sync<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    f: impl FnOnce(&mut ratatui::Frame),
+) -> Result<()> {
+    queue!(terminal.backend_mut(), terminal::BeginSynchronizedUpdate)?;
     terminal.draw(f)?;
-    queue!(terminal.backend_mut(), terminal::EndSynchronizedUpdate,)?;
+    queue!(terminal.backend_mut(), terminal::EndSynchronizedUpdate)?;
     terminal.backend_mut().flush()?;
     Ok(())
 }
@@ -86,4 +92,59 @@ pub(crate) fn install_panic_hook() {
         restore();
         original_hook(panic_info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    // ── draw_sync ──
+    //
+    // `init` / `restore` need a real TTY; `install_panic_hook` clobbers
+    // process-global panic state and cannot run cleanly under parallel
+    // tests. `draw_sync` is the one function whose behavior we can pin
+    // down in-process by swapping `Stdout` for an in-memory writer.
+
+    // DEC private mode 2026 on/off escape sequences emitted by
+    // `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`.
+    const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+    const END_SYNC: &[u8] = b"\x1b[?2026l";
+
+    /// `Write` sink that mirrors every byte into a shared buffer the
+    /// test can inspect after the terminal has borrowed the backend.
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn draw_sync_brackets_the_render_with_sync_update_bytes() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut drew = false;
+        draw_sync(&mut terminal, |_frame| drew = true).unwrap();
+
+        assert!(drew, "render closure must be invoked");
+        let bytes = buf.lock().unwrap();
+        let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
+        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
+        assert!(begin < end, "sync update must bracket the render");
+    }
 }
