@@ -151,13 +151,13 @@ ox     # Start an interactive session
 #### Commits
 
 - Messages: `type(scope): description`
-  - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`, `perf`
+  - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`, `style`, `perf`
   - Scope: the most specific area changed — module (e.g., `client`, `config`, `oauth`), doc target (e.g., `CLAUDE`, `research`), or crate name only for cross-module changes.
 - Keep commits atomic — one logical change per commit.
 
 #### Branches
 
-- Feature branches: `feat/<feature-name>`
+- Format: `<type>/<short-name>`, using the same type set as commits (`feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`, `perf`, `ci`). Pick the type that matches the dominant change on the branch; if commits span multiple types, use the one that matches the PR's `type(scope):` title.
 
 #### Pull Requests
 
@@ -175,6 +175,7 @@ ox     # Start an interactive session
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
 - Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`). For parameterless single-behavior functions where the value IS the test, use property form (`icon_is_dollar_sign`), not mechanism form (`icon_returns_dollar_sign`).
 - Use `indoc!` for multi-line string literals in tests.
+- Reach for the established test infrastructure before hand-rolling: `wiremock` for HTTP round-trips, `temp-env` for environment-variable isolation, `ratatui::backend::TestBackend` + `insta` for TUI render snapshots (review with `cargo insta review`), and an extracted trait with an in-process fake (see `agent::AgentClient`) when a dependency is hard to mock at the network boundary.
 - Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.
 - Prefer a concise test suite with full coverage over many minimal tests. Drop tests that are subsumed by more thorough ones. Merge tests that cover the same code path when the combined test remains readable.
 
@@ -183,6 +184,7 @@ ox     # Start an interactive session
 - Keep `README.md` user-facing. It should describe value, supported features, and usage, not internal progress tracking.
 - Keep `docs/roadmap.md` as the canonical in-repo roadmap / status summary. Update it when shipped capability areas or planned priorities change.
 - Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically; directories sort alongside their parent `.rs` file.
+- After substantive changes, sweep docs for stale claims: `README.md` status bullets, `docs/roadmap.md` Working Today / Current Focus sections, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/*` deferred / follow-up notes that the change now resolves.
 
 ## Verification
 
