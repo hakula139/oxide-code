@@ -784,6 +784,35 @@ mod tests {
         assert!(format!("{err:#}").contains("parse"));
     }
 
+    // ── load_token ──
+
+    // Gated off on macOS because the public `load_token` wrapper routes
+    // through `load_credentials`, which consults the user's Keychain
+    // before falling back to the file. The Keychain is user-scoped (not
+    // $HOME-scoped), so a dev running this test on a machine with a
+    // real Claude Code install would read their production token. The
+    // file-only path runs in CI, which is Linux.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn load_token_resolves_credentials_relative_to_home() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        write_creds(
+            &claude_dir.join(".credentials.json"),
+            "token-from-home",
+            None,
+            9_999_999_999_999,
+        );
+
+        let token = temp_env::async_with_vars(
+            [("HOME", Some(home.path().to_string_lossy().into_owned()))],
+            async { load_token().await.unwrap() },
+        )
+        .await;
+        assert_eq!(token, "token-from-home");
+    }
+
     // ── load_token_from ──
 
     fn write_creds(path: &Path, access: &str, refresh: Option<&str>, expires_at: i64) {

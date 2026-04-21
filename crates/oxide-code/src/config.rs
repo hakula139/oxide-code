@@ -139,7 +139,10 @@ mod tests {
 
     /// Builds an env override list starting from defaults (every
     /// tracked key unset, except `ANTHROPIC_API_KEY = "sk-default"` so
-    /// the `ApiKey` arm is reached). Overrides replace or add entries.
+    /// the `ApiKey` arm is reached). Overrides replace entries for keys
+    /// already in [`ENV_KEYS`]; passing an unknown key panics so a
+    /// misspelled test key surfaces immediately instead of silently
+    /// expanding the tracked set.
     fn env_vars(
         overrides: Vec<(&'static str, Option<String>)>,
     ) -> Vec<(&'static str, Option<String>)> {
@@ -155,11 +158,11 @@ mod tests {
             })
             .collect();
         for (key, value) in overrides {
-            if let Some(entry) = out.iter_mut().find(|(k, _)| *k == key) {
-                entry.1 = value;
-            } else {
-                out.push((key, value));
-            }
+            let entry = out
+                .iter_mut()
+                .find(|(k, _)| *k == key)
+                .unwrap_or_else(|| panic!("env key {key:?} not in ENV_KEYS"));
+            entry.1 = value;
         }
         out
     }
