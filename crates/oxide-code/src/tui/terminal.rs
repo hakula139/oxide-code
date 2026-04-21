@@ -98,6 +98,8 @@ pub(crate) fn install_panic_hook() {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use ratatui::{TerminalOptions, Viewport, layout::Rect};
+
     use super::*;
 
     // ── draw_sync ──
@@ -136,7 +138,13 @@ mod tests {
     fn draw_sync_brackets_the_render_with_sync_update_bytes() {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
-        let mut terminal = Terminal::new(backend).unwrap();
+        // `Terminal::new` queries stdout for the window size which fails
+        // on CI without a TTY. `Viewport::Fixed` skips that query so the
+        // test runs the same whether stdout is a pty or a pipe.
+        let opts = TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+        };
+        let mut terminal = Terminal::with_options(backend, opts).unwrap();
 
         let mut drew = false;
         draw_sync(&mut terminal, |_frame| drew = true).unwrap();
