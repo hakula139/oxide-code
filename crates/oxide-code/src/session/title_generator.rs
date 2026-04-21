@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::agent::event::{AgentEvent, AgentSink};
-use crate::client::anthropic::Client;
+use crate::client::anthropic::{Client, OutputFormat};
 use crate::session::manager::SessionManager;
 use crate::session::writer::log_session_err;
 
@@ -40,8 +40,11 @@ const MAX_TOKENS: u32 = 40;
 /// request small, predictable, and cheap regardless of input size.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. Constrains the output to sentence-case, 3-7 words, wrapped
-/// in a JSON envelope so [`parse_title`] can extract the title reliably.
+/// Title prompt. Instructs the model to return JSON with a single
+/// `title` field; the paired JSON-schema output format (see
+/// [`title_output_format`]) enforces that shape regardless of whether
+/// the model would otherwise try to answer the user's prompt
+/// conversationally.
 const SYSTEM_PROMPT: &str = indoc! {r#"
     Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
@@ -57,6 +60,27 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
     Bad (too long): {"title": "Investigate and fix the issue where the login button does not respond on mobile devices"}
     Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 "#};
+
+/// `{"title": string}` schema for [`Client::complete`]'s structured
+/// outputs. Built once per call — the schema JSON itself is small and
+/// constructing a `serde_json::Value` is cheap compared to the HTTP
+/// round-trip, so a `LazyLock` optimization would be theatre.
+///
+/// Without this, a first prompt phrased as a direct request (e.g.
+/// `"see what's next to do in this repo"`) would frequently drive Haiku
+/// to answer the task instead of titling it, and [`parse_title`] would
+/// then bail on the conversational reply. The schema forces Haiku onto
+/// the envelope shape regardless of how the prompt scans.
+fn title_output_format() -> OutputFormat {
+    OutputFormat::json_schema(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+        },
+        "required": ["title"],
+        "additionalProperties": false,
+    }))
+}
 
 /// Spawn a detached task that asks Haiku for a title, records it on
 /// `session`, and notifies `sink`.
@@ -89,8 +113,15 @@ async fn generate_and_record(
     first_prompt: &str,
 ) -> Result<()> {
     let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
+    let output_format = title_output_format();
     let raw = client
-        .complete(HAIKU_MODEL, SYSTEM_PROMPT, &prompt, MAX_TOKENS)
+        .complete(
+            HAIKU_MODEL,
+            SYSTEM_PROMPT,
+            &prompt,
+            MAX_TOKENS,
+            Some(&output_format),
+        )
         .await
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
@@ -183,6 +214,23 @@ struct TitleEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── title_output_format ──
+
+    #[test]
+    fn title_output_format_matches_title_envelope_shape() {
+        // The schema must line up with [`TitleEnvelope`] so a
+        // schema-conforming response parses via `parse_title` without
+        // further validation. Pins the contract against accidental
+        // drift in either direction (e.g., renaming the JSON field
+        // without updating the Deserialize target).
+        let fmt = title_output_format();
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
+        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
+        assert_eq!(v["schema"]["additionalProperties"], false);
+    }
 
     // ── parse_title ──
 

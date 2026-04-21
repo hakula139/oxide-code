@@ -22,6 +22,7 @@ const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
 const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
+const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
 /// Matches the installed Claude Code version.
 const CLAUDE_CLI_VERSION: &str = "2.1.101";
@@ -48,7 +49,44 @@ struct CreateMessageRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
+    /// JSON-schema-constrained output format for one-shot utility calls
+    /// (title generation, future classifiers). Mirrors claude-code's
+    /// `extraBodyParams.output_config`. Must travel alongside the
+    /// `structured-outputs-2025-12-15` beta header; both are gated on
+    /// `Capabilities::structured_outputs` so unsupported models silently
+    /// drop back to free-form text rather than 400ing the gateway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig<'a>>,
     messages: &'a [Message],
+}
+
+/// Wrapper matching the wire shape `output_config.format = {...}`.
+#[derive(Serialize)]
+struct OutputConfig<'a> {
+    format: &'a OutputFormat,
+}
+
+/// JSON-schema-constrained completion format. Constructed via
+/// [`OutputFormat::json_schema`]; callers typically build one per
+/// request shape (e.g., `{"title": string}`) and pass it by reference
+/// to [`Client::complete`].
+#[derive(Debug, Serialize)]
+pub(crate) struct OutputFormat {
+    r#type: &'static str,
+    schema: serde_json::Value,
+}
+
+impl OutputFormat {
+    /// Build a `json_schema` output format from a precomputed schema
+    /// value. The schema must already match Anthropic's expectations
+    /// (`type: "object"`, `additionalProperties: false`, explicit
+    /// `required` array) — we don't validate here.
+    pub(crate) fn json_schema(schema: serde_json::Value) -> Self {
+        Self {
+            r#type: "json_schema",
+            schema,
+        }
+    }
 }
 
 /// Request metadata matching Claude Code's `getAPIMetadata()` format.
@@ -406,6 +444,7 @@ impl Client {
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
+            output_config: None,
             messages: effective_messages,
         })
         .context("failed to serialize request")?;
@@ -418,7 +457,7 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(&self.config.model, &self.config.auth, true).join(",");
+        let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
 
         tokio::spawn(async move {
             let result = stream_sse(&http, &url, betas, body, &tx).await;
@@ -439,6 +478,15 @@ impl Client {
     /// (OAuth vs API key, billing attestation) still applies so the same
     /// client works for both auth modes.
     ///
+    /// `output_format` optionally constrains the reply to a JSON schema
+    /// via the `structured-outputs-2025-12-15` beta. When the target
+    /// model's [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
+    /// is `false` (e.g., Opus 4.0 base, Sonnet 4.0 base, or an unknown
+    /// future family), both the body field and the beta header are
+    /// silently dropped — the response is free-form text and the caller
+    /// is expected to tolerate schema-missing replies. Mirrors the
+    /// `[1m]`-tag × `context_1m` silent-strip pattern.
+    ///
     /// Non-text content blocks (`tool_use`, thinking, …) are filtered out
     /// so callers get the assistant's user-visible answer directly.
     pub async fn complete(
@@ -447,7 +495,9 @@ impl Client {
         system: &str,
         user: &str,
         max_tokens: u32,
+        output_format: Option<&OutputFormat>,
     ) -> Result<String> {
+        let effective_format = output_format.filter(|_| supports_structured_outputs(model));
         let body = build_completion_body(
             model,
             system,
@@ -455,12 +505,14 @@ impl Client {
             max_tokens,
             &self.config.auth,
             &self.session_id,
+            effective_format,
         )?;
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        let betas = compute_betas(model, &self.config.auth, false).join(",");
+        let betas =
+            compute_betas(model, &self.config.auth, false, effective_format.is_some()).join(",");
         let response = self
             .http
             .post(&url)
@@ -505,6 +557,13 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 /// classifiers) that skip agent-oriented betas so the request stays
 /// minimal and gateway-friendly.
 ///
+/// `want_structured` is the caller's intent to constrain the response
+/// to a JSON schema via [`OutputFormat`]. The beta is only emitted
+/// when both the caller wants it AND the target model claims support
+/// ([`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]).
+/// Mirrors the `[1m]` × `context_1m` cross-check — a mismatch silently
+/// drops back to free-form text rather than 400ing the gateway.
+///
 /// `[1m]` on the model string is a user opt-in to the 1M-context
 /// window, following the upstream convention. It toggles
 /// [`CONTEXT_1M_BETA_HEADER`] independently of the capability table so
@@ -512,13 +571,18 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 /// the table row doesn't claim it — and conversely, subscription
 /// mismatches don't auto-400 because we're not attaching the beta
 /// silently.
-fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str> {
+fn compute_betas(
+    model: &str,
+    auth: &Auth,
+    is_agentic: bool,
+    want_structured: bool,
+) -> Vec<&'static str> {
     let caps = crate::model::lookup(model)
         .map(|info| info.capabilities)
         .unwrap_or_default();
     let is_haiku = model.to_lowercase().contains("haiku");
 
-    let mut out = Vec::with_capacity(7);
+    let mut out = Vec::with_capacity(8);
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta sets:
     // identity / auth first, then universal agentic betas, then the
@@ -563,8 +627,21 @@ fn compute_betas(model: &str, auth: &Auth, is_agentic: bool) -> Vec<&'static str
     if is_agentic && caps.effort {
         out.push(EFFORT_BETA_HEADER);
     }
+    // Structured outputs: one-shot only. The streaming path never asks
+    // for a schema (agentic turns are free-form), so gating on
+    // `want_structured` alone is enough — no `!is_agentic` guard.
+    if want_structured && caps.structured_outputs {
+        out.push(STRUCTURED_OUTPUTS_BETA_HEADER);
+    }
 
     out
+}
+
+/// Does the target model accept the `structured-outputs-2025-12-15`
+/// beta? Thin wrapper over the capability table so the title generator
+/// (and future classifiers) can pre-check before building the schema.
+pub(crate) fn supports_structured_outputs(model: &str) -> bool {
+    crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
 }
 
 /// Strip the `[1m]` tag (if any) from a caller-supplied model string,
@@ -606,6 +683,14 @@ fn tag_offset(model: &str) -> Option<usize> {
 /// [`Client::complete`] is covered behind a wiremock harness (see
 /// `docs/roadmap.md` → Test Coverage).
 ///
+/// `output_format` flows into `output_config.format` on the wire —
+/// pre-gated by [`Client::complete`] against
+/// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs],
+/// so by the time we get here the caller has already decided the
+/// target model accepts the beta. The matching
+/// [`STRUCTURED_OUTPUTS_BETA_HEADER`] is emitted by [`compute_betas`]
+/// on the same signal.
+///
 /// System block order matches [`Client::stream_message`]:
 ///
 /// 1. Billing header (OAuth only; no `cache_control`, injected with `cch`).
@@ -618,6 +703,7 @@ fn build_completion_body(
     max_tokens: u32,
     auth: &Auth,
     session_id: &str,
+    output_format: Option<&OutputFormat>,
 ) -> Result<String> {
     let messages = [Message::user(user)];
 
@@ -656,6 +742,7 @@ fn build_completion_body(
         system: system_blocks,
         tools: None,
         thinking: None,
+        output_config: output_format.map(|format| OutputConfig { format }),
         messages: &messages,
     })
     .context("failed to serialize request")?;
@@ -1207,6 +1294,7 @@ mod tests {
             40,
             &Auth::ApiKey("k".to_owned()),
             "sid",
+            None,
         )
         .unwrap();
         let v = parse_body(&body);
@@ -1215,6 +1303,10 @@ mod tests {
         assert_eq!(v["stream"], false);
         assert!(v.get("tools").is_none(), "tools must be omitted: {v}");
         assert!(v.get("thinking").is_none(), "thinking must be omitted: {v}");
+        assert!(
+            v.get("output_config").is_none(),
+            "output_config must stay omitted when no schema is supplied: {v}",
+        );
         let user = &v["messages"][0];
         assert_eq!(user["role"], "user");
         assert_eq!(user["content"][0]["text"], "hi");
@@ -1229,6 +1321,7 @@ mod tests {
             40,
             &Auth::ApiKey("k".to_owned()),
             "sid",
+            None,
         )
         .unwrap();
         let v = parse_body(&body);
@@ -1255,6 +1348,7 @@ mod tests {
             40,
             &Auth::OAuth("t".to_owned()),
             "sid",
+            None,
         )
         .unwrap();
         let v = parse_body(&body);
@@ -1286,6 +1380,7 @@ mod tests {
             40,
             &Auth::ApiKey("k".to_owned()),
             "sid",
+            None,
         )
         .unwrap();
         let v = parse_body(&body);
@@ -1298,6 +1393,34 @@ mod tests {
     }
 
     #[test]
+    fn build_completion_body_with_output_format_emits_output_config_on_wire() {
+        // Structured outputs serialize as `output_config.format` matching
+        // the upstream `extraBodyParams.output_config` shape. The schema
+        // value must round-trip intact — the API validates it.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": false,
+        });
+        let fmt = OutputFormat::json_schema(schema.clone());
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys",
+            "hi",
+            40,
+            &Auth::ApiKey("k".to_owned()),
+            "sid",
+            Some(&fmt),
+        )
+        .unwrap();
+        let v = parse_body(&body);
+        let format = &v["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["schema"], schema);
+    }
+
+    #[test]
     fn build_completion_body_routes_session_id_into_metadata() {
         let body = build_completion_body(
             "claude-haiku-4-5",
@@ -1306,6 +1429,7 @@ mod tests {
             40,
             &Auth::ApiKey("k".to_owned()),
             "unique-sid-789",
+            None,
         )
         .unwrap();
         assert!(
@@ -1518,7 +1642,7 @@ mod tests {
         // 1M context. This is the subscription-safety behavior: a
         // gateway without 1M access would 400 the request if we sent
         // `context-1m-2025-08-07` by default.
-        let betas = compute_betas("claude-opus-4-6", &api_key(), true);
+        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
@@ -1526,19 +1650,20 @@ mod tests {
         assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(!betas.contains(&OAUTH_BETA_HEADER));
+        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
     }
 
     #[test]
     fn compute_betas_agentic_opus_46_with_1m_tag_adds_context_1m() {
         // Explicit `[1m]` user opt-in → 1M beta flows.
-        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true);
+        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     #[test]
     fn compute_betas_agentic_opus_46_oauth_adds_oauth_header() {
-        let betas = compute_betas("claude-opus-4-6", &oauth(), true);
+        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false);
         assert!(betas.contains(&OAUTH_BETA_HEADER));
     }
 
@@ -1546,7 +1671,7 @@ mod tests {
     fn compute_betas_agentic_sonnet_45_plain_has_thinking_but_not_effort() {
         // Sonnet 4.5 supports 1M via tag per upstream, but does not
         // support effort. Plain (no `[1m]`) → no 1M beta.
-        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true);
+        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -1559,7 +1684,7 @@ mod tests {
         // window. Rather than 400ing on the gateway, we cross-check
         // `has_1m_tag` against `Capabilities::context_1m` and strip
         // the beta.
-        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true);
+        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false);
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
@@ -1567,7 +1692,7 @@ mod tests {
     fn compute_betas_agentic_haiku_4_omits_1m_effort_and_thinking() {
         // This is the failing-in-the-wild case: Haiku 4 must not carry
         // context-1m / interleaved-thinking / effort on 3P gateways.
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), true);
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -1579,13 +1704,13 @@ mod tests {
     fn compute_betas_non_agentic_haiku_is_minimal() {
         // The title-generator one-shot: no agent-oriented betas, no
         // gateway tag. API-key + Haiku → empty.
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), false);
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), false, false);
         assert!(betas.is_empty(), "expected empty, got {betas:?}");
     }
 
     #[test]
     fn compute_betas_non_agentic_haiku_oauth_only_carries_oauth_tag() {
-        let betas = compute_betas("claude-haiku-4-5", &oauth(), false);
+        let betas = compute_betas("claude-haiku-4-5", &oauth(), false, false);
         assert_eq!(betas, vec![OAUTH_BETA_HEADER]);
     }
 
@@ -1594,7 +1719,7 @@ mod tests {
         // Non-Haiku non-agentic (hypothetical compaction / classifier on
         // Sonnet): still needs the gateway tag because OAuth 1P rejects
         // non-Haiku without it.
-        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false);
+        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&OAUTH_BETA_HEADER));
         assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
@@ -1605,7 +1730,7 @@ mod tests {
     fn compute_betas_opus_47_inherits_ge_46_effort() {
         // Opus 4.7 matches the "opus-4-6 or newer" predicate so it gets
         // `effort`, without needing a hand-update each release.
-        let betas = compute_betas("claude-opus-4-7", &api_key(), true);
+        let betas = compute_betas("claude-opus-4-7", &api_key(), true, false);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
@@ -1614,9 +1739,55 @@ mod tests {
 
     #[test]
     fn compute_betas_opus_47_with_1m_tag_adds_context_1m() {
-        let betas = compute_betas("claude-opus-4-7[1m]", &api_key(), true);
+        let betas = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
+    }
+
+    #[test]
+    fn compute_betas_non_agentic_haiku_with_structured_adds_only_that_beta() {
+        // The title-generator path: one-shot Haiku + structured outputs.
+        // Nothing else in the set (no gateway tag, no caching, no
+        // thinking). Pins the minimal shape we actually send on the wire.
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), false, true);
+        assert_eq!(betas, vec![STRUCTURED_OUTPUTS_BETA_HEADER]);
+    }
+
+    #[test]
+    fn compute_betas_structured_silently_drops_on_unsupported_model() {
+        // `claude-haiku-4` (base) predates structured outputs per
+        // upstream. Asking for the beta should be silently dropped,
+        // matching the `[1m]` × `context_1m` cross-check pattern —
+        // otherwise the gateway would 400 on the mismatch.
+        let betas = compute_betas("claude-haiku-4", &api_key(), false, true);
+        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
+    }
+
+    // ── supports_structured_outputs ──
+
+    #[test]
+    fn supports_structured_outputs_reflects_capability_table() {
+        // Haiku 4.5 is in the upstream allowlist; the Haiku 4 base row
+        // is not, and unknown families fall through to no support.
+        assert!(supports_structured_outputs("claude-haiku-4-5"));
+        assert!(supports_structured_outputs("claude-opus-4-7"));
+        assert!(!supports_structured_outputs("claude-haiku-4"));
+        assert!(!supports_structured_outputs("claude-opus-5-0"));
+    }
+
+    // ── OutputFormat ──
+
+    #[test]
+    fn output_format_json_schema_serializes_with_type_and_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+        });
+        let fmt = OutputFormat::json_schema(schema.clone());
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"], schema);
     }
 
     // ── api_model_id / has_1m_tag ──

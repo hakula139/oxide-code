@@ -28,7 +28,8 @@ pub(crate) struct ModelInfo {
 /// headers. Each flag corresponds to a `modelSupports*` check in the
 /// upstream reference: `interleaved_thinking` → `modelSupportsISP`,
 /// `context_management` → `modelSupportsContextManagement`, `effort` →
-/// `modelSupportsEffort`, `context_1m` → `modelSupports1M`.
+/// `modelSupportsEffort`, `context_1m` → `modelSupports1M`,
+/// `structured_outputs` → `modelSupportsStructuredOutputs`.
 ///
 /// `context_1m` does not currently drive beta sending — that signal is
 /// the user-opt-in `[1m]` tag on the model string. The flag is kept for
@@ -36,7 +37,7 @@ pub(crate) struct ModelInfo {
 /// on models that can't honor it.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent capability flags — each maps 1:1 to a \
+    reason = "five independent capability flags — each maps 1:1 to a \
               separate upstream `modelSupports*` predicate; a bitflag or \
               state-machine refactor would add indirection without any \
               expressiveness gain"
@@ -51,6 +52,14 @@ pub(crate) struct Capabilities {
     /// context_1m` so a user who tags `claude-haiku-4[1m]` doesn't
     /// silently send an unsupported beta and 400.
     pub(crate) context_1m: bool,
+    /// Whether the model accepts the `structured-outputs-2025-12-15`
+    /// beta (JSON-schema-constrained text output). The upstream
+    /// allowlist is Opus 4.1/4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5;
+    /// everything else silently falls back to free-form text, which
+    /// [`Client::complete`][crate::client::anthropic::Client::complete]
+    /// mirrors by dropping the `output_config` body field together with
+    /// the beta header rather than 400ing on the gateway.
+    pub(crate) structured_outputs: bool,
 }
 
 /// All capabilities enabled. Shorthand for the top-tier rows.
@@ -59,33 +68,54 @@ const ALL_CAPS: Capabilities = Capabilities {
     context_management: true,
     effort: true,
     context_1m: true,
+    structured_outputs: true,
 };
 
-/// Opus-4 family baseline: thinking + context management, no 1M / effort.
+/// Opus-4 family baseline (4.1 / 4.5): thinking + context management +
+/// structured outputs; no effort, no 1M. Distinct from the Opus 4 base
+/// row because upstream's structured-outputs allowlist is per-version
+/// and a future `claude-opus-4-0` variant landing after the snapshot
+/// should stay in the safer, narrower fallback below.
 const OPUS_4_BASELINE: Capabilities = Capabilities {
-    interleaved_thinking: true,
-    context_management: true,
     effort: false,
     context_1m: false,
+    ..ALL_CAPS
 };
 
-/// Sonnet-4 family baseline: like Opus-4, plus 1M (all Sonnet 4.x support
-/// the 1M-context beta per the upstream reference).
+/// Opus 4 unqualified base: like [`OPUS_4_BASELINE`] minus structured
+/// outputs. Used only by the substring fallback row for model IDs that
+/// don't match a specific Opus 4.x entry.
+const OPUS_4_BASE_CAPS: Capabilities = Capabilities {
+    structured_outputs: false,
+    ..OPUS_4_BASELINE
+};
+
+/// Sonnet-4 family baseline (4.5): Opus 4 baseline + 1M (Sonnet 4.x
+/// all carry 1M per upstream, opt-in via `[1m]`).
 const SONNET_4_BASELINE: Capabilities = Capabilities {
-    interleaved_thinking: true,
-    context_management: true,
-    effort: false,
     context_1m: true,
+    ..OPUS_4_BASELINE
 };
 
-/// Haiku-4 family baseline: context management only — Haiku rejects
-/// interleaved thinking on 3P gateways, never supports 1M, and has no
-/// effort control.
+/// Sonnet 4 unqualified base: [`SONNET_4_BASELINE`] minus structured.
+const SONNET_4_BASE_CAPS: Capabilities = Capabilities {
+    structured_outputs: false,
+    ..SONNET_4_BASELINE
+};
+
+/// Haiku-4 family baseline (4.5): context management + structured
+/// outputs only — no thinking (3P gateways 400), no 1M, no effort.
 const HAIKU_4_BASELINE: Capabilities = Capabilities {
     interleaved_thinking: false,
-    context_management: true,
     effort: false,
     context_1m: false,
+    ..ALL_CAPS
+};
+
+/// Haiku 4 unqualified base: [`HAIKU_4_BASELINE`] minus structured.
+const HAIKU_4_BASE_CAPS: Capabilities = Capabilities {
+    structured_outputs: false,
+    ..HAIKU_4_BASELINE
 };
 
 /// Ordered table of known Claude models. More-specific prefixes come
@@ -143,19 +173,19 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         id_substr: "claude-opus-4",
         marketing: "Claude Opus 4",
         cutoff: Some("January 2025"),
-        capabilities: OPUS_4_BASELINE,
+        capabilities: OPUS_4_BASE_CAPS,
     },
     ModelInfo {
         id_substr: "claude-sonnet-4",
         marketing: "Claude Sonnet 4",
         cutoff: Some("January 2025"),
-        capabilities: SONNET_4_BASELINE,
+        capabilities: SONNET_4_BASE_CAPS,
     },
     ModelInfo {
         id_substr: "claude-haiku-4",
         marketing: "Claude Haiku 4",
         cutoff: Some("February 2025"),
-        capabilities: HAIKU_4_BASELINE,
+        capabilities: HAIKU_4_BASE_CAPS,
     },
 ];
 
@@ -253,5 +283,32 @@ mod tests {
         // 4.7); the base row must not claim it.
         let caps = lookup("claude-opus-4").unwrap().capabilities;
         assert!(!caps.context_1m);
+    }
+
+    #[test]
+    fn structured_outputs_flag_tracks_upstream_allowlist() {
+        // Upstream `modelSupportsStructuredOutputs` is a per-version
+        // allowlist: Opus 4.1/4.5/4.6 (+ our 4.7 monotonic bump),
+        // Sonnet 4.5/4.6, Haiku 4.5. Everything else is out.
+        for supported in [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+        ] {
+            assert!(
+                lookup(supported).unwrap().capabilities.structured_outputs,
+                "{supported} should claim structured outputs per upstream",
+            );
+        }
+        for unsupported in ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"] {
+            assert!(
+                !lookup(unsupported).unwrap().capabilities.structured_outputs,
+                "{unsupported} fallback row must not claim structured outputs",
+            );
+        }
     }
 }
