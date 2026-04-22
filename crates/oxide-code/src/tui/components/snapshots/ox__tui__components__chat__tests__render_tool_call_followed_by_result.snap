@@ -5,7 +5,7 @@ expression: "render_chat(&mut chat, 60, 10)"
 ---
 "▎ $ echo hi                                                 "
 "▎ ✓ ran echo                                                "
-"▎ hi                                                        "
+"▎   hi                                                      "
 "                                                            "
 "                                                            "
 "                                                            "

@@ -31,9 +31,10 @@ const BAR: &str = "▎";
 /// space. Content sits at col 2.
 const BORDER_PREFIX: &str = "▎ ";
 
-/// Continuation prefix for status lines (wrapped tool name + args,
-/// wrapped result label). Aligns under the status column (bar + space +
-/// icon + space).
+/// Prefix for lines subordinate to the status header — wrapped tool
+/// name / result label (when the header overflows) and tool output body
+/// lines. Aligns content at col 4, past the `✓` / `✗` indicator, so the
+/// body reads as a child of the status header rather than a peer.
 const STATUS_LINE_CONT: &str = "▎   ";
 
 // ── Tool Call ──
@@ -127,7 +128,7 @@ fn render_output_body(
 
     let border_style = border_style_for(ctx.theme, is_error);
     let text_style = ctx.theme.dim();
-    let cont_prefix = border_continuation_prefix(BORDER_PREFIX, border_style);
+    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
     let width = usize::from(ctx.width);
 
     let output_lines: Vec<&str> = trimmed.lines().collect();
@@ -142,13 +143,13 @@ fn render_output_body(
         let expanded = expand_tabs(text_line);
         let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
         let line = Line::from(vec![
-            Span::styled(BORDER_PREFIX.to_owned(), border_style),
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
             Span::styled(display_text, text_style),
         ]);
         out.extend(wrap_line(
             line,
             width,
-            BORDER_PREFIX.len(),
+            STATUS_LINE_CONT.len(),
             Some(&cont_prefix),
         ));
     }
@@ -157,8 +158,8 @@ fn render_output_body(
         let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
         let label = if n == 1 { "line" } else { "lines" };
         out.push(Line::from(vec![
-            Span::styled(BORDER_PREFIX.to_owned(), border_style),
-            Span::styled(format!("... {n} more {label}"), ctx.theme.dim()),
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(format!("… +{n} {label}"), ctx.theme.dim()),
         ]));
     }
 }
