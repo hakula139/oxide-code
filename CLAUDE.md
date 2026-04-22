@@ -67,7 +67,15 @@ ox     # Start an interactive session
 │   ├── component.rs            # Component trait (components report UserAction back to the agent loop)
 │   ├── components.rs           # Components module root
 │   ├── components/
-│   │   ├── chat.rs             # Scrollable chat with markdown, tool styling, thinking display
+│   │   ├── chat.rs             # ChatView container (scroll, event dispatch, block stacking, load_history)
+│   │   ├── chat/
+│   │   │   ├── blocks.rs       # ChatBlock trait + RenderCtx + shared border helpers
+│   │   │   └── blocks/
+│   │   │       ├── assistant.rs # AssistantText + AssistantThinking
+│   │   │       ├── error.rs    # ErrorBlock
+│   │   │       ├── streaming.rs # StreamingAssistant (in-flight buffer + render cache)
+│   │   │       ├── tool.rs     # ToolCallBlock + ToolResultBlock + shared status line
+│   │   │       └── user.rs     # UserMessage
 │   │   ├── input.rs            # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs           # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                # ChannelSink (mpsc transport for the TUI)
