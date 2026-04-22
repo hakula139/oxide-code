@@ -1228,6 +1228,24 @@ mod tests {
         assert!(text.contains("✗"));
         assert!(text.contains("failed"));
         assert!(text.contains("error details"));
+        // The bar color is the status channel: neutral on success, error
+        // on failure. Walk the rendered spans and pin that the `▎` span
+        // carries the theme's error style here — a bug swapping the
+        // tool_border / error branches in `border_style_for` would flip
+        // success and error results identically otherwise.
+        let rendered = chat.build_text(60);
+        let bar_style = rendered
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains('▎'))
+            .map(|s| s.style)
+            .expect("rendered line should contain a ▎ span");
+        assert_eq!(
+            bar_style,
+            Theme::default().error(),
+            "error-result bar should use the theme error style, got {bar_style:?}"
+        );
     }
 
     #[test]

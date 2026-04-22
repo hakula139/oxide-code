@@ -256,4 +256,34 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "    ");
     }
+
+    // ── truncate_to_bytes ──
+
+    #[test]
+    fn truncate_to_bytes_under_limit_returns_input() {
+        assert_eq!(truncate_to_bytes("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_to_bytes_over_limit_appends_ellipsis() {
+        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_to_bytes_respects_char_boundary() {
+        // Each `中` is 3 bytes in UTF-8. If floor_char_boundary wasn't used,
+        // cutting at byte 5 would split the second `中` mid-codepoint and
+        // produce invalid UTF-8 (panic on `&s[..5]`). Boundary fallback
+        // rounds down to byte 3, yielding one clean `中` + `...`.
+        let input = "中中中中";
+        let result = truncate_to_bytes(input, 5);
+        assert_eq!(result, "中...");
+        assert!(result.is_char_boundary(result.len() - 3));
+    }
+
+    #[test]
+    fn truncate_to_bytes_exact_boundary_no_split() {
+        // 6 bytes = exactly two `中`s; result stays untouched.
+        assert_eq!(truncate_to_bytes("中中", 6), "中中");
+    }
 }
