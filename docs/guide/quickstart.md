@@ -30,7 +30,7 @@ This opens an interactive REPL. Type a task and press Enter:
 > Read main.rs and explain the agent loop.
 ```
 
-The assistant reads files, runs commands, and edits code using its built-in tools. It loops — calling tools and feeding results back — until it produces a final text response.
+The assistant reads files, runs commands, and edits code using its built-in tools until it produces a final answer.
 
 ## What it can do
 
@@ -60,8 +60,3 @@ Drop a `CLAUDE.md` file in your project root to give the assistant project-speci
 ```
 
 See [Instruction Files](instructions.md) for the full discovery hierarchy.
-
-## Next steps
-
-- [Configuration](configuration.md) — API credentials, model selection, and all environment variables.
-- [Instruction Files](instructions.md) — discovery hierarchy, global vs. project scope, writing tips.

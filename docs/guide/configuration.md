@@ -2,16 +2,14 @@
 
 oxide-code loads configuration from multiple sources, merged in order of increasing priority:
 
-1. **Built-in defaults** — hardcoded in the binary.
+1. **Built-in defaults.**
 2. **User config file** — `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
-3. **Project config file** — the nearest `ox.toml` found by walking from the current directory upward.
-4. **Environment variables** — highest priority, always win.
-
-Each source only needs to specify the values it wants to override. Unset fields fall through to the next lower-priority source.
+3. **Project config file** — the nearest `ox.toml` found by walking up from the current directory.
+4. **Environment variables** — always win.
 
 ## Config file
 
-Create a TOML file at either location:
+All fields are optional. Only specify the values you want to override.
 
 ```toml
 # ~/.config/ox/config.toml (user-wide)
@@ -27,8 +25,6 @@ max_tokens = 8192
 show_thinking = true
 ```
 
-All sections and fields are optional. Project config (`ox.toml`) overrides user config (`~/.config/ox/config.toml`).
-
 ### `[client]` — API connection
 
 | Key          | Type    | Default                     | Description             |
@@ -40,16 +36,14 @@ All sections and fields are optional. Project config (`ox.toml`) overrides user 
 
 #### 1M context window — `[1m]` tag
 
-Append `[1m]` to `model` to opt into the 1M-context window on models that support it — any Sonnet 4.x, plus Opus 4.6 and newer:
+Append `[1m]` to `model` to opt into the 1M-token context window on models that support it (any Sonnet 4.x, plus Opus 4.6 and newer):
 
 ```toml
 [client]
 model = "claude-opus-4-7[1m]"
 ```
 
-The tag is stripped before the model string reaches the wire — it's a client-side convention matching claude-code. We don't auto-enable 1M based on the model family because subscriptions and third-party gateways vary in whether 1M access is included, and silently sending the beta header produces `HTTP 400 long context beta not available for this subscription`. Explicit opt-in sidesteps that entire class of error.
-
-If you tag a model that doesn't actually support 1M (e.g. `claude-haiku-4-5[1m]` — Haiku has a 200K window), the tag is silently dropped rather than forwarded to the API.
+1M access depends on your subscription or gateway, so it is opt-in rather than automatic. The tag is silently ignored on models without 1M support (e.g. Haiku).
 
 ### `[tui]` — Terminal UI
 
@@ -61,28 +55,13 @@ If you tag a model that doesn't actually support 1M (e.g. `claude-haiku-4-5[1m]`
 
 oxide-code checks three credential sources in order:
 
-### 1. API key (environment variable)
+1. `ANTHROPIC_API_KEY` environment variable.
+2. `api_key` under `[client]` in a config file.
+3. Claude Code OAuth credentials, if [Claude Code](https://code.claude.com/docs) is installed and signed in:
+    - **macOS** — the `"Claude Code-credentials"` Keychain entry (preferred), falling back to `~/.claude/.credentials.json`.
+    - **Linux** — `~/.claude/.credentials.json`.
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-This is the highest-priority method. The key is sent directly in the `x-api-key` header.
-
-### 2. API key (config file)
-
-Set `api_key` under `[client]` in your user or project config file. The environment variable takes precedence if both are set.
-
-### 3. Claude Code OAuth
-
-If no API key is found, oxide-code reads OAuth credentials created by [Claude Code](https://code.claude.com/docs):
-
-1. **macOS Keychain** — the `"Claude Code-credentials"` service entry, accessed via the `security-framework` crate.
-2. **Credentials file** — `~/.claude/.credentials.json`.
-
-On macOS, the Keychain is the authoritative source — preferred whenever present, with the credentials file as a fallback so a local file with inflated `expiresAt` cannot override a valid Keychain entry. Expired tokens are refreshed automatically. On Linux, only the file source is available (no Keychain support).
-
-You do not need to configure anything — if Claude Code is installed and authenticated, oxide-code picks up its credentials automatically.
+    Expired tokens are refreshed automatically. No configuration needed.
 
 ## Environment variables
 
