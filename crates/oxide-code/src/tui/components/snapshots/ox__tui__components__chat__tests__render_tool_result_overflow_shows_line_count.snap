@@ -1,15 +1,16 @@
 ---
 source: crates/oxide-code/src/tui/components/chat.rs
+assertion_line: 1527
 expression: "render_chat(&mut chat, 60, 14)"
 ---
-"  ▎ $ ls                                                    "
-"  ▎   ✓ ls out                                              "
-"  ▎     line 0                                              "
-"  ▎     line 1                                              "
-"  ▎     line 2                                              "
-"  ▎     line 3                                              "
-"  ▎     line 4                                              "
-"  ▎     ... 3 more lines                                    "
+"▎ $ ls                                                      "
+"▎ ✓ ls out                                                  "
+"▎ line 0                                                    "
+"▎ line 1                                                    "
+"▎ line 2                                                    "
+"▎ line 3                                                    "
+"▎ line 4                                                    "
+"▎ ... 3 more lines                                          "
 "                                                            "
 "                                                            "
 "                                                            "

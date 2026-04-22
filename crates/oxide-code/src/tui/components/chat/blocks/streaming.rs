@@ -7,8 +7,8 @@
 
 use ratatui::text::{Line, Span};
 
-use super::assistant::{ASSISTANT_PREFIX, render_assistant_markdown};
-use super::{BORDER_PREFIX, RenderCtx};
+use super::RenderCtx;
+use super::assistant::{ASSISTANT_CONT, ASSISTANT_PREFIX, render_assistant_markdown};
 
 /// Mutable streaming state for the current assistant response. Not a
 /// [`ChatBlock`](super::ChatBlock) — its render path needs context from
@@ -135,7 +135,7 @@ impl StreamingAssistant {
             let prefix = if starts_here {
                 ASSISTANT_PREFIX
             } else {
-                BORDER_PREFIX
+                ASSISTANT_CONT
             };
             out.push(Line::from(vec![
                 Span::styled(prefix.to_owned(), ctx.theme.secondary()),

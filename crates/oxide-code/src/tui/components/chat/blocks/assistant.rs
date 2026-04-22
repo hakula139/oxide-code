@@ -1,17 +1,24 @@
 //! Assistant text and thinking blocks.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
-use super::{
-    BORDER_PREFIX, ChatBlock, RenderCtx, border_continuation_prefix, border_markdown_line,
-    push_bordered_wrapped,
-};
+use super::{ChatBlock, RenderCtx, prepend_markdown_prefix, push_icon_wrapped};
 use crate::tui::markdown::render_markdown;
 
-/// First-line prefix for assistant messages — lavender bar + diamond icon.
-pub(super) const ASSISTANT_PREFIX: &str = "⟡ ▎ ";
+/// First-line prefix for assistant text — diamond + space. Continuation
+/// (and all lines when the streaming block is continuing a turn) uses a
+/// 2-column space indent.
+pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
 
-// ── Assistant Text ──
+/// Continuation prefix for assistant markdown — two spaces matching the
+/// visual width of [`ASSISTANT_PREFIX`].
+pub(super) const ASSISTANT_CONT: &str = "  ";
+
+/// First-line prefix for the thinking header — diamond + space.
+const THINKING_PREFIX: &str = "◇ ";
+
+// ── AssistantText ──
 
 /// A committed assistant text response, rendered through the markdown
 /// pipeline.
@@ -35,22 +42,23 @@ impl ChatBlock for AssistantText {
     }
 }
 
-/// Render assistant prose as a bordered markdown block.
+/// Render assistant prose as markdown with a first-line icon and a
+/// matching-width space indent on every subsequent line.
 ///
-/// `starts_new_turn = true` emits the assistant icon on the first line
-/// ([`ASSISTANT_PREFIX`]); `false` uses [`BORDER_PREFIX`] so the block
-/// continues an in-progress turn (used by the streaming cache after its
-/// first cached line has already been emitted).
+/// `starts_new_turn = true` emits [`ASSISTANT_PREFIX`] on the first line
+/// (a fresh turn). `false` uses [`ASSISTANT_CONT`] on every line so the
+/// block flows into an existing assistant turn (used by the streaming
+/// cache after its first line has already been emitted).
 ///
-/// The markdown renderer wraps to `width - BORDER_PREFIX.len()` so the
-/// left border doesn't push content past the terminal edge.
+/// The markdown renderer wraps to `width - 2` so the 2-column lead-in
+/// never pushes content past the terminal edge.
 pub(super) fn render_assistant_markdown(
     text: &str,
     ctx: &RenderCtx<'_>,
     starts_new_turn: bool,
 ) -> Vec<Line<'static>> {
-    let bar_style = ctx.theme.secondary();
-    let md_width = usize::from(ctx.width).saturating_sub(BORDER_PREFIX.len());
+    let icon_style = ctx.theme.secondary();
+    let md_width = usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width());
     let rendered = render_markdown(text, ctx.theme, md_width);
     rendered
         .lines
@@ -60,17 +68,17 @@ pub(super) fn render_assistant_markdown(
             let prefix = if i == 0 && starts_new_turn {
                 ASSISTANT_PREFIX
             } else {
-                BORDER_PREFIX
+                ASSISTANT_CONT
             };
-            border_markdown_line(line, prefix, bar_style)
+            prepend_markdown_prefix(line, prefix, icon_style)
         })
         .collect()
 }
 
-// ── Assistant Thinking ──
+// ── AssistantThinking ──
 
-/// Extended-thinking block, shown dimmed and italic under a "Thinking..."
-/// section header. Collapses to zero lines when `show_thinking` is off.
+/// Extended-thinking block, shown dimmed-italic under a `◇ Thinking`
+/// header. Collapses to zero lines when `show_thinking` is off.
 pub(crate) struct AssistantThinking {
     text: String,
 }
@@ -84,25 +92,20 @@ impl AssistantThinking {
 impl ChatBlock for AssistantThinking {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let header_style = ctx.theme.thinking();
-        let bar_style = ctx.theme.dim();
         let text_style = ctx.theme.thinking();
-        let cont_prefix = border_continuation_prefix(BORDER_PREFIX, bar_style);
         let width = usize::from(ctx.width);
 
-        let mut out = vec![Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Thinking...", header_style),
-        ])];
+        let mut out = Vec::new();
+        push_icon_wrapped(
+            &mut out,
+            THINKING_PREFIX,
+            header_style,
+            "Thinking...",
+            header_style,
+            width,
+        );
         for text_line in self.text.lines() {
-            push_bordered_wrapped(
-                &mut out,
-                BORDER_PREFIX,
-                bar_style,
-                text_line,
-                text_style,
-                width,
-                &cont_prefix,
-            );
+            push_icon_wrapped(&mut out, "  ", header_style, text_line, text_style, width);
         }
         out
     }

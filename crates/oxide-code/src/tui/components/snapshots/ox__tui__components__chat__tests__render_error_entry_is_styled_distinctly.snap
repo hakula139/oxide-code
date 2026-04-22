@@ -1,8 +1,9 @@
 ---
 source: crates/oxide-code/src/tui/components/chat.rs
+assertion_line: 1534
 expression: "render_chat(&mut chat, 60, 4)"
 ---
-"  ▎   ✗ API error (HTTP 503): overloaded                    "
+"✗ API error (HTTP 503): overloaded                          "
 "                                                            "
 "                                                            "
 "                                                            "

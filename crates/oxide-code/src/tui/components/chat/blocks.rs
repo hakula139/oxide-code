@@ -24,25 +24,10 @@ pub(super) use user::UserMessage;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
-
-// ── Shared Prefix Constants ──
-
-/// Left bar character for bordered content.
-const BAR: &str = "▎";
-
-/// Border prefix for continuation lines and non-first content lines.
-const BORDER_PREFIX: &str = "  ▎ ";
-
-/// Border prefix for status lines (indicator + label).
-const STATUS_LINE_PREFIX: &str = "  ▎   ";
-
-/// Border prefix for status-body lines (tool output, wrapped label
-/// continuation). Also used as the continuation prefix for the status
-/// line itself so wrapped labels align under the indicator.
-const STATUS_BODY_PREFIX: &str = "  ▎     ";
 
 // ── Trait ──
 
@@ -59,11 +44,11 @@ pub(super) trait ChatBlock: Send + Sync {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
     /// Whether the block wants breathing room (a blank line) on both
-    /// sides. Standalone blocks (user, assistant, thinking) return
-    /// `true`; tool-group blocks (call, result) and error markers
-    /// return `false` so they sit flush with their neighbors. The
-    /// container de-duplicates adjacent blank lines, so two standalone
-    /// blocks in a row produce exactly one blank between them.
+    /// sides. Standalone blocks (user, assistant, thinking, error)
+    /// return `true`; tool-group blocks (call, result) return `false`
+    /// so the call and its output hug. The container de-duplicates
+    /// adjacent blank lines, so two standalone blocks in a row produce
+    /// exactly one blank between them.
     fn standalone(&self) -> bool {
         true
     }
@@ -103,110 +88,112 @@ pub(super) trait ChatBlock: Send + Sync {
 
 // ── Shared Helpers ──
 
-/// Builds a continuation prefix that keeps the `▎` bar aligned under the
-/// original prefix. For a prefix like `"  ▎ "` (4 cols), produces spans
-/// `["  ", "▎", " "]` where the bar span is styled.
-fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
-    if let Some(bar_pos) = prefix.find(BAR) {
-        let left = &prefix[..bar_pos];
-        let right = &prefix[bar_pos + BAR.len()..];
-        vec![
-            Span::raw(left.to_owned()),
-            Span::styled(BAR, bar_style),
-            Span::raw(right.to_owned()),
-        ]
-    } else {
-        vec![Span::raw(" ".repeat(prefix.len()))]
-    }
+/// Pushes a line with a styled first-line icon prefix and wraps
+/// continuation to a matching-width space indent. Used by the bar-less
+/// blocks (user, assistant, thinking body, error) so their wrapped
+/// content aligns under the text, not under the icon itself.
+///
+/// `prefix` is measured in display columns (not bytes) so multi-byte
+/// icons like `❯` wrap correctly.
+pub(super) fn push_icon_wrapped(
+    out: &mut Vec<Line<'static>>,
+    prefix: &str,
+    prefix_style: Style,
+    text: &str,
+    text_style: Style,
+    width: usize,
+) {
+    let indent = prefix.width();
+    let cont_prefix = vec![Span::raw(" ".repeat(indent))];
+    let line = Line::from(vec![
+        Span::styled(prefix.to_owned(), prefix_style),
+        Span::styled(text.to_owned(), text_style),
+    ]);
+    out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
 }
 
-/// Prepends a styled border prefix to a markdown-rendered line.
-fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> Line<'static> {
-    let mut spans = vec![Span::styled(prefix.to_owned(), bar_style)];
+/// Prepends a styled prefix span to a markdown-rendered line. Used by
+/// the bar-less markdown blocks (assistant text, streaming, thinking
+/// body) for per-line first-column decoration (icon on line 1, plain
+/// indent on continuations).
+pub(super) fn prepend_markdown_prefix(
+    line: Line<'static>,
+    prefix: &str,
+    prefix_style: Style,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(prefix.to_owned(), prefix_style)];
     spans.extend(line.spans);
     Line::from(spans)
 }
 
-/// Pushes a bordered single text line into `out`, wrapping to `width`.
-/// Shared by blocks with the "styled bar prefix + styled text" shape:
-/// user messages, thinking prose, tool output bodies.
-fn push_bordered_wrapped(
-    out: &mut Vec<Line<'static>>,
-    prefix: &str,
-    bar_style: Style,
-    text: &str,
-    text_style: Style,
-    width: usize,
-    cont_prefix: &[Span<'static>],
-) {
-    let line = Line::from(vec![
-        Span::styled(prefix.to_owned(), bar_style),
-        Span::styled(text.to_owned(), text_style),
-    ]);
-    out.extend(wrap_line(line, width, prefix.len(), Some(cont_prefix)));
-}
-
-/// Renders a status line with success / error indicator, styled label,
-/// and wrapped continuation. Shared between [`ToolResultBlock`] and
-/// [`ErrorBlock`] so their visual treatment stays consistent.
-fn render_status_line(
-    out: &mut Vec<Line<'static>>,
-    ctx: &RenderCtx<'_>,
-    label: &str,
-    is_error: bool,
-) {
-    let (indicator, indicator_style) = if is_error {
-        ("✗", ctx.theme.error())
-    } else {
-        ("✓", ctx.theme.success())
-    };
-    let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = border_continuation_prefix(STATUS_BODY_PREFIX, border_style);
-    let line = Line::from(vec![
-        Span::styled(STATUS_LINE_PREFIX.to_owned(), border_style),
-        Span::styled(indicator, indicator_style),
-        Span::raw(" "),
-        Span::styled(label.to_owned(), ctx.theme.muted()),
-    ]);
-    out.extend(wrap_line(
-        line,
-        usize::from(ctx.width),
-        STATUS_BODY_PREFIX.len(),
-        Some(&cont_prefix),
-    ));
-}
-
-fn border_style_for(theme: &Theme, is_error: bool) -> Style {
-    if is_error {
-        theme.error()
-    } else {
-        theme.tool_border()
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use ratatui::style::{Color, Style};
+
     use super::*;
 
-    // ── border_continuation_prefix ──
+    // ── push_icon_wrapped ──
 
     #[test]
-    fn border_continuation_prefix_preserves_bar_position() {
-        let style = Style::default();
-        let spans = border_continuation_prefix("  ▎ ", style);
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "  ");
-        assert_eq!(spans[1].content, BAR);
-        assert_eq!(spans[2].content, " ");
+    fn push_icon_wrapped_short_text_single_line() {
+        let mut out = Vec::new();
+        push_icon_wrapped(
+            &mut out,
+            "❯ ",
+            Style::default().fg(Color::Red),
+            "hello",
+            Style::default(),
+            80,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].spans.len(), 2);
+        assert_eq!(out[0].spans[0].content, "❯ ");
+        assert_eq!(out[0].spans[1].content, "hello");
     }
 
     #[test]
-    fn border_continuation_prefix_without_bar_pads_with_spaces() {
-        // Defensive fallback for any future prefix that doesn't contain
-        // the bar — return plain spaces of the same visual width.
-        let style = Style::default();
-        let spans = border_continuation_prefix("    ", style);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, "    ");
+    fn push_icon_wrapped_wraps_long_text_with_indent() {
+        let mut out = Vec::new();
+        push_icon_wrapped(
+            &mut out,
+            "❯ ",
+            Style::default(),
+            "one two three four five six seven",
+            Style::default(),
+            16,
+        );
+        assert!(out.len() >= 2, "should wrap: {out:?}");
+        // Continuation starts with a 2-col space indent (width of "❯ ").
+        let cont = &out[1];
+        assert_eq!(cont.spans[0].content.as_ref(), "  ");
+    }
+
+    #[test]
+    fn push_icon_wrapped_uses_display_width_not_bytes() {
+        // `❯ ` is 4 bytes (3 for ❯ + 1 for space) but 2 display columns.
+        // Continuation indent must use columns, not bytes.
+        let mut out = Vec::new();
+        push_icon_wrapped(
+            &mut out,
+            "❯ ",
+            Style::default(),
+            "one two three four five",
+            Style::default(),
+            12,
+        );
+        assert!(out.len() >= 2);
+        assert_eq!(out[1].spans[0].content.as_ref(), "  ");
+    }
+
+    // ── prepend_markdown_prefix ──
+
+    #[test]
+    fn prepend_markdown_prefix_adds_styled_prefix() {
+        let line = Line::from(vec![Span::raw("content")]);
+        let result = prepend_markdown_prefix(line, "◉ ", Style::default().fg(Color::Blue));
+        assert_eq!(result.spans.len(), 2);
+        assert_eq!(result.spans[0].content, "◉ ");
+        assert_eq!(result.spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(result.spans[1].content, "content");
     }
 }

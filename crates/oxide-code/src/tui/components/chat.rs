@@ -862,7 +862,7 @@ mod tests {
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("partial response");
         let text = all_text(&chat);
-        assert!(text.contains('⟡'), "should show assistant icon");
+        assert!(text.contains('◉'), "should show assistant icon");
         assert!(text.contains("partial response"));
     }
 
@@ -898,7 +898,7 @@ mod tests {
         chat.append_stream_token("response");
 
         let text = all_text(&chat);
-        assert!(text.contains('⟡'), "new turn should show assistant icon");
+        assert!(text.contains('◉'), "new turn should show assistant icon");
     }
 
     #[test]
@@ -911,7 +911,7 @@ mod tests {
         chat.streaming = Some(s);
 
         let text = all_text(&chat);
-        let count = text.matches('⟡').count();
+        let count = text.matches('◉').count();
         assert_eq!(count, 1, "icon should appear once, not duplicated");
     }
 
@@ -1562,7 +1562,7 @@ mod tests {
         let mut chat = test_chat();
         chat.blocks.push(Box::new(AssistantText::new("response")));
         let text = all_text(&chat);
-        assert!(text.contains('⟡'));
+        assert!(text.contains('◉'));
         assert!(text.contains("response"));
     }
 

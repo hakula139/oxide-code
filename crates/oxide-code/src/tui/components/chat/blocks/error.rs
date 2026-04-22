@@ -1,11 +1,14 @@
-//! Error block — reuses the shared status-line visual with the error
-//! indicator.
+//! Error block — flat `✗ message` in the error color, no left bar.
 
 use ratatui::text::Line;
 
-use super::{ChatBlock, RenderCtx, render_status_line};
+use super::{ChatBlock, RenderCtx, push_icon_wrapped};
 
-/// A fatal agent or API error, rendered as a single ✗-prefixed line.
+/// First-line prefix for errors — cross mark + space, rendered in the
+/// error color. Continuation wraps to a 2-column space indent.
+const ERROR_PREFIX: &str = "✗ ";
+
+/// A fatal agent or API error, rendered as a single red line.
 pub(crate) struct ErrorBlock {
     message: String,
 }
@@ -20,13 +23,17 @@ impl ErrorBlock {
 
 impl ChatBlock for ErrorBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        let style = ctx.theme.error();
         let mut out = Vec::new();
-        render_status_line(&mut out, ctx, &self.message, true);
+        push_icon_wrapped(
+            &mut out,
+            ERROR_PREFIX,
+            style,
+            &self.message,
+            style,
+            usize::from(ctx.width),
+        );
         out
-    }
-
-    fn standalone(&self) -> bool {
-        false
     }
 
     fn is_error_marker(&self) -> bool {
