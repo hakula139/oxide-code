@@ -665,6 +665,12 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("first"));
         assert!(text.contains("second"));
+        // Assistant text renders bar-less after the redesign; load_history
+        // is a natural place to pin this without a standalone test.
+        assert!(
+            !text.contains('▎'),
+            "assistant text should render without the left bar: {text}"
+        );
     }
 
     #[test]
@@ -833,6 +839,12 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains('❯'));
         assert!(text.contains("hello world"));
+        // Bar redesign: user messages render bar-less. A regressed snapshot
+        // that re-adds `▎` would land silently without this invariant.
+        assert!(
+            !text.contains('▎'),
+            "user message should render without the left bar: {text}"
+        );
     }
 
     #[test]
@@ -1136,6 +1148,12 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains('$'));
         assert!(text.contains("ls -la"));
+        // Bar is preserved specifically on tool call / tool result — it
+        // visually groups the call with its output and color-codes status.
+        assert!(
+            text.contains('▎'),
+            "tool call should retain the left bar: {text}"
+        );
     }
 
     #[test]
@@ -1244,6 +1262,14 @@ mod tests {
         assert!(text.contains("line 4"));
         assert!(!text.contains("line 5"));
         assert!(text.contains("... +5 lines"));
+        // Body-indent invariant: output lines sit at col 4 (`▎   `), past
+        // the `✓`/`✗` header at col 2. Anchored to the exact prefix so a
+        // regression collapsing back to col 2 fails here, not just in
+        // snapshots.
+        assert!(
+            text.contains("▎   line 0"),
+            "tool result body should indent past the status indicator: {text}"
+        );
     }
 
     #[test]
@@ -1306,6 +1332,10 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("✗"));
         assert!(text.contains("something broke"));
+        assert!(
+            !text.contains('▎'),
+            "error block should render without the left bar: {text}"
+        );
     }
 
     // ── last_is_error ──
