@@ -1,10 +1,9 @@
-//! Error block — reuses the tool-result status-line visual with the
-//! error indicator.
+//! Error block — reuses the shared status-line visual with the error
+//! indicator.
 
 use ratatui::text::Line;
 
-use super::tool::render_status_line;
-use super::{ChatBlock, RenderCtx};
+use super::{ChatBlock, RenderCtx, render_status_line};
 
 /// A fatal agent or API error, rendered as a single ✗-prefixed line.
 pub(crate) struct ErrorBlock {
@@ -28,5 +27,10 @@ impl ChatBlock for ErrorBlock {
 
     fn standalone(&self) -> bool {
         false
+    }
+
+    #[cfg(test)]
+    fn is_error_marker(&self) -> bool {
+        true
     }
 }

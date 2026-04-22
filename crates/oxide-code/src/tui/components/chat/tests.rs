@@ -901,6 +901,41 @@ fn error_block_shows_error_indicator() {
     assert!(text.contains("something broke"));
 }
 
+// ── last_is_error ──
+
+#[test]
+fn last_is_error_true_after_push_error() {
+    let mut chat = test_chat();
+    chat.push_error("boom");
+    assert!(chat.last_is_error());
+}
+
+#[test]
+fn last_is_error_false_for_non_error_blocks() {
+    // Exercises the `ChatBlock::is_error_marker` default impl on every
+    // non-error variant. A failed tool result also renders a ✗ but
+    // `is_error_marker` stays `false` — the predicate is about block
+    // identity, not rendered glyphs.
+    let mut chat = test_chat();
+    chat.push_user_message("hello".into());
+    assert!(!chat.last_is_error());
+
+    chat.push_tool_call("$", "ls");
+    assert!(!chat.last_is_error());
+
+    chat.push_tool_result("failed", "boom", true);
+    assert!(
+        !chat.last_is_error(),
+        "failed tool result is not an error marker"
+    );
+}
+
+#[test]
+fn last_is_error_false_when_no_blocks() {
+    let chat = test_chat();
+    assert!(!chat.last_is_error());
+}
+
 // ── Thinking ──
 
 #[test]

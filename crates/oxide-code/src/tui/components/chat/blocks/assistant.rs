@@ -4,9 +4,9 @@ use ratatui::text::{Line, Span};
 
 use super::{
     BORDER_PREFIX, ChatBlock, RenderCtx, border_continuation_prefix, border_markdown_line,
+    push_bordered_wrapped,
 };
 use crate::tui::markdown::render_markdown;
-use crate::tui::wrap::wrap_line;
 
 /// First-line prefix for assistant messages — lavender bar + diamond icon.
 pub(super) const ASSISTANT_PREFIX: &str = "⟡ ▎ ";
@@ -89,19 +89,20 @@ impl ChatBlock for AssistantThinking {
         let cont_prefix = border_continuation_prefix(BORDER_PREFIX, bar_style);
         let width = usize::from(ctx.width);
 
-        let mut out = Vec::new();
-        out.push(Line::from(vec![
+        let mut out = vec![Line::from(vec![
             Span::raw("  "),
             Span::styled("Thinking...", header_style),
-        ]));
+        ])];
         for text_line in self.text.lines() {
-            let line = Line::from(vec![
-                Span::styled(BORDER_PREFIX.to_owned(), bar_style),
-                Span::styled(text_line.to_owned(), text_style),
-            ]);
-            for wrapped in wrap_line(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
-                out.push(wrapped);
-            }
+            push_bordered_wrapped(
+                &mut out,
+                BORDER_PREFIX,
+                bar_style,
+                text_line,
+                text_style,
+                width,
+                &cont_prefix,
+            );
         }
         out
     }

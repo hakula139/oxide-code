@@ -16,24 +16,33 @@ mod streaming;
 mod tool;
 mod user;
 
-pub(crate) use assistant::{AssistantText, AssistantThinking};
-pub(crate) use error::ErrorBlock;
-pub(crate) use streaming::StreamingAssistant;
-pub(crate) use tool::{ToolCallBlock, ToolResultBlock};
-pub(crate) use user::UserMessage;
+pub(super) use assistant::{AssistantText, AssistantThinking};
+pub(super) use error::ErrorBlock;
+pub(super) use streaming::StreamingAssistant;
+pub(super) use tool::{ToolCallBlock, ToolResultBlock};
+pub(super) use user::UserMessage;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::tui::theme::Theme;
+use crate::tui::wrap::wrap_line;
 
 // ── Shared Prefix Constants ──
 
 /// Left bar character for bordered content.
-pub(super) const BAR: &str = "▎";
+const BAR: &str = "▎";
 
 /// Border prefix for continuation lines and non-first content lines.
-pub(super) const BORDER_PREFIX: &str = "  ▎ ";
+const BORDER_PREFIX: &str = "  ▎ ";
+
+/// Border prefix for status lines (indicator + label).
+const STATUS_LINE_PREFIX: &str = "  ▎   ";
+
+/// Border prefix for status-body lines (tool output, wrapped label
+/// continuation). Also used as the continuation prefix for the status
+/// line itself so wrapped labels align under the indicator.
+const STATUS_BODY_PREFIX: &str = "  ▎     ";
 
 // ── Trait ──
 
@@ -62,8 +71,7 @@ pub(crate) trait ChatBlock: Send + Sync {
     /// Whether the block is visible in the current context. Thinking
     /// blocks collapse to zero when `show_thinking` is off, keeping the
     /// conditional in the block itself rather than in the container.
-    fn visible(&self, ctx: &RenderCtx<'_>) -> bool {
-        _ = ctx;
+    fn visible(&self, _ctx: &RenderCtx<'_>) -> bool {
         true
     }
 
@@ -74,6 +82,15 @@ pub(crate) trait ChatBlock: Send + Sync {
     fn continues_assistant_turn(&self) -> bool {
         false
     }
+
+    /// Whether this block is a fatal error marker. A dedicated
+    /// predicate avoids `Any`-based downcasting just for tests: the
+    /// parent module uses it to assert on error dispatch without
+    /// scraping rendered glyphs.
+    #[cfg(test)]
+    fn is_error_marker(&self) -> bool {
+        false
+    }
 }
 
 // ── Shared Helpers ──
@@ -81,7 +98,7 @@ pub(crate) trait ChatBlock: Send + Sync {
 /// Builds a continuation prefix that keeps the `▎` bar aligned under the
 /// original prefix. For a prefix like `"  ▎ "` (4 cols), produces spans
 /// `["  ", "▎", " "]` where the bar span is styled.
-pub(super) fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
+fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
     if let Some(bar_pos) = prefix.find(BAR) {
         let left = &prefix[..bar_pos];
         let right = &prefix[bar_pos + BAR.len()..];
@@ -96,19 +113,74 @@ pub(super) fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<
 }
 
 /// Prepends a styled border prefix to a markdown-rendered line.
-pub(super) fn border_markdown_line(
-    line: Line<'static>,
-    prefix: &str,
-    bar_style: Style,
-) -> Line<'static> {
+fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> Line<'static> {
     let mut spans = vec![Span::styled(prefix.to_owned(), bar_style)];
     spans.extend(line.spans);
     Line::from(spans)
 }
 
+/// Pushes a bordered single text line into `out`, wrapping to `width`.
+/// Shared by blocks with the "styled bar prefix + styled text" shape:
+/// user messages, thinking prose, tool output bodies.
+fn push_bordered_wrapped(
+    out: &mut Vec<Line<'static>>,
+    prefix: &str,
+    bar_style: Style,
+    text: &str,
+    text_style: Style,
+    width: usize,
+    cont_prefix: &[Span<'static>],
+) {
+    let line = Line::from(vec![
+        Span::styled(prefix.to_owned(), bar_style),
+        Span::styled(text.to_owned(), text_style),
+    ]);
+    out.extend(wrap_line(line, width, prefix.len(), Some(cont_prefix)));
+}
+
+/// Renders a status line with success / error indicator, styled label,
+/// and wrapped continuation. Shared between [`ToolResultBlock`] and
+/// [`ErrorBlock`] so their visual treatment stays consistent.
+fn render_status_line(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    label: &str,
+    is_error: bool,
+) {
+    let (indicator, indicator_style) = if is_error {
+        ("✗", ctx.theme.error())
+    } else {
+        ("✓", ctx.theme.success())
+    };
+    let border_style = border_style_for(ctx.theme, is_error);
+    let cont_prefix = border_continuation_prefix(STATUS_BODY_PREFIX, border_style);
+    let line = Line::from(vec![
+        Span::styled(STATUS_LINE_PREFIX.to_owned(), border_style),
+        Span::styled(indicator, indicator_style),
+        Span::raw(" "),
+        Span::styled(label.to_owned(), ctx.theme.muted()),
+    ]);
+    out.extend(wrap_line(
+        line,
+        usize::from(ctx.width),
+        STATUS_BODY_PREFIX.len(),
+        Some(&cont_prefix),
+    ));
+}
+
+fn border_style_for(theme: &Theme, is_error: bool) -> Style {
+    if is_error {
+        theme.error()
+    } else {
+        theme.tool_border()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── border_continuation_prefix ──
 
     #[test]
     fn border_continuation_prefix_preserves_bar_position() {

@@ -199,22 +199,11 @@ impl ChatView {
 
     /// Whether the tail block is an [`ErrorBlock`]. Same rationale as
     /// [`entry_count`][Self::entry_count] — lets `tui::app` tests assert
-    /// on error dispatch without depending on the block module's
-    /// internals. Uses downcasting via a marker trait isn't available,
-    /// so we introspect the last block's render output for the error
-    /// indicator.
+    /// on error dispatch without reaching through the private `blocks`
+    /// field or the block module's internals.
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
-        self.blocks.last().is_some_and(|b| {
-            let ctx = RenderCtx {
-                width: 80,
-                theme: &self.theme,
-                show_thinking: self.show_thinking,
-            };
-            b.render(&ctx)
-                .iter()
-                .any(|l| l.spans.iter().any(|s| s.content.contains('✗')))
-        })
+        self.blocks.last().is_some_and(|b| b.is_error_marker())
     }
 
     /// Updates cached viewport height and syncs scroll position. Called
@@ -361,13 +350,17 @@ impl ChatView {
             }
         }
 
-        // Live thinking (transient — not stored in blocks).
-        if self.show_thinking && !self.thinking_buffer.is_empty() {
+        // Live thinking (transient — not stored in blocks). Visibility
+        // lives in `AssistantThinking::visible`, same contract as the
+        // committed-blocks loop above.
+        if !self.thinking_buffer.is_empty() {
             let thinking = AssistantThinking::new(self.thinking_buffer.clone());
-            if !lines.is_empty() && last_has_width(&lines) {
-                lines.push(Line::raw(""));
+            if thinking.visible(&ctx) {
+                if !lines.is_empty() && last_has_width(&lines) {
+                    lines.push(Line::raw(""));
+                }
+                lines.extend(thinking.render(&ctx));
             }
-            lines.extend(thinking.render(&ctx));
         }
 
         // Streaming assistant tail (not yet committed).

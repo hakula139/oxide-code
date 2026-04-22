@@ -1,9 +1,10 @@
 //! User message block.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
-use super::{BORDER_PREFIX, ChatBlock, RenderCtx, border_continuation_prefix};
-use crate::tui::wrap::wrap_line;
+use super::{
+    BORDER_PREFIX, ChatBlock, RenderCtx, border_continuation_prefix, push_bordered_wrapped,
+};
 
 /// First-line prefix for user messages — peach bar + chevron icon.
 const USER_PREFIX: &str = "❯ ▎ ";
@@ -27,17 +28,17 @@ impl ChatBlock for UserMessage {
         let width = usize::from(ctx.width);
 
         let mut out = Vec::new();
-        let mut is_first = true;
-        for text_line in self.text.trim().lines() {
-            let prefix = if is_first { USER_PREFIX } else { BORDER_PREFIX };
-            is_first = false;
-            let line = Line::from(vec![
-                Span::styled(prefix.to_owned(), bar_style),
-                Span::styled(text_line.to_owned(), text_style),
-            ]);
-            for wrapped in wrap_line(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
-                out.push(wrapped);
-            }
+        for (i, text_line) in self.text.trim().lines().enumerate() {
+            let prefix = if i == 0 { USER_PREFIX } else { BORDER_PREFIX };
+            push_bordered_wrapped(
+                &mut out,
+                prefix,
+                bar_style,
+                text_line,
+                text_style,
+                width,
+                &cont_prefix,
+            );
         }
         out
     }
