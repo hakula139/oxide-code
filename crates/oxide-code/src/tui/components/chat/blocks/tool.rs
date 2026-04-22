@@ -159,7 +159,7 @@ fn render_output_body(
         let label = if n == 1 { "line" } else { "lines" };
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(format!("… +{n} {label}"), ctx.theme.dim()),
+            Span::styled(format!("... +{n} {label}"), ctx.theme.dim()),
         ]));
     }
 }

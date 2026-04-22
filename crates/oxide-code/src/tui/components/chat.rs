@@ -1242,7 +1242,7 @@ mod tests {
         assert!(text.contains("line 0"));
         assert!(text.contains("line 4"));
         assert!(!text.contains("line 5"));
-        assert!(text.contains("… +5 lines"));
+        assert!(text.contains("... +5 lines"));
     }
 
     #[test]
@@ -1266,7 +1266,7 @@ mod tests {
         chat.push_tool_result("result", &output.join("\n"), false);
         let text = all_text(&chat);
         assert!(
-            !text.contains('…'),
+            !text.contains("... +"),
             "no truncation summary expected: {text}"
         );
     }
@@ -1278,7 +1278,7 @@ mod tests {
         let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
         chat.push_tool_result("result", &output.join("\n"), false);
         let text = all_text(&chat);
-        assert!(text.contains("… +1 line"));
+        assert!(text.contains("... +1 line"));
         assert!(!text.contains("lines"), "singular 'line' expected: {text}");
     }
 
