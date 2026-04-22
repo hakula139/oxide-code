@@ -9,6 +9,7 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use super::{ChatBlock, RenderCtx};
 use crate::tui::theme::Theme;
@@ -68,7 +69,7 @@ impl ChatBlock for ToolCallBlock {
         wrap_line(
             line,
             usize::from(ctx.width),
-            STATUS_LINE_CONT.len(),
+            STATUS_LINE_CONT.width(),
             Some(&cont_prefix),
         )
     }
@@ -149,7 +150,7 @@ fn render_output_body(
         out.extend(wrap_line(
             line,
             width,
-            STATUS_LINE_CONT.len(),
+            STATUS_LINE_CONT.width(),
             Some(&cont_prefix),
         ));
     }
@@ -189,7 +190,7 @@ fn render_status_line(
     out.extend(wrap_line(
         line,
         usize::from(ctx.width),
-        STATUS_LINE_CONT.len(),
+        STATUS_LINE_CONT.width(),
         Some(&cont_prefix),
     ));
 }

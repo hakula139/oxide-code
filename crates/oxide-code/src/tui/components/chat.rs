@@ -433,6 +433,7 @@ mod tests {
     use indoc::indoc;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::message::{ContentBlock, Role};
@@ -1181,7 +1182,7 @@ mod tests {
             text.lines.len(),
         );
         for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert!(
                 width <= 60,
                 "wrapped tool call line must fit the width budget (got {width}): {line:?}",
@@ -1224,7 +1225,7 @@ mod tests {
             text.lines.len(),
         );
         for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert!(
                 width <= 50,
                 "wrapped tool result line must fit width (got {width}): {line:?}",
