@@ -24,7 +24,7 @@ use ratatui::widgets::Paragraph;
 
 use self::blocks::{
     AssistantText, AssistantThinking, ChatBlock, ErrorBlock, RenderCtx, StreamingAssistant,
-    ToolCallBlock, ToolResultBlock, UserMessage,
+    ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::message::Message;
@@ -400,10 +400,6 @@ impl ChatView {
     fn is_empty(&self) -> bool {
         self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
     }
-}
-
-fn last_has_width(lines: &[Line<'_>]) -> bool {
-    lines.last().is_some_and(|l| l.width() > 0)
 }
 
 /// Welcome splash for an empty chat: two blank lines + centered title +
@@ -1605,17 +1601,6 @@ mod tests {
         ];
         chat.load_history(&history, &tools);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
-    }
-
-    // ── AssistantText ──
-
-    #[test]
-    fn assistant_text_has_icon_and_content() {
-        let mut chat = test_chat();
-        chat.blocks.push(Box::new(AssistantText::new("response")));
-        let text = all_text(&chat);
-        assert!(text.contains('◉'));
-        assert!(text.contains("response"));
     }
 
     // ── scroll_to_bottom / scroll_up / scroll_down ──

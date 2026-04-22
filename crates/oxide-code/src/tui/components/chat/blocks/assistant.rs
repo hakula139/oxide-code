@@ -91,21 +91,20 @@ impl AssistantThinking {
 
 impl ChatBlock for AssistantThinking {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        let header_style = ctx.theme.thinking();
-        let text_style = ctx.theme.thinking();
+        let style = ctx.theme.thinking();
         let width = usize::from(ctx.width);
 
         let mut out = Vec::new();
         push_icon_wrapped(
             &mut out,
             THINKING_PREFIX,
-            header_style,
+            style,
             "Thinking...",
-            header_style,
+            style,
             width,
         );
         for text_line in self.text.lines() {
-            push_icon_wrapped(&mut out, "  ", header_style, text_line, text_style, width);
+            push_icon_wrapped(&mut out, "  ", style, text_line, style, width);
         }
         out
     }

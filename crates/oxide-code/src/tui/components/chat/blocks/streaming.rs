@@ -105,7 +105,7 @@ impl StreamingAssistant {
     ) {
         // Leading gap when starting a fresh turn and the transcript
         // already has content.
-        if !continues_turn && out.last().is_some_and(|l| l.width() > 0) {
+        if !continues_turn && super::last_has_width(out) {
             out.push(Line::raw(""));
         }
 

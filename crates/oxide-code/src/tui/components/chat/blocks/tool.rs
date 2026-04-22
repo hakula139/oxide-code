@@ -165,9 +165,8 @@ fn render_output_body(
     }
 }
 
-/// Renders a status line with success / error indicator, styled label,
-/// and wrapped continuation. Shared between the tool result status
-/// header and any future bar-carrying block.
+/// Renders the tool-result header line — success / error indicator,
+/// styled label, and wrapped continuation under the bar.
 fn render_status_line(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -198,18 +197,19 @@ fn render_status_line(
 /// Builds a continuation prefix that keeps the `▎` bar aligned under
 /// the original prefix. For a prefix like `"▎   "` (4 cols), produces
 /// `["", "▎", "   "]` where the bar span is styled.
+///
+/// Precondition: `prefix` must contain [`BAR`] — every tool-rendering
+/// call site passes either [`BORDER_PREFIX`] or [`STATUS_LINE_CONT`],
+/// both of which satisfy it.
 fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
-    if let Some(bar_pos) = prefix.find(BAR) {
-        let left = &prefix[..bar_pos];
-        let right = &prefix[bar_pos + BAR.len()..];
-        vec![
-            Span::raw(left.to_owned()),
-            Span::styled(BAR, bar_style),
-            Span::raw(right.to_owned()),
-        ]
-    } else {
-        vec![Span::raw(" ".repeat(prefix.len()))]
-    }
+    let bar_pos = prefix.find(BAR).expect("prefix must contain ▎ bar");
+    let left = &prefix[..bar_pos];
+    let right = &prefix[bar_pos + BAR.len()..];
+    vec![
+        Span::raw(left.to_owned()),
+        Span::styled(BAR, bar_style),
+        Span::raw(right.to_owned()),
+    ]
 }
 
 fn border_style_for(theme: &Theme, is_error: bool) -> Style {
@@ -247,14 +247,6 @@ mod tests {
         assert_eq!(spans[0].content, "");
         assert_eq!(spans[1].content, BAR);
         assert_eq!(spans[2].content, " ");
-    }
-
-    #[test]
-    fn border_continuation_prefix_without_bar_pads_with_spaces() {
-        let style = Style::default();
-        let spans = border_continuation_prefix("    ", style);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content, "    ");
     }
 
     // ── truncate_to_bytes ──

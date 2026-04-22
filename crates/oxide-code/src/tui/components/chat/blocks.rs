@@ -126,6 +126,13 @@ pub(super) fn prepend_markdown_prefix(
     Line::from(spans)
 }
 
+/// Whether the last rendered line is non-empty. Used to decide where
+/// to insert blank-line separators between blocks — adjacent blanks
+/// collapse to one.
+pub(super) fn last_has_width(lines: &[Line<'_>]) -> bool {
+    lines.last().is_some_and(|l| l.width() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Color, Style};
