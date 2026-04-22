@@ -74,7 +74,7 @@ ox     # Start an interactive session
 │   │   │       ├── assistant.rs    # AssistantText + AssistantThinking
 │   │   │       ├── error.rs        # ErrorBlock
 │   │   │       ├── streaming.rs    # StreamingAssistant (in-flight buffer + render cache)
-│   │   │       ├── tool.rs         # ToolCallBlock + ToolResultBlock + shared status line
+│   │   │       ├── tool.rs         # ToolCallBlock + ToolResultBlock
 │   │   │       └── user.rs         # UserMessage
 │   │   ├── input.rs                # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs               # Status bar (model, spinner, status, working directory)
