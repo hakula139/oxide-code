@@ -14,83 +14,83 @@ ox     # Start an interactive session
 
 ```text
 .
-├── crates/oxide-code/          # Main binary crate
-├── docs/                       # Roadmap and research notes
-└── target/                     # Build output
+├── crates/oxide-code/              # Main binary crate
+├── docs/                           # Roadmap and research notes
+└── target/                         # Build output
 ```
 
 ### Crate Structure (`crates/oxide-code/src/`)
 
 ```text
 .
-├── agent.rs                    # Agent turn loop, stream accumulation, tool dispatch
+├── agent.rs                        # Agent turn loop, stream accumulation, tool dispatch
 ├── agent/
-│   └── event.rs                # AgentEvent, UserAction, AgentSink trait, StdioSink
-├── client.rs                   # Client module root
+│   └── event.rs                    # AgentEvent, UserAction, AgentSink trait, StdioSink
+├── client.rs                       # Client module root
 ├── client/
-│   ├── anthropic.rs            # Anthropic Messages API streaming client
-│   └── billing.rs              # Billing attribution header (fingerprint, cch attestation)
-├── config.rs                   # Configuration loading and layered merging
+│   ├── anthropic.rs                # Anthropic Messages API streaming client
+│   └── billing.rs                  # Billing attribution header (fingerprint, cch attestation)
+├── config.rs                       # Configuration loading and layered merging
 ├── config/
-│   ├── file.rs                 # TOML config file discovery, parsing, and merge (user + project)
-│   └── oauth.rs                # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
-├── main.rs                     # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
-├── message.rs                  # Conversation message types
-├── model.rs                    # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)
-├── prompt.rs                   # System prompt builder (section assembly)
+│   ├── file.rs                     # TOML config file discovery, parsing, and merge (user + project)
+│   └── oauth.rs                    # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
+├── main.rs                         # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
+├── message.rs                      # Conversation message types
+├── model.rs                        # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)
+├── prompt.rs                       # System prompt builder (section assembly)
 ├── prompt/
-│   ├── environment.rs          # Runtime environment detection (platform, git, date, marketing name)
-│   ├── instructions.rs         # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
-│   └── sections.rs             # Static prompt section constants (intro, guidance, style)
-├── session.rs                  # Session module root
+│   ├── environment.rs              # Runtime environment detection (platform, git, date, marketing name)
+│   ├── instructions.rs             # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
+│   └── sections.rs                 # Static prompt section constants (intro, guidance, style)
+├── session.rs                      # Session module root
 ├── session/
-│   ├── entry.rs                # JSONL entry types (Header, Message, Title, Summary) and metadata structs
-│   ├── history.rs              # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
-│   ├── list_view.rs            # `ox --list` table rendering (writes to any `impl Write`)
-│   ├── manager.rs              # SessionManager: lifecycle (start, resume, record, finish)
-│   ├── path.rs                 # Filesystem-safe project subdirectory derivation (sanitize_cwd)
-│   ├── resolver.rs             # CLI `--continue` argument resolution (ResumeMode, resolve_session)
-│   ├── store.rs                # SessionStore / SessionWriter: file I/O, XDG path, listing
-│   ├── title_generator.rs      # Background AI title generation (Haiku) with detached task
-│   └── writer.rs               # Session-write helpers (record_session_message, log_session_err)
-├── tool.rs                     # Tool trait, registry, definitions
+│   ├── entry.rs                    # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── history.rs                  # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
+│   ├── list_view.rs                # `ox --list` table rendering (writes to any `impl Write`)
+│   ├── manager.rs                  # SessionManager: lifecycle (start, resume, record, finish)
+│   ├── path.rs                     # Filesystem-safe project subdirectory derivation (sanitize_cwd)
+│   ├── resolver.rs                 # CLI `--continue` argument resolution (ResumeMode, resolve_session)
+│   ├── store.rs                    # SessionStore / SessionWriter: file I/O, XDG path, listing
+│   ├── title_generator.rs          # Background AI title generation (Haiku) with detached task
+│   └── writer.rs                   # Session-write helpers (record_session_message, log_session_err)
+├── tool.rs                         # Tool trait, registry, definitions
 ├── tool/
-│   ├── bash.rs                 # Shell command execution with timeout
-│   ├── edit.rs                 # Exact string replacement in files
-│   ├── glob.rs                 # File pattern matching (glob)
-│   ├── grep.rs                 # Content search via regex
-│   ├── read.rs                 # File reading with line numbers and pagination
-│   └── write.rs                # File writing with directory creation
-├── tui.rs                      # TUI module root
+│   ├── bash.rs                     # Shell command execution with timeout
+│   ├── edit.rs                     # Exact string replacement in files
+│   ├── glob.rs                     # File pattern matching (glob)
+│   ├── grep.rs                     # Content search via regex
+│   ├── read.rs                     # File reading with line numbers and pagination
+│   └── write.rs                    # File writing with directory creation
+├── tui.rs                          # TUI module root
 ├── tui/
-│   ├── app.rs                  # Root App struct, tokio::select! event loop, render dispatch
-│   ├── component.rs            # Component trait (components report UserAction back to the agent loop)
-│   ├── components.rs           # Components module root
+│   ├── app.rs                      # Root App struct, tokio::select! event loop, render dispatch
+│   ├── component.rs                # Component trait (components report UserAction back to the agent loop)
+│   ├── components.rs               # Components module root
 │   ├── components/
-│   │   ├── chat.rs             # ChatView container (scroll, event dispatch, block stacking, load_history)
+│   │   ├── chat.rs                 # ChatView container (scroll, event dispatch, block stacking, load_history)
 │   │   ├── chat/
-│   │   │   ├── blocks.rs       # ChatBlock trait + RenderCtx + shared border helpers
+│   │   │   ├── blocks.rs           # ChatBlock trait + RenderCtx + shared border helpers
 │   │   │   └── blocks/
-│   │   │       ├── assistant.rs # AssistantText + AssistantThinking
-│   │   │       ├── error.rs    # ErrorBlock
-│   │   │       ├── streaming.rs # StreamingAssistant (in-flight buffer + render cache)
-│   │   │       ├── tool.rs     # ToolCallBlock + ToolResultBlock + shared status line
-│   │   │       └── user.rs     # UserMessage
-│   │   ├── input.rs            # Multi-line input area (ratatui-textarea)
-│   │   └── status.rs           # Status bar (model, spinner, status, working directory)
-│   ├── event.rs                # ChannelSink (mpsc transport for the TUI)
-│   ├── markdown.rs             # Markdown module root (pulldown-cmark + syntect renderer)
+│   │   │       ├── assistant.rs    # AssistantText + AssistantThinking
+│   │   │       ├── error.rs        # ErrorBlock
+│   │   │       ├── streaming.rs    # StreamingAssistant (in-flight buffer + render cache)
+│   │   │       ├── tool.rs         # ToolCallBlock + ToolResultBlock + shared status line
+│   │   │       └── user.rs         # UserMessage
+│   │   ├── input.rs                # Multi-line input area (ratatui-textarea)
+│   │   └── status.rs               # Status bar (model, spinner, status, working directory)
+│   ├── event.rs                    # ChannelSink (mpsc transport for the TUI)
+│   ├── markdown.rs                 # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
-│   │   ├── highlight.rs        # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
-│   │   └── render.rs           # pulldown-cmark event walker, inline / block / list / table rendering
-│   ├── terminal.rs             # Terminal init / restore, synchronized output, panic hook
-│   ├── theme.rs                # Catppuccin Mocha palette, style helpers
-│   └── wrap.rs                 # Word-wrap with continuation indent for styled lines
-├── util.rs                     # Shared utilities module root
+│   │   ├── highlight.rs            # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
+│   │   └── render.rs               # pulldown-cmark event walker, inline / block / list / table rendering
+│   ├── terminal.rs                 # Terminal init / restore, synchronized output, panic hook
+│   ├── theme.rs                    # Catppuccin Mocha palette, style helpers
+│   └── wrap.rs                     # Word-wrap with continuation indent for styled lines
+├── util.rs                         # Shared utilities module root
 └── util/
-    ├── env.rs                  # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
-    ├── lock.rs                 # Async retry helper for advisory locks (used by oauth)
-    └── path.rs                 # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
+    ├── env.rs                      # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
+    ├── lock.rs                     # Async retry helper for advisory locks (used by oauth)
+    └── path.rs                     # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```
 
 ## Coding Conventions
