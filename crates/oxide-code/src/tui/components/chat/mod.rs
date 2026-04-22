@@ -1484,6 +1484,69 @@ mod tests {
     }
 
     #[test]
+    fn streaming_inserts_blank_separator_after_tool_output() {
+        // When streaming tokens arrive after a non-standalone block (tool
+        // call / tool result / error — no trailing blank of its own), the
+        // streaming block must insert its own leading blank so the icon
+        // doesn't sit flush against the preceding line.
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.append_stream_token("response");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let tool_pos = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let stream_pos = lines.iter().position(|l| l.contains("response")).unwrap();
+        assert!(
+            (tool_pos + 1..stream_pos).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between tool call and streaming: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_renders_committed_and_trailing_before_cache_advance() {
+        // With viewport_width = 0, advance_cache no-ops, so the streaming
+        // buffer accumulates newlines that rfind('\n') inside render_into
+        // then splits on first paint. Covers the Some(nl) match arm plus
+        // the `!committed.is_empty()` branch that an advance-cache-first
+        // flow skips.
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("cached line\ntail text");
+        // Pre-check the invariant that makes this test meaningful: cache
+        // deferred because viewport wasn't measured.
+        assert_eq!(
+            chat.streaming.as_ref().unwrap().rendered_boundary(),
+            0,
+            "advance_cache must defer when viewport_width is 0"
+        );
+
+        let text = all_text(&chat);
+        assert!(text.contains("cached line"));
+        assert!(text.contains("tail text"));
+    }
+
+    #[test]
+    fn live_thinking_after_tool_call_has_separator() {
+        // Live thinking pushes a leading blank when the tail block has no
+        // trailing blank of its own. Tool call is the natural example —
+        // standalone = false, no trail blank, so the thinking header needs
+        // its own separator.
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.append_thinking_token("deep thought");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let tool_pos = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let thinking_pos = lines.iter().position(|l| l.contains("Thinking")).unwrap();
+        assert!(
+            (tool_pos + 1..thinking_pos).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between tool call and thinking: {lines:?}"
+        );
+    }
+
+    #[test]
     fn streaming_trailing_newline_with_empty_tail() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());

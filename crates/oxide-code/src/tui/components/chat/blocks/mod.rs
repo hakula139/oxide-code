@@ -105,3 +105,28 @@ pub(super) fn border_markdown_line(
     spans.extend(line.spans);
     Line::from(spans)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn border_continuation_prefix_preserves_bar_position() {
+        let style = Style::default();
+        let spans = border_continuation_prefix("  ▎ ", style);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "  ");
+        assert_eq!(spans[1].content, BAR);
+        assert_eq!(spans[2].content, " ");
+    }
+
+    #[test]
+    fn border_continuation_prefix_without_bar_pads_with_spaces() {
+        // Defensive fallback for any future prefix that doesn't contain
+        // the bar — return plain spaces of the same visual width.
+        let style = Style::default();
+        let spans = border_continuation_prefix("    ", style);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "    ");
+    }
+}
