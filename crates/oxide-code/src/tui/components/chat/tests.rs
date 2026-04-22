@@ -770,7 +770,7 @@ fn consecutive_tool_calls_have_no_gap() {
 fn tool_call_wraps_long_label() {
     let mut chat = test_chat();
     let long_cmd =
-        "cd /Users/hakula/GitHub/oxide-code && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
+        "cd /home/user/projects/example-app && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
     chat.push_tool_call("$", long_cmd);
     let text = chat.build_text(60);
     assert!(
