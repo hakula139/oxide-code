@@ -777,10 +777,57 @@ mod tests {
         assert!(!text.contains("opaque-ciphertext"));
     }
 
+    #[test]
+    fn load_history_renders_resumed_thinking_when_show_thinking_enabled() {
+        let mut chat = test_chat();
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "resumed reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking..."));
+        assert!(text.contains("resumed reasoning"));
+    }
+
+    #[test]
+    fn load_history_hides_resumed_thinking_when_show_thinking_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking..."));
+        assert!(!text.contains("private reasoning"));
+        assert!(text.contains("reply"));
+    }
+
     // ── push_user_message ──
 
     #[test]
-    fn user_message_has_icon_and_content() {
+    fn push_user_message_has_icon_and_content() {
         let mut chat = test_chat();
         chat.push_user_message("hello world".to_owned());
         let text = all_text(&chat);
@@ -789,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn user_message_has_trailing_blank_before_tool_call() {
+    fn push_user_message_has_trailing_blank_before_tool_call() {
         let mut chat = test_chat();
         chat.push_user_message("hello".to_owned());
         chat.push_tool_call("$", "ls");
@@ -821,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn user_message_enables_auto_scroll() {
+    fn push_user_message_enables_auto_scroll() {
         let mut chat = test_chat();
         chat.auto_scroll = false;
         chat.push_user_message("hello".to_owned());
@@ -829,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn user_message_multiline_renders_every_line() {
+    fn push_user_message_multiline_renders_every_line() {
         let mut chat = test_chat();
         chat.push_user_message(
             indoc! {"
@@ -858,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_shows_partial_text() {
+    fn append_stream_token_shows_partial_text() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("partial response");
@@ -868,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_cached_and_tail_both_visible() {
+    fn append_stream_token_cached_and_tail_both_visible() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("cached line\n");
@@ -880,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_uncommitted_newlines_all_render() {
+    fn append_stream_token_uncommitted_newlines_all_render() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.viewport_width = 80;
@@ -893,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_without_prior_assistant_shows_icon() {
+    fn append_stream_token_without_prior_assistant_shows_icon() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("response");
@@ -903,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_after_committed_assistant_omits_duplicate_icon() {
+    fn append_stream_token_after_committed_assistant_omits_duplicate_icon() {
         let mut chat = test_chat();
         chat.blocks.push(Box::new(AssistantText::new("committed")));
         // Push streaming directly — simulates a continued turn.
@@ -917,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_inserts_blank_separator_after_tool_output() {
+    fn append_stream_token_inserts_blank_separator_after_tool_output() {
         // When streaming tokens arrive after a non-standalone block (tool
         // call / tool result / error — no trailing blank of its own), the
         // streaming block must insert its own leading blank so the icon
@@ -937,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_renders_committed_and_trailing_before_cache_advance() {
+    fn append_stream_token_renders_committed_and_trailing_before_cache_advance() {
         // With viewport_width = 0, advance_cache no-ops, so the streaming
         // buffer accumulates newlines that rfind('\n') inside render_into
         // then splits on first paint. Covers the Some(nl) match arm plus
@@ -960,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_renders_buffer_ending_in_newline_before_cache_advance() {
+    fn append_stream_token_renders_buffer_ending_in_newline_before_cache_advance() {
         // Trailing newline with viewport_width = 0: `advance_cache` defers,
         // so `render_into` sees a tail that ends in `\n`. The rfind split
         // gives committed = "line1\nline2" and trailing = "" — this is the
@@ -980,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_trailing_newline_with_empty_tail() {
+    fn append_stream_token_trailing_newline_with_empty_tail() {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.viewport_width = 80;
@@ -994,7 +1041,7 @@ mod tests {
     // ── append_thinking_token ──
 
     #[test]
-    fn live_thinking_visible_when_enabled() {
+    fn append_thinking_token_visible_when_enabled() {
         let mut chat = test_chat();
         chat.append_thinking_token("pondering...");
         let text = all_text(&chat);
@@ -1003,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn live_thinking_hidden_when_disabled() {
+    fn append_thinking_token_hidden_when_disabled() {
         let mut chat = ChatView::new(Theme::default(), false);
         chat.append_thinking_token("pondering...");
         let text = all_text(&chat);
@@ -1012,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn live_thinking_after_user_has_separator() {
+    fn append_thinking_token_after_user_has_separator() {
         let mut chat = test_chat();
         chat.push_user_message("hello".to_owned());
         chat.append_thinking_token("deep thought");
@@ -1027,54 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_thinking_renders_when_show_thinking_enabled() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "resumed reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        let text = all_text(&chat);
-        assert!(text.contains("Thinking..."));
-        assert!(text.contains("resumed reasoning"));
-    }
-
-    #[test]
-    fn resumed_thinking_hidden_when_show_thinking_disabled() {
-        let mut chat = ChatView::new(Theme::default(), false);
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "private reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        let text = all_text(&chat);
-        assert!(!text.contains("Thinking..."));
-        assert!(!text.contains("private reasoning"));
-        assert!(text.contains("reply"));
-    }
-
-    #[test]
-    fn live_thinking_after_tool_call_has_separator() {
+    fn append_thinking_token_after_tool_call_has_separator() {
         // Live thinking pushes a leading blank when the tail block has no
         // trailing blank of its own. Tool call is the natural example —
         // standalone = false, no trail blank, so the thinking header needs
@@ -1130,7 +1130,7 @@ mod tests {
     // ── push_tool_call ──
 
     #[test]
-    fn tool_call_shows_icon_and_label() {
+    fn push_tool_call_shows_icon_and_label() {
         let mut chat = test_chat();
         chat.push_tool_call("$", "ls -la");
         let text = all_text(&chat);
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_after_assistant_has_blank_separator() {
+    fn push_tool_call_after_assistant_has_blank_separator() {
         let mut chat = test_chat();
         chat.blocks.push(Box::new(AssistantText::new("some text")));
         chat.push_tool_call("$", "ls");
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_wraps_long_label() {
+    fn push_tool_call_wraps_long_label() {
         let mut chat = test_chat();
         let long_cmd =
             "cd /home/user/projects/example-app && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
@@ -1193,7 +1193,7 @@ mod tests {
     // ── push_tool_result ──
 
     #[test]
-    fn tool_result_success() {
+    fn push_tool_result_success() {
         let mut chat = test_chat();
         chat.push_tool_result("done", "output text", false);
         let text = all_text(&chat);
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_error() {
+    fn push_tool_result_error() {
         let mut chat = test_chat();
         chat.push_tool_result("failed", "error details", true);
         let text = all_text(&chat);
@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_wraps_long_label() {
+    fn push_tool_result_wraps_long_label() {
         let mut chat = test_chat();
         let long_label =
             "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_truncation() {
+    fn push_tool_result_truncation() {
         let mut chat = test_chat();
         let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
         chat.push_tool_result("result", &long_output.join("\n"), false);
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_empty_content_adds_nothing() {
+    fn push_tool_result_empty_content_adds_nothing() {
         let mut chat = test_chat();
         chat.push_tool_result("result", "  \n  ", false);
         let before = line_count(&chat);
@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_exactly_max_no_truncation() {
+    fn push_tool_result_exactly_max_no_truncation() {
         const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
         let mut chat = test_chat();
         let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
@@ -1273,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_one_over_max_shows_singular_line() {
+    fn push_tool_result_one_over_max_shows_singular_line() {
         const MAX: usize = 5;
         let mut chat = test_chat();
         let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_long_line_is_truncated() {
+    fn push_tool_result_long_line_is_truncated() {
         const MAX_CHARS: usize = 512;
         let mut chat = test_chat();
         let long_line = "x".repeat(MAX_CHARS + 100);
@@ -1300,7 +1300,7 @@ mod tests {
     // ── push_error ──
 
     #[test]
-    fn error_block_shows_error_indicator() {
+    fn push_error_shows_error_indicator() {
         let mut chat = test_chat();
         chat.push_error("something broke");
         let text = all_text(&chat);
@@ -1672,7 +1672,7 @@ mod tests {
     // ── advance_streaming_cache ──
 
     #[test]
-    fn streaming_advance_cache_no_newline_keeps_boundary_zero() {
+    fn advance_streaming_cache_no_newline_keeps_boundary_zero() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("no newline here");
@@ -1682,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_advance_cache_single_newline() {
+    fn advance_streaming_cache_single_newline() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("first line\nincomplete");
@@ -1692,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_advance_cache_multiple_newlines() {
+    fn advance_streaming_cache_multiple_newlines() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("line1\nline2\nline3\npartial");
@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_advance_cache_incremental() {
+    fn advance_streaming_cache_incremental() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
 
@@ -1721,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_advance_cache_trailing_newline_only() {
+    fn advance_streaming_cache_trailing_newline_only() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("\n");
@@ -1730,7 +1730,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_advance_cache_defers_until_viewport_measured() {
+    fn advance_streaming_cache_defers_until_viewport_measured() {
         // Streaming before update_layout runs must not bake unwrapped
         // markdown into the cache. The cache stays empty until the
         // viewport width is supplied.
@@ -1755,7 +1755,7 @@ mod tests {
     // ── push_welcome ──
 
     #[test]
-    fn welcome_centered_for_width() {
+    fn push_welcome_centered_for_width() {
         let chat = test_chat();
 
         let narrow = chat.build_text(30);
