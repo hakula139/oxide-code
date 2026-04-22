@@ -39,7 +39,7 @@ pub(super) struct RenderCtx<'a> {
 }
 
 /// A single renderable unit in the chat history.
-pub(super) trait ChatBlock: Send + Sync {
+pub(super) trait ChatBlock {
     /// Render this block's lines for the given context.
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 

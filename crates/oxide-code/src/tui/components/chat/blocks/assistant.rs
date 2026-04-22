@@ -9,11 +9,11 @@ use crate::tui::markdown::render_markdown;
 /// First-line prefix for assistant text — diamond + space. Continuation
 /// (and all lines when the streaming block is continuing a turn) uses a
 /// 2-column space indent.
-pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
+pub(crate) const ASSISTANT_PREFIX: &str = "◉ ";
 
 /// Continuation prefix for assistant markdown — two spaces matching the
 /// visual width of [`ASSISTANT_PREFIX`].
-pub(super) const ASSISTANT_CONT: &str = "  ";
+pub(crate) const ASSISTANT_CONT: &str = "  ";
 
 /// First-line prefix for the thinking header — diamond + space.
 const THINKING_PREFIX: &str = "◇ ";
@@ -52,7 +52,7 @@ impl ChatBlock for AssistantText {
 ///
 /// The markdown renderer wraps to `width - 2` so the 2-column lead-in
 /// never pushes content past the terminal edge.
-pub(super) fn render_assistant_markdown(
+pub(crate) fn render_assistant_markdown(
     text: &str,
     ctx: &RenderCtx<'_>,
     starts_new_turn: bool,
