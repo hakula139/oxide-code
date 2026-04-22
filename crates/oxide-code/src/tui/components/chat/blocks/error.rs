@@ -29,7 +29,6 @@ impl ChatBlock for ErrorBlock {
         false
     }
 
-    #[cfg(test)]
     fn is_error_marker(&self) -> bool {
         true
     }

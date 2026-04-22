@@ -47,14 +47,14 @@ const STATUS_BODY_PREFIX: &str = "  ▎     ";
 // ── Trait ──
 
 /// Immutable context passed to [`ChatBlock::render`].
-pub(crate) struct RenderCtx<'a> {
-    pub(crate) width: u16,
-    pub(crate) theme: &'a Theme,
-    pub(crate) show_thinking: bool,
+pub(super) struct RenderCtx<'a> {
+    pub(super) width: u16,
+    pub(super) theme: &'a Theme,
+    pub(super) show_thinking: bool,
 }
 
 /// A single renderable unit in the chat history.
-pub(crate) trait ChatBlock: Send + Sync {
+pub(super) trait ChatBlock: Send + Sync {
     /// Render this block's lines for the given context.
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
@@ -86,8 +86,16 @@ pub(crate) trait ChatBlock: Send + Sync {
     /// Whether this block is a fatal error marker. A dedicated
     /// predicate avoids `Any`-based downcasting just for tests: the
     /// parent module uses it to assert on error dispatch without
-    /// scraping rendered glyphs.
-    #[cfg(test)]
+    /// scraping rendered glyphs. Kept on the always-compiled trait
+    /// surface so the vtable shape is consistent between test and
+    /// release builds.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed only by ChatView::last_is_error in tests"
+        )
+    )]
     fn is_error_marker(&self) -> bool {
         false
     }
