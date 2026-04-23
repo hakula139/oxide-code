@@ -64,6 +64,22 @@ impl PendingCalls {
     pub(crate) fn remove(&mut self, id: &str) -> Option<PendingCall> {
         self.map.remove(id)
     }
+
+    /// Discards every pending entry. Called at turn boundaries so a
+    /// call whose result never arrived (agent-loop bug, crashed tool
+    /// subprocess, mid-turn abort) doesn't linger in the map across
+    /// turns — otherwise a long session accumulates orphaned entries
+    /// indefinitely.
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    /// Number of outstanding calls. Test-only observable so turn-end
+    /// eviction can be asserted without reaching into the private map.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 #[cfg(test)]

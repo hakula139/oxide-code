@@ -232,6 +232,13 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        // A tool call whose matching `ToolCallEnd` didn't arrive by
+        // turn end is orphaned — either the agent loop dropped the
+        // pairing (bug) or the tool crashed before emitting a result.
+        // Either way, the entry will never be consumed; clearing at
+        // the turn boundary bounds `pending_calls` to at most one
+        // turn's worth of in-flight calls.
+        self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
     }
@@ -508,6 +515,27 @@ mod tests {
         app.handle_agent_event(AgentEvent::TurnComplete);
         assert_eq!(app.status_bar.status(), Status::Idle);
         assert!(app.input.is_enabled());
+    }
+
+    #[test]
+    fn finish_turn_evicts_orphaned_pending_calls() {
+        // `ToolCallStart` without a matching `ToolCallEnd` by turn-end
+        // is an orphan (crashed tool, agent-loop bug, mid-turn abort).
+        // The pending entry must be discarded so long sessions don't
+        // accumulate stale ids across turns.
+        let (mut app, _rx, _agent_tx) = test_app_with_tools();
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "orphan".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(app.pending_calls.len(), 1);
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        assert_eq!(
+            app.pending_calls.len(),
+            0,
+            "turn end must evict calls whose result never arrived",
+        );
     }
 
     #[test]
