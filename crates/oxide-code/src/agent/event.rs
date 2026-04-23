@@ -114,11 +114,11 @@ impl AgentSink for StdioSink {
             }
             AgentEvent::ToolCallStart { name, input, .. } => {
                 let icon = self.tools.icon(&name);
-                if let Some(title) = self.tools.summarize_input(&name, &input) {
-                    eprintln!("{icon} {name}: {title}");
-                } else {
-                    eprintln!("{icon} {name}");
-                }
+                let label = self
+                    .tools
+                    .summarize_call(&name, &input)
+                    .unwrap_or_else(|| name.clone());
+                eprintln!("{icon} {label}");
             }
             AgentEvent::ToolCallEnd { title, content, .. } => {
                 if let Some(title) = title {

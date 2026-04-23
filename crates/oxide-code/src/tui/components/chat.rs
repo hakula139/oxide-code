@@ -107,8 +107,8 @@ impl ChatView {
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
                     let label = tools
-                        .summarize_input(name, input)
-                        .map_or_else(|| name.to_owned(), str::to_owned);
+                        .summarize_call(name, input)
+                        .unwrap_or_else(|| name.to_owned());
                     labels.insert(id, label.clone());
                     self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
                 }

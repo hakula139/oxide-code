@@ -50,6 +50,15 @@ impl Tool for BashTool {
         extract_input_field(input, "command")
     }
 
+    /// Bash uses `$ <command>` as its visual identity — the dollar
+    /// icon already reads as a shell prompt, so wrapping the command
+    /// in `Bash(...)` would be redundant.
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        extract_input_field(input, "command")
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     fn run(
         &self,
         input: serde_json::Value,

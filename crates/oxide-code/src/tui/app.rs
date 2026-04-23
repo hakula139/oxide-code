@@ -178,8 +178,8 @@ impl App {
                 let icon = self.tools.icon(&name);
                 let label = self
                     .tools
-                    .summarize_input(&name, &input)
-                    .map_or_else(|| name.clone(), str::to_owned);
+                    .summarize_call(&name, &input)
+                    .unwrap_or_else(|| name.clone());
                 self.chat.push_tool_call(icon, &label);
                 self.status_bar.set_status(Status::ToolRunning);
             }
