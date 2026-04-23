@@ -14,6 +14,7 @@
 mod blocks;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -91,8 +92,14 @@ impl ChatView {
     /// Thinking blocks are always pushed; [`AssistantThinking::visible`]
     /// collapses them to zero when `show_thinking` is off, so flipping
     /// the toggle at runtime doesn't require reloading the session.
-    pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
+    pub(crate) fn load_history(
+        &mut self,
+        messages: &[Message],
+        metadata_by_tool_use_id: &HashMap<String, ToolMetadata>,
+        tools: &ToolRegistry,
+    ) {
         let mut pending = PendingCalls::new();
+        let default_metadata = ToolMetadata::default();
         for interaction in walk_transcript(messages) {
             match interaction {
                 Interaction::UserText(text) => {
@@ -126,18 +133,20 @@ impl ChatView {
                     // [`walk_transcript`] emits `ToolResult` only
                     // inline right after its paired `ToolCall` —
                     // unpaired ids surface through `OrphanToolResult`
-                    // instead — so the lookup is total. Resumed
-                    // sessions don't yet persist `ToolMetadata` in
-                    // the transcript, so resume-path views fall back
-                    // to content-parsing where applicable (see
-                    // `EditTool::result_view`).
+                    // instead — so the lookup is total.
                     let p = pending
                         .remove(tool_use_id)
                         .expect("walk_transcript pairs every ToolResult with its ToolCall");
-                    let metadata = ToolMetadata::default();
-                    let view = tools.result_view(&p.name, &p.input, content, &metadata, is_error);
+                    let metadata = metadata_by_tool_use_id
+                        .get(tool_use_id)
+                        .unwrap_or(&default_metadata);
+                    let view = tools.result_view(&p.name, &p.input, content, metadata, is_error);
+                    // Prefer the persisted title; fall back to the
+                    // call label so pre-upgrade sessions keep
+                    // rendering (just without the live-path title).
+                    let header = metadata.title.clone().unwrap_or_else(|| p.label.clone());
                     self.blocks
-                        .push(Box::new(ToolResultBlock::new(p.label, view, is_error)));
+                        .push(Box::new(ToolResultBlock::new(header, view, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
                     let view = ToolResultView::Text {
@@ -549,6 +558,7 @@ mod tests {
         let mut chat = test_chat();
         chat.load_history(
             &[Message::user("hello"), Message::assistant("hi there")],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 2);
@@ -602,6 +612,7 @@ mod tests {
                     ],
                 },
             ],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 5);
@@ -644,6 +655,7 @@ mod tests {
                 },
                 Message::assistant("reply"),
             ],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 4);
@@ -674,6 +686,7 @@ mod tests {
                     is_error: true,
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -698,6 +711,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -722,6 +736,7 @@ mod tests {
                     text: "  \n  ".to_owned(),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert!(chat.blocks.is_empty());
@@ -730,7 +745,7 @@ mod tests {
     #[test]
     fn load_history_empty_slice_is_noop() {
         let mut chat = test_chat();
-        chat.load_history(&[], &test_tools());
+        chat.load_history(&[], &HashMap::new(), &test_tools());
         assert!(chat.blocks.is_empty());
     }
 
@@ -751,6 +766,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 2);
@@ -771,6 +787,7 @@ mod tests {
                     input: serde_json::json!({"arg": "value"}),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -791,6 +808,7 @@ mod tests {
                     input: serde_json::json!({"query": "rust"}),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -814,6 +832,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -838,11 +857,74 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         let text = all_text(&chat);
         assert!(text.contains("Thinking..."));
         assert!(text.contains("resumed reasoning"));
+    }
+
+    #[test]
+    fn load_history_uses_persisted_metadata_title_and_replacements() {
+        // The architect flagged a live/replay header asymmetry: live
+        // shows the tool-set title (`Edited f.rs`), replay used to
+        // fall back to the call label (`Edit(/tmp/f.rs)`). Now that
+        // `Entry::ToolResultMetadata` persists the title alongside
+        // the tool result, replay must reattach it via
+        // `load_history`'s metadata map. Also pins that
+        // `metadata.replacements` wins over the content-derived
+        // default — if the Diff's match count came back as 1, the
+        // metadata lookup silently failed and the test would catch
+        // it.
+        let tools = test_tools();
+        let mut chat = test_chat();
+        let history = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "edit1".to_owned(),
+                    name: "edit".to_owned(),
+                    input: serde_json::json!({
+                        "file_path": "/tmp/f.rs",
+                        "old_string": "a",
+                        "new_string": "b",
+                        "replace_all": true,
+                    }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "edit1".to_owned(),
+                    content: "Replaced 4 occurrences in /tmp/f.rs.".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let mut metadata_map = HashMap::new();
+        metadata_map.insert(
+            "edit1".to_owned(),
+            crate::tool::ToolMetadata {
+                title: Some("Edited f.rs".to_owned()),
+                replacements: Some(4),
+                ..crate::tool::ToolMetadata::default()
+            },
+        );
+        chat.load_history(&history, &metadata_map, &tools);
+        let text = all_text(&chat);
+        // Both labels appear: `Edit(/tmp/f.rs)` on the call row
+        // (from `ToolCallBlock`), `Edited f.rs` on the result row
+        // (from `ToolResultBlock`). Pre-commit the result row used
+        // the call label — so `Edited` was absent entirely.
+        assert!(
+            text.contains("✓ Edited f.rs"),
+            "persisted title should drive the result row: {text}",
+        );
+        assert!(
+            text.contains("4 occurrences replaced"),
+            "metadata.replacements should drive the diff footer: {text}",
+        );
     }
 
     #[test]
@@ -861,6 +943,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         let text = all_text(&chat);
@@ -1986,7 +2069,7 @@ mod tests {
                 ],
             },
         ];
-        chat.load_history(&history, &tools);
+        chat.load_history(&history, &HashMap::new(), &tools);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 

@@ -11,9 +11,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
-use super::manager::SessionManager;
+use super::manager::{ResumedSession, SessionManager};
 use super::store::SessionStore;
-use crate::message::Message;
 
 /// Normalized form of the CLI `--continue` argument. Built by
 /// [`normalize_resume_arg`] and consumed by [`resolve_session`].
@@ -49,20 +48,25 @@ pub(crate) async fn resolve_session(
     model: &str,
     resume: Option<&Option<String>>,
     all: bool,
-) -> Result<(SessionManager, Vec<Message>, Option<String>)> {
+) -> Result<ResumedSession> {
     let mode = normalize_resume_arg(resume)?;
 
     // Path resumes bypass the store's project-subdir lookup entirely and
     // can be resolved without listing anything.
     if let ResumeMode::Path(path) = mode {
-        let (session, messages, title) = SessionManager::resume_from_path(store, path)?;
+        let resumed = SessionManager::resume_from_path(store, path)?;
         debug!("resuming session from {}", path.display());
-        return Ok((session, messages, title));
+        return Ok(resumed);
     }
 
     if matches!(mode, ResumeMode::Fresh) {
-        let session = SessionManager::start(store, model);
-        return Ok((session, Vec::new(), None));
+        let manager = SessionManager::start(store, model);
+        return Ok(ResumedSession {
+            manager,
+            messages: Vec::new(),
+            title: None,
+            tool_result_metadata: std::collections::HashMap::new(),
+        });
     }
 
     let sessions = if all {
@@ -106,9 +110,9 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let (session, messages, title) = SessionManager::resume(store, &session_id).await?;
+    let resumed = SessionManager::resume(store, &session_id).await?;
     debug!("resuming session {session_id}");
-    Ok((session, messages, title))
+    Ok(resumed)
 }
 
 /// Trims and classifies a `--continue` argument into a [`ResumeMode`].
@@ -174,6 +178,7 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
 mod tests {
     use super::super::store::{test_project_dir, test_session_file, test_store};
     use super::*;
+    use crate::message::Message;
 
     // ── normalize_resume_arg ──
 
@@ -271,9 +276,10 @@ mod tests {
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let (_session, messages, title) = resolve_session(&store, "m", None, false).await.unwrap();
-        assert!(messages.is_empty());
-        assert!(title.is_none());
+        let resumed = resolve_session(&store, "m", None, false).await.unwrap();
+        assert!(resumed.messages.is_empty());
+        assert!(resumed.title.is_none());
+        assert!(resumed.tool_result_metadata.is_empty());
         assert!(
             std::fs::read_dir(test_project_dir(dir.path()))
                 .unwrap()
@@ -376,12 +382,12 @@ mod tests {
         std::fs::copy(&path, &external_path).unwrap();
 
         let arg = Some(external_path.to_string_lossy().into_owned());
-        let (session, messages, title) = resolve_session(&store, "m", Some(&arg), false)
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
-        assert_eq!(session.session_id(), full_id);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(title.as_deref(), Some("external path test"));
+        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("external path test"));
     }
 
     #[tokio::test]
@@ -412,12 +418,12 @@ mod tests {
         // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
-        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), false)
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
-        assert_eq!(resumed.session_id(), full_id);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(title.as_deref(), Some("hello"));
+        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("hello"));
     }
 
     #[tokio::test]
@@ -438,12 +444,12 @@ mod tests {
         drop(original);
 
         let arg = Some(full_id[..10].to_owned());
-        let (resumed, messages, title) = resolve_session(&store, "m", Some(&arg), true)
+        let resumed = resolve_session(&store, "m", Some(&arg), true)
             .await
             .unwrap();
-        assert_eq!(resumed.session_id(), full_id);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(title.as_deref(), Some("all scope"));
+        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("all scope"));
 
         // Error path under `all = true` omits the "use --all" hint.
         let missing = Some("zzzz".to_owned());

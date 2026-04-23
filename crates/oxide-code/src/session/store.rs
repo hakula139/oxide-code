@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
+use crate::tool::ToolMetadata;
 use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
@@ -280,6 +281,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
     let mut referenced: HashSet<Uuid> = HashSet::new();
     let mut latest_title: Option<TitleInfo> = None;
+    let mut tool_result_metadata: HashMap<String, ToolMetadata> = HashMap::new();
     let mut buf = Vec::new();
     let mut line_no: u32 = 0;
 
@@ -356,6 +358,17 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
             {
                 latest_title = Some(TitleInfo { title, updated_at });
             }
+            // Sidecar metadata for completed tool results. Later
+            // entries win on duplicate `tool_use_id` — a rerun /
+            // partial-write recovery replays the same id, and the
+            // most recent write reflects the final view.
+            Entry::ToolResultMetadata {
+                tool_use_id,
+                metadata,
+                ..
+            } => {
+                tool_result_metadata.insert(tool_use_id, metadata);
+            }
             _ => {}
         }
     }
@@ -365,6 +378,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
         messages,
         last_uuid,
         title: latest_title,
+        tool_result_metadata,
     })
 }
 
@@ -532,6 +546,15 @@ pub(crate) struct SessionData {
     /// no title was ever recorded (e.g., the session exited before the
     /// first user prompt).
     pub(crate) title: Option<TitleInfo>,
+    /// Per-tool-use-id sidecar metadata collected from every
+    /// [`Entry::ToolResultMetadata`](crate::session::entry::Entry)
+    /// in the file. Keyed by the tool-use id on the matching
+    /// [`ContentBlock::ToolResult`](crate::message::ContentBlock)
+    /// so the replay path can reattach display fields (title,
+    /// replacement count) that the wire format doesn't carry.
+    /// Empty for pre-upgrade sessions — the TUI falls back to its
+    /// existing content-derived defaults.
+    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
 }
 
 // ── File Opening ──

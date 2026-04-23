@@ -55,21 +55,28 @@ pub(crate) struct ToolOutput {
 /// Every tool should set `title` to a concise, human-readable summary
 /// (e.g., "Read Cargo.toml", "Created src/main.rs", "3 matches in 2 files").
 /// The TUI renders this as the one-line label for each tool invocation.
-#[derive(Clone, Debug, Default)]
+///
+/// Serializable because the session writer persists this alongside
+/// each tool result (via [`Entry::ToolResultMetadata`](crate::session::entry::Entry))
+/// so resumed sessions see the same rendered shape as live — without
+/// polluting the API-facing [`ContentBlock::ToolResult`](crate::message::ContentBlock)
+/// wire format with TUI-only fields.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct ToolMetadata {
     /// Short label for TUI display (5–15 words).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// Process exit code, present only for the bash tool.
-    #[expect(
-        dead_code,
-        reason = "recorded by the bash tool but unused by the current TUI tool-result renderer"
-    )]
+    /// Process exit code, present only for the bash tool. Read by
+    /// the `PartialEq` derive (used to gate persistence of empty
+    /// metadata) but not yet surfaced in the rendered view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<i32>,
     /// Number of replacements actually made, present only for the
     /// edit tool when `replace_all` matched multiple occurrences.
-    /// Consumed by [`ToolResultView::Diff`] so the \"N occurrences
-    /// replaced\" footer can be driven structurally instead of
+    /// Consumed by [`ToolResultView::Diff`] so the "N occurrences
+    /// replaced" footer can be driven structurally instead of
     /// parsed from prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replacements: Option<usize>,
 }
 

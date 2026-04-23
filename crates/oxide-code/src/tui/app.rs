@@ -7,6 +7,7 @@
 //! redraw work proportional to state change rather than event
 //! throughput.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
-use crate::tool::{ToolRegistry, ToolResultView};
+use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -61,11 +62,12 @@ impl App {
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
+        history_metadata: &HashMap<String, ToolMetadata>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(history, tools.as_ref());
+        chat.load_history(history, history_metadata, tools.as_ref());
         let mut status_bar = StatusBar::new(theme, model, cwd);
         status_bar.set_title(title);
         Self {
@@ -325,6 +327,7 @@ mod tests {
             agent_rx,
             user_tx,
             &[],
+            &HashMap::new(),
             tools,
         );
         (app, user_rx, agent_tx)
