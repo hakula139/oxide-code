@@ -29,8 +29,11 @@ const MAX_TOOL_OUTPUT_LINES: usize = 5;
 /// Maximum lines of diff body (combined `-` + `+`) shown before
 /// truncation. Set higher than text output because diffs pair every
 /// old line with its new counterpart, doubling the natural line
-/// count before the user learns anything new.
-const MAX_DIFF_BODY_LINES: usize = 10;
+/// count before the user learns anything new — a 6-line → 7-line
+/// function replacement (common in real edits) already sits at 13
+/// combined lines. 20 covers roughly the 95th-percentile edit
+/// without hiding the change's middle behind an ellipsis.
+const MAX_DIFF_BODY_LINES: usize = 20;
 
 /// Maximum bytes per tool output line before horizontal truncation.
 /// Measured in bytes (matched against `str::len`) rather than Unicode

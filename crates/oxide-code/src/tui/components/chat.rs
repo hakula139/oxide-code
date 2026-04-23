@@ -1845,13 +1845,16 @@ mod tests {
         // a head + ellipsis + tail shape. Regressions that revert to
         // the old asymmetric policy — or that emit a bogus
         // `... +0 lines` footer on pure deletion — show up here.
+        // 14 lines per side (combined = 28 > MAX_DIFF_BODY_LINES = 20)
+        // is small enough to read but big enough to stay over budget
+        // if the constant inches up.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/big.rs)");
-        let old = (0..8)
+        let old = (0..14)
             .map(|i| format!("old{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let new = (0..8)
+        let new = (0..14)
             .map(|i| format!("new{i}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -1862,7 +1865,7 @@ mod tests {
             replacements: 1,
         };
         chat.push_tool_result_view("Edited big.rs", view, false);
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 16));
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 26));
     }
 
     #[test]
