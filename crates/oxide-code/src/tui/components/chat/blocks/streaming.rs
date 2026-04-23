@@ -5,10 +5,10 @@
 //! every frame. Promoted to a committed [`super::AssistantText`] block
 //! on `commit_streaming`.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use super::RenderCtx;
-use super::assistant::{ASSISTANT_CONT, ASSISTANT_PREFIX, render_assistant_markdown};
+use super::assistant::render_assistant_markdown;
 
 /// Mutable streaming state for the current assistant response. Not a
 /// [`ChatBlock`](super::ChatBlock) — its render path needs context from
@@ -136,51 +136,13 @@ impl StreamingAssistant {
             out.push(Line::raw(""));
         }
 
-        // The tail can still carry multiple paragraphs when
-        // `advance_cache` has been deferred (viewport not yet measured).
-        // Split off the unterminated trailing line so it renders as a
-        // plain token stream — feeding a half-typed word through
-        // pulldown-cmark flashes emphasis / code spans as markers
-        // arrive. Everything before the last `\n` goes through markdown
-        // so complete lines within the live paragraph still get their
-        // normal formatting.
-        let (committed, trailing) = match tail.rfind('\n') {
-            Some(nl) => (&tail[..nl], &tail[nl + 1..]),
-            None => ("", tail),
-        };
-
+        // Full-tail parse: pulldown's block separators (blank-line
+        // before list / heading / fence) only fire on a single-pass
+        // parse. Splitting the tail off to render raw would strip
+        // them — a bounded one-frame flash on unclosed inline markers
+        // isn't worth that persistent bug.
         let starts_new_turn = !continues_turn && cache_empty;
-        if !committed.is_empty() {
-            out.extend(render_assistant_markdown(committed, ctx, starts_new_turn));
-        }
-
-        if !trailing.is_empty() {
-            // `trailing` is rendered raw (no markdown parse), so it
-            // doesn't pick up the block separator pulldown would emit
-            // in a single-pass render. When the trailing starts a
-            // block (list item, heading, blockquote, code fence, …)
-            // whose type differs from whatever the committed chunk
-            // just closed, inject the missing blank so mid-stream
-            // layout matches the post-commit view.
-            let last_committed_line = committed.rsplit('\n').next().unwrap_or("");
-            if block_start(trailing).is_some()
-                && block_start(last_committed_line) != block_start(trailing)
-                && super::last_has_width(out)
-            {
-                out.push(Line::raw(""));
-            }
-
-            let starts_here = starts_new_turn && committed.is_empty();
-            let prefix = if starts_here {
-                ASSISTANT_PREFIX
-            } else {
-                ASSISTANT_CONT
-            };
-            out.push(Line::from(vec![
-                Span::styled(prefix.to_owned(), ctx.theme.secondary()),
-                Span::styled(trailing.to_owned(), ctx.theme.text()),
-            ]));
-        }
+        out.extend(render_assistant_markdown(tail, ctx, starts_new_turn));
     }
 
     // Test-only accessors for sibling-module tests that assert on
@@ -199,83 +161,5 @@ impl StreamingAssistant {
     #[cfg(test)]
     pub(crate) fn cached_width(&self) -> u16 {
         self.cached_width
-    }
-}
-
-/// Coarse tag for the block type `line` starts, or `None` for plain
-/// prose. Used to decide whether a raw-rendered streaming tail needs
-/// an explicit blank separator above it — two fragments with
-/// different block starts would have been separated by pulldown if
-/// they'd gone through a single render pass.
-///
-/// Leading indentation (up to three spaces per `CommonMark`) is
-/// tolerated so a nested list continuation still resolves. Ordered-
-/// list markers collapse to `"N. "` regardless of the actual digits,
-/// so `"1. "` and `"42. "` compare equal (same list type).
-fn block_start(line: &str) -> Option<&'static str> {
-    let t = line.trim_start_matches(' ');
-    for m in [
-        "- ", "* ", "+ ", "> ", "# ", "## ", "### ", "#### ", "##### ", "###### ", "```", "---",
-        "***", "___",
-    ] {
-        if t.starts_with(m) {
-            return Some(m);
-        }
-    }
-    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
-    if (1..10).contains(&digits)
-        && t.as_bytes()
-            .get(digits)
-            .is_some_and(|b| matches!(b, b'.' | b')'))
-        && t.as_bytes().get(digits + 1) == Some(&b' ')
-    {
-        return Some("N. ");
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── block_start ──
-
-    #[test]
-    fn block_start_recognizes_unordered_list_markers() {
-        assert_eq!(block_start("- item"), Some("- "));
-        assert_eq!(block_start("* item"), Some("* "));
-        assert_eq!(block_start("+ item"), Some("+ "));
-        // Leading indent (up to 3 spaces) still resolves.
-        assert_eq!(block_start("  - nested"), Some("- "));
-    }
-
-    #[test]
-    fn block_start_recognizes_ordered_list_markers_as_generic_tag() {
-        // 1. and 42. collapse to the same tag so successive ordered
-        // items compare equal and don't get a spurious blank between
-        // them.
-        assert_eq!(block_start("1. item"), Some("N. "));
-        assert_eq!(block_start("42. item"), Some("N. "));
-        assert_eq!(block_start("3) item"), Some("N. "));
-    }
-
-    #[test]
-    fn block_start_recognizes_headings_and_blockquote_and_fence_and_rule() {
-        assert_eq!(block_start("# heading"), Some("# "));
-        assert_eq!(block_start("### heading"), Some("### "));
-        assert_eq!(block_start("> quote"), Some("> "));
-        assert_eq!(block_start("```rust"), Some("```"));
-        assert_eq!(block_start("---"), Some("---"));
-    }
-
-    #[test]
-    fn block_start_is_none_for_plain_prose() {
-        assert_eq!(block_start("ordinary text"), None);
-        assert_eq!(block_start(""), None);
-        // Dash without trailing space is just prose (e.g., "re-use").
-        assert_eq!(block_start("-no space"), None);
-        // Digits without `. ` are plain text.
-        assert_eq!(block_start("1 apple"), None);
-        assert_eq!(block_start("12abc"), None);
     }
 }

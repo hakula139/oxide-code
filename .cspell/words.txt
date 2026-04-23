@@ -40,7 +40,6 @@ replacen
 reqwest
 rfind
 riscv
-rsplit
 rustls
 serde
 serie
