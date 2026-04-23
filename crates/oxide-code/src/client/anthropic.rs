@@ -522,9 +522,10 @@ impl Client {
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        // Non-agentic one-shot — 1P gating only affects `PROMPT_CACHING_SCOPE`,
-        // which `compute_betas` restricts to the agentic branch anyway. Still
-        // passed for signature symmetry with [`Self::stream_message`].
+        // Non-agentic one-shot — 1P gating only affects the
+        // `prompt-caching-scope` beta, which `compute_betas` restricts
+        // to the agentic branch anyway. Still passed for signature
+        // symmetry with [`Self::stream_message`].
         let is_first_party = is_first_party_base_url(&self.config.base_url);
         let betas = compute_betas(
             model,
@@ -1718,11 +1719,11 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_and_its_beta() {
-        // Mock server URI (127.0.0.1:NNNN) is third-party by definition.
-        // Pin the full request shape we send to 3P gateways:
-        //   - static-prefix cache_control is `{"type":"ephemeral"}` only;
-        //   - the `prompt-caching-scope` beta is absent.
-        // Regressing either half is exactly how PR #22's gateway 400 fired.
+        // Mock server URIs are third-party by definition. Pin both
+        // halves of the 3P request shape: the static-prefix
+        // cache_control must be `{"type":"ephemeral"}` only, and the
+        // `prompt-caching-scope` beta must be absent. Regressing
+        // either half is exactly how PR #22's gateway 400 fired.
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);

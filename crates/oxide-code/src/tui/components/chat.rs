@@ -1352,10 +1352,11 @@ mod tests {
 
     #[test]
     fn push_tool_result_dedup_drops_first_body_line_matching_label() {
-        // Grep and glob both set `title = "Found N files"` AND emit
-        // the same string as the first line of `content`. Rendering
-        // both duplicates it on screen. Skip the first body line when
-        // it matches the label verbatim.
+        // Grep and glob both set `title = "Found N files"` as the
+        // status-line label and emit the same string as the first
+        // line of `content` for the model's context. Rendering both
+        // duplicates it on screen; skip the first body line when it
+        // matches the label verbatim.
         let mut chat = test_chat();
         chat.push_tool_result("Found 2 files", "Found 2 files\na.rs\nb.rs", false);
         let text = all_text(&chat);
