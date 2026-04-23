@@ -7,18 +7,19 @@
 //! col 0. The bar / border machinery therefore lives here, not in the
 //! trait module, so it scopes to exactly the blocks that use it.
 //!
-//! Result rendering is per-tool via [`ToolResultView`]: the default
-//! variant is a truncated text body ([`Text`](ToolResultView::Text));
-//! tools with structured inputs get richer shapes — Edit, for example,
-//! returns a [`Diff`](ToolResultView::Diff) that renders `-` / `+`
-//! lines. A new variant is added here (not on the `Tool` trait) so the
-//! execution layer stays rendering-free.
+//! Result rendering is per-variant via [`ToolResultView`]: the default
+//! is a truncated text body; tools with structured inputs (Edit today;
+//! Read / Grep / Glob later) produce richer variants via
+//! [`Tool::result_view`](crate::tool::Tool::result_view). The enum
+//! itself lives in `crate::tool` — rendering stays here, so adding a
+//! new variant touches the tool module + this file + the renderer.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{ChatBlock, RenderCtx};
+use crate::tool::ToolResultView;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
@@ -144,96 +145,6 @@ impl ChatBlock for ToolResultBlock {
     fn standalone(&self) -> bool {
         false
     }
-}
-
-// ── Tool Result View ──
-
-/// Per-tool shape of a completed tool call's body. Constructed at push
-/// time via [`ToolResultView::build`]; rendered by [`ToolResultBlock`]
-/// dispatching on the variant.
-///
-/// Adding a new variant (grouped grep matches, read-file header, etc.)
-/// means extending the enum + builder + renderer in this module — one
-/// local change, no churn on the `Tool` trait or tool submodules.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ToolResultView {
-    /// Default shape — the raw tool output, truncated to
-    /// [`MAX_TOOL_OUTPUT_LINES`] with a "+N lines" footer.
-    Text { content: String },
-    /// Edit tool — renders as a `-` old / `+` new unified diff.
-    /// `replacements` is the number of matches actually replaced
-    /// (>1 only for `replace_all` edits).
-    Diff {
-        old: String,
-        new: String,
-        replace_all: bool,
-        replacements: usize,
-    },
-}
-
-impl ToolResultView {
-    /// Builds the view from a completed tool call. Falls back to
-    /// [`Text`](Self::Text) for every case the custom renderers cannot
-    /// handle cleanly: error outputs (keeping the error text front and
-    /// center), tools without a structured view, orphan results with
-    /// no `name` / `input` pair, and structured inputs that fail to
-    /// parse.
-    pub(crate) fn build(
-        name: Option<&str>,
-        input: Option<&serde_json::Value>,
-        content: &str,
-        is_error: bool,
-    ) -> Self {
-        // Error paths carry the failure message; pretending they're a
-        // structured diff would swap useful signal for a lie.
-        if is_error {
-            return Self::Text {
-                content: content.to_owned(),
-            };
-        }
-        match (name, input) {
-            (Some("edit"), Some(input)) => {
-                edit_view(input, content).unwrap_or_else(|| Self::Text {
-                    content: content.to_owned(),
-                })
-            }
-            _ => Self::Text {
-                content: content.to_owned(),
-            },
-        }
-    }
-}
-
-/// Extracts the edit tool's structured inputs and pairs them with the
-/// replacement count parsed from its output. Returns `None` when any
-/// required field is missing — caller falls back to [`ToolResultView::Text`].
-fn edit_view(input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
-    let old = input.get("old_string")?.as_str()?.to_owned();
-    let new = input.get("new_string")?.as_str()?.to_owned();
-    let replace_all = input
-        .get("replace_all")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let replacements = parse_replacement_count(content).unwrap_or(1);
-    Some(ToolResultView::Diff {
-        old,
-        new,
-        replace_all,
-        replacements,
-    })
-}
-
-/// Parses `"Replaced N occurrences in <path>."` — the shape
-/// [`EditTool`](crate::tool::edit::EditTool) returns for `replace_all`
-/// with multiple matches. Returns `None` for the single-match shape
-/// (`"Successfully edited ..."`); caller defaults to 1.
-fn parse_replacement_count(content: &str) -> Option<usize> {
-    content
-        .strip_prefix("Replaced ")?
-        .split_ascii_whitespace()
-        .next()?
-        .parse()
-        .ok()
 }
 
 fn render_text_body(
@@ -632,139 +543,6 @@ mod tests {
     fn truncate_to_bytes_exact_boundary_no_split() {
         // 6 bytes = exactly two `中`s; result stays untouched.
         assert_eq!(truncate_to_bytes("中中", 6), "中中");
-    }
-
-    // ── ToolResultView::build ──
-
-    #[test]
-    fn build_view_falls_back_to_text_when_tool_is_unknown() {
-        let view = ToolResultView::build(None, None, "anything", false);
-        assert_eq!(
-            view,
-            ToolResultView::Text {
-                content: "anything".to_owned()
-            },
-        );
-    }
-
-    #[test]
-    fn build_view_uses_text_for_tools_without_structured_renderer() {
-        // The `bash` tool has no structured view yet — its output is
-        // free-form shell text, not a fixed-shape diff or match list.
-        let input = serde_json::json!({"command": "ls"});
-        let view = ToolResultView::build(Some("bash"), Some(&input), "file1\nfile2", false);
-        assert!(matches!(view, ToolResultView::Text { .. }));
-    }
-
-    #[test]
-    fn build_view_falls_back_to_text_on_error_even_for_edit() {
-        // Error outputs are prose (`"old_string not found in ..."`);
-        // rendering them as a diff would hide the failure reason.
-        // Pin the contract: errors bypass every structured renderer.
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "foo",
-            "new_string": "bar",
-        });
-        let view = ToolResultView::build(Some("edit"), Some(&input), "not found", true);
-        assert!(matches!(view, ToolResultView::Text { .. }));
-    }
-
-    #[test]
-    fn build_view_edit_extracts_diff_from_structured_inputs() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "fn foo()",
-            "new_string": "fn bar()",
-        });
-        let view = ToolResultView::build(
-            Some("edit"),
-            Some(&input),
-            "Successfully edited /tmp/f.rs.",
-            false,
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Diff {
-                old: "fn foo()".to_owned(),
-                new: "fn bar()".to_owned(),
-                replace_all: false,
-                replacements: 1,
-            },
-        );
-    }
-
-    #[test]
-    fn build_view_edit_falls_back_when_required_inputs_missing() {
-        // Edit's input normally has `old_string` and `new_string`; a
-        // malformed call (e.g., model emitted bad JSON that parsed as
-        // an empty object) should degrade to Text rather than panic.
-        let input = serde_json::json!({"file_path": "/tmp/x"});
-        let view = ToolResultView::build(Some("edit"), Some(&input), "edited", false);
-        assert!(matches!(view, ToolResultView::Text { .. }));
-    }
-
-    #[test]
-    fn build_view_edit_parses_replace_all_count_from_content() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = ToolResultView::build(
-            Some("edit"),
-            Some(&input),
-            "Replaced 7 occurrences in /tmp/f.rs.",
-            false,
-        );
-        assert_eq!(
-            view,
-            ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
-                replace_all: true,
-                replacements: 7,
-            },
-        );
-    }
-
-    #[test]
-    fn build_view_edit_defaults_to_one_replacement_when_count_missing() {
-        // Single-match edits return `"Successfully edited ..."` —
-        // `parse_replacement_count` returns None, caller defaults to 1.
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = ToolResultView::build(
-            Some("edit"),
-            Some(&input),
-            "Successfully edited /tmp/f.rs.",
-            false,
-        );
-        let ToolResultView::Diff { replacements, .. } = view else {
-            panic!("expected diff view");
-        };
-        assert_eq!(replacements, 1);
-    }
-
-    // ── parse_replacement_count ──
-
-    #[test]
-    fn parse_replacement_count_extracts_leading_integer() {
-        assert_eq!(
-            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
-            Some(3),
-        );
-    }
-
-    #[test]
-    fn parse_replacement_count_returns_none_for_unrelated_messages() {
-        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None,);
-        assert_eq!(parse_replacement_count(""), None);
     }
 
     // ── diff_entries ──

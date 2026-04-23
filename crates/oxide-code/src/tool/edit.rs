@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, extract_input_field};
+use super::{Tool, ToolOutput, ToolResultView, extract_input_field};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -54,12 +54,49 @@ impl Tool for EditTool {
         extract_input_field(input, "file_path")
     }
 
+    fn result_view(&self, input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
+        let old = input.get("old_string")?.as_str()?.to_owned();
+        let new = input.get("new_string")?.as_str()?.to_owned();
+        let replace_all = input
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let replacements = parse_replacement_count(content).unwrap_or(1);
+        Some(ToolResultView::Diff {
+            old,
+            new,
+            replace_all,
+            replacements,
+        })
+    }
+
     fn run(
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
         Box::pin(run(input))
     }
+}
+
+// ── Result View ──
+
+/// Parses the replacement count from the success-path output returned
+/// by [`edit_file`] when `replace_all` hits multiple matches — a
+/// `"Replaced N occurrences in <path>."` string. Returns `None` for
+/// the single-match shape (`"Successfully edited ..."`), in which case
+/// the caller defaults to 1.
+///
+/// The content-format contract this parser relies on is pinned by
+/// [`tests::edit_file_replace_all_pins_replaced_n_occurrences_format`]
+/// so rewording the success string in `edit_file` breaks the test,
+/// not the renderer silently.
+fn parse_replacement_count(content: &str) -> Option<usize> {
+    content
+        .strip_prefix("Replaced ")?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 // ── Input ──
@@ -279,6 +316,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_file_replace_all_pins_replaced_n_occurrences_format() {
+        // [`parse_replacement_count`] reads the replacement count out
+        // of this exact string to drive the TUI's "applied to N
+        // matches" footer. Rewording the prefix or spacing silently
+        // breaks that parser — pin the full shape here so the
+        // coupling is visible in this test file rather than only
+        // manifesting as a missing footer in the rendered diff.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.txt");
+        std::fs::write(&path, "a a a").unwrap();
+        let msg = edit_file(path.to_str().unwrap(), "a", "b", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            msg,
+            format!("Replaced 3 occurrences in {}.", path.display())
+        );
+    }
+
+    #[tokio::test]
     async fn edit_file_replace_all_single_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
@@ -492,5 +549,102 @@ mod tests {
     #[test]
     fn apply_eol_lf_unchanged() {
         assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
+    }
+
+    // ── parse_replacement_count ──
+
+    #[test]
+    fn parse_replacement_count_extracts_leading_integer() {
+        assert_eq!(
+            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn parse_replacement_count_returns_none_for_unrelated_messages() {
+        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
+        assert_eq!(parse_replacement_count(""), None);
+    }
+
+    // ── result_view ──
+
+    #[test]
+    fn result_view_extracts_diff_from_structured_inputs() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "fn foo()",
+            "new_string": "fn bar()",
+        });
+        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "fn foo()".to_owned(),
+                new: "fn bar()".to_owned(),
+                replace_all: false,
+                replacements: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_parses_replace_all_count_from_content() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = EditTool.result_view(&input, "Replaced 7 occurrences in /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 7,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_defaults_to_one_replacement_when_count_missing() {
+        // Single-match edits return `"Successfully edited ..."` —
+        // `parse_replacement_count` returns None, caller defaults to 1.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let Some(ToolResultView::Diff { replacements, .. }) =
+            EditTool.result_view(&input, "Successfully edited /tmp/f.rs.")
+        else {
+            panic!("expected diff view");
+        };
+        assert_eq!(replacements, 1);
+    }
+
+    #[test]
+    fn result_view_returns_none_when_required_inputs_missing() {
+        // Malformed call (e.g., model emitted JSON missing `new_string`)
+        // degrades to None so the caller falls back to Text rather
+        // than panicking.
+        let input = serde_json::json!({"file_path": "/tmp/x"});
+        assert!(EditTool.result_view(&input, "edited").is_none());
+    }
+
+    #[test]
+    fn result_view_returns_none_when_field_type_is_wrong() {
+        // `old_string` must be a string; a numeric value shouldn't
+        // panic on unwrap — it returns `None` and the TUI renders
+        // the raw `content` as text.
+        let input = serde_json::json!({
+            "file_path": "/tmp/x",
+            "old_string": 42,
+            "new_string": "b",
+        });
+        assert!(EditTool.result_view(&input, "edited").is_none());
     }
 }

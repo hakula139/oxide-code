@@ -93,6 +93,31 @@ impl ToolOutput {
     }
 }
 
+// ── Tool Result View ──
+
+/// Per-tool shape of a completed tool call's body, produced by
+/// [`Tool::result_view`] and rendered by the TUI's tool-result block.
+///
+/// This enum lives here — not in the TUI layer — so per-tool parsing
+/// (Edit's diff extraction, future Read/Grep/Glob shapes) stays in the
+/// module that owns each tool's input/output contract. The TUI still
+/// owns rendering; this is pure data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolResultView {
+    /// Default shape — the raw tool output, shown as a truncated
+    /// monospace block with a `+N lines` footer when it overflows.
+    Text { content: String },
+    /// Edit tool — renders as a `-` old / `+` new unified diff.
+    /// `replacements` is the number of matches actually replaced
+    /// (> 1 only when `replace_all` succeeded on multiple matches).
+    Diff {
+        old: String,
+        new: String,
+        replace_all: bool,
+        replacements: usize,
+    },
+}
+
 // ── Tool Trait ──
 
 /// A tool that the agent can invoke.
@@ -128,6 +153,25 @@ pub(crate) trait Tool: Send + Sync {
             Some(arg) => format!("{label}({arg})"),
             None => label,
         }
+    }
+
+    /// Optional structured view of a completed tool call's output,
+    /// used by the TUI in place of the default truncated text block.
+    /// `input` is the original tool-call arguments (already used by
+    /// `run`); `content` is the success-path `ToolOutput::content`.
+    ///
+    /// Returning `None` — the default — falls back to [`ToolResultView::Text`].
+    /// Tools should also return `None` when the input shape doesn't
+    /// match their expectations, so malformed calls degrade gracefully
+    /// rather than panic.
+    ///
+    /// Not called for error outputs: [`ToolRegistry::result_view`]
+    /// short-circuits `is_error` to `Text` centrally since every
+    /// tool's error message is free-form prose, not a structured
+    /// shape.
+    fn result_view(&self, input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
+        _ = (input, content);
+        None
     }
 
     fn run(
@@ -201,6 +245,35 @@ impl ToolRegistry {
     pub(crate) fn label(&self, name: &str, input: &serde_json::Value) -> String {
         self.get(name)
             .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
+    }
+
+    /// Builds the structured [`ToolResultView`] for a completed tool
+    /// call. Falls back to [`ToolResultView::Text`] in every case a
+    /// per-tool renderer cannot cleanly represent:
+    ///
+    /// - `is_error`: error outputs carry the failure message as free
+    ///   text; pretending they're a diff swaps signal for a lie.
+    /// - Unregistered tool name: no renderer to consult.
+    /// - [`Tool::result_view`] returns `None`: the tool has no
+    ///   structured view yet, or the input shape wasn't what the
+    ///   renderer expected.
+    pub(crate) fn result_view(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        content: &str,
+        is_error: bool,
+    ) -> ToolResultView {
+        if is_error {
+            return ToolResultView::Text {
+                content: content.to_owned(),
+            };
+        }
+        self.get(name)
+            .and_then(|t| t.result_view(input, content))
+            .unwrap_or_else(|| ToolResultView::Text {
+                content: content.to_owned(),
+            })
     }
 }
 
@@ -598,6 +671,68 @@ mod tests {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
         assert_eq!(registry.label("nonexistent", &input), "nonexistent");
+    }
+
+    // ── ToolRegistry::result_view ──
+
+    #[test]
+    fn result_view_delegates_to_tool_for_structured_output() {
+        // Edit is the one registered override today; routing through
+        // the registry must produce the same `Diff` the tool owns.
+        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+        });
+        let view = registry.result_view("edit", &input, "Successfully edited /tmp/f.rs.", false);
+        assert!(matches!(view, ToolResultView::Diff { .. }));
+    }
+
+    #[test]
+    fn result_view_short_circuits_errors_to_text() {
+        // Error outputs are prose ("old_string not found …"); rendering
+        // them as a diff would hide the failure. The short-circuit lives
+        // in the registry so individual tools don't each re-implement it.
+        let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+        });
+        let view = registry.result_view("edit", &input, "old_string not found", true);
+        assert_eq!(
+            view,
+            ToolResultView::Text {
+                content: "old_string not found".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_to_text_for_unknown_tool() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let view = registry.result_view("nonexistent", &serde_json::json!({}), "anything", false);
+        assert_eq!(
+            view,
+            ToolResultView::Text {
+                content: "anything".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_to_text_when_tool_has_no_structured_view() {
+        // Bash has no `result_view` override yet — free-form shell
+        // output renders as the default truncated text block.
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let view = registry.result_view(
+            "bash",
+            &serde_json::json!({"command": "ls"}),
+            "file1\nfile2",
+            false,
+        );
+        assert!(matches!(view, ToolResultView::Text { .. }));
     }
 
     // ── resolve_base_dir ──

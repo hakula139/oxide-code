@@ -13,10 +13,7 @@
 
 mod blocks;
 
-pub(crate) use self::blocks::ToolResultView;
-
 use std::cell::Cell;
-use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -31,8 +28,9 @@ use self::blocks::{
 use crate::agent::event::UserAction;
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
+use crate::tui::pending_calls::{PendingCall, PendingCalls};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call
@@ -94,11 +92,7 @@ impl ChatView {
     /// collapses them to zero when `show_thinking` is off, so flipping
     /// the toggle at runtime doesn't require reloading the session.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
-        // Per-call metadata so the paired `ToolResult` can build a
-        // structured view (Edit diff, etc.) without re-walking the
-        // transcript: label is shown in the status line, name + input
-        // drive [`ToolResultView::build`].
-        let mut pending: HashMap<&str, (String, &str, &serde_json::Value)> = HashMap::new();
+        let mut pending = PendingCalls::new();
         for interaction in walk_transcript(messages) {
             match interaction {
                 Interaction::UserText(text) => {
@@ -113,24 +107,42 @@ impl ChatView {
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
                     let label = tools.label(name, input);
-                    pending.insert(id, (label.clone(), name, input));
-                    self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
+                    self.blocks
+                        .push(Box::new(ToolCallBlock::new(icon, label.clone())));
+                    pending.insert(
+                        id.to_owned(),
+                        PendingCall {
+                            label,
+                            name: name.to_owned(),
+                            input: input.clone(),
+                        },
+                    );
                 }
                 Interaction::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
                 } => {
-                    let (label, name, input) = pending.remove(tool_use_id).map_or_else(
-                        || ("(result)".to_owned(), None, None),
-                        |(l, n, i)| (l, Some(n), Some(i)),
-                    );
-                    let view = ToolResultView::build(name, input, content, is_error);
+                    let pending = pending.remove(tool_use_id);
+                    let (label, view) = match pending {
+                        Some(p) => {
+                            let view = tools.result_view(&p.name, &p.input, content, is_error);
+                            (p.label, view)
+                        }
+                        None => (
+                            "(result)".to_owned(),
+                            ToolResultView::Text {
+                                content: content.to_owned(),
+                            },
+                        ),
+                    };
                     self.blocks
                         .push(Box::new(ToolResultBlock::new(label, view, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
-                    let view = ToolResultView::build(None, None, content, is_error);
+                    let view = ToolResultView::Text {
+                        content: content.to_owned(),
+                    };
                     self.blocks
                         .push(Box::new(ToolResultBlock::new("(result)", view, is_error)));
                 }
@@ -1517,7 +1529,7 @@ mod tests {
         // render the replaced text with `- ` for the old side and `+ `
         // for the new side, not the default 5-line truncation body.
         let mut chat = test_chat();
-        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+        let view = crate::tool::ToolResultView::Diff {
             old: "fn foo()".to_owned(),
             new: "fn bar()".to_owned(),
             replace_all: false,
@@ -1538,7 +1550,7 @@ mod tests {
     #[test]
     fn push_tool_result_view_edit_replace_all_shows_match_count() {
         let mut chat = test_chat();
-        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+        let view = crate::tool::ToolResultView::Diff {
             old: "a".to_owned(),
             new: "b".to_owned(),
             replace_all: true,
@@ -1559,7 +1571,7 @@ mod tests {
         // replace_all=false or replace_all=true with one match) should
         // render a clean diff with no count footer.
         let mut chat = test_chat();
-        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+        let view = crate::tool::ToolResultView::Diff {
             old: "a".to_owned(),
             new: "b".to_owned(),
             replace_all: true,
@@ -1809,7 +1821,7 @@ mod tests {
         // routing Edit through `Text` again shows up here.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
-        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+        let view = crate::tool::ToolResultView::Diff {
             old: "fn foo() {}".to_owned(),
             new: "fn foo() -> i32 { 42 }".to_owned(),
             replace_all: false,

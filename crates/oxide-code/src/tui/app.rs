@@ -7,7 +7,6 @@
 //! redraw work proportional to state change rather than event
 //! throughput.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,14 +17,15 @@ use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
 use super::component::Component;
-use super::components::chat::{ChatView, ToolResultView};
+use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::pending_calls::{PendingCall, PendingCalls};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolRegistry, ToolResultView};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -38,27 +38,15 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
-    /// Per-in-flight-call metadata bridging
-    /// [`AgentEvent::ToolCallStart`] and [`AgentEvent::ToolCallEnd`] —
-    /// the End arm needs `name` + `input` to build a structured
-    /// [`ToolResultView`] (Edit diff, etc.) and to fall back to the
-    /// call label when the tool didn't set a result title.
-    /// Entries are removed on their matching End or on turn completion.
-    pending_calls: HashMap<String, PendingCall>,
+    /// Bridges [`AgentEvent::ToolCallStart`] to its matching
+    /// [`AgentEvent::ToolCallEnd`]. The End arm looks up `name` +
+    /// `input` to build a structured
+    /// [`ToolResultView`](crate::tool::ToolResultView) and falls back
+    /// to `label` when the tool emits `title: None`.
+    pending_calls: PendingCalls,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
-}
-
-/// Metadata stashed at `ToolCallStart` and consumed at `ToolCallEnd`.
-/// `label` doubles as the result header when the tool emits `title:
-/// None` — closing the latent swallow-on-missing-title bug that used
-/// to hide error bodies whenever a tool failed before calling
-/// `with_title`.
-struct PendingCall {
-    label: String,
-    name: String,
-    input: serde_json::Value,
 }
 
 impl App {
@@ -88,7 +76,7 @@ impl App {
             agent_rx,
             user_tx,
             tools,
-            pending_calls: HashMap::new(),
+            pending_calls: PendingCalls::new(),
             should_quit: false,
             dirty: true,
         }
@@ -210,14 +198,18 @@ impl App {
             } => {
                 // The End arm always pushes a result, even when the
                 // tool didn't set a title — the tool-call label is
-                // the natural fallback. The pre-cache lookup lets
-                // Edit etc. build a structured view from the input.
+                // the natural fallback. The cached input drives
+                // per-tool structured views (Edit diff, etc.).
                 let pending = self.pending_calls.remove(&id);
-                let (name, input) = pending
-                    .as_ref()
-                    .map(|p| (p.name.as_str(), &p.input))
-                    .map_or((None, None), |(n, i)| (Some(n), Some(i)));
-                let view = ToolResultView::build(name, input, &content, is_error);
+                let view = pending.as_ref().map_or_else(
+                    || ToolResultView::Text {
+                        content: content.clone(),
+                    },
+                    |p| {
+                        self.tools
+                            .result_view(&p.name, &p.input, &content, is_error)
+                    },
+                );
                 let header = title
                     .or_else(|| pending.as_ref().map(|p| p.label.clone()))
                     .unwrap_or_else(|| "(result)".to_owned());

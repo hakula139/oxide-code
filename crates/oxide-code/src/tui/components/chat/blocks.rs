@@ -19,7 +19,6 @@ mod user;
 pub(super) use assistant::{AssistantText, AssistantThinking};
 pub(super) use error::ErrorBlock;
 pub(super) use streaming::StreamingAssistant;
-pub(crate) use tool::ToolResultView;
 pub(super) use tool::{ToolCallBlock, ToolResultBlock};
 pub(super) use user::UserMessage;
 
