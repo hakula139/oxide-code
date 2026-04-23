@@ -7,6 +7,7 @@
 //! redraw work proportional to state change rather than event
 //! throughput.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +38,15 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
+    /// Per-in-flight-call header label, keyed by tool-call id. Bridges
+    /// [`AgentEvent::ToolCallStart`] to [`AgentEvent::ToolCallEnd`] so
+    /// the result header can fall back to the call label when the
+    /// tool did not emit a `title` of its own — closes a latent bug
+    /// where errors that aborted before `.with_title(...)` (bash
+    /// spawn failures, `parse_input` errors, unknown tools) silently
+    /// swallowed the result entry. Entries are removed on their
+    /// matching End; orphans drop on the next `TurnComplete` cleanup.
+    pending_result_labels: HashMap<String, String>,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -69,6 +79,7 @@ impl App {
             agent_rx,
             user_tx,
             tools,
+            pending_result_labels: HashMap::new(),
             should_quit: false,
             dirty: true,
         }
@@ -173,22 +184,28 @@ impl App {
                 self.chat.append_thinking_token(&token);
                 self.status_bar.set_status(Status::Streaming);
             }
-            AgentEvent::ToolCallStart { name, input, .. } => {
+            AgentEvent::ToolCallStart { id, name, input } => {
                 self.chat.commit_streaming();
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
                 self.chat.push_tool_call(icon, &label);
+                self.pending_result_labels.insert(id, label);
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
+                id,
                 title,
                 content,
                 is_error,
-                ..
             } => {
-                if let Some(title) = &title {
-                    self.chat.push_tool_result(title, &content, is_error);
-                }
+                // Always push the result — previously a `title: None`
+                // swallowed the entire entry, hiding error bodies from
+                // tools that failed before calling `.with_title(...)`.
+                // Fall back to the cached tool-call label (or a generic
+                // "(result)" when the Start event was missed).
+                let fallback = self.pending_result_labels.remove(&id);
+                let header = title.or(fallback).unwrap_or_else(|| "(result)".to_owned());
+                self.chat.push_tool_result(&header, &content, is_error);
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -259,6 +276,28 @@ mod tests {
     fn test_app(
         title: Option<&str>,
     ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+        test_app_with_registry(title, Arc::new(ToolRegistry::new(Vec::new())))
+    }
+
+    /// Variant plumbing the real tool catalog into the `App` so
+    /// `ToolCallStart` label lookups match production. Used by
+    /// tool-event tests that exercise the Start → End flow.
+    fn test_app_with_tools() -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+        let tools = ToolRegistry::new(vec![
+            Box::new(crate::tool::bash::BashTool),
+            Box::new(crate::tool::read::ReadTool),
+            Box::new(crate::tool::write::WriteTool),
+            Box::new(crate::tool::edit::EditTool),
+            Box::new(crate::tool::glob::GlobTool),
+            Box::new(crate::tool::grep::GrepTool),
+        ]);
+        test_app_with_registry(None, Arc::new(tools))
+    }
+
+    fn test_app_with_registry(
+        title: Option<&str>,
+        tools: Arc<ToolRegistry>,
+    ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(8);
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
@@ -269,7 +308,7 @@ mod tests {
             agent_rx,
             user_tx,
             &[],
-            Arc::new(ToolRegistry::new(Vec::new())),
+            tools,
         );
         (app, user_rx, agent_tx)
     }
@@ -492,11 +531,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_tool_call_end_without_title_skips_result_entry() {
-        // `title: None` signals the tool dispatch layer chose to hide the
-        // result (e.g., for tools whose output is purely model-facing).
-        // The chat entry count must not grow in that case.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+    fn handle_tool_call_end_without_title_falls_back_to_call_label() {
+        // `title: None` means the tool didn't set a result header —
+        // typically an error path (timeout, invalid input, spawn
+        // failure) that aborted before `.with_title(...)`. The result
+        // must still render (previously: silently swallowed, hiding
+        // the failure body from the user) and the header falls back
+        // to the tool-call label stashed at `ToolCallStart`.
+        let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
@@ -506,10 +548,30 @@ mod tests {
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
             title: None,
-            content: "silent".to_owned(),
+            content: "spawn failed: permission denied".to_owned(),
+            is_error: true,
+        });
+        assert_eq!(
+            app.chat.entry_count(),
+            before + 1,
+            "result must render even when the tool did not set a title",
+        );
+    }
+
+    #[test]
+    fn handle_tool_call_end_without_start_uses_generic_fallback_header() {
+        // Defensive: an End without a matching Start (agent bug or
+        // dropped event) must still render so the user sees the
+        // output. No pending label → header falls back to `(result)`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::ToolCallEnd {
+            id: "orphan".to_owned(),
+            title: None,
+            content: "stray output".to_owned(),
             is_error: false,
         });
-        assert_eq!(app.chat.entry_count(), before);
+        assert_eq!(app.chat.entry_count(), before + 1);
     }
 
     // ── draw_frame ──

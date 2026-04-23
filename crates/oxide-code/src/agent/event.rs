@@ -17,22 +17,20 @@ pub(crate) enum AgentEvent {
     StreamToken(String),
     /// A chunk of thinking text (streamed incrementally).
     ThinkingToken(String),
-    /// A tool call has started execution.
+    /// A tool call has started execution. `id` is the call's
+    /// correlation handle — `App` caches the tool-call label under it
+    /// so the matching [`Self::ToolCallEnd`] can fall back to that
+    /// label when the tool did not set a result title of its own.
     ToolCallStart {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "read only by cfg(test) assertions")
-        )]
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// A tool call has finished.
+    /// A tool call has finished. `title` is an optional display
+    /// override for the result header; when `None`, the caller falls
+    /// back to the tool-call label recorded at [`Self::ToolCallStart`].
+    /// (Not a suppression flag — the result is always shown.)
     ToolCallEnd {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "read only by cfg(test) assertions")
-        )]
         id: String,
         title: Option<String>,
         content: String,
