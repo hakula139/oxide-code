@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn push_tool_result_dedups_label_against_first_body_line() {
+    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
         // Grep and glob both set `title = "Found N files"` AND emit
         // the same string as the first line of `content`. Rendering
         // both duplicates it on screen. Skip the first body line when
