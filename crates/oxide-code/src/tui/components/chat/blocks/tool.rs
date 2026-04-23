@@ -681,6 +681,22 @@ mod tests {
         assert_eq!(render_entries(&entries), vec!["... +2", "... +1"]);
     }
 
+    #[test]
+    fn diff_entries_budget_two_emits_single_ellipsis_then_tail_per_side() {
+        // `split_budget(n, n, 2)` → `(1, 1)`, which exercises the
+        // `budget == 1` branch in `emit_side` — previously untested
+        // via `diff_entries`. Head = 0, Ellipsis{hidden: n-1}, tail.
+        // Regresses if a mutation flips `head = budget - 1` to
+        // `head = budget` (then the ellipsis would vanish).
+        let old = vec!["a", "b", "c"];
+        let new = vec!["x", "y", "z"];
+        let entries = diff_entries(&old, &new, 2, Style::default(), Style::default());
+        assert_eq!(
+            render_entries(&entries),
+            vec!["... +2", "- c", "... +2", "+ z"],
+        );
+    }
+
     // ── split_budget ──
 
     #[test]

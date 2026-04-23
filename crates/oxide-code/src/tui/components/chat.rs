@@ -1863,6 +1863,26 @@ mod tests {
     }
 
     #[test]
+    fn render_tool_call_with_edit_diff_error_uses_error_border_color() {
+        // Error-path Edit (e.g., `old_string` didn't match) still
+        // renders through the Diff view but with the error-colored
+        // border on the result row. Pins the `is_error = true`
+        // branch in `render_diff_body` — all other diff snapshots
+        // exercise the success border, so any theme regression on
+        // the error path would otherwise slip through.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo() {}".to_owned(),
+            new: "fn foo() -> i32 { 42 }".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, true);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
     fn render_tool_call_with_edit_diff_identical_sides_emits_no_body() {
         // Defensive guard in `render_diff_body`: when `trim_common_boundaries`
         // collapses both sides to empty (old == new entirely — not reachable
