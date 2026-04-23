@@ -1881,11 +1881,10 @@ mod tests {
         chat.append_stream_token("para2\n\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "para1\n\npara2\n\n".len());
+        let final_len = s.rendered_len();
         assert!(
-            s.rendered_len() >= first_len + 2,
-            "paragraph break must add >= 2 lines (blank + body): got {} → {}",
-            first_len,
-            s.rendered_len(),
+            final_len >= first_len + 2,
+            "paragraph break must add >= 2 lines (blank + body): got {first_len} → {final_len}",
         );
     }
 
