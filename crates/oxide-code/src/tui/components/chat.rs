@@ -1300,6 +1300,55 @@ mod tests {
     }
 
     #[test]
+    fn push_tool_result_dedups_label_against_first_body_line() {
+        // Grep and glob both set `title = "Found N files"` AND emit
+        // the same string as the first line of `content`. Rendering
+        // both duplicates it on screen. Skip the first body line when
+        // it matches the label verbatim.
+        let mut chat = test_chat();
+        chat.push_tool_result("Found 2 files", "Found 2 files\na.rs\nb.rs", false);
+        let text = all_text(&chat);
+        // Only the status line carries "Found 2 files" — the body
+        // starts at the file list.
+        assert_eq!(
+            text.matches("Found 2 files").count(),
+            1,
+            "label must not appear twice: {text}",
+        );
+        assert!(text.contains("a.rs"));
+        assert!(text.contains("b.rs"));
+    }
+
+    #[test]
+    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
+        // Body's first line only gets dropped when it exactly matches
+        // the label. A superficially similar prefix ("Found 2 files"
+        // vs "Found 2 files in cache") must render both — the label
+        // is a distinct header.
+        let mut chat = test_chat();
+        chat.push_tool_result("Found 2 files", "Found 2 files in cache\na.rs", false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("Found 2 files in cache"),
+            "body preserved: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_dedup_strips_only_exact_match_then_shows_rest() {
+        // When content is just the duplicated label (no trailing body
+        // lines), rendering collapses to a bare status line.
+        let mut chat = test_chat();
+        chat.push_tool_result("No matches found", "No matches found", false);
+        let text = all_text(&chat);
+        assert_eq!(
+            text.matches("No matches found").count(),
+            1,
+            "body collapses when it only repeats the label: {text}",
+        );
+    }
+
+    #[test]
     fn push_tool_result_exactly_max_no_truncation() {
         const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
         let mut chat = test_chat();

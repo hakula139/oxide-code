@@ -107,7 +107,7 @@ impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         render_status_line(&mut out, ctx, &self.label, self.is_error);
-        render_output_body(&mut out, ctx, &self.content, self.is_error);
+        render_output_body(&mut out, ctx, &self.content, &self.label, self.is_error);
         out
     }
 
@@ -120,6 +120,7 @@ fn render_output_body(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
     content: &str,
+    label: &str,
     is_error: bool,
 ) {
     let trimmed = content.trim();
@@ -132,7 +133,22 @@ fn render_output_body(
     let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
     let width = usize::from(ctx.width);
 
-    let output_lines: Vec<&str> = trimmed.lines().collect();
+    // Tools (grep, glob) commonly use their own summary line as both
+    // the `title` metadata (shown in the status line) and the first
+    // line of `content` (shown in the body) — the model needs the
+    // summary to parse counts, but rendering both duplicates it on
+    // screen. Skip the first body line when it matches the label
+    // verbatim.
+    let mut output_lines: Vec<&str> = trimmed.lines().collect();
+    if output_lines
+        .first()
+        .is_some_and(|l| l.trim() == label.trim())
+    {
+        output_lines.remove(0);
+    }
+    if output_lines.is_empty() {
+        return;
+    }
     let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
     let visible = if truncated {
         &output_lines[..MAX_TOOL_OUTPUT_LINES]
