@@ -191,7 +191,12 @@ impl ChatView {
     }
 
     /// Appends a tool call entry with its icon and label.
+    ///
+    /// Finalizes any in-flight streaming buffer first — a tool call
+    /// implicitly ends the current assistant turn's text, so callers
+    /// don't need to remember to `commit_streaming()` beforehand.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
+        self.commit_streaming();
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
@@ -209,11 +214,8 @@ impl ChatView {
             .push(Box::new(ToolResultBlock::new(label, view, is_error)));
     }
 
-    /// Test shortcut for the common "raw text body" shape. Kept
-    /// behind `cfg(test)` so production code is forced through
-    /// [`push_tool_result_view`](Self::push_tool_result_view) with an
-    /// explicit view — the chat layer shouldn't need to know which
-    /// tools fall back to Text.
+    /// Test shortcut for the `Text` variant — production callers
+    /// route through [`push_tool_result_view`](Self::push_tool_result_view).
     #[cfg(test)]
     pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
         let view = ToolResultView::Text {
@@ -1829,6 +1831,69 @@ mod tests {
         };
         chat.push_tool_result_view("Edited f.rs", view, false);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_over_budget_truncates_both_sides() {
+        // Pins the symmetric truncation policy: when the combined line
+        // count exceeds `MAX_DIFF_BODY_LINES`, each side renders with
+        // a head + ellipsis + tail shape. Regressions that revert to
+        // the old asymmetric policy — or that emit a bogus
+        // `... +0 lines` footer on pure deletion — show up here.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/big.rs)");
+        let old = (0..8)
+            .map(|i| format!("old{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (0..8)
+            .map(|i| format!("new{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let view = crate::tool::ToolResultView::Diff {
+            old,
+            new,
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited big.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 16));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_trims_identical_boundary_lines() {
+        // Pure tail insertion: the anchor line (`fn foo()`) is
+        // identical on both sides and must NOT render as
+        // `- fn foo()` / `+ fn foo()`. Pinned as a snapshot so the
+        // trim regression would surface at the rendered-layout level,
+        // not just in the unit test on `trim_common_boundaries`.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo()".to_owned(),
+            new: "fn foo()\n    return 42;".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_wraps_long_lines_under_bar() {
+        // Pins bar continuation under narrow widths — the `+` sigil
+        // stays on the first visual row only; wrapped continuations
+        // flush under the bar without repeating the sigil.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "short".to_owned(),
+            new: "an intentionally quite long replacement line that forces wrapping".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 40, 10));
     }
 
     #[test]

@@ -182,9 +182,11 @@ impl App {
                 self.status_bar.set_status(Status::Streaming);
             }
             AgentEvent::ToolCallStart { id, name, input } => {
-                self.chat.commit_streaming();
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
+                // `push_tool_call` implicitly flushes any in-flight
+                // streaming assistant text — no explicit
+                // `commit_streaming` side channel needed.
                 self.chat.push_tool_call(icon, &label);
                 self.pending_calls
                     .insert(id, PendingCall { label, name, input });

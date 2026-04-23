@@ -1,0 +1,20 @@
+---
+source: crates/oxide-code/src/tui/components/chat.rs
+expression: "render_chat(&mut chat, 60, 16)"
+---
+"▎ ✎ Edit(/tmp/big.rs)                                       "
+"▎ ✓ Edited big.rs                                           "
+"▎   - old0                                                  "
+"▎   - old1                                                  "
+"▎   - old2                                                  "
+"▎   - old3                                                  "
+"▎   ... +3 lines                                            "
+"▎   - old7                                                  "
+"▎   + new0                                                  "
+"▎   + new1                                                  "
+"▎   + new2                                                  "
+"▎   + new3                                                  "
+"▎   ... +3 lines                                            "
+"▎   + new7                                                  "
+"                                                            "
+"                                                            "
