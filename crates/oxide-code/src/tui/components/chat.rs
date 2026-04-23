@@ -1046,6 +1046,59 @@ mod tests {
         assert!(text.contains("line2"));
     }
 
+    #[test]
+    fn append_stream_token_preserves_blank_between_committed_paragraphs() {
+        // The user-visible paragraph-spacing bug: committing chunk-
+        // by-chunk on `\n` boundaries fed pulldown-cmark fragments
+        // that each rendered as a standalone paragraph, losing the
+        // inter-paragraph blank. Mid-stream view ended up collapsed
+        // vs. the post-commit view. Pin the expected shape here —
+        // two committed paragraphs with a blank line between them.
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        // First chunk ends a paragraph; second chunk starts a new
+        // one. Both must sit in the cache when the next token lands
+        // because each `advance_cache` call committed past a `\n\n`.
+        chat.append_stream_token("para1\n\n");
+        chat.append_stream_token("para2\n\ntail");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let p1 = lines.iter().position(|l| l.contains("para1")).unwrap();
+        let p2 = lines.iter().position(|l| l.contains("para2")).unwrap();
+        assert!(
+            (p1 + 1..p2).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between committed paragraphs: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn append_stream_token_preserves_blank_between_cache_and_live_tail() {
+        // Same invariant at the cache / live-tail seam: a committed
+        // paragraph followed by a partially-typed next paragraph
+        // must show the blank gap even while the new paragraph is
+        // still streaming (pre-`\n\n`).
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("committed paragraph\n\n");
+        chat.append_stream_token("still streaming");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let committed = lines
+            .iter()
+            .position(|l| l.contains("committed paragraph"))
+            .unwrap();
+        let live = lines
+            .iter()
+            .position(|l| l.contains("still streaming"))
+            .unwrap();
+        assert!(
+            (committed + 1..live).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between cache and live tail: {lines:?}"
+        );
+    }
+
     // ── append_thinking_token ──
 
     #[test]
@@ -1459,7 +1512,9 @@ mod tests {
     fn update_layout_invalidates_streaming_cache_on_width_change() {
         let mut chat = test_chat();
         chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete line\n");
+        // Full paragraph (ends in `\n\n`) so the cache actually
+        // commits — a single `\n` no longer triggers advance_cache.
+        chat.append_stream_token("a complete paragraph\n\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_ne!(s.rendered_len(), 0);
         assert_eq!(s.cached_width(), 80);
@@ -1764,51 +1819,87 @@ mod tests {
     }
 
     #[test]
-    fn advance_streaming_cache_single_newline() {
+    fn advance_streaming_cache_line_boundary_does_not_commit() {
+        // Line boundaries mid-paragraph are not commit points — the
+        // cache advances only when a full paragraph has arrived
+        // (`\n\n`), so pulldown-cmark sees each committed chunk as a
+        // complete block. A single `\n` inside a paragraph keeps the
+        // buffer uncommitted and streaming-live.
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        chat.append_stream_token("first line\nincomplete");
+        chat.append_stream_token("first line\nsecond line");
         let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "first line\n".len());
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.rendered_len(), 0);
+    }
+
+    #[test]
+    fn advance_streaming_cache_paragraph_boundary_commits() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("para1\n\npartial");
+        let s = chat.streaming.as_ref().unwrap();
+        // The `\n\n` between para1 and "partial" is the commit point;
+        // boundary lands past both newlines so subsequent advances
+        // scan only the uncommitted tail.
+        assert_eq!(s.rendered_boundary(), "para1\n\n".len());
         assert_eq!(s.rendered_len(), 1);
     }
 
     #[test]
-    fn advance_streaming_cache_multiple_newlines() {
+    fn advance_streaming_cache_multiple_paragraphs_commit_to_last_break() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        chat.append_stream_token("line1\nline2\nline3\npartial");
+        chat.append_stream_token("p1\n\np2\n\np3\n\npartial");
         let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), "line1\nline2\nline3\n".len());
+        // Commit up to the last `\n\n` before the trailing live
+        // fragment; p1, p2, p3 land in the cache in one render pass
+        // so pulldown sees them as three consecutive blocks and emits
+        // inter-paragraph blanks naturally.
+        assert_eq!(s.rendered_boundary(), "p1\n\np2\n\np3\n\n".len());
     }
 
     #[test]
-    fn advance_streaming_cache_incremental() {
+    fn advance_streaming_cache_incremental_inserts_paragraph_gaps() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
 
-        chat.append_stream_token("first\n");
-        {
+        // First paragraph — cache empty, the render includes the `◉`
+        // icon via render_assistant_markdown's `starts_new_turn`.
+        chat.append_stream_token("para1\n\n");
+        let (first_boundary, first_len) = {
             let s = chat.streaming.as_ref().unwrap();
-            assert_eq!(s.rendered_boundary(), 6);
-            assert_eq!(s.rendered_len(), 1);
-        }
+            (s.rendered_boundary(), s.rendered_len())
+        };
+        assert_eq!(first_boundary, "para1\n\n".len());
+        assert!(first_len >= 1);
 
-        chat.append_stream_token("second\n");
-        {
-            let s = chat.streaming.as_ref().unwrap();
-            assert_eq!(s.rendered_boundary(), 13);
-            assert_eq!(s.rendered_len(), 2);
-        }
+        // Second paragraph — cache is non-empty, so advance_cache
+        // prepends a blank separator before the new paragraph's
+        // rendered lines. Total cache length grows by at least 2
+        // (separator + paragraph line).
+        chat.append_stream_token("para2\n\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_boundary(), "para1\n\npara2\n\n".len());
+        assert!(
+            s.rendered_len() >= first_len + 2,
+            "paragraph break must add >= 2 lines (blank + body): got {} → {}",
+            first_len,
+            s.rendered_len(),
+        );
     }
 
     #[test]
-    fn advance_streaming_cache_trailing_newline_only() {
+    fn advance_streaming_cache_trailing_paragraph_break_only() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        chat.append_stream_token("\n");
+        chat.append_stream_token("\n\n");
         let s = chat.streaming.as_ref().unwrap();
-        assert_eq!(s.rendered_boundary(), 1);
+        // Empty (whitespace-only) commit — boundary still advances
+        // past the `\n\n` so subsequent text isn't re-scanned, but
+        // nothing lands in the cache.
+        assert_eq!(s.rendered_boundary(), 2);
+        assert_eq!(s.rendered_len(), 0);
     }
 
     #[test]
@@ -1817,7 +1908,7 @@ mod tests {
         // markdown into the cache. The cache stays empty until the
         // viewport width is supplied.
         let mut chat = test_chat();
-        chat.append_stream_token("first complete line\n");
+        chat.append_stream_token("first paragraph\n\n");
         {
             let s = chat.streaming.as_ref().unwrap();
             assert_eq!(s.rendered_len(), 0);
@@ -1826,7 +1917,7 @@ mod tests {
         }
 
         chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("second complete line\n");
+        chat.append_stream_token("second paragraph\n\n");
         {
             let s = chat.streaming.as_ref().unwrap();
             assert_ne!(s.rendered_len(), 0);
