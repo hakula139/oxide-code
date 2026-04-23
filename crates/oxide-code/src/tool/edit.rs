@@ -618,12 +618,16 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let Some(ToolResultView::Diff { replacements, .. }) =
-            EditTool.result_view(&input, "Successfully edited /tmp/f.rs.")
-        else {
-            panic!("expected diff view");
-        };
-        assert_eq!(replacements, 1);
+        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 1,
+            }),
+        );
     }
 
     #[test]

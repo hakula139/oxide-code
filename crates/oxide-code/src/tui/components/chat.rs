@@ -123,21 +123,16 @@ impl ChatView {
                     content,
                     is_error,
                 } => {
-                    let pending = pending.remove(tool_use_id);
-                    let (label, view) = match pending {
-                        Some(p) => {
-                            let view = tools.result_view(&p.name, &p.input, content, is_error);
-                            (p.label, view)
-                        }
-                        None => (
-                            "(result)".to_owned(),
-                            ToolResultView::Text {
-                                content: content.to_owned(),
-                            },
-                        ),
-                    };
+                    // [`walk_transcript`] emits `ToolResult` only
+                    // inline right after its paired `ToolCall` —
+                    // unpaired ids surface through `OrphanToolResult`
+                    // instead — so the lookup is total.
+                    let p = pending
+                        .remove(tool_use_id)
+                        .expect("walk_transcript pairs every ToolResult with its ToolCall");
+                    let view = tools.result_view(&p.name, &p.input, content, is_error);
                     self.blocks
-                        .push(Box::new(ToolResultBlock::new(label, view, is_error)));
+                        .push(Box::new(ToolResultBlock::new(p.label, view, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
                     let view = ToolResultView::Text {
@@ -1858,6 +1853,24 @@ mod tests {
         };
         chat.push_tool_result_view("Edited big.rs", view, false);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 16));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_identical_sides_emits_no_body() {
+        // Defensive guard in `render_diff_body`: when `trim_common_boundaries`
+        // collapses both sides to empty (old == new entirely — not reachable
+        // via `EditTool` since it rejects no-op edits, but still a valid input
+        // to the renderer), only the status header renders.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "unchanged".to_owned(),
+            new: "unchanged".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 6));
     }
 
     #[test]
