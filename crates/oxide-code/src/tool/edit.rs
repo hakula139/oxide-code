@@ -119,7 +119,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     };
 
     let name = super::file_name(&input.file_path);
-    ToolOutput::from_result(
+    let output = ToolOutput::from_result(
         edit_file(
             &input.file_path,
             &input.old_string,
@@ -127,8 +127,17 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
             input.replace_all,
         )
         .await,
-    )
-    .with_title(format!("Edited {name}"))
+    );
+    // Only claim "Edited {name}" when the edit actually succeeded —
+    // on failure (old_string not found, file missing, etc.) the
+    // title must stay `None` so the UI falls back to the neutral
+    // tool-call label. Otherwise the user reads `✗ Edited f.rs`,
+    // which contradicts the error indicator.
+    if output.is_error {
+        output
+    } else {
+        output.with_title(format!("Edited {name}"))
+    }
 }
 
 async fn edit_file(
@@ -373,6 +382,11 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
+        assert_eq!(
+            output.metadata.title.as_deref(),
+            Some("Edited test.txt"),
+            "success path attaches the Edited title",
+        );
     }
 
     #[tokio::test]
@@ -384,6 +398,30 @@ mod tests {
         .await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_edit_error_omits_edited_title() {
+        // Failing edits (old_string not found, missing file, etc.)
+        // must leave `title` unset so the TUI header falls back to
+        // the neutral call label rather than rendering
+        // `✗ Edited <name>`, which contradicts the error indicator.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let output = run(serde_json::json!({
+            "file_path": path.to_str().unwrap(),
+            "old_string": "not present",
+            "new_string": "x",
+        }))
+        .await;
+
+        assert!(output.is_error);
+        assert_eq!(
+            output.metadata.title, None,
+            "error path must not claim the edit happened",
+        );
     }
 
     // ── edit_file ──
