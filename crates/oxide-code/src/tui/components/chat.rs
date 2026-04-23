@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn push_tool_result_dedup_strips_only_exact_match_then_shows_rest() {
+    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
         // When content is just the duplicated label (no trailing body
         // lines), rendering collapses to a bare status line.
         let mut chat = test_chat();
