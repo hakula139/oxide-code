@@ -1883,11 +1883,14 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_call_with_edit_diff_identical_sides_emits_no_body() {
-        // Defensive guard in `render_diff_body`: when `trim_common_boundaries`
-        // collapses both sides to empty (old == new entirely — not reachable
-        // via `EditTool` since it rejects no-op edits, but still a valid input
-        // to the renderer), only the status header renders.
+    fn render_tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
+        // Defensive guard in `render_diff_body`: when
+        // `trim_common_boundaries` collapses both sides to empty
+        // (old == new entirely — reachable on transcript replay
+        // since `edit_file` rejects no-op edits live), emit a single
+        // dim "(no change)" row so the user sees an explicit marker
+        // instead of a bare success header that reads as "edit
+        // applied, diff scrolled off".
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {

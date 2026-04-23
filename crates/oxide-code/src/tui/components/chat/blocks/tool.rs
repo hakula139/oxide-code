@@ -251,6 +251,16 @@ fn render_diff_body(
     let new_lines = split_diff_side(new);
     let (old_lines, new_lines) = trim_common_boundaries(&old_lines, &new_lines);
     if old_lines.is_empty() && new_lines.is_empty() {
+        // Both sides collapsed to empty — `old == new` entirely.
+        // `edit_file` rejects no-op edits live, but a resumed
+        // transcript (or a malformed input) can reach this branch.
+        // Emit a single dim marker so the result row doesn't render
+        // as a bare success header with no body, which reads as
+        // \"edit applied, diff scrolled off\" instead of \"no change\".
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled("(no change)", ctx.theme.dim()),
+        ]));
         return;
     }
 
