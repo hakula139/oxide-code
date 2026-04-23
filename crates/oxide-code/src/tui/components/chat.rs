@@ -13,6 +13,8 @@
 
 mod blocks;
 
+pub(crate) use self::blocks::ToolResultView;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -92,7 +94,11 @@ impl ChatView {
     /// collapses them to zero when `show_thinking` is off, so flipping
     /// the toggle at runtime doesn't require reloading the session.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
-        let mut labels: HashMap<&str, String> = HashMap::new();
+        // Per-call metadata so the paired `ToolResult` can build a
+        // structured view (Edit diff, etc.) without re-walking the
+        // transcript: label is shown in the status line, name + input
+        // drive [`ToolResultView::build`].
+        let mut pending: HashMap<&str, (String, &str, &serde_json::Value)> = HashMap::new();
         for interaction in walk_transcript(messages) {
             match interaction {
                 Interaction::UserText(text) => {
@@ -107,7 +113,7 @@ impl ChatView {
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
                     let label = tools.label(name, input);
-                    labels.insert(id, label.clone());
+                    pending.insert(id, (label.clone(), name, input));
                     self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
                 }
                 Interaction::ToolResult {
@@ -115,17 +121,18 @@ impl ChatView {
                     content,
                     is_error,
                 } => {
-                    let label = labels
-                        .get(tool_use_id)
-                        .cloned()
-                        .unwrap_or_else(|| "(result)".to_owned());
+                    let (label, name, input) = pending.remove(tool_use_id).map_or_else(
+                        || ("(result)".to_owned(), None, None),
+                        |(l, n, i)| (l, Some(n), Some(i)),
+                    );
+                    let view = ToolResultView::build(name, input, content, is_error);
                     self.blocks
-                        .push(Box::new(ToolResultBlock::new(label, content, is_error)));
+                        .push(Box::new(ToolResultBlock::new(label, view, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
-                    self.blocks.push(Box::new(ToolResultBlock::new(
-                        "(result)", content, is_error,
-                    )));
+                    let view = ToolResultView::build(None, None, content, is_error);
+                    self.blocks
+                        .push(Box::new(ToolResultBlock::new("(result)", view, is_error)));
                 }
             }
         }
@@ -176,10 +183,31 @@ impl ChatView {
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
-    /// Appends a tool result summary line with optional output content.
-    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
+    /// Appends a tool result with a pre-built structured view. Used
+    /// by [`App::handle_agent_event`](super::super::app::App::handle_agent_event)
+    /// (which builds the view from the cached tool name + input) and
+    /// by [`load_history`](Self::load_history) when resuming sessions.
+    pub(crate) fn push_tool_result_view(
+        &mut self,
+        label: &str,
+        view: ToolResultView,
+        is_error: bool,
+    ) {
         self.blocks
-            .push(Box::new(ToolResultBlock::new(label, content, is_error)));
+            .push(Box::new(ToolResultBlock::new(label, view, is_error)));
+    }
+
+    /// Test shortcut for the common "raw text body" shape. Kept
+    /// behind `cfg(test)` so production code is forced through
+    /// [`push_tool_result_view`](Self::push_tool_result_view) with an
+    /// explicit view — the chat layer shouldn't need to know which
+    /// tools fall back to Text.
+    #[cfg(test)]
+    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
+        let view = ToolResultView::Text {
+            content: content.to_owned(),
+        };
+        self.push_tool_result_view(label, view, is_error);
     }
 
     /// Appends an error message.
@@ -1481,6 +1509,70 @@ mod tests {
         );
     }
 
+    // ── push_tool_result_view ──
+
+    #[test]
+    fn push_tool_result_view_edit_renders_diff_markers() {
+        // An Edit tool result wired through the structured view should
+        // render the replaced text with `- ` for the old side and `+ `
+        // for the new side, not the default 5-line truncation body.
+        let mut chat = test_chat();
+        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+            old: "fn foo()".to_owned(),
+            new: "fn bar()".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("- fn foo()"), "old side missing: {text}");
+        assert!(text.contains("+ fn bar()"), "new side missing: {text}");
+        // Diff rendering replaces the default body — the "Successfully
+        // edited" message must not leak through.
+        assert!(
+            !text.contains("Successfully edited"),
+            "diff should replace the raw content body: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_edit_replace_all_shows_match_count() {
+        let mut chat = test_chat();
+        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+            old: "a".to_owned(),
+            new: "b".to_owned(),
+            replace_all: true,
+            replacements: 3,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("applied to 3 matches"),
+            "replace-all footer missing: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_edit_single_replacement_hides_count_footer() {
+        // The `applied to N matches` footer only makes sense when the
+        // edit actually multiplied. A single replacement (either
+        // replace_all=false or replace_all=true with one match) should
+        // render a clean diff with no count footer.
+        let mut chat = test_chat();
+        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+            old: "a".to_owned(),
+            new: "b".to_owned(),
+            replace_all: true,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(
+            !text.contains("applied to"),
+            "single-replacement footer should be suppressed: {text}",
+        );
+    }
+
     // ── push_error ──
 
     #[test]
@@ -1706,6 +1798,24 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_call("$", "echo hi");
         chat.push_tool_result("ran echo", "hi", false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_result() {
+        // Per-tool rendering: the Edit tool's result renders as a
+        // `-` / `+` diff body, not the default truncated text block.
+        // Pins the first structured-view override so a regression
+        // routing Edit through `Text` again shows up here.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tui::components::chat::blocks::ToolResultView::Diff {
+            old: "fn foo() {}".to_owned(),
+            new: "fn foo() -> i32 { 42 }".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 

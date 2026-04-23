@@ -18,7 +18,7 @@ use ratatui::layout::{Constraint, Layout};
 use tokio::sync::mpsc;
 
 use super::component::Component;
-use super::components::chat::ChatView;
+use super::components::chat::{ChatView, ToolResultView};
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
 use super::terminal::{Tui, draw_sync};
@@ -38,18 +38,27 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
-    /// Per-in-flight-call header label, keyed by tool-call id. Bridges
-    /// [`AgentEvent::ToolCallStart`] to [`AgentEvent::ToolCallEnd`] so
-    /// the result header can fall back to the call label when the
-    /// tool did not emit a `title` of its own — closes a latent bug
-    /// where errors that aborted before `.with_title(...)` (bash
-    /// spawn failures, `parse_input` errors, unknown tools) silently
-    /// swallowed the result entry. Entries are removed on their
-    /// matching End; orphans drop on the next `TurnComplete` cleanup.
-    pending_result_labels: HashMap<String, String>,
+    /// Per-in-flight-call metadata bridging
+    /// [`AgentEvent::ToolCallStart`] and [`AgentEvent::ToolCallEnd`] —
+    /// the End arm needs `name` + `input` to build a structured
+    /// [`ToolResultView`] (Edit diff, etc.) and to fall back to the
+    /// call label when the tool didn't set a result title.
+    /// Entries are removed on their matching End or on turn completion.
+    pending_calls: HashMap<String, PendingCall>,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
+}
+
+/// Metadata stashed at `ToolCallStart` and consumed at `ToolCallEnd`.
+/// `label` doubles as the result header when the tool emits `title:
+/// None` — closing the latent swallow-on-missing-title bug that used
+/// to hide error bodies whenever a tool failed before calling
+/// `with_title`.
+struct PendingCall {
+    label: String,
+    name: String,
+    input: serde_json::Value,
 }
 
 impl App {
@@ -79,7 +88,7 @@ impl App {
             agent_rx,
             user_tx,
             tools,
-            pending_result_labels: HashMap::new(),
+            pending_calls: HashMap::new(),
             should_quit: false,
             dirty: true,
         }
@@ -189,7 +198,8 @@ impl App {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
                 self.chat.push_tool_call(icon, &label);
-                self.pending_result_labels.insert(id, label);
+                self.pending_calls
+                    .insert(id, PendingCall { label, name, input });
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
@@ -198,14 +208,20 @@ impl App {
                 content,
                 is_error,
             } => {
-                // Always push the result — previously a `title: None`
-                // swallowed the entire entry, hiding error bodies from
-                // tools that failed before calling `.with_title(...)`.
-                // Fall back to the cached tool-call label (or a generic
-                // "(result)" when the Start event was missed).
-                let fallback = self.pending_result_labels.remove(&id);
-                let header = title.or(fallback).unwrap_or_else(|| "(result)".to_owned());
-                self.chat.push_tool_result(&header, &content, is_error);
+                // The End arm always pushes a result, even when the
+                // tool didn't set a title — the tool-call label is
+                // the natural fallback. The pre-cache lookup lets
+                // Edit etc. build a structured view from the input.
+                let pending = self.pending_calls.remove(&id);
+                let (name, input) = pending
+                    .as_ref()
+                    .map(|p| (p.name.as_str(), &p.input))
+                    .map_or((None, None), |(n, i)| (Some(n), Some(i)));
+                let view = ToolResultView::build(name, input, &content, is_error);
+                let header = title
+                    .or_else(|| pending.as_ref().map(|p| p.label.clone()))
+                    .unwrap_or_else(|| "(result)".to_owned());
+                self.chat.push_tool_result_view(&header, view, is_error);
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -279,9 +295,9 @@ mod tests {
         test_app_with_registry(title, Arc::new(ToolRegistry::new(Vec::new())))
     }
 
-    /// Variant plumbing the real tool catalog into the `App` so
-    /// `ToolCallStart` label lookups match production. Used by
-    /// tool-event tests that exercise the Start → End flow.
+    /// Variant that plumbs the real tool catalog into the `App` so
+    /// `ToolCallStart` label lookups match what production would render.
+    /// Used by tool-event tests that exercise the Start → End flow.
     fn test_app_with_tools() -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
         let tools = ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
@@ -533,11 +549,11 @@ mod tests {
     #[test]
     fn handle_tool_call_end_without_title_falls_back_to_call_label() {
         // `title: None` means the tool didn't set a result header —
-        // typically an error path (timeout, invalid input, spawn
-        // failure) that aborted before `.with_title(...)`. The result
-        // must still render (previously: silently swallowed, hiding
-        // the failure body from the user) and the header falls back
-        // to the tool-call label stashed at `ToolCallStart`.
+        // typically a failure path (timeout, invalid input) that
+        // aborted before `.with_title(...)`. The result must still be
+        // pushed (previously: silently swallowed, hiding the error
+        // body from the user) and the header falls back to the
+        // tool-call label stashed at `ToolCallStart`.
         let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
@@ -560,9 +576,9 @@ mod tests {
 
     #[test]
     fn handle_tool_call_end_without_start_uses_generic_fallback_header() {
-        // Defensive: an End without a matching Start (agent bug or
-        // dropped event) must still render so the user sees the
-        // output. No pending label → header falls back to `(result)`.
+        // Defensive: an End without a matching Start (agent-layer bug
+        // or dropped event) must still render so the user sees the
+        // output. No pending entry → header falls back to `(result)`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {

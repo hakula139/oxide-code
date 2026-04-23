@@ -6,6 +6,13 @@
 //! uses the bar-less icon-prefix helpers in [`super`] and flushes to
 //! col 0. The bar / border machinery therefore lives here, not in the
 //! trait module, so it scopes to exactly the blocks that use it.
+//!
+//! Result rendering is per-tool via [`ToolResultView`]: the default
+//! variant is a truncated text body ([`Text`](ToolResultView::Text));
+//! tools with structured inputs get richer shapes — Edit, for example,
+//! returns a [`Diff`](ToolResultView::Diff) that renders `-` / `+`
+//! lines. A new variant is added here (not on the `Tool` trait) so the
+//! execution layer stays rendering-free.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -17,6 +24,12 @@ use crate::tui::wrap::{expand_tabs, wrap_line};
 
 /// Maximum lines of tool output shown inline before truncation.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
+
+/// Maximum lines of diff body (combined `-` + `+`) shown before
+/// truncation. Set higher than text output because diffs pair every
+/// old line with its new counterpart, doubling the natural line
+/// count before the user learns anything new.
+const MAX_DIFF_BODY_LINES: usize = 10;
 
 /// Maximum bytes per tool output line before horizontal truncation.
 /// Measured in bytes (matched against `str::len`) rather than Unicode
@@ -81,23 +94,20 @@ impl ChatBlock for ToolCallBlock {
 
 // ── Tool Result ──
 
-/// The outcome of a tool call — indicator (✓ / ✗), label, and a truncated
-/// body preview.
+/// The outcome of a tool call — indicator (✓ / ✗), label, and a
+/// per-view body (truncated text by default; richer shapes for tools
+/// with structured inputs).
 pub(crate) struct ToolResultBlock {
     label: String,
-    content: String,
+    view: ToolResultView,
     is_error: bool,
 }
 
 impl ToolResultBlock {
-    pub(crate) fn new(
-        label: impl Into<String>,
-        content: impl Into<String>,
-        is_error: bool,
-    ) -> Self {
+    pub(crate) fn new(label: impl Into<String>, view: ToolResultView, is_error: bool) -> Self {
         Self {
             label: label.into(),
-            content: content.into(),
+            view,
             is_error,
         }
     }
@@ -107,7 +117,27 @@ impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         render_status_line(&mut out, ctx, &self.label, self.is_error);
-        render_output_body(&mut out, ctx, &self.content, &self.label, self.is_error);
+        match &self.view {
+            ToolResultView::Text { content } => {
+                render_text_body(&mut out, ctx, content, &self.label, self.is_error);
+            }
+            ToolResultView::Diff {
+                old,
+                new,
+                replace_all,
+                replacements,
+            } => {
+                render_diff_body(
+                    &mut out,
+                    ctx,
+                    old,
+                    new,
+                    *replace_all,
+                    *replacements,
+                    self.is_error,
+                );
+            }
+        }
         out
     }
 
@@ -116,7 +146,97 @@ impl ChatBlock for ToolResultBlock {
     }
 }
 
-fn render_output_body(
+// ── Tool Result View ──
+
+/// Per-tool shape of a completed tool call's body. Constructed at push
+/// time via [`ToolResultView::build`]; rendered by [`ToolResultBlock`]
+/// dispatching on the variant.
+///
+/// Adding a new variant (grouped grep matches, read-file header, etc.)
+/// means extending the enum + builder + renderer in this module — one
+/// local change, no churn on the `Tool` trait or tool submodules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolResultView {
+    /// Default shape — the raw tool output, truncated to
+    /// [`MAX_TOOL_OUTPUT_LINES`] with a "+N lines" footer.
+    Text { content: String },
+    /// Edit tool — renders as a `-` old / `+` new unified diff.
+    /// `replacements` is the number of matches actually replaced
+    /// (>1 only for `replace_all` edits).
+    Diff {
+        old: String,
+        new: String,
+        replace_all: bool,
+        replacements: usize,
+    },
+}
+
+impl ToolResultView {
+    /// Builds the view from a completed tool call. Falls back to
+    /// [`Text`](Self::Text) for every case the custom renderers cannot
+    /// handle cleanly: error outputs (keeping the error text front and
+    /// center), tools without a structured view, orphan results with
+    /// no `name` / `input` pair, and structured inputs that fail to
+    /// parse.
+    pub(crate) fn build(
+        name: Option<&str>,
+        input: Option<&serde_json::Value>,
+        content: &str,
+        is_error: bool,
+    ) -> Self {
+        // Error paths carry the failure message; pretending they're a
+        // structured diff would swap useful signal for a lie.
+        if is_error {
+            return Self::Text {
+                content: content.to_owned(),
+            };
+        }
+        match (name, input) {
+            (Some("edit"), Some(input)) => {
+                edit_view(input, content).unwrap_or_else(|| Self::Text {
+                    content: content.to_owned(),
+                })
+            }
+            _ => Self::Text {
+                content: content.to_owned(),
+            },
+        }
+    }
+}
+
+/// Extracts the edit tool's structured inputs and pairs them with the
+/// replacement count parsed from its output. Returns `None` when any
+/// required field is missing — caller falls back to [`ToolResultView::Text`].
+fn edit_view(input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
+    let old = input.get("old_string")?.as_str()?.to_owned();
+    let new = input.get("new_string")?.as_str()?.to_owned();
+    let replace_all = input
+        .get("replace_all")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let replacements = parse_replacement_count(content).unwrap_or(1);
+    Some(ToolResultView::Diff {
+        old,
+        new,
+        replace_all,
+        replacements,
+    })
+}
+
+/// Parses `"Replaced N occurrences in <path>."` — the shape
+/// [`EditTool`](crate::tool::edit::EditTool) returns for `replace_all`
+/// with multiple matches. Returns `None` for the single-match shape
+/// (`"Successfully edited ..."`); caller defaults to 1.
+fn parse_replacement_count(content: &str) -> Option<usize> {
+    content
+        .strip_prefix("Replaced ")?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn render_text_body(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
     content: &str,
@@ -179,6 +299,195 @@ fn render_output_body(
             Span::styled(format!("... +{n} {label}"), ctx.theme.dim()),
         ]));
     }
+}
+
+/// Renders a unified-diff-style body: every line of `old` prefixed with
+/// `- ` in red, followed by every line of `new` prefixed with `+ ` in
+/// green. Long diffs are truncated from the middle (keeping equal head
+/// and tail) so both sides stay represented.
+///
+/// Empty strings on either side — a pure deletion or insertion — render
+/// only the non-empty half. Trailing blank lines (a common artefact of
+/// line-ended old/new strings) are stripped so the rendered body
+/// matches what the user sees when they open the file.
+fn render_diff_body(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+    replacements: usize,
+    is_error: bool,
+) {
+    let border_style = border_style_for(ctx.theme, is_error);
+    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let width = usize::from(ctx.width);
+
+    let old_lines = split_diff_side(old);
+    let new_lines = split_diff_side(new);
+    if old_lines.is_empty() && new_lines.is_empty() {
+        return;
+    }
+
+    let entries = diff_entries(
+        &old_lines,
+        &new_lines,
+        MAX_DIFF_BODY_LINES,
+        ctx.theme.error(),
+        ctx.theme.success(),
+    );
+    for entry in entries {
+        match entry {
+            DiffEntry::Line { sign, text, style } => {
+                let expanded = expand_tabs(text);
+                let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
+                let line = Line::from(vec![
+                    Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+                    Span::styled(format!("{sign} "), style),
+                    Span::styled(display_text, style),
+                ]);
+                out.extend(wrap_line(
+                    line,
+                    width,
+                    STATUS_LINE_CONT.width(),
+                    Some(&cont_prefix),
+                ));
+            }
+            DiffEntry::Ellipsis { hidden } => {
+                let noun = if hidden == 1 { "line" } else { "lines" };
+                out.push(Line::from(vec![
+                    Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+                    Span::styled(format!("... +{hidden} {noun}"), ctx.theme.dim()),
+                ]));
+            }
+        }
+    }
+
+    if replace_all && replacements > 1 {
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(
+                format!("applied to {replacements} matches"),
+                ctx.theme.dim(),
+            ),
+        ]));
+    }
+}
+
+/// Splits one side of a diff into displayable lines — empty input
+/// yields an empty slice (collapses the `+`/`-` block entirely); a
+/// trailing newline is dropped so `"a\nb\n"` renders as two lines, not
+/// three with a blank tail.
+fn split_diff_side(side: &str) -> Vec<&str> {
+    if side.is_empty() {
+        return Vec::new();
+    }
+    side.lines().collect()
+}
+
+/// A single rendered entry in a diff body.
+enum DiffEntry<'a> {
+    Line {
+        sign: char,
+        text: &'a str,
+        style: Style,
+    },
+    Ellipsis {
+        hidden: usize,
+    },
+}
+
+/// Builds the ordered entry stream for a diff body, capping the total
+/// line count at `budget`. When the combined count exceeds the budget,
+/// emits all old lines, then a single `Ellipsis` for the cut new lines,
+/// then the tail of the new side — so both the deletion context and
+/// the final shape stay visible.
+///
+/// The truncation policy is intentionally asymmetric: edits typically
+/// replace `old` in full (the user has already seen it in their
+/// question), while `new` is what they're inspecting. Showing every
+/// `-` line with only the tail of `+` keeps the diff small without
+/// hiding the "what used to be here" anchor.
+fn diff_entries<'a>(
+    old_lines: &[&'a str],
+    new_lines: &[&'a str],
+    budget: usize,
+    del_style: Style,
+    add_style: Style,
+) -> Vec<DiffEntry<'a>> {
+    let mut out = Vec::with_capacity(old_lines.len() + new_lines.len());
+
+    let total = old_lines.len() + new_lines.len();
+    if total <= budget {
+        for line in old_lines {
+            out.push(DiffEntry::Line {
+                sign: '-',
+                text: line,
+                style: del_style,
+            });
+        }
+        for line in new_lines {
+            out.push(DiffEntry::Line {
+                sign: '+',
+                text: line,
+                style: add_style,
+            });
+        }
+        return out;
+    }
+
+    // Budget exceeded. Always show every deleted line (they're the
+    // "what was replaced" anchor); truncate the additions side so the
+    // combined count fits, keeping a leading prefix + the trailing tail
+    // so the final shape stays visible.
+    for line in old_lines {
+        out.push(DiffEntry::Line {
+            sign: '-',
+            text: line,
+            style: del_style,
+        });
+    }
+    let add_budget = budget.saturating_sub(old_lines.len());
+    if add_budget == 0 {
+        out.push(DiffEntry::Ellipsis {
+            hidden: new_lines.len(),
+        });
+        return out;
+    }
+    if new_lines.len() <= add_budget {
+        for line in new_lines {
+            out.push(DiffEntry::Line {
+                sign: '+',
+                text: line,
+                style: add_style,
+            });
+        }
+        return out;
+    }
+    // Split the addition budget between a head and a tail (at least 1
+    // on the tail so the final line stays visible). The middle band
+    // collapses into a single Ellipsis.
+    let head = add_budget.saturating_sub(1).max(1).min(add_budget);
+    let tail_start = new_lines.len().saturating_sub(add_budget - head);
+    for line in &new_lines[..head] {
+        out.push(DiffEntry::Line {
+            sign: '+',
+            text: line,
+            style: add_style,
+        });
+    }
+    let hidden = tail_start - head;
+    if hidden > 0 {
+        out.push(DiffEntry::Ellipsis { hidden });
+    }
+    for line in &new_lines[tail_start..] {
+        out.push(DiffEntry::Line {
+            sign: '+',
+            text: line,
+            style: add_style,
+        });
+    }
+    out
 }
 
 /// Renders the tool-result header line — success / error indicator,
@@ -293,5 +602,205 @@ mod tests {
     fn truncate_to_bytes_exact_boundary_no_split() {
         // 6 bytes = exactly two `中`s; result stays untouched.
         assert_eq!(truncate_to_bytes("中中", 6), "中中");
+    }
+
+    // ── ToolResultView::build ──
+
+    #[test]
+    fn build_view_falls_back_to_text_when_tool_is_unknown() {
+        let view = ToolResultView::build(None, None, "anything", false);
+        assert_eq!(
+            view,
+            ToolResultView::Text {
+                content: "anything".to_owned()
+            },
+        );
+    }
+
+    #[test]
+    fn build_view_uses_text_for_tools_without_structured_renderer() {
+        // The `bash` tool has no structured view yet — its output is
+        // free-form shell text, not a fixed-shape diff or match list.
+        let input = serde_json::json!({"command": "ls"});
+        let view = ToolResultView::build(Some("bash"), Some(&input), "file1\nfile2", false);
+        assert!(matches!(view, ToolResultView::Text { .. }));
+    }
+
+    #[test]
+    fn build_view_falls_back_to_text_on_error_even_for_edit() {
+        // Error outputs are prose (`"old_string not found in ..."`);
+        // rendering them as a diff would hide the failure reason.
+        // Pin the contract: errors bypass every structured renderer.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "foo",
+            "new_string": "bar",
+        });
+        let view = ToolResultView::build(Some("edit"), Some(&input), "not found", true);
+        assert!(matches!(view, ToolResultView::Text { .. }));
+    }
+
+    #[test]
+    fn build_view_edit_extracts_diff_from_structured_inputs() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "fn foo()",
+            "new_string": "fn bar()",
+        });
+        let view = ToolResultView::build(
+            Some("edit"),
+            Some(&input),
+            "Successfully edited /tmp/f.rs.",
+            false,
+        );
+        assert_eq!(
+            view,
+            ToolResultView::Diff {
+                old: "fn foo()".to_owned(),
+                new: "fn bar()".to_owned(),
+                replace_all: false,
+                replacements: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn build_view_edit_falls_back_when_required_inputs_missing() {
+        // Edit's input normally has `old_string` and `new_string`; a
+        // malformed call (e.g., model emitted bad JSON that parsed as
+        // an empty object) should degrade to Text rather than panic.
+        let input = serde_json::json!({"file_path": "/tmp/x"});
+        let view = ToolResultView::build(Some("edit"), Some(&input), "edited", false);
+        assert!(matches!(view, ToolResultView::Text { .. }));
+    }
+
+    #[test]
+    fn build_view_edit_parses_replace_all_count_from_content() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = ToolResultView::build(
+            Some("edit"),
+            Some(&input),
+            "Replaced 7 occurrences in /tmp/f.rs.",
+            false,
+        );
+        assert_eq!(
+            view,
+            ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 7,
+            },
+        );
+    }
+
+    #[test]
+    fn build_view_edit_defaults_to_one_replacement_when_count_missing() {
+        // Single-match edits return `"Successfully edited ..."` —
+        // `parse_replacement_count` returns None, caller defaults to 1.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = ToolResultView::build(
+            Some("edit"),
+            Some(&input),
+            "Successfully edited /tmp/f.rs.",
+            false,
+        );
+        let ToolResultView::Diff { replacements, .. } = view else {
+            panic!("expected diff view");
+        };
+        assert_eq!(replacements, 1);
+    }
+
+    // ── parse_replacement_count ──
+
+    #[test]
+    fn parse_replacement_count_extracts_leading_integer() {
+        assert_eq!(
+            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn parse_replacement_count_returns_none_for_unrelated_messages() {
+        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None,);
+        assert_eq!(parse_replacement_count(""), None);
+    }
+
+    // ── diff_entries ──
+
+    #[test]
+    fn diff_entries_under_budget_shows_all_lines() {
+        let old = vec!["foo", "bar"];
+        let new = vec!["baz"];
+        let entries = diff_entries(&old, &new, 10, Style::default(), Style::default());
+        let rendered: Vec<_> = entries
+            .iter()
+            .map(|e| match e {
+                DiffEntry::Line { sign, text, .. } => format!("{sign} {text}"),
+                DiffEntry::Ellipsis { hidden } => format!("... +{hidden}"),
+            })
+            .collect();
+        assert_eq!(rendered, vec!["- foo", "- bar", "+ baz"]);
+    }
+
+    #[test]
+    fn diff_entries_over_budget_keeps_every_deletion_and_trims_additions() {
+        // Deletions are the anchor ("what was replaced"); additions
+        // can be abbreviated to fit the budget without losing context.
+        let old = vec!["a", "b"];
+        let new = vec!["c", "d", "e", "f", "g"];
+        let entries = diff_entries(&old, &new, 5, Style::default(), Style::default());
+        let rendered: Vec<_> = entries
+            .iter()
+            .map(|e| match e {
+                DiffEntry::Line { sign, text, .. } => format!("{sign} {text}"),
+                DiffEntry::Ellipsis { hidden } => format!("... +{hidden}"),
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec!["- a", "- b", "+ c", "+ d", "... +2", "+ g"],
+            "head + ellipsis + tail keeps the leading and final additions visible",
+        );
+    }
+
+    #[test]
+    fn diff_entries_deletions_consume_entire_budget_collapse_additions() {
+        // When deletions alone exceed the budget, additions collapse
+        // into a single `Ellipsis` rather than dropping silently.
+        let old = vec!["a", "b", "c", "d", "e"];
+        let new = vec!["x", "y"];
+        let entries = diff_entries(&old, &new, 5, Style::default(), Style::default());
+        let last = entries.last().expect("expected at least one entry");
+        assert!(
+            matches!(last, DiffEntry::Ellipsis { hidden: 2 }),
+            "trailing entry should be the collapsed-additions ellipsis",
+        );
+    }
+
+    // ── split_diff_side ──
+
+    #[test]
+    fn split_diff_side_empty_yields_empty_slice() {
+        assert!(split_diff_side("").is_empty());
+    }
+
+    #[test]
+    fn split_diff_side_drops_trailing_newline() {
+        // `"a\nb\n"` → two displayable lines, not three with a blank
+        // tail. Needed because `old_string` / `new_string` often end
+        // in newlines when the edit spans full lines.
+        assert_eq!(split_diff_side("a\nb\n"), vec!["a", "b"]);
     }
 }
