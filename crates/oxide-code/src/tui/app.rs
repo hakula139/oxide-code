@@ -193,9 +193,9 @@ impl App {
             }
             AgentEvent::ToolCallEnd {
                 id,
-                title,
                 content,
                 is_error,
+                metadata,
             } => {
                 // The End arm always pushes a result, even when the
                 // tool didn't set a title — the tool-call label is
@@ -208,10 +208,11 @@ impl App {
                     },
                     |p| {
                         self.tools
-                            .result_view(&p.name, &p.input, &content, is_error)
+                            .result_view(&p.name, &p.input, &content, &metadata, is_error)
                     },
                 );
-                let header = title
+                let header = metadata
+                    .title
                     .or_else(|| pending.as_ref().map(|p| p.label.clone()))
                     .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned());
                 self.chat.push_tool_result_view(&header, view, is_error);
@@ -560,9 +561,12 @@ mod tests {
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
-            title: Some("ls /".to_owned()),
             content: "file1\nfile2\n".to_owned(),
             is_error: false,
+            metadata: crate::tool::ToolMetadata {
+                title: Some("ls /".to_owned()),
+                ..crate::tool::ToolMetadata::default()
+            },
         });
         assert_eq!(app.chat.entry_count(), before + 1);
     }
@@ -585,9 +589,9 @@ mod tests {
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
-            title: None,
             content: "spawn failed: permission denied".to_owned(),
             is_error: true,
+            metadata: crate::tool::ToolMetadata::default(),
         });
         assert_eq!(
             app.chat.entry_count(),
@@ -620,9 +624,9 @@ mod tests {
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "orphan".to_owned(),
-            title: None,
             content: "stray output".to_owned(),
             is_error: false,
+            metadata: crate::tool::ToolMetadata::default(),
         });
         assert_eq!(app.chat.entry_count(), before + 1);
         let text = rendered_text(&mut app, 60, 6);

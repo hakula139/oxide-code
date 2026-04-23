@@ -55,7 +55,7 @@ pub(crate) struct ToolOutput {
 /// Every tool should set `title` to a concise, human-readable summary
 /// (e.g., "Read Cargo.toml", "Created src/main.rs", "3 matches in 2 files").
 /// The TUI renders this as the one-line label for each tool invocation.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ToolMetadata {
     /// Short label for TUI display (5–15 words).
     pub(crate) title: Option<String>,
@@ -65,6 +65,12 @@ pub(crate) struct ToolMetadata {
         reason = "recorded by the bash tool but unused by the current TUI tool-result renderer"
     )]
     pub(crate) exit_code: Option<i32>,
+    /// Number of replacements actually made, present only for the
+    /// edit tool when `replace_all` matched multiple occurrences.
+    /// Consumed by [`ToolResultView::Diff`] so the \"N occurrences
+    /// replaced\" footer can be driven structurally instead of
+    /// parsed from prose.
+    pub(crate) replacements: Option<usize>,
 }
 
 impl ToolOutput {
@@ -89,6 +95,13 @@ impl ToolOutput {
     /// [`from_result`](Self::from_result) at the construction site.
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
+        self
+    }
+
+    /// Fluent helper to record a replacement count; only meaningful
+    /// for the edit tool with `replace_all` hitting multiple matches.
+    pub(crate) fn with_replacements(mut self, count: usize) -> Self {
+        self.metadata.replacements = Some(count);
         self
     }
 }
@@ -158,7 +171,10 @@ pub(crate) trait Tool: Send + Sync {
     /// Optional structured view of a completed tool call's output,
     /// used by the TUI in place of the default truncated text block.
     /// `input` is the original tool-call arguments (already used by
-    /// `run`); `content` is the success-path `ToolOutput::content`.
+    /// `run`); `content` is the success-path `ToolOutput::content`;
+    /// `metadata` is the same `ToolMetadata` the tool attached in
+    /// `run` (title, exit code, replacements, …) so tools can drive
+    /// the view structurally instead of re-parsing `content`.
     ///
     /// Returning `None` — the default — falls back to [`ToolResultView::Text`].
     /// Tools should also return `None` when the input shape doesn't
@@ -169,7 +185,12 @@ pub(crate) trait Tool: Send + Sync {
     /// short-circuits `is_error` to `Text` centrally since every
     /// tool's error message is free-form prose, not a structured
     /// shape.
-    fn result_view(&self, _input: &serde_json::Value, _content: &str) -> Option<ToolResultView> {
+    fn result_view(
+        &self,
+        _input: &serde_json::Value,
+        _content: &str,
+        _metadata: &ToolMetadata,
+    ) -> Option<ToolResultView> {
         None
     }
 
@@ -261,6 +282,7 @@ impl ToolRegistry {
         name: &str,
         input: &serde_json::Value,
         content: &str,
+        metadata: &ToolMetadata,
         is_error: bool,
     ) -> ToolResultView {
         if is_error {
@@ -269,7 +291,7 @@ impl ToolRegistry {
             };
         }
         self.get(name)
-            .and_then(|t| t.result_view(input, content))
+            .and_then(|t| t.result_view(input, content, metadata))
             .unwrap_or_else(|| ToolResultView::Text {
                 content: content.to_owned(),
             })
@@ -686,7 +708,14 @@ mod tests {
             "old_string": "a",
             "new_string": "b",
         });
-        let view = registry.result_view("edit", &input, "Successfully edited /tmp/f.rs.", false);
+        let metadata = ToolMetadata::default();
+        let view = registry.result_view(
+            "edit",
+            &input,
+            "Successfully edited /tmp/f.rs.",
+            &metadata,
+            false,
+        );
         assert_eq!(
             view,
             ToolResultView::Diff {
@@ -709,7 +738,8 @@ mod tests {
             "old_string": "a",
             "new_string": "b",
         });
-        let view = registry.result_view("edit", &input, "old_string not found", true);
+        let metadata = ToolMetadata::default();
+        let view = registry.result_view("edit", &input, "old_string not found", &metadata, true);
         assert_eq!(
             view,
             ToolResultView::Text {
@@ -721,7 +751,14 @@ mod tests {
     #[test]
     fn result_view_falls_back_to_text_for_unknown_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
-        let view = registry.result_view("nonexistent", &serde_json::json!({}), "anything", false);
+        let metadata = ToolMetadata::default();
+        let view = registry.result_view(
+            "nonexistent",
+            &serde_json::json!({}),
+            "anything",
+            &metadata,
+            false,
+        );
         assert_eq!(
             view,
             ToolResultView::Text {
@@ -737,10 +774,12 @@ mod tests {
         // the full content so a mutation returning an empty Text
         // wouldn't pass.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let metadata = ToolMetadata::default();
         let view = registry.result_view(
             "bash",
             &serde_json::json!({"command": "ls"}),
             "file1\nfile2",
+            &metadata,
             false,
         );
         assert_eq!(

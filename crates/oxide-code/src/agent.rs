@@ -109,9 +109,9 @@ pub(crate) async fn agent_turn(
 
             _ = sink.send(AgentEvent::ToolCallEnd {
                 id: id.clone(),
-                title: output.metadata.title.clone(),
                 content: output.content.clone(),
                 is_error: output.is_error,
+                metadata: output.metadata.clone(),
             });
 
             results.push(ContentBlock::ToolResult {
@@ -555,8 +555,8 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolCallEnd { id, title: Some(t), is_error: false, .. }
-                if id == "tool_1" && t == "echoed",
+            AgentEvent::ToolCallEnd { id, metadata, is_error: false, .. }
+                if id == "tool_1" && metadata.title.as_deref() == Some("echoed"),
         )));
     }
 

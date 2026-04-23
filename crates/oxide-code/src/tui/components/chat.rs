@@ -28,7 +28,7 @@ use self::blocks::{
 use crate::agent::event::UserAction;
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
-use crate::tool::{ToolRegistry, ToolResultView};
+use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
 use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
 use crate::tui::theme::Theme;
@@ -126,11 +126,16 @@ impl ChatView {
                     // [`walk_transcript`] emits `ToolResult` only
                     // inline right after its paired `ToolCall` —
                     // unpaired ids surface through `OrphanToolResult`
-                    // instead — so the lookup is total.
+                    // instead — so the lookup is total. Resumed
+                    // sessions don't yet persist `ToolMetadata` in
+                    // the transcript, so resume-path views fall back
+                    // to content-parsing where applicable (see
+                    // `EditTool::result_view`).
                     let p = pending
                         .remove(tool_use_id)
                         .expect("walk_transcript pairs every ToolResult with its ToolCall");
-                    let view = tools.result_view(&p.name, &p.input, content, is_error);
+                    let metadata = ToolMetadata::default();
+                    let view = tools.result_view(&p.name, &p.input, content, &metadata, is_error);
                     self.blocks
                         .push(Box::new(ToolResultBlock::new(p.label, view, is_error)));
                 }

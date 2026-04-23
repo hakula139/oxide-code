@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, ToolResultView, extract_input_field};
+use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -54,14 +54,26 @@ impl Tool for EditTool {
         extract_input_field(input, "file_path")
     }
 
-    fn result_view(&self, input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
+    fn result_view(
+        &self,
+        input: &serde_json::Value,
+        content: &str,
+        metadata: &ToolMetadata,
+    ) -> Option<ToolResultView> {
         let old = input.get("old_string")?.as_str()?.to_owned();
         let new = input.get("new_string")?.as_str()?.to_owned();
         let replace_all = input
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let replacements = parse_replacement_count(content).unwrap_or(1);
+        // Live path: `run` sets `metadata.replacements` structurally.
+        // Resume path (future commit): the session JSONL will persist
+        // this too. Until then, the replay path falls back to parsing
+        // the free-form success message.
+        let replacements = metadata
+            .replacements
+            .or_else(|| parse_replacement_count(content))
+            .unwrap_or(1);
         Some(ToolResultView::Diff {
             old,
             new,
@@ -119,24 +131,21 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     };
 
     let name = super::file_name(&input.file_path);
-    let output = ToolOutput::from_result(
-        edit_file(
-            &input.file_path,
-            &input.old_string,
-            &input.new_string,
-            input.replace_all,
-        )
-        .await,
-    );
-    // Only claim "Edited {name}" when the edit actually succeeded —
-    // on failure (old_string not found, file missing, etc.) the
-    // title must stay `None` so the UI falls back to the neutral
-    // tool-call label. Otherwise the user reads `✗ Edited f.rs`,
-    // which contradicts the error indicator.
-    if output.is_error {
-        output
-    } else {
-        output.with_title(format!("Edited {name}"))
+    match edit_file(
+        &input.file_path,
+        &input.old_string,
+        &input.new_string,
+        input.replace_all,
+    )
+    .await
+    {
+        Ok((content, replacements)) => ToolOutput::from_result(Ok(content))
+            .with_title(format!("Edited {name}"))
+            .with_replacements(replacements),
+        // Error path: leave `title` unset so the TUI falls back to
+        // the neutral tool-call label — `✗ Edited {name}` would
+        // read as a successful edit, contradicting the ✗ indicator.
+        Err(msg) => ToolOutput::from_result(Err(msg)),
     }
 }
 
@@ -145,7 +154,7 @@ async fn edit_file(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-) -> Result<String, String> {
+) -> Result<(String, usize), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
     }
@@ -207,11 +216,12 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
-    if replace_all && match_count > 1 {
-        Ok(format!("Replaced {match_count} occurrences in {path}."))
+    let message = if replace_all && match_count > 1 {
+        format!("Replaced {match_count} occurrences in {path}.")
     } else {
-        Ok(format!("Successfully edited {path}."))
-    }
+        format!("Successfully edited {path}.")
+    };
+    Ok((message, match_count))
 }
 
 // ── Line Endings ──
@@ -256,7 +266,11 @@ mod tests {
             "old_string": "fn foo()",
             "new_string": "fn bar()",
         });
-        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        let view = EditTool.result_view(
+            &input,
+            "Successfully edited /tmp/f.rs.",
+            &ToolMetadata::default(),
+        );
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
@@ -269,14 +283,50 @@ mod tests {
     }
 
     #[test]
-    fn result_view_parses_replace_all_count_from_content() {
+    fn result_view_reads_replacements_from_metadata_on_live_path() {
+        // Live path: `run` attaches `metadata.replacements` via
+        // `with_replacements`, so the renderer does NOT need to
+        // re-parse prose. Pin the structural source of truth.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(&input, "Replaced 7 occurrences in /tmp/f.rs.");
+        let metadata = ToolMetadata {
+            replacements: Some(7),
+            ..ToolMetadata::default()
+        };
+        // Content deliberately inconsistent with metadata — metadata
+        // wins. This locks in the "structured over parsed" priority.
+        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.", &metadata);
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 7,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_to_parsing_content_when_metadata_lacks_replacements() {
+        // Resume path: session transcripts don't yet persist
+        // metadata, so the TUI re-parses the success message. This
+        // is the only remaining use of `parse_replacement_count`.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = EditTool.result_view(
+            &input,
+            "Replaced 7 occurrences in /tmp/f.rs.",
+            &ToolMetadata::default(),
+        );
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
@@ -298,7 +348,11 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        let view = EditTool.result_view(
+            &input,
+            "Successfully edited /tmp/f.rs.",
+            &ToolMetadata::default(),
+        );
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
@@ -316,7 +370,11 @@ mod tests {
         // degrades to None so the caller falls back to Text rather
         // than panicking.
         let input = serde_json::json!({"file_path": "/tmp/x"});
-        assert!(EditTool.result_view(&input, "edited").is_none());
+        assert!(
+            EditTool
+                .result_view(&input, "edited", &ToolMetadata::default())
+                .is_none(),
+        );
     }
 
     #[test]
@@ -330,13 +388,21 @@ mod tests {
             "old_string": 42,
             "new_string": "b",
         });
-        assert!(EditTool.result_view(&bad_old, "edited").is_none());
+        assert!(
+            EditTool
+                .result_view(&bad_old, "edited", &ToolMetadata::default())
+                .is_none(),
+        );
         let bad_new = serde_json::json!({
             "file_path": "/tmp/x",
             "old_string": "a",
             "new_string": 42,
         });
-        assert!(EditTool.result_view(&bad_new, "edited").is_none());
+        assert!(
+            EditTool
+                .result_view(&bad_new, "edited", &ToolMetadata::default())
+                .is_none(),
+        );
     }
 
     // ── parse_replacement_count ──
@@ -464,11 +530,12 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let msg = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
+        let (msg, replacements) = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
             .await
             .unwrap();
 
         assert!(msg.contains("2 occurrences"));
+        assert_eq!(replacements, 2);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
     }
 
@@ -483,13 +550,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
-        let msg = edit_file(path.to_str().unwrap(), "a", "b", true)
+        let (msg, replacements) = edit_file(path.to_str().unwrap(), "a", "b", true)
             .await
             .unwrap();
         assert_eq!(
             msg,
             format!("Replaced 3 occurrences in {}.", path.display())
         );
+        assert_eq!(replacements, 3);
     }
 
     #[tokio::test]
@@ -498,11 +566,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let msg = edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
+        let (msg, replacements) = edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
             .await
             .unwrap();
 
         assert!(msg.contains("Successfully edited"));
+        assert_eq!(
+            replacements, 1,
+            "single-match replace_all still replaces once"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
