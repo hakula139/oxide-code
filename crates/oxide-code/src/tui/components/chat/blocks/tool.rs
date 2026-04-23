@@ -503,46 +503,81 @@ mod tests {
 
     use super::*;
 
-    // ── border_continuation_prefix ──
+    // ── split_diff_side ──
 
     #[test]
-    fn border_continuation_prefix_preserves_bar_position() {
-        let style = Style::default();
-        let spans = border_continuation_prefix(BORDER_PREFIX, style);
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "");
-        assert_eq!(spans[1].content, BAR);
-        assert_eq!(spans[2].content, " ");
-    }
-
-    // ── truncate_to_bytes ──
-
-    #[test]
-    fn truncate_to_bytes_under_limit_returns_input() {
-        assert_eq!(truncate_to_bytes("hello", 10), "hello");
+    fn split_diff_side_empty_yields_empty_slice() {
+        assert!(split_diff_side("").is_empty());
     }
 
     #[test]
-    fn truncate_to_bytes_over_limit_appends_ellipsis() {
-        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
+    fn split_diff_side_drops_trailing_newline() {
+        // `"a\nb\n"` → two displayable lines, not three with a blank
+        // tail. Needed because `old_string` / `new_string` often end
+        // in newlines when the edit spans full lines.
+        assert_eq!(split_diff_side("a\nb\n"), vec!["a", "b"]);
+    }
+
+    // ── trim_common_boundaries ──
+
+    #[test]
+    fn trim_common_boundaries_drops_matching_prefix_and_suffix() {
+        let old = vec!["a", "b", "c", "d"];
+        let new = vec!["a", "X", "Y", "d"];
+        let (o, n) = trim_common_boundaries(&old, &new);
+        assert_eq!(o, &["b", "c"]);
+        assert_eq!(n, &["X", "Y"]);
     }
 
     #[test]
-    fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes in UTF-8. If floor_char_boundary wasn't used,
-        // cutting at byte 5 would split the second `中` mid-codepoint and
-        // produce invalid UTF-8 (panic on `&s[..5]`). Boundary fallback
-        // rounds down to byte 3, yielding one clean `中` + `...`.
-        let input = "中中中中";
-        let result = truncate_to_bytes(input, 5);
-        assert_eq!(result, "中...");
-        assert!(result.is_char_boundary(result.len() - 3));
+    fn trim_common_boundaries_pure_tail_insertion_strips_anchor() {
+        // The canonical Edit case: `old` is an anchor line,
+        // `new` is the anchor plus added lines below. The diff
+        // should show only the added lines, not `- anchor / + anchor`.
+        let old = vec!["fn foo()"];
+        let new = vec!["fn foo()", "    return 42;"];
+        let (o, n) = trim_common_boundaries(&old, &new);
+        assert!(o.is_empty(), "anchor line dropped on old side");
+        assert_eq!(n, &["    return 42;"]);
     }
 
     #[test]
-    fn truncate_to_bytes_exact_boundary_no_split() {
-        // 6 bytes = exactly two `中`s; result stays untouched.
-        assert_eq!(truncate_to_bytes("中中", 6), "中中");
+    fn trim_common_boundaries_pure_head_insertion_strips_anchor() {
+        let old = vec!["fn foo()"];
+        let new = vec!["// new doc", "fn foo()"];
+        let (o, n) = trim_common_boundaries(&old, &new);
+        assert!(o.is_empty());
+        assert_eq!(n, &["// new doc"]);
+    }
+
+    #[test]
+    fn trim_common_boundaries_single_line_edit_is_untouched() {
+        // Line 0 differs on both sides — no boundary to trim. This
+        // preserves the snapshot for single-line word changes.
+        let old = vec!["fn foo() {}"];
+        let new = vec!["fn bar() {}"];
+        let (o, n) = trim_common_boundaries(&old, &new);
+        assert_eq!(o, &["fn foo() {}"]);
+        assert_eq!(n, &["fn bar() {}"]);
+    }
+
+    #[test]
+    fn trim_common_boundaries_fully_identical_yields_empty_slices() {
+        // Not reachable via EditTool (no-op edits are rejected), but
+        // the helper must still terminate and return empty slices.
+        let old = vec!["a", "b"];
+        let new = vec!["a", "b"];
+        let (o, n) = trim_common_boundaries(&old, &new);
+        assert!(o.is_empty());
+        assert!(n.is_empty());
+    }
+
+    #[test]
+    fn trim_common_boundaries_empty_input_is_idempotent() {
+        let empty: Vec<&str> = Vec::new();
+        let (o, n) = trim_common_boundaries(&empty, &empty);
+        assert!(o.is_empty());
+        assert!(n.is_empty());
     }
 
     // ── diff_entries ──
@@ -669,80 +704,45 @@ mod tests {
         assert_eq!(split_budget(10, 10, 5), (3, 2));
     }
 
-    // ── trim_common_boundaries ──
+    // ── border_continuation_prefix ──
 
     #[test]
-    fn trim_common_boundaries_drops_matching_prefix_and_suffix() {
-        let old = vec!["a", "b", "c", "d"];
-        let new = vec!["a", "X", "Y", "d"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert_eq!(o, &["b", "c"]);
-        assert_eq!(n, &["X", "Y"]);
+    fn border_continuation_prefix_preserves_bar_position() {
+        let style = Style::default();
+        let spans = border_continuation_prefix(BORDER_PREFIX, style);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "");
+        assert_eq!(spans[1].content, BAR);
+        assert_eq!(spans[2].content, " ");
+    }
+
+    // ── truncate_to_bytes ──
+
+    #[test]
+    fn truncate_to_bytes_under_limit_returns_input() {
+        assert_eq!(truncate_to_bytes("hello", 10), "hello");
     }
 
     #[test]
-    fn trim_common_boundaries_pure_tail_insertion_strips_anchor() {
-        // The canonical Edit case: `old` is an anchor line,
-        // `new` is the anchor plus added lines below. The diff
-        // should show only the added lines, not `- anchor / + anchor`.
-        let old = vec!["fn foo()"];
-        let new = vec!["fn foo()", "    return 42;"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty(), "anchor line dropped on old side");
-        assert_eq!(n, &["    return 42;"]);
+    fn truncate_to_bytes_over_limit_appends_ellipsis() {
+        assert_eq!(truncate_to_bytes("hello world", 5), "hello...");
     }
 
     #[test]
-    fn trim_common_boundaries_pure_head_insertion_strips_anchor() {
-        let old = vec!["fn foo()"];
-        let new = vec!["// new doc", "fn foo()"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty());
-        assert_eq!(n, &["// new doc"]);
+    fn truncate_to_bytes_respects_char_boundary() {
+        // Each `中` is 3 bytes in UTF-8. If floor_char_boundary wasn't used,
+        // cutting at byte 5 would split the second `中` mid-codepoint and
+        // produce invalid UTF-8 (panic on `&s[..5]`). Boundary fallback
+        // rounds down to byte 3, yielding one clean `中` + `...`.
+        let input = "中中中中";
+        let result = truncate_to_bytes(input, 5);
+        assert_eq!(result, "中...");
+        assert!(result.is_char_boundary(result.len() - 3));
     }
 
     #[test]
-    fn trim_common_boundaries_single_line_edit_is_untouched() {
-        // Line 0 differs on both sides — no boundary to trim. This
-        // preserves the snapshot for single-line word changes.
-        let old = vec!["fn foo() {}"];
-        let new = vec!["fn bar() {}"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert_eq!(o, &["fn foo() {}"]);
-        assert_eq!(n, &["fn bar() {}"]);
-    }
-
-    #[test]
-    fn trim_common_boundaries_fully_identical_yields_empty_slices() {
-        // Not reachable via EditTool (no-op edits are rejected), but
-        // the helper must still terminate and return empty slices.
-        let old = vec!["a", "b"];
-        let new = vec!["a", "b"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty());
-        assert!(n.is_empty());
-    }
-
-    #[test]
-    fn trim_common_boundaries_empty_input_is_idempotent() {
-        let empty: Vec<&str> = Vec::new();
-        let (o, n) = trim_common_boundaries(&empty, &empty);
-        assert!(o.is_empty());
-        assert!(n.is_empty());
-    }
-
-    // ── split_diff_side ──
-
-    #[test]
-    fn split_diff_side_empty_yields_empty_slice() {
-        assert!(split_diff_side("").is_empty());
-    }
-
-    #[test]
-    fn split_diff_side_drops_trailing_newline() {
-        // `"a\nb\n"` → two displayable lines, not three with a blank
-        // tail. Needed because `old_string` / `new_string` often end
-        // in newlines when the edit spans full lines.
-        assert_eq!(split_diff_side("a\nb\n"), vec!["a", "b"]);
+    fn truncate_to_bytes_exact_boundary_no_split() {
+        // 6 bytes = exactly two `中`s; result stays untouched.
+        assert_eq!(truncate_to_bytes("中中", 6), "中中");
     }
 }

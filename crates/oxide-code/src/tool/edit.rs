@@ -237,6 +237,108 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+
+    // ── result_view ──
+
+    #[test]
+    fn result_view_extracts_diff_from_structured_inputs() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "fn foo()",
+            "new_string": "fn bar()",
+        });
+        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "fn foo()".to_owned(),
+                new: "fn bar()".to_owned(),
+                replace_all: false,
+                replacements: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_parses_replace_all_count_from_content() {
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = EditTool.result_view(&input, "Replaced 7 occurrences in /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 7,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_defaults_to_one_replacement_when_count_missing() {
+        // Single-match edits return `"Successfully edited ..."` —
+        // `parse_replacement_count` returns None, caller defaults to 1.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: true,
+                replacements: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_returns_none_when_required_inputs_missing() {
+        // Malformed call (e.g., model emitted JSON missing `new_string`)
+        // degrades to None so the caller falls back to Text rather
+        // than panicking.
+        let input = serde_json::json!({"file_path": "/tmp/x"});
+        assert!(EditTool.result_view(&input, "edited").is_none());
+    }
+
+    #[test]
+    fn result_view_returns_none_when_field_type_is_wrong() {
+        // `old_string` must be a string; a numeric value shouldn't
+        // panic on unwrap — it returns `None` and the TUI renders
+        // the raw `content` as text.
+        let input = serde_json::json!({
+            "file_path": "/tmp/x",
+            "old_string": 42,
+            "new_string": "b",
+        });
+        assert!(EditTool.result_view(&input, "edited").is_none());
+    }
+
+    // ── parse_replacement_count ──
+
+    #[test]
+    fn parse_replacement_count_extracts_leading_integer() {
+        assert_eq!(
+            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn parse_replacement_count_returns_none_for_unrelated_messages() {
+        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
+        assert_eq!(parse_replacement_count(""), None);
+    }
+
     // ── run ──
 
     #[tokio::test]
@@ -549,106 +651,5 @@ mod tests {
     #[test]
     fn apply_eol_lf_unchanged() {
         assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
-    }
-
-    // ── parse_replacement_count ──
-
-    #[test]
-    fn parse_replacement_count_extracts_leading_integer() {
-        assert_eq!(
-            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
-            Some(3),
-        );
-    }
-
-    #[test]
-    fn parse_replacement_count_returns_none_for_unrelated_messages() {
-        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
-        assert_eq!(parse_replacement_count(""), None);
-    }
-
-    // ── result_view ──
-
-    #[test]
-    fn result_view_extracts_diff_from_structured_inputs() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "fn foo()",
-            "new_string": "fn bar()",
-        });
-        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                old: "fn foo()".to_owned(),
-                new: "fn bar()".to_owned(),
-                replace_all: false,
-                replacements: 1,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_parses_replace_all_count_from_content() {
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = EditTool.result_view(&input, "Replaced 7 occurrences in /tmp/f.rs.");
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
-                replace_all: true,
-                replacements: 7,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_defaults_to_one_replacement_when_count_missing() {
-        // Single-match edits return `"Successfully edited ..."` —
-        // `parse_replacement_count` returns None, caller defaults to 1.
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.");
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
-                replace_all: true,
-                replacements: 1,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_returns_none_when_required_inputs_missing() {
-        // Malformed call (e.g., model emitted JSON missing `new_string`)
-        // degrades to None so the caller falls back to Text rather
-        // than panicking.
-        let input = serde_json::json!({"file_path": "/tmp/x"});
-        assert!(EditTool.result_view(&input, "edited").is_none());
-    }
-
-    #[test]
-    fn result_view_returns_none_when_field_type_is_wrong() {
-        // `old_string` must be a string; a numeric value shouldn't
-        // panic on unwrap — it returns `None` and the TUI renders
-        // the raw `content` as text.
-        let input = serde_json::json!({
-            "file_path": "/tmp/x",
-            "old_string": 42,
-            "new_string": "b",
-        });
-        assert!(EditTool.result_view(&input, "edited").is_none());
     }
 }
