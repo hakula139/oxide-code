@@ -52,6 +52,13 @@ const BORDER_PREFIX: &str = "▎ ";
 /// body reads as a child of the status header rather than a peer.
 const STATUS_LINE_CONT: &str = "▎   ";
 
+/// Continuation prefix for wrapped diff-body lines. Hangs under the
+/// text column of a `- ` / `+ ` line (col 6) — two columns right of
+/// [`STATUS_LINE_CONT`] — so wrapped content keeps reading as a
+/// continuation of the same diff line rather than dropping back to
+/// the outer body indent.
+const DIFF_LINE_CONT: &str = "▎     ";
+
 // ── Tool Call ──
 
 /// A running or completed tool invocation — one bordered line with the
@@ -237,7 +244,7 @@ fn render_diff_body(
     is_error: bool,
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let diff_cont_prefix = border_continuation_prefix(DIFF_LINE_CONT, border_style);
     let width = usize::from(ctx.width);
 
     let old_lines = split_diff_side(old);
@@ -267,8 +274,8 @@ fn render_diff_body(
                 out.extend(wrap_line(
                     line,
                     width,
-                    STATUS_LINE_CONT.width(),
-                    Some(&cont_prefix),
+                    DIFF_LINE_CONT.width(),
+                    Some(&diff_cont_prefix),
                 ));
             }
             DiffEntry::Ellipsis { hidden } => {
