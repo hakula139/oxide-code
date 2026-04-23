@@ -169,8 +169,7 @@ pub(crate) trait Tool: Send + Sync {
     /// short-circuits `is_error` to `Text` centrally since every
     /// tool's error message is free-form prose, not a structured
     /// shape.
-    fn result_view(&self, input: &serde_json::Value, content: &str) -> Option<ToolResultView> {
-        _ = (input, content);
+    fn result_view(&self, _input: &serde_json::Value, _content: &str) -> Option<ToolResultView> {
         None
     }
 
