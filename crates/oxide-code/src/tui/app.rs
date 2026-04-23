@@ -545,13 +545,14 @@ mod tests {
         // typically a failure path (timeout, invalid input) that
         // aborted before `.with_title(...)`. The result must still be
         // pushed (previously: silently swallowed, hiding the error
-        // body from the user) and the header falls back to the
-        // tool-call label stashed at `ToolCallStart`.
+        // body from the user) and the header must render the
+        // tool-call label stashed at `ToolCallStart`, not a blank
+        // string or the generic `(result)` fallback.
         let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
+            input: serde_json::json!({"command": "distinctive_label_xyz"}),
         });
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
@@ -564,6 +565,21 @@ mod tests {
             app.chat.entry_count(),
             before + 1,
             "result must render even when the tool did not set a title",
+        );
+        // The result header must be the stashed call label (the bash
+        // command). It appears twice in the rendered view — once for
+        // the tool call line, once for the result header — which is
+        // what we want to confirm: both the call row and the result
+        // row carry the same label.
+        let text = rendered_text(&mut app, 60, 8);
+        let occurrences = text.matches("distinctive_label_xyz").count();
+        assert_eq!(
+            occurrences, 2,
+            "expected call label on both the call and result rows, got {occurrences}:\n{text}",
+        );
+        assert!(
+            !text.contains("(result)"),
+            "generic fallback must not leak through when the pending call label is known, got:\n{text}",
         );
     }
 
@@ -581,6 +597,11 @@ mod tests {
             is_error: false,
         });
         assert_eq!(app.chat.entry_count(), before + 1);
+        let text = rendered_text(&mut app, 60, 6);
+        assert!(
+            text.contains("(result)"),
+            "orphan End with no pending call should use the generic fallback, got:\n{text}",
+        );
     }
 
     // ── draw_frame ──
@@ -595,6 +616,26 @@ mod tests {
             .unwrap();
         app.chat.update_layout(chat_area);
         terminal.backend().clone()
+    }
+
+    /// Renders the app and returns the buffer as a newline-joined
+    /// string. Use when substring-asserting on the rendered UI is more
+    /// readable than a full `insta::assert_snapshot!`.
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = render_app(app, width, height);
+        let buffer = backend.buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
