@@ -155,8 +155,10 @@ pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -
 
 /// Capitalizes the first character of an ASCII tool name for display
 /// (`"grep"` → `"Grep"`). Returns an empty string for empty input.
-/// Used by the default [`Tool::summarize_call`] implementation.
-fn title_case(s: &str) -> String {
+/// Used by the default [`Tool::summarize_call`] implementation and by
+/// overrides that still want the default fallback shape when input
+/// fields are missing (see [`BashTool::summarize_call`]).
+pub(crate) fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -505,19 +507,14 @@ mod tests {
 
     #[test]
     fn tool_summarize_call_falls_back_to_bare_name_when_arg_missing() {
-        // Default: `Grep` (no parens) when the primary field is absent.
-        // Bash still overrides — empty-command inputs yield the empty
-        // string rather than a bare `Bash`, matching its role as a
-        // shell-prompt line.
+        // Missing primary field → every tool (bash included) falls
+        // back to the title-cased tool name. Without this, bash would
+        // render as a bare `$ ` in the TUI; `$ Bash` keeps the status
+        // line readable even on malformed input.
         let tools = all_tools();
         for t in &tools {
             let got = t.summarize_call(&serde_json::json!({}));
-            let expected = if t.name() == "bash" {
-                String::new()
-            } else {
-                title_case(t.name())
-            };
-            assert_eq!(got, expected, "tool {}", t.name());
+            assert_eq!(got, title_case(t.name()), "tool {}", t.name());
         }
     }
 
