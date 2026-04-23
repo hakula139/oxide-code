@@ -30,7 +30,7 @@ use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
-use crate::tui::pending_calls::{PendingCall, PendingCalls};
+use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call
@@ -138,8 +138,11 @@ impl ChatView {
                     let view = ToolResultView::Text {
                         content: content.to_owned(),
                     };
-                    self.blocks
-                        .push(Box::new(ToolResultBlock::new("(result)", view, is_error)));
+                    self.blocks.push(Box::new(ToolResultBlock::new(
+                        FALLBACK_RESULT_HEADER,
+                        view,
+                        is_error,
+                    )));
                 }
             }
         }

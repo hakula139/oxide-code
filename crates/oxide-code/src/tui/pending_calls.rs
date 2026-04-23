@@ -21,6 +21,18 @@
 
 use std::collections::HashMap;
 
+/// Generic fallback label used when a tool result arrives with
+/// `title: None` AND no matching pending entry exists (orphan result
+/// from a replayed transcript with missing start, or an agent-loop
+/// bug). Both the live event path and the resumed-history walk must
+/// render *something* so the user sees the output — this is the
+/// something.
+///
+/// Not used when a pending entry exists: in that case the call's
+/// computed label is the fallback, which carries more information
+/// (tool name + input) than this sentinel.
+pub(crate) const FALLBACK_RESULT_HEADER: &str = "(result)";
+
 /// Per-call metadata observed at tool-call emission, consumed at the
 /// matching result.
 #[derive(Debug, Clone)]

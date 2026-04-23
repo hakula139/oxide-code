@@ -20,7 +20,7 @@ use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::pending_calls::{PendingCall, PendingCalls};
+use super::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
@@ -213,7 +213,7 @@ impl App {
                 );
                 let header = title
                     .or_else(|| pending.as_ref().map(|p| p.label.clone()))
-                    .unwrap_or_else(|| "(result)".to_owned());
+                    .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned());
                 self.chat.push_tool_result_view(&header, view, is_error);
             }
             AgentEvent::TurnComplete => {
