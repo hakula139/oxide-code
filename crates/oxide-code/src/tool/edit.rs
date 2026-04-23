@@ -87,9 +87,9 @@ impl Tool for EditTool {
 /// the caller defaults to 1.
 ///
 /// The content-format contract this parser relies on is pinned by
-/// [`tests::edit_file_replace_all_pins_replaced_n_occurrences_format`]
-/// so rewording the success string in `edit_file` breaks the test,
-/// not the renderer silently.
+/// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
+/// test so rewording the success string in `edit_file` breaks the
+/// test, not the renderer silently.
 fn parse_replacement_count(content: &str) -> Option<usize> {
     content
         .strip_prefix("Replaced ")?

@@ -40,9 +40,8 @@ pub(crate) struct App {
     tools: Arc<ToolRegistry>,
     /// Bridges [`AgentEvent::ToolCallStart`] to its matching
     /// [`AgentEvent::ToolCallEnd`]. The End arm looks up `name` +
-    /// `input` to build a structured
-    /// [`ToolResultView`](crate::tool::ToolResultView) and falls back
-    /// to `label` when the tool emits `title: None`.
+    /// `input` to build a structured [`ToolResultView`] and falls
+    /// back to `label` when the tool emits `title: None`.
     pending_calls: PendingCalls,
     should_quit: bool,
     /// Whether state has changed since the last render.

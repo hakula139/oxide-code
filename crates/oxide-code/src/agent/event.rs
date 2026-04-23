@@ -18,9 +18,10 @@ pub(crate) enum AgentEvent {
     /// A chunk of thinking text (streamed incrementally).
     ThinkingToken(String),
     /// A tool call has started execution. `id` is the call's
-    /// correlation handle — `App` caches the tool name + input under
-    /// it so the paired [`Self::ToolCallEnd`] can build a structured
-    /// [`ToolResultView`](crate::tui::components::chat::ToolResultView).
+    /// correlation handle — [`PendingCalls`](crate::tui::pending_calls::PendingCalls)
+    /// stashes the tool name + input under it so the paired
+    /// [`Self::ToolCallEnd`] can build a structured
+    /// [`ToolResultView`](crate::tool::ToolResultView).
     ToolCallStart {
         id: String,
         name: String,
