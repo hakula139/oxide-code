@@ -49,15 +49,15 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                                             |
-| --------------------------------- | --------------------------------------------------- |
-| `interleaved-thinking-2025-05-14` | Extended thinking support                           |
-| `context-1m-2025-08-07`           | 1M context window                                   |
-| `context-management-2025-06-27`   | Context management                                  |
-| `prompt-caching-scope-2026-01-05` | Prompt caching                                      |
-| `effort-2025-11-24`               | Effort control                                      |
-| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls)  |
-| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                      |
+| Header                            | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `interleaved-thinking-2025-05-14` | Extended thinking support                          |
+| `context-1m-2025-08-07`           | 1M context window                                  |
+| `context-management-2025-06-27`   | Context management                                 |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                                     |
+| `effort-2025-11-24`               | Effort control                                     |
+| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls) |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
 
 #### Per-model beta sets
 
@@ -83,6 +83,7 @@ Key rules:
 - **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
 - **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
+- **`prompt-caching-scope` requires a 1P base URL** — the beta only matters when a block carries `cache_control.scope: "global"`, which 3P gateways reject (see [Prompt Caching Scope](#prompt-caching-scope)). oxide-code gates the header on `is_first_party_base_url()` so requests going through a proxy ship neither the scope field nor its beta.
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
 - **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
 - **`structured-outputs` is per-version and caller-opt-in** — the upstream allowlist is Opus 4.1 / 4.5 / 4.6+, Sonnet 4.5 / 4.6+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag: a schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
@@ -174,6 +175,44 @@ The `User-Agent` must start with `claude-cli/`. Claude Code constructs it as `cl
 | Prefix in body string    | 200       | 429           |
 
 The last two rows are the critical distinction: having the prefix present in a concatenated string is **not sufficient**. It must be a separate `{"type": "text", "text": "..."}` block in the system array.
+
+## Prompt Caching Scope
+
+Blocks in the `system` array can carry `cache_control` for prompt caching. The `scope` field controls the sharing level:
+
+| Value      | Shape                                      | Shared across             |
+| ---------- | ------------------------------------------ | ------------------------- |
+| `global`   | `{"type": "ephemeral", "scope": "global"}` | All users on the 1P API   |
+| _(absent)_ | `{"type": "ephemeral"}`                    | The caller's organization |
+| `null`     | no `cache_control` at all                  | _(not cached)_            |
+
+### Prefix invariance
+
+`scope: "global"` is only valid when **every preceding request element is also globally scoped or unscoped**. The order the server sees is:
+
+```text
+[tool definitions] → [system blocks...] → [messages...]
+```
+
+Tool definitions render before system blocks. If any earlier block carries a narrower cache scope — or if the gateway treats missing `cache_control` on tools as narrower — the server rejects the global block with HTTP 400:
+
+> `cache_control.scope: "global"` is only valid when every preceding block is also globally scoped. A block with `scope: "global"` was found after content with a narrower cache scope.
+
+### Gateway behavior differs
+
+- **1P (`api.anthropic.com`)**: accepts `scope: "global"` on the static system block even when tools are present — the server model is lenient about tool-definition scope.
+- **3P proxies / self-hosted gateways**: enforce strict prefix invariance. Any `scope: "global"` block downstream of tools is rejected. The fix path is to drop the scope field (the block still caches at the default org level).
+
+### oxide-code gating
+
+oxide-code gates `scope: "global"` on `is_first_party_base_url(&config.base_url)`:
+
+- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}` + `prompt-caching-scope-2026-01-05` beta.
+- Any other host (proxies, self-hosted, malformed URLs) → `{"type": "ephemeral"}`; the beta is dropped since it's a no-op without the scope field.
+
+The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the two 1P-only elements toggle.
+
+This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a proxy still parses as first-party by that check.
 
 ## Third-Party Tool Restrictions
 

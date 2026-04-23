@@ -126,8 +126,13 @@ struct SystemBlock<'a> {
 }
 
 /// Prompt caching control. The `scope` field determines the cache sharing
-/// level: `"global"` for static content identical across sessions, `"org"`
-/// for organization-scoped content.
+/// level: `"global"` for static content identical across sessions (1P only),
+/// `None` for the default org-scoped ephemeral cache (universally accepted).
+///
+/// `scope: "global"` must be a true prefix of all preceding request content
+/// — the server rejects a global-scoped block preceded by a non-global
+/// block (including tool definitions, which render before `system`). See
+/// [`is_first_party_base_url`] for where the gating decision is made.
 #[derive(Serialize)]
 struct CacheControl {
     r#type: &'static str,
@@ -398,11 +403,19 @@ impl Client {
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
         });
 
+        // Global-scope prompt caching only fires on the official API —
+        // third-party gateways reject `scope: "global"` on a system block
+        // because tool definitions render first and taint the cache
+        // prefix. On 3P we fall back to the default (org-scoped)
+        // ephemeral cache, which every gateway accepts.
+        let is_first_party = is_first_party_base_url(&self.config.base_url);
+
         // System-block order (boundary marker filtered):
         //
         // 1. Billing header (OAuth only; no cache_control).
         // 2. Identity prefix (no cache_control).
-        // 3. Static sections joined (cache_control: ephemeral, global).
+        // 3. Static sections joined (ephemeral cache; scope=global on 1P,
+        //    default org-scoped on 3P).
         // 4. Dynamic sections joined (no cache_control).
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
@@ -425,10 +438,7 @@ impl Client {
             system_blocks.push(SystemBlock {
                 r#type: "text",
                 text: &static_joined,
-                cache_control: Some(CacheControl {
-                    r#type: "ephemeral",
-                    scope: Some("global"),
-                }),
+                cache_control: Some(static_prefix_cache_control(is_first_party)),
             });
         }
         if !dynamic_joined.is_empty() {
@@ -462,7 +472,14 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
+        let betas = compute_betas(
+            &self.config.model,
+            &self.config.auth,
+            true,
+            false,
+            is_first_party,
+        )
+        .join(",");
 
         tokio::spawn(async move {
             let result = stream_sse(&http, &url, betas, body, &tx).await;
@@ -505,8 +522,18 @@ impl Client {
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        let betas =
-            compute_betas(model, &self.config.auth, false, effective_format.is_some()).join(",");
+        // Non-agentic one-shot — 1P gating only affects `PROMPT_CACHING_SCOPE`,
+        // which `compute_betas` restricts to the agentic branch anyway. Still
+        // passed for signature symmetry with [`Self::stream_message`].
+        let is_first_party = is_first_party_base_url(&self.config.base_url);
+        let betas = compute_betas(
+            model,
+            &self.config.auth,
+            false,
+            effective_format.is_some(),
+            is_first_party,
+        )
+        .join(",");
         let response = self
             .http
             .post(&url)
@@ -549,11 +576,15 @@ fn build_metadata(session_id: &str) -> RequestMetadata {
 /// `want_structured` is cross-checked against the model's capability
 /// flag so an unsupported `[OutputFormat]` silently drops back to
 /// free-form text instead of 400ing the gateway.
+/// `is_first_party` gates experimental betas that 3P proxies reject
+/// (currently: `prompt-caching-scope`, which is a no-op without the
+/// scope field it enables).
 fn compute_betas(
     model: &str,
     auth: &Auth,
     is_agentic: bool,
     want_structured: bool,
+    is_first_party: bool,
 ) -> Vec<&'static str> {
     let caps = crate::model::lookup(model)
         .map(|info| info.capabilities)
@@ -577,9 +608,14 @@ fn compute_betas(
         if caps.context_management {
             out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
         }
-        // Prompt-caching scope is 1P-intended but no-ops on 3P when
-        // `scope` is omitted on cache_control blocks (our behavior).
-        out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
+        // Prompt-caching scope is the beta that enables `scope: "global"`
+        // on `cache_control`. Ship it only when we actually send the
+        // scope field — i.e., on the 1P API. 3P gateways reject the
+        // scope (tools taint the cache prefix) and the beta without
+        // scope is a no-op.
+        if is_first_party {
+            out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
+        }
         if caps.interleaved_thinking {
             out.push(INTERLEAVED_THINKING_BETA_HEADER);
         }
@@ -606,6 +642,38 @@ fn compute_betas(
 /// beta. Thin wrapper over the capability table for pre-checks.
 pub(crate) fn supports_structured_outputs(model: &str) -> bool {
     crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
+}
+
+/// Whether `base_url` points at the first-party Anthropic API, gating
+/// features that strict 3P proxies reject (currently: global-scope
+/// prompt caching + its beta header).
+///
+/// An unparsable URL, a URL with no host, or any host other than the
+/// 1P list is treated as third-party; the safe fallback (drop scope +
+/// beta) preserves org-level ephemeral caching, which every gateway
+/// accepts.
+fn is_first_party_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| {
+            matches!(
+                h.as_str(),
+                "api.anthropic.com" | "api-staging.anthropic.com"
+            )
+        })
+}
+
+/// Cache-control for the static system-prompt prefix. On 1P, emit the
+/// global scope so the prefix is shared across sessions; on 3P, fall
+/// back to the default (org-scoped) ephemeral cache — 3P gateways
+/// reject `scope: "global"` because tool definitions render first and
+/// taint the cache prefix.
+fn static_prefix_cache_control(is_first_party: bool) -> CacheControl {
+    CacheControl {
+        r#type: "ephemeral",
+        scope: is_first_party.then_some("global"),
+    }
 }
 
 /// Strips the `[1m]` tag from a caller-supplied model string. The tag
@@ -1648,6 +1716,67 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         assert_eq!(messages[1]["content"][0]["text"], "user-question");
     }
 
+    #[tokio::test]
+    async fn stream_message_third_party_base_url_drops_global_scope_and_its_beta() {
+        // Mock server URI (127.0.0.1:NNNN) is third-party by definition.
+        // Pin the full request shape we send to 3P gateways:
+        //   - static-prefix cache_control is `{"type":"ephemeral"}` only;
+        //   - the `prompt-caching-scope` beta is absent.
+        // Regressing either half is exactly how PR #22's gateway 400 fired.
+        let server = MockServer::start().await;
+        let sink: Captured<(String, String)> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                let body = String::from_utf8_lossy(&req.body).into_owned();
+                let beta = req
+                    .headers
+                    .get("anthropic-beta")
+                    .map(|v| v.to_str().unwrap().to_owned())
+                    .unwrap_or_default();
+                *sink_clone.lock().unwrap() = Some((body, beta));
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body())
+            })
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &["static-a", "static-b"], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
+        assert!(
+            !beta.contains(PROMPT_CACHING_SCOPE_BETA_HEADER),
+            "prompt-caching-scope beta absent on 3P: {beta}",
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let system = v["system"].as_array().expect("system array");
+        // [0] identity prefix (no cache_control), [1] static joined.
+        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        assert!(
+            system[0].get("cache_control").is_none(),
+            "identity prefix carries no cache_control: {body}",
+        );
+        let cc = &system[1]["cache_control"];
+        assert_eq!(cc["type"], "ephemeral");
+        assert!(
+            cc.get("scope").is_none(),
+            "scope field omitted entirely on 3P (not null): {body}",
+        );
+    }
+
     // ── Client::complete ──
 
     #[tokio::test]
@@ -1822,7 +1951,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     fn compute_betas_agentic_opus_46_plain_carries_full_set_except_1m() {
         // Plain model (no `[1m]` tag) must not auto-enable 1M context —
         // a gateway without 1M access would 400.
-        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
+        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
@@ -1835,14 +1964,14 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[test]
     fn compute_betas_opus_46_with_1m_tag_adds_context_1m() {
-        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false);
+        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false, true);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     #[test]
     fn compute_betas_oauth_adds_oauth_header() {
-        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false);
+        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false, true);
         assert!(betas.contains(&OAUTH_BETA_HEADER));
     }
 
@@ -1850,7 +1979,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     fn compute_betas_sonnet_45_has_thinking_but_not_effort() {
         // Sonnet 4.5 supports interleaved thinking but not effort;
         // plain (no `[1m]` tag) means no 1M beta either.
-        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false);
+        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false, true);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -1861,7 +1990,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     fn compute_betas_haiku_4_5_agentic_omits_1m_effort_and_thinking() {
         // Haiku has a 200K window and no interleaved-thinking / effort
         // support on 3P gateways; all three must be absent.
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false);
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false, true);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -1871,7 +2000,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[test]
     fn compute_betas_haiku_4_5_with_1m_tag_silently_drops_1m() {
-        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false);
+        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false, true);
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
@@ -1880,11 +2009,11 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         // Title-generator one-shot on API key → no agent tags, no gateway
         // tag. OAuth one-shot → only the OAuth tag.
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, false),
+            compute_betas("claude-haiku-4-5", &api_key(), false, false, true),
             Vec::<&str>::new(),
         );
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &oauth(), false, false),
+            compute_betas("claude-haiku-4-5", &oauth(), false, false, true),
             vec![OAUTH_BETA_HEADER],
         );
     }
@@ -1892,7 +2021,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     #[test]
     fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
         // OAuth on non-Haiku requires the gateway tag even for one-shots.
-        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false);
+        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false, true);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&OAUTH_BETA_HEADER));
         assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
@@ -1901,13 +2030,13 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[test]
     fn compute_betas_opus_47_matches_opus_46_family() {
-        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false);
+        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false, true);
         assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(plain.contains(&EFFORT_BETA_HEADER));
         assert!(!plain.contains(&CONTEXT_1M_BETA_HEADER));
 
-        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false);
+        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false, true);
         assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
@@ -1916,13 +2045,26 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         // Haiku 4.5 supports it → emitted alone on non-agentic API key.
         // Haiku 4 base predates the beta → silently dropped.
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, true),
+            compute_betas("claude-haiku-4-5", &api_key(), false, true, true),
             vec![STRUCTURED_OUTPUTS_BETA_HEADER],
         );
         assert!(
-            !compute_betas("claude-haiku-4", &api_key(), false, true)
+            !compute_betas("claude-haiku-4", &api_key(), false, true, true)
                 .contains(&STRUCTURED_OUTPUTS_BETA_HEADER),
         );
+    }
+
+    #[test]
+    fn compute_betas_third_party_base_url_drops_prompt_caching_scope() {
+        // 3P gateways reject `scope: "global"` because tool definitions
+        // render before system blocks and taint the cache prefix. Keep
+        // every other agentic beta — only the scope header goes.
+        let betas = compute_betas("claude-opus-4-7", &api_key(), true, false, false);
+        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
+        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
+        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
+        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
+        assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     // ── supports_structured_outputs ──
@@ -1933,6 +2075,51 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         assert!(supports_structured_outputs("claude-opus-4-7"));
         assert!(!supports_structured_outputs("claude-haiku-4"));
         assert!(!supports_structured_outputs("claude-opus-5-0"));
+    }
+
+    // ── is_first_party_base_url ──
+
+    #[test]
+    fn is_first_party_base_url_accepts_official_hosts() {
+        assert!(is_first_party_base_url("https://api.anthropic.com"));
+        assert!(is_first_party_base_url("https://api.anthropic.com/"));
+        assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
+        // Case-insensitive on the host (URL spec lowercases it).
+        assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
+    }
+
+    #[test]
+    fn is_first_party_base_url_rejects_proxies_and_malformed_urls() {
+        // Proxies and self-hosted gateways → 3P. Also anything that
+        // doesn't parse as a URL falls through to the safe default.
+        assert!(!is_first_party_base_url("https://api.openai.com"));
+        assert!(!is_first_party_base_url("https://proxy.example.com"));
+        assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
+        assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
+        assert!(!is_first_party_base_url(""));
+        assert!(!is_first_party_base_url("not-a-url"));
+    }
+
+    // ── static_prefix_cache_control ──
+
+    #[test]
+    fn static_prefix_cache_control_emits_global_scope_on_first_party_only() {
+        // 1P → `{"type":"ephemeral","scope":"global"}` — global cache.
+        // 3P → `{"type":"ephemeral"}` — default (org) scope; every
+        // gateway accepts this.
+        let first = static_prefix_cache_control(true);
+        assert_eq!(first.r#type, "ephemeral");
+        assert_eq!(first.scope, Some("global"));
+
+        let third = static_prefix_cache_control(false);
+        assert_eq!(third.r#type, "ephemeral");
+        assert_eq!(third.scope, None);
+
+        // Round-trip through JSON to pin the on-wire shape — the
+        // `scope` key must be absent (not `null`) in the 3P case so
+        // gateways that validate the field strictly accept it.
+        let wire = serde_json::to_string(&third).unwrap();
+        assert_eq!(wire, r#"{"type":"ephemeral"}"#);
     }
 
     // ── api_model_id / has_1m_tag ──
