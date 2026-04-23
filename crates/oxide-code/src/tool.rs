@@ -194,11 +194,13 @@ impl ToolRegistry {
         self.get(name).map_or(DEFAULT_TOOL_ICON, Tool::icon)
     }
 
-    /// Looks up the per-tool call label for `name`, returning `None`
-    /// when the tool is not registered. Delegates to
-    /// [`Tool::summarize_call`] — see there for the formatting rules.
-    pub(crate) fn summarize_call(&self, name: &str, input: &serde_json::Value) -> Option<String> {
-        self.get(name).map(|t| t.summarize_call(input))
+    /// Returns the display label for a tool call. Resolves `name` to
+    /// a registered [`Tool`] and delegates to [`Tool::summarize_call`];
+    /// falls back to the raw `name` for tools not in the registry so
+    /// callers always get a non-empty label to render.
+    pub(crate) fn label(&self, name: &str, input: &serde_json::Value) -> String {
+        self.get(name)
+            .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 }
 
@@ -573,29 +575,29 @@ mod tests {
         assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
     }
 
-    // ── ToolRegistry::summarize_call ──
+    // ── ToolRegistry::label ──
 
     #[test]
-    fn summarize_call_delegates_to_registered_tool() {
+    fn label_delegates_to_registered_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool)]);
         assert_eq!(
-            registry.summarize_call("bash", &serde_json::json!({"command": "echo hi"})),
-            Some("echo hi".to_owned()),
+            registry.label("bash", &serde_json::json!({"command": "echo hi"})),
+            "echo hi",
         );
         assert_eq!(
-            registry.summarize_call("grep", &serde_json::json!({"pattern": "fn "})),
-            Some("Grep(fn )".to_owned()),
+            registry.label("grep", &serde_json::json!({"pattern": "fn "})),
+            "Grep(fn )",
         );
     }
 
     #[test]
-    fn summarize_call_unknown_tool_returns_none() {
-        // Caller falls back to the raw API name when the tool isn't
-        // registered — pinned so a future "defer to first registered
-        // tool" bug would flip this to Some and surface in chat.
+    fn label_unknown_tool_falls_back_to_raw_name() {
+        // Unknown tool → the raw API name keeps the UI showing
+        // *something*. Pinned so a future "defer to first registered
+        // tool" bug would flip this to a mismatched label.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
-        assert_eq!(registry.summarize_call("nonexistent", &input), None);
+        assert_eq!(registry.label("nonexistent", &input), "nonexistent");
     }
 
     // ── resolve_base_dir ──

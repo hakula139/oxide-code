@@ -57,8 +57,7 @@ impl Tool for BashTool {
     /// upstream) fall back to the default shape (`Bash`) so the UI
     /// still prints a readable label rather than a bare `$ `.
     fn summarize_call(&self, input: &serde_json::Value) -> String {
-        extract_input_field(input, "command")
-            .map_or_else(|| title_case(self.name()), str::to_owned)
+        extract_input_field(input, "command").map_or_else(|| title_case(self.name()), str::to_owned)
     }
 
     fn run(

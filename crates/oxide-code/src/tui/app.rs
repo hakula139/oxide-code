@@ -176,10 +176,7 @@ impl App {
             AgentEvent::ToolCallStart { name, input, .. } => {
                 self.chat.commit_streaming();
                 let icon = self.tools.icon(&name);
-                let label = self
-                    .tools
-                    .summarize_call(&name, &input)
-                    .unwrap_or_else(|| name.clone());
+                let label = self.tools.label(&name, &input);
                 self.chat.push_tool_call(icon, &label);
                 self.status_bar.set_status(Status::ToolRunning);
             }
