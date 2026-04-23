@@ -116,6 +116,20 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
+    /// Returns the human-readable tool-call label shown in the TUI,
+    /// e.g. `Grep(fn foo)`, `Read(Cargo.toml)`. The default capitalizes
+    /// [`Tool::name`] and wraps [`summarize_input`](Self::summarize_input)
+    /// in parentheses; tools whose icon + argument already read as a
+    /// complete line (bash's `$ <command>`) override to return the bare
+    /// argument instead.
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        let label = title_case(self.name());
+        match self.summarize_input(input) {
+            Some(arg) => format!("{label}({arg})"),
+            None => label,
+        }
+    }
+
     fn run(
         &self,
         input: serde_json::Value,
@@ -137,6 +151,19 @@ pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 /// [`Tool::summarize_input`] implementations that simply pluck one key.
 pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// Capitalizes the first character of an ASCII tool name for display
+/// (`"grep"` → `"Grep"`). Returns an empty string for empty input.
+/// Used by the default [`Tool::summarize_call`] implementation and by
+/// overrides that still want the default fallback shape when input
+/// fields are missing (see [`BashTool::summarize_call`]).
+pub(crate) fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 // ── Tool Registry ──
@@ -167,14 +194,13 @@ impl ToolRegistry {
         self.get(name).map_or(DEFAULT_TOOL_ICON, Tool::icon)
     }
 
-    /// Looks up the per-tool input summary for `name`, returning `None`
-    /// when the tool is not registered or has no summary for `input`.
-    pub(crate) fn summarize_input<'a>(
-        &self,
-        name: &str,
-        input: &'a serde_json::Value,
-    ) -> Option<&'a str> {
-        self.get(name).and_then(|t| t.summarize_input(input))
+    /// Returns the display label for a tool call. Resolves `name` to
+    /// a registered [`Tool`] and delegates to [`Tool::summarize_call`];
+    /// falls back to the raw `name` for tools not in the registry so
+    /// callers always get a non-empty label to render.
+    pub(crate) fn label(&self, name: &str, input: &serde_json::Value) -> String {
+        self.get(name)
+            .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 }
 
@@ -444,6 +470,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_summarize_call_wraps_arg_in_title_cased_name() {
+        // Default format: `Grep(fn foo)`, `Read(/a/b.rs)` — clearly
+        // identifies which tool is running even without the icon.
+        // Bash overrides to the bare command (the `$` icon carries the
+        // "shell prompt" semantics; wrapping in `Bash(...)` is redundant).
+        let cases = [
+            ("bash", serde_json::json!({"command": "ls"}), "ls"),
+            (
+                "edit",
+                serde_json::json!({"file_path": "/a/b.rs", "old_string": "x", "new_string": "y"}),
+                "Edit(/a/b.rs)",
+            ),
+            (
+                "glob",
+                serde_json::json!({"pattern": "**/*.rs"}),
+                "Glob(**/*.rs)",
+            ),
+            ("grep", serde_json::json!({"pattern": "fn "}), "Grep(fn )"),
+            (
+                "read",
+                serde_json::json!({"file_path": "/a/b.rs"}),
+                "Read(/a/b.rs)",
+            ),
+            (
+                "write",
+                serde_json::json!({"file_path": "/a/b.rs", "content": "x"}),
+                "Write(/a/b.rs)",
+            ),
+        ];
+        let tools = all_tools();
+        for (name, input, expected) in &cases {
+            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            assert_eq!(t.summarize_call(input), *expected, "tool {name}");
+        }
+    }
+
+    #[test]
+    fn tool_summarize_call_falls_back_to_bare_name_when_arg_missing() {
+        // Missing primary field → every tool (bash included) falls
+        // back to the title-cased tool name. Without this, bash would
+        // render as a bare `$ ` in the TUI; `$ Bash` keeps the status
+        // line readable even on malformed input.
+        let tools = all_tools();
+        for t in &tools {
+            let got = t.summarize_call(&serde_json::json!({}));
+            assert_eq!(got, title_case(t.name()), "tool {}", t.name());
+        }
+    }
+
+    // ── title_case ──
+
+    #[test]
+    fn title_case_capitalizes_first_char_only() {
+        assert_eq!(title_case("grep"), "Grep");
+        assert_eq!(title_case("bash"), "Bash");
+        // Already-capitalized / empty / single-char inputs pass through
+        // without panicking or mangling subsequent characters.
+        assert_eq!(title_case("Foo"), "Foo");
+        assert_eq!(title_case(""), "");
+        assert_eq!(title_case("a"), "A");
+    }
+
     // ── ToolRegistry::get ──
 
     #[test]
@@ -486,20 +575,29 @@ mod tests {
         assert_eq!(registry.icon("nonexistent"), DEFAULT_TOOL_ICON);
     }
 
-    // ── ToolRegistry::summarize_input ──
+    // ── ToolRegistry::label ──
 
     #[test]
-    fn summarize_input_delegates_to_registered_tool() {
-        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
-        let input = serde_json::json!({"command": "echo hi"});
-        assert_eq!(registry.summarize_input("bash", &input), Some("echo hi"));
+    fn label_delegates_to_registered_tool() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool), Box::new(GrepTool)]);
+        assert_eq!(
+            registry.label("bash", &serde_json::json!({"command": "echo hi"})),
+            "echo hi",
+        );
+        assert_eq!(
+            registry.label("grep", &serde_json::json!({"pattern": "fn "})),
+            "Grep(fn )",
+        );
     }
 
     #[test]
-    fn summarize_input_unknown_tool() {
+    fn label_unknown_tool_falls_back_to_raw_name() {
+        // Unknown tool → the raw API name keeps the UI showing
+        // *something*. Pinned so a future "defer to first registered
+        // tool" bug would flip this to a mismatched label.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
-        assert_eq!(registry.summarize_input("nonexistent", &input), None);
+        assert_eq!(registry.label("nonexistent", &input), "nonexistent");
     }
 
     // ── resolve_base_dir ──

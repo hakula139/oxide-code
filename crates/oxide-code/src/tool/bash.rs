@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::{Tool, ToolMetadata, ToolOutput, extract_input_field};
+use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 
@@ -48,6 +48,16 @@ impl Tool for BashTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "command")
+    }
+
+    /// Bash uses `$ <command>` as its visual identity — the dollar
+    /// icon already reads as a shell prompt, so wrapping the command
+    /// in `Bash(...)` would be redundant. When the `command` field is
+    /// absent (malformed input — schema validation should catch this
+    /// upstream) fall back to the default shape (`Bash`) so the UI
+    /// still prints a readable label rather than a bare `$ `.
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        extract_input_field(input, "command").map_or_else(|| title_case(self.name()), str::to_owned)
     }
 
     fn run(

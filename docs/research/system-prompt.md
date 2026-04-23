@@ -138,34 +138,39 @@ Tool schemas are sent via the API `tools` parameter, **not** in the system promp
 
 ## Prompt Caching
 
-The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Claude Code assigns cache scopes:
+The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Cache scopes:
 
-- `global` — static instructions identical across all sessions (first-party only).
-- `org` — organization-scoped prefix.
-- `null` — dynamic content, not cached.
+- `global` — static instructions identical across all sessions. **First-party only**; 3P proxies reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Prompt Caching Scope](./anthropic-api.md#prompt-caching-scope) for the full invariance rule.
+- _(absent)_ — default (org-scoped) ephemeral cache. Universally accepted.
+- `null` (no `cache_control`) — dynamic content, not cached.
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
 
-## System Block Layout (`splitSysPromptPrefix`)
+oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API; on any other host the static prefix still gets ephemeral caching, just at org level instead of global. The dynamic sections and block order are identical in both modes.
 
-`splitSysPromptPrefix()` transforms the flat sections array into the block layout actually sent to the API. The boundary marker is consumed — it never appears in the request. Behavior depends on whether global cache scope is active:
+## System Block Layout
 
-**Global cache mode** (first-party, boundary found) — 4 blocks:
+The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed — it never appears in the request. oxide-code always emits the same 4-block shape (attribution + identity + static + dynamic); only the `cache_control` on the static block varies by base URL.
 
-| #   | Content                          | `cache_control`                      |
-| --- | -------------------------------- | ------------------------------------ |
-| 0   | Attribution header               | —                                    |
-| 1   | Identity prefix                  | —                                    |
-| 2   | Static sections joined (`\n\n`)  | `{ type: ephemeral, scope: global }` |
-| 3   | Dynamic sections joined (`\n\n`) | —                                    |
+**First-party base URL** (`api.anthropic.com`) — global cache active:
 
-**Default mode** (third-party / boundary missing) — 3 blocks:
+| #   | Content                          | `cache_control`                          |
+| --- | -------------------------------- | ---------------------------------------- |
+| 0   | Attribution header (OAuth only)  | —                                        |
+| 1   | Identity prefix                  | —                                        |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
+| 3   | Dynamic sections joined (`\n\n`) | —                                        |
 
-| #   | Content                         | `cache_control`                   |
-| --- | ------------------------------- | --------------------------------- |
-| 0   | Attribution header              | —                                 |
-| 1   | Identity prefix                 | `{ type: ephemeral, scope: org }` |
-| 2   | Everything else joined (`\n\n`) | `{ type: ephemeral, scope: org }` |
+**Third-party base URL** (proxy, self-hosted, anything else) — default scope:
+
+| #   | Content                          | `cache_control`         |
+| --- | -------------------------------- | ----------------------- |
+| 0   | Attribution header (OAuth only)  | —                       |
+| 1   | Identity prefix                  | —                       |
+| 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
+| 3   | Dynamic sections joined (`\n\n`) | —                       |
+
+Dropping the `scope` field (rather than serializing `scope: "org"` explicitly) is deliberate: org is the default when `scope` is absent, the wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 
