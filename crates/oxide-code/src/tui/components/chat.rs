@@ -1542,11 +1542,11 @@ mod tests {
             !text.contains("Successfully edited"),
             "diff should replace the raw content body: {text}",
         );
-        // Single-replacement edits must not emit the `applied to N`
-        // footer — closes an `&&` → `||` mutation on the guard in
-        // `render_diff_body`.
+        // Single-replacement edits must not emit the
+        // "N occurrences replaced" footer — closes an `&&` → `||`
+        // mutation on the guard in `render_diff_body`.
         assert!(
-            !text.contains("applied to"),
+            !text.contains("occurrences replaced"),
             "replace_all=false should suppress the match-count footer: {text}",
         );
     }
@@ -1563,7 +1563,7 @@ mod tests {
         chat.push_tool_result_view("Edited file.rs", view, false);
         let text = all_text(&chat);
         assert!(
-            text.contains("applied to 3 matches"),
+            text.contains("3 occurrences replaced"),
             "replace-all footer missing: {text}",
         );
     }

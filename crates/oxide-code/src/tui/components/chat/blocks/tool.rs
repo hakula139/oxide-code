@@ -282,7 +282,12 @@ fn render_diff_body(
                 let noun = if hidden == 1 { "line" } else { "lines" };
                 out.push(Line::from(vec![
                     Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-                    Span::styled(format!("... +{hidden} {noun}"), ctx.theme.dim()),
+                    // Inside a diff body the `+` glyph already means
+                    // "added line" on an adjacent row; using `+N` on
+                    // an ellipsis would smuggle addition semantics
+                    // into a collapsed region that might be a pure
+                    // deletion. Render as neutral "N lines hidden".
+                    Span::styled(format!("... {hidden} {noun} hidden"), ctx.theme.dim()),
                 ]));
             }
         }
@@ -291,8 +296,11 @@ fn render_diff_body(
     if replace_all && replacements > 1 {
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            // Mirror the model-facing "Replaced N occurrences in ..."
+            // wording rather than inventing a new shape. Past tense
+            // matches the ✓/✗ indicator in the status row above.
             Span::styled(
-                format!("applied to {replacements} matches"),
+                format!("{replacements} occurrences replaced"),
                 ctx.theme.dim(),
             ),
         ]));
