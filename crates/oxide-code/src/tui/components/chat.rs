@@ -1542,6 +1542,13 @@ mod tests {
             !text.contains("Successfully edited"),
             "diff should replace the raw content body: {text}",
         );
+        // Single-replacement edits must not emit the `applied to N`
+        // footer — closes an `&&` → `||` mutation on the guard in
+        // `render_diff_body`.
+        assert!(
+            !text.contains("applied to"),
+            "replace_all=false should suppress the match-count footer: {text}",
+        );
     }
 
     #[test]

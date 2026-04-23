@@ -677,7 +677,9 @@ mod tests {
     #[test]
     fn result_view_delegates_to_tool_for_structured_output() {
         // Edit is the one registered override today; routing through
-        // the registry must produce the same `Diff` the tool owns.
+        // the registry must produce the same `Diff` the tool owns —
+        // including the field values, so a mutation returning an
+        // empty diff wouldn't pass.
         let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
@@ -685,7 +687,15 @@ mod tests {
             "new_string": "b",
         });
         let view = registry.result_view("edit", &input, "Successfully edited /tmp/f.rs.", false);
-        assert!(matches!(view, ToolResultView::Diff { .. }));
+        assert_eq!(
+            view,
+            ToolResultView::Diff {
+                old: "a".to_owned(),
+                new: "b".to_owned(),
+                replace_all: false,
+                replacements: 1,
+            },
+        );
     }
 
     #[test]
@@ -723,7 +733,9 @@ mod tests {
     #[test]
     fn result_view_falls_back_to_text_when_tool_has_no_structured_view() {
         // Bash has no `result_view` override yet — free-form shell
-        // output renders as the default truncated text block.
+        // output renders as the default truncated text block. Pin
+        // the full content so a mutation returning an empty Text
+        // wouldn't pass.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let view = registry.result_view(
             "bash",
@@ -731,7 +743,12 @@ mod tests {
             "file1\nfile2",
             false,
         );
-        assert!(matches!(view, ToolResultView::Text { .. }));
+        assert_eq!(
+            view,
+            ToolResultView::Text {
+                content: "file1\nfile2".to_owned(),
+            },
+        );
     }
 
     // ── resolve_base_dir ──

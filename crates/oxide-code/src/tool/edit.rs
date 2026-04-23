@@ -312,15 +312,22 @@ mod tests {
 
     #[test]
     fn result_view_returns_none_when_field_type_is_wrong() {
-        // `old_string` must be a string; a numeric value shouldn't
-        // panic on unwrap — it returns `None` and the TUI renders
-        // the raw `content` as text.
-        let input = serde_json::json!({
+        // Either string field being the wrong JSON type must degrade
+        // to None so the caller falls back to Text rather than
+        // panicking on `as_str()?`. Cover both sides explicitly since
+        // they're parallel `?` chains.
+        let bad_old = serde_json::json!({
             "file_path": "/tmp/x",
             "old_string": 42,
             "new_string": "b",
         });
-        assert!(EditTool.result_view(&input, "edited").is_none());
+        assert!(EditTool.result_view(&bad_old, "edited").is_none());
+        let bad_new = serde_json::json!({
+            "file_path": "/tmp/x",
+            "old_string": "a",
+            "new_string": 42,
+        });
+        assert!(EditTool.result_view(&bad_new, "edited").is_none());
     }
 
     // ── parse_replacement_count ──
@@ -337,6 +344,16 @@ mod tests {
     fn parse_replacement_count_returns_none_for_unrelated_messages() {
         assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
         assert_eq!(parse_replacement_count(""), None);
+    }
+
+    #[test]
+    fn parse_replacement_count_requires_space_after_replaced() {
+        // The leading `"Replaced "` prefix (with trailing space) is the
+        // structural separator — `"Replaced7 occurrences ..."` is not
+        // the format `edit_file` emits and must not parse, otherwise a
+        // mutation that drops the space from the prefix would go
+        // unnoticed.
+        assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
     }
 
     // ── run ──
