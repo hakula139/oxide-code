@@ -24,10 +24,10 @@ Alternatively, if you have [Claude Code](https://code.claude.com/docs) installed
 ox
 ```
 
-This opens an interactive REPL. Type a task and press Enter:
+This opens an interactive terminal session. Type a task and press Enter:
 
 ```text
-> Read main.rs and explain the agent loop.
+❯ Read main.rs and explain the agent loop.
 ```
 
 The assistant reads files, runs commands, and edits code using its built-in tools until it produces a final answer.

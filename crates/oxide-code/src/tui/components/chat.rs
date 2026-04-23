@@ -1,109 +1,65 @@
+//! Chat view — the scrollable message list.
+//!
+//! Each visible unit in the transcript (user messages, assistant
+//! replies, tool calls and results, errors) is a [`blocks::ChatBlock`]
+//! implementation. [`ChatView`] is the thin container: it appends
+//! blocks, owns the streaming buffer, handles scroll state, and stacks
+//! `render` outputs with appropriate blank-line separators.
+//!
+//! Adding a new block type — plan approval, task list, permission
+//! prompt, skill invocation — means writing a new `impl ChatBlock`
+//! module. No cascade through a giant match, no prefix-constant
+//! editing spree.
+
+mod blocks;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use self::blocks::{
+    AssistantText, AssistantThinking, ChatBlock, ErrorBlock, RenderCtx, StreamingAssistant,
+    ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
+};
 use crate::agent::event::UserAction;
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::ToolRegistry;
 use crate::tui::component::Component;
-use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
-use crate::tui::wrap::{expand_tabs, wrap_line};
 
-// ── Chat Entry ──
-
-/// A single entry in the chat history.
-#[derive(Debug, Clone)]
-enum ChatEntry {
-    User(String),
-    Assistant(String),
-    /// Committed thinking block (populated only from resumed history
-    /// when `show_thinking` is enabled). Live thinking streams through
-    /// the transient [`ChatView::thinking_buffer`] instead.
-    Thinking(String),
-    ToolCall {
-        icon: &'static str,
-        label: String,
-    },
-    ToolResult {
-        label: String,
-        content: String,
-        is_error: bool,
-    },
-    Error(String),
-}
-
-// ── Chat View ──
-
-/// Maximum lines of tool output shown inline before truncation.
-const MAX_TOOL_OUTPUT_LINES: usize = 5;
-
-/// Maximum characters per tool output line before horizontal truncation.
-const MAX_TOOL_OUTPUT_LINE_CHARS: usize = 512;
-
-/// Left bar character for bordered content.
-const BAR: &str = "▎";
-
-/// Border prefix for continuation lines and non-first content lines.
-const BORDER_PREFIX: &str = "  ▎ ";
-
-/// Icon prefix for the first line of user messages.
-const USER_PREFIX: &str = "❯ ▎ ";
-
-/// Icon prefix for the first line of assistant messages.
-const ASSISTANT_PREFIX: &str = "⟡ ▎ ";
-
-/// Border prefix for tool result status lines (indicator + label).
-const TOOL_RESULT_PREFIX: &str = "  ▎   ";
-
-/// Border prefix for tool output body lines.
-const TOOL_OUTPUT_PREFIX: &str = "  ▎     ";
-
-/// Scrollable chat message list with markdown rendering, tool call display,
-/// and thinking block support.
+/// Scrollable chat message list with markdown rendering, tool call
+/// display, and thinking block support.
 ///
-/// Renders messages vertically with role labels and auto-scrolls to the
-/// bottom on new content. The user can scroll up to review history; new
-/// content pauses auto-scroll until the user scrolls back to the bottom.
+/// Renders blocks vertically and auto-scrolls to the bottom on new
+/// content. The user can scroll up to review history; new content
+/// pauses auto-scroll until the user scrolls back to the bottom.
 pub(crate) struct ChatView {
     // Config
     theme: Theme,
     show_thinking: bool,
 
-    // Persistent data
-    entries: Vec<ChatEntry>,
+    // Committed blocks
+    blocks: Vec<Box<dyn ChatBlock>>,
 
-    // Transient buffers (cleared per turn)
-    /// Text being streamed for the current assistant response.
-    streaming_buffer: String,
-    /// Rendered lines for the stable prefix of the streaming buffer.
-    /// Avoids re-parsing all committed text on every frame during
-    /// streaming — only new complete lines since the last boundary
-    /// are parsed and appended.
-    streaming_rendered: Vec<Line<'static>>,
-    /// Byte offset in `streaming_buffer` up to which `streaming_rendered`
-    /// is current. Everything before this offset is already rendered and
-    /// cached; only text from here to the next `\n` needs parsing.
-    streaming_rendered_boundary: usize,
-    /// Viewport width the streaming cache was rendered at. When the
-    /// viewport resizes mid-stream, the cache must be cleared so lines
-    /// rewrap to the new width.
-    streaming_cached_width: u16,
-    /// Thinking tokens accumulated during extended thinking.
+    // Transient state (cleared per turn)
+    /// In-flight assistant tokens with a rendered-prefix cache.
+    streaming: Option<StreamingAssistant>,
+    /// Live thinking tokens — transient; cleared when a stream token or
+    /// turn completion arrives. Resumed thinking comes through
+    /// [`blocks`] as an [`AssistantThinking`] block instead.
     thinking_buffer: String,
 
     // View state
     scroll_offset: u16,
     /// Total content height from the last render (for scroll bounds).
-    /// Uses `Cell` for interior mutability so `render` (`&self`) can
-    /// update it during the render pass without a second `build_text` call.
+    /// `Cell` for interior mutability so `render` (`&self`) can update
+    /// it during the render pass without a second `build_text` call.
     content_height: Cell<u16>,
     viewport_height: u16,
     viewport_width: u16,
@@ -115,11 +71,8 @@ impl ChatView {
         Self {
             theme,
             show_thinking,
-            entries: Vec::new(),
-            streaming_buffer: String::new(),
-            streaming_rendered: Vec::new(),
-            streaming_rendered_boundary: 0,
-            streaming_cached_width: 0,
+            blocks: Vec::new(),
+            streaming: None,
             thinking_buffer: String::new(),
             scroll_offset: 0,
             content_height: Cell::new(0),
@@ -129,25 +82,27 @@ impl ChatView {
         }
     }
 
-    /// Populate the chat history from resumed session messages.
+    /// Populate the chat from resumed session messages.
     ///
-    /// Projects the transcript into [`Interaction`]s (see
-    /// [`walk_transcript`]) so a resumed view matches live rendering —
-    /// paired tool calls and results appear together, orphan results get a
-    /// fallback label, and `RedactedThinking` / whitespace-only blocks are
-    /// dropped upstream. Thinking entries are stored unconditionally here;
-    /// the renderer gates their display on [`ChatView::show_thinking`], so
-    /// flipping the toggle does not require reloading the session.
+    /// Projects the transcript into [`Interaction`]s so the resumed view
+    /// matches live rendering — paired tool calls and results appear
+    /// together, orphan results get a fallback label, and
+    /// `RedactedThinking` / whitespace-only blocks are dropped upstream.
+    /// Thinking blocks are always pushed; [`AssistantThinking::visible`]
+    /// collapses them to zero when `show_thinking` is off, so flipping
+    /// the toggle at runtime doesn't require reloading the session.
     pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
         let mut labels: HashMap<&str, String> = HashMap::new();
         for interaction in walk_transcript(messages) {
             match interaction {
-                Interaction::UserText(text) => self.entries.push(ChatEntry::User(text)),
+                Interaction::UserText(text) => {
+                    self.blocks.push(Box::new(UserMessage::new(text)));
+                }
                 Interaction::AssistantText(text) => {
-                    self.entries.push(ChatEntry::Assistant(text));
+                    self.blocks.push(Box::new(AssistantText::new(text)));
                 }
                 Interaction::AssistantThinking(text) => {
-                    self.entries.push(ChatEntry::Thinking(text.to_owned()));
+                    self.blocks.push(Box::new(AssistantThinking::new(text)));
                 }
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
@@ -155,7 +110,7 @@ impl ChatView {
                         .summarize_input(name, input)
                         .map_or_else(|| name.to_owned(), str::to_owned);
                     labels.insert(id, label.clone());
-                    self.entries.push(ChatEntry::ToolCall { icon, label });
+                    self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
                 }
                 Interaction::ToolResult {
                     tool_use_id,
@@ -166,42 +121,39 @@ impl ChatView {
                         .get(tool_use_id)
                         .cloned()
                         .unwrap_or_else(|| "(result)".to_owned());
-                    self.entries.push(ChatEntry::ToolResult {
-                        label,
-                        content: content.to_owned(),
-                        is_error,
-                    });
+                    self.blocks
+                        .push(Box::new(ToolResultBlock::new(label, content, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
-                    self.entries.push(ChatEntry::ToolResult {
-                        label: "(result)".to_owned(),
-                        content: content.to_owned(),
-                        is_error,
-                    });
+                    self.blocks.push(Box::new(ToolResultBlock::new(
+                        "(result)", content, is_error,
+                    )));
                 }
             }
         }
     }
 
-    /// Appends a user message to the chat history.
+    /// Appends a user message to the chat.
     pub(crate) fn push_user_message(&mut self, text: String) {
-        self.entries.push(ChatEntry::User(text));
+        self.blocks.push(Box::new(UserMessage::new(text)));
         self.auto_scroll = true;
     }
 
-    /// Appends a streamed token to the current assistant response buffer.
+    /// Appends a streamed token to the current assistant response.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         if !self.thinking_buffer.is_empty() {
             self.thinking_buffer.clear();
         }
-        self.streaming_buffer.push_str(token);
+        self.streaming
+            .get_or_insert_with(StreamingAssistant::new)
+            .append(token);
         self.advance_streaming_cache();
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
     }
 
-    /// Appends a thinking token to the thinking display buffer.
+    /// Appends a thinking token to the live thinking display buffer.
     pub(crate) fn append_thinking_token(&mut self, token: &str) {
         self.thinking_buffer.push_str(token);
         if self.auto_scroll {
@@ -209,68 +161,58 @@ impl ChatView {
         }
     }
 
-    /// Finalize the current streaming buffer into a committed assistant message.
+    /// Finalize the current streaming buffer into a committed assistant
+    /// block.
     pub(crate) fn commit_streaming(&mut self) {
         self.thinking_buffer.clear();
-        self.streaming_rendered.clear();
-        self.streaming_rendered_boundary = 0;
-        self.streaming_cached_width = 0;
-        if !self.streaming_buffer.is_empty() {
-            let content = std::mem::take(&mut self.streaming_buffer);
-            self.entries.push(ChatEntry::Assistant(content));
+        if let Some(mut s) = self.streaming.take() {
+            let text = s.take_buffer();
+            if !text.is_empty() {
+                self.blocks.push(Box::new(AssistantText::new(text)));
+            }
         }
     }
 
     /// Appends a tool call entry with its icon and label.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
-        self.entries.push(ChatEntry::ToolCall {
-            icon,
-            label: label.to_owned(),
-        });
+        self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
     /// Appends a tool result summary line with optional output content.
     pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
-        self.entries.push(ChatEntry::ToolResult {
-            label: label.to_owned(),
-            content: content.to_owned(),
-            is_error,
-        });
+        self.blocks
+            .push(Box::new(ToolResultBlock::new(label, content, is_error)));
     }
 
     /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
-        self.entries.push(ChatEntry::Error(msg.to_owned()));
+        self.blocks.push(Box::new(ErrorBlock::new(msg)));
     }
 
-    /// Number of committed chat entries. Exposed for observable state in
+    /// Number of committed chat blocks. Exposed for observable state in
     /// sibling-module tests (`tui::app`) so they don't need to reach
-    /// through the private `entries` field.
+    /// through the private `blocks` field.
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.blocks.len()
     }
 
-    /// Whether the tail entry is an [`ChatEntry::Error`]. Same rationale
-    /// as [`entry_count`][Self::entry_count] — lets `tui::app` tests
-    /// assert on error dispatch without exposing `ChatEntry` itself.
+    /// Whether the tail block is an [`ErrorBlock`]. Same rationale as
+    /// [`entry_count`][Self::entry_count] — lets `tui::app` tests assert
+    /// on error dispatch without reaching through the private `blocks`
+    /// field or the block module's internals.
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
-        matches!(self.entries.last(), Some(ChatEntry::Error(_)))
+        self.blocks.last().is_some_and(|b| b.is_error_marker())
     }
 
-    /// Updates cached viewport height and syncs scroll position. Called by
-    /// [`App`](super::super::app::App) after each frame.
+    /// Updates cached viewport height and syncs scroll position. Called
+    /// by [`App`](super::super::app::App) after each frame.
     pub(crate) fn update_layout(&mut self, area: Rect) {
         self.viewport_height = area.height;
         self.viewport_width = area.width;
-        // Resize mid-stream: drop cached lines so the next append rebuilds
-        // them at the new width. Otherwise wrapped lines remain at the old
-        // width and overflow the viewport.
-        if self.streaming_cached_width != 0 && self.streaming_cached_width != area.width {
-            self.streaming_rendered.clear();
-            self.streaming_rendered_boundary = 0;
-            self.streaming_cached_width = 0;
+        if let Some(s) = &mut self.streaming {
+            s.invalidate_cache_for_width(area.width);
         }
         if self.auto_scroll {
             self.scroll_to_bottom();
@@ -339,7 +281,15 @@ impl Component for ChatView {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        self.render_inner(frame, area);
+        let text = self.build_text(area.width);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to u16::MAX; truncation cannot occur"
+        )]
+        let height = text.lines.len().min(u16::MAX as usize) as u16;
+        self.content_height.set(height);
+        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
+        frame.render_widget(paragraph, area);
     }
 }
 
@@ -369,455 +319,108 @@ impl ChatView {
         }
     }
 
-    fn render_inner(&self, frame: &mut Frame, area: Rect) {
-        let text = self.build_text(area.width);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "clamped to u16::MAX; truncation cannot occur"
-        )]
-        let height = text.lines.len().min(u16::MAX as usize) as u16;
-        self.content_height.set(height);
-        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
-        frame.render_widget(paragraph, area);
+    fn render_ctx(&self, width: u16) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme: &self.theme,
+            show_thinking: self.show_thinking,
+        }
     }
 
-    fn build_text(&self, width: u16) -> Text<'_> {
-        let width = usize::from(width);
-        let mut lines: Vec<Line<'_>> = Vec::new();
+    fn build_text(&self, width: u16) -> Text<'static> {
+        let ctx = self.render_ctx(width);
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
-        if self.entries.is_empty()
-            && self.streaming_buffer.is_empty()
-            && self.thinking_buffer.is_empty()
-        {
-            self.push_welcome(&mut lines, width);
+        if self.is_empty() {
+            push_welcome(&mut lines, &ctx);
             return Text::from(lines);
         }
 
-        for entry in &self.entries {
-            match entry {
-                ChatEntry::User(content) => {
-                    self.push_user_message_lines(&mut lines, content, width);
-                    lines.push(Line::raw(""));
-                }
-                ChatEntry::Assistant(content) => {
-                    self.push_assistant_message_lines(&mut lines, content, width);
-                    lines.push(Line::raw(""));
-                }
-                ChatEntry::Thinking(content) => {
-                    if self.show_thinking {
-                        self.push_thinking_lines(&mut lines, content, width);
-                        lines.push(Line::raw(""));
-                    }
-                }
-                ChatEntry::ToolCall { icon, label } => {
-                    self.push_tool_call_line(&mut lines, icon, label, width);
-                }
-                ChatEntry::ToolResult {
-                    label,
-                    content,
-                    is_error,
-                } => {
-                    self.push_tool_result_line(&mut lines, label, *is_error, width);
-                    self.push_tool_output_lines(&mut lines, content, *is_error, width);
-                }
-                ChatEntry::Error(msg) => {
-                    self.push_tool_result_line(&mut lines, msg, true, width);
-                }
+        // Committed blocks.
+        for block in &self.blocks {
+            if !block.visible(&ctx) {
+                continue;
+            }
+            if block.standalone() && !lines.is_empty() && last_has_width(&lines) {
+                lines.push(Line::raw(""));
+            }
+            lines.extend(block.render(&ctx));
+            if block.standalone() {
+                lines.push(Line::raw(""));
             }
         }
 
-        // Thinking buffer (ephemeral — not stored in history).
-        if self.show_thinking && !self.thinking_buffer.is_empty() {
-            self.push_thinking_lines(&mut lines, &self.thinking_buffer, width);
+        // Live thinking (transient — not stored in blocks). Visibility
+        // lives in `AssistantThinking::visible`, same contract as the
+        // committed-blocks loop above.
+        if !self.thinking_buffer.is_empty() {
+            let thinking = AssistantThinking::new(self.thinking_buffer.clone());
+            if thinking.visible(&ctx) {
+                if !lines.is_empty() && last_has_width(&lines) {
+                    lines.push(Line::raw(""));
+                }
+                lines.extend(thinking.render(&ctx));
+            }
         }
 
-        // Streaming buffer (not yet committed).
-        if !self.streaming_buffer.is_empty() {
-            self.push_streaming_lines(&mut lines, width);
+        // Streaming assistant tail (not yet committed).
+        if let Some(streaming) = &self.streaming {
+            let continues = self.streaming_continues_turn();
+            streaming.render_into(&mut lines, &ctx, continues);
         }
 
         Text::from(lines)
     }
 
-    // ── Welcome ──
-
-    fn push_welcome(&self, lines: &mut Vec<Line<'_>>, width: usize) {
-        let title = "Welcome to ox";
-        let subtitle = "Ask anything to begin.";
-        let title_pad = width.saturating_sub(title.len()) / 2;
-        let subtitle_pad = width.saturating_sub(subtitle.len()) / 2;
-
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(title_pad)),
-            Span::styled(title, self.theme.accent()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(subtitle_pad)),
-            Span::styled(subtitle, self.theme.dim()),
-        ]));
-    }
-
-    // ── User Messages ──
-
-    fn push_user_message_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        content: &'a str,
-        width: usize,
-    ) {
-        push_section_gap(lines);
-        push_bordered_lines(
-            lines,
-            content.trim(),
-            USER_PREFIX,
-            self.theme.user(),
-            self.theme.text(),
-            width,
-        );
-    }
-
-    // ── Assistant Messages ──
-
-    fn push_assistant_message_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        content: &'a str,
-        width: usize,
-    ) {
-        push_section_gap(lines);
-        lines.extend(self.render_assistant_block(content, width, true));
-    }
-
-    /// Render an assistant markdown block with the assistant border.
-    ///
-    /// `starts_new_turn` controls the first line's prefix: `true` emits the
-    /// assistant icon ([`ASSISTANT_PREFIX`]), `false` emits a plain
-    /// [`BORDER_PREFIX`] so the block continues a previous turn (used by the
-    /// streaming cache after the first cached line has already been emitted).
-    ///
-    /// The markdown renderer wraps to `width - BORDER_PREFIX.len()` so the
-    /// border prefix doesn't push content past the terminal edge.
-    fn render_assistant_block(
-        &self,
-        content: &str,
-        width: usize,
-        starts_new_turn: bool,
-    ) -> Vec<Line<'static>> {
-        let bar_style = self.theme.secondary();
-        let md_width = width.saturating_sub(BORDER_PREFIX.len());
-        let rendered = render_markdown(content, &self.theme, md_width);
-        rendered
-            .lines
-            .into_iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let prefix = if i == 0 && starts_new_turn {
-                    ASSISTANT_PREFIX
-                } else {
-                    BORDER_PREFIX
-                };
-                border_markdown_line(line, prefix, bar_style)
-            })
-            .collect()
-    }
-
-    // ── Tool Calls ──
-
-    fn push_tool_call_line(
-        &self,
-        lines: &mut Vec<Line<'_>>,
-        icon: &'static str,
-        label: &str,
-        width: usize,
-    ) {
-        // Continuation aligns under the label (past `"  ▎ X "`).
-        let border_style = self.theme.tool_border();
-        let cont_prefix = border_continuation_prefix(TOOL_RESULT_PREFIX, border_style);
-        let line = Line::from(vec![
-            Span::styled(BORDER_PREFIX, border_style),
-            Span::styled(icon, self.theme.tool_icon()),
-            Span::raw(" "),
-            Span::styled(label.to_owned(), self.theme.text()),
-        ]);
-        for wrapped in wrap_line(line, width, TOOL_RESULT_PREFIX.len(), Some(&cont_prefix)) {
-            lines.push(wrapped);
-        }
-    }
-
-    fn push_tool_result_line(
-        &self,
-        lines: &mut Vec<Line<'_>>,
-        label: &str,
-        is_error: bool,
-        width: usize,
-    ) {
-        let (indicator, indicator_style) = if is_error {
-            ("✗", self.theme.error())
-        } else {
-            ("✓", self.theme.success())
-        };
-        // Continuation aligns under the label (past `"  ▎   X "`).
-        let border_style = self.tool_border_style(is_error);
-        let cont_prefix = border_continuation_prefix(TOOL_OUTPUT_PREFIX, border_style);
-        let line = Line::from(vec![
-            Span::styled(TOOL_RESULT_PREFIX, border_style),
-            Span::styled(indicator, indicator_style),
-            Span::raw(" "),
-            Span::styled(label.to_owned(), self.theme.muted()),
-        ]);
-        for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
-            lines.push(wrapped);
-        }
-    }
-
-    fn push_tool_output_lines<'a>(
-        &'a self,
-        lines: &mut Vec<Line<'a>>,
-        content: &'a str,
-        is_error: bool,
-        width: usize,
-    ) {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-
-        let border_style = self.tool_border_style(is_error);
-        let text_style = self.theme.dim();
-        let cont_prefix = border_continuation_prefix(TOOL_OUTPUT_PREFIX, border_style);
-
-        let output_lines: Vec<&str> = trimmed.lines().collect();
-        let truncated = output_lines.len() > MAX_TOOL_OUTPUT_LINES;
-        let visible = if truncated {
-            &output_lines[..MAX_TOOL_OUTPUT_LINES]
-        } else {
-            &output_lines
-        };
-
-        for text_line in visible {
-            let expanded = expand_tabs(text_line);
-            let display_text = truncate_to_chars(&expanded, MAX_TOOL_OUTPUT_LINE_CHARS);
-            let line = Line::from(vec![
-                Span::styled(TOOL_OUTPUT_PREFIX, border_style),
-                Span::styled(display_text, text_style),
-            ]);
-            for wrapped in wrap_line(line, width, TOOL_OUTPUT_PREFIX.len(), Some(&cont_prefix)) {
-                lines.push(wrapped);
-            }
-        }
-
-        if truncated {
-            let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
-            let label = if n == 1 { "line" } else { "lines" };
-            lines.push(Line::from(vec![
-                Span::styled(TOOL_OUTPUT_PREFIX, border_style),
-                Span::styled(format!("... {n} more {label}"), self.theme.dim()),
-            ]));
-        }
-    }
-
-    fn tool_border_style(&self, is_error: bool) -> Style {
-        if is_error {
-            self.theme.error()
-        } else {
-            self.theme.tool_border()
-        }
-    }
-
-    // ── Thinking ──
-
-    fn push_thinking_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, text: &'a str, width: usize) {
-        push_section_header(lines, "Thinking...", self.theme.thinking());
-        push_bordered_lines(
-            lines,
-            text,
-            BORDER_PREFIX,
-            self.theme.dim(),
-            self.theme.thinking(),
-            width,
-        );
-    }
-
-    // ── Streaming ──
-
-    fn push_streaming_lines<'a>(&'a self, lines: &mut Vec<Line<'a>>, width: usize) {
-        // Show a blank separator when the streaming text begins a new turn
-        // (not a continuation of a committed assistant entry).
-        let new_turn = self.streaming_starts_new_turn();
-        if new_turn && !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-
-        // Emit already-rendered cached lines from the stable prefix.
-        lines.extend(self.streaming_rendered.iter().cloned());
-
-        // The cache is populated only after the viewport has been measured
-        // (advance_streaming_cache defers otherwise), so the tail may still
-        // contain complete lines before the last `\n`. Render those as
-        // markdown; render whatever is past the last `\n` as plain text
-        // (partial markdown re-parses mid-token would flicker).
-        let tail = &self.streaming_buffer[self.streaming_rendered_boundary..];
-        if tail.is_empty() {
-            return;
-        }
-
-        // `cache_empty` gates the first-line icon: if the cache already holds
-        // lines, the new chunk is a continuation of the turn regardless of
-        // whether the turn itself started fresh.
-        let cache_empty = self.streaming_rendered.is_empty();
-        let (committed, trailing) = match tail.rfind('\n') {
-            Some(nl) => (&tail[..nl], &tail[nl + 1..]),
-            None => ("", tail),
-        };
-
-        if !committed.is_empty() {
-            lines.extend(self.render_assistant_block(committed, width, new_turn && cache_empty));
-        }
-
-        if !trailing.is_empty() {
-            let starts_here = new_turn && cache_empty && committed.is_empty();
-            let prefix = if starts_here {
-                ASSISTANT_PREFIX
-            } else {
-                BORDER_PREFIX
-            };
-            lines.push(border_markdown_line(
-                Line::from(Span::styled(trailing.to_owned(), self.theme.text())),
-                prefix,
-                self.theme.secondary(),
-            ));
-        }
-    }
-
-    /// Advances the streaming cache: renders newly committed lines and stores
-    /// them so subsequent frames skip re-parsing the stable prefix.
     fn advance_streaming_cache(&mut self) {
-        // Defer caching until the first frame has measured the viewport.
-        // Otherwise `md_width` would be 0 and the markdown renderer would
-        // skip wrapping, baking unwrapped lines into the cache.
-        if self.viewport_width == 0 {
-            return;
+        let continues = self.streaming_continues_turn();
+        let width = self.viewport_width;
+        let theme = self.theme;
+        let show_thinking = self.show_thinking;
+        if let Some(s) = &mut self.streaming {
+            let ctx = RenderCtx {
+                width,
+                theme: &theme,
+                show_thinking,
+            };
+            s.advance_cache(&ctx, continues);
         }
-
-        let boundary = self.streaming_rendered_boundary;
-        let tail = &self.streaming_buffer[boundary..];
-        let Some(rel_boundary) = tail.rfind('\n') else {
-            return;
-        };
-
-        let new_committed = &self.streaming_buffer[boundary..boundary + rel_boundary];
-        if !new_committed.is_empty() {
-            let new_turn = self.streaming_starts_new_turn();
-            let cache_empty = self.streaming_rendered.is_empty();
-            let rendered = self.render_assistant_block(
-                new_committed,
-                self.viewport_width.into(),
-                new_turn && cache_empty,
-            );
-            self.streaming_rendered.extend(rendered);
-        }
-
-        self.streaming_rendered_boundary = boundary + rel_boundary + 1;
-        self.streaming_cached_width = self.viewport_width;
     }
 
-    /// Whether the next streaming chunk begins a fresh assistant turn. The
-    /// answer is `false` when the most recent committed entry is already an
-    /// assistant message, which means we're splicing more tokens onto the
-    /// same visible block and should suppress the leading icon / blank gap.
-    fn streaming_starts_new_turn(&self) -> bool {
-        !self
-            .entries
+    /// Whether streaming tokens continue the last committed assistant
+    /// turn. `false` when the preceding block is anything other than
+    /// assistant text (user message, tool entry, error) — in which case
+    /// streaming starts a fresh turn with its own icon and gap.
+    fn streaming_continues_turn(&self) -> bool {
+        self.blocks
             .last()
-            .is_some_and(|e| matches!(e, ChatEntry::Assistant(_)))
+            .is_some_and(|b| b.continues_assistant_turn())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
     }
 }
 
-// ── Free Helpers ──
+/// Welcome splash for an empty chat: two blank lines + centered title +
+/// centered subtitle.
+fn push_welcome(lines: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>) {
+    let title = "Welcome to ox";
+    let subtitle = "Ask anything to begin.";
+    let width = usize::from(ctx.width);
+    let title_pad = width.saturating_sub(title.len()) / 2;
+    let subtitle_pad = width.saturating_sub(subtitle.len()) / 2;
 
-/// Pushes a blank line separator unless `lines` is empty or already ends
-/// with a blank line.
-fn push_section_gap(lines: &mut Vec<Line<'_>>) {
-    let needs_gap = lines.last().is_some_and(|last| last.width() > 0);
-    if needs_gap {
-        lines.push(Line::raw(""));
-    }
-}
-
-/// Pushes a blank separator (when lines exist) and a styled section label.
-fn push_section_header<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, style: Style) {
-    push_section_gap(lines);
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(label, style),
+        Span::raw(" ".repeat(title_pad)),
+        Span::styled(title, ctx.theme.accent()),
     ]));
-}
-
-/// Emits bordered lines: the first content line uses `first_prefix` (with
-/// an icon like `"❯ ▎ "`), subsequent lines use [`BORDER_PREFIX`]. All
-/// lines are wrapped with a styled continuation prefix preserving the bar.
-fn push_bordered_lines(
-    lines: &mut Vec<Line<'_>>,
-    content: &str,
-    first_prefix: &str,
-    bar_style: Style,
-    text_style: Style,
-    width: usize,
-) {
-    let cont_prefix = border_continuation_prefix(BORDER_PREFIX, bar_style);
-    let mut is_first = true;
-    for text_line in content.lines() {
-        let prefix = if is_first {
-            first_prefix
-        } else {
-            BORDER_PREFIX
-        };
-        is_first = false;
-        let line = Line::from(vec![
-            Span::styled(prefix.to_owned(), bar_style),
-            Span::styled(text_line.to_owned(), text_style),
-        ]);
-        for wrapped in wrap_line(line, width, BORDER_PREFIX.len(), Some(&cont_prefix)) {
-            lines.push(wrapped);
-        }
-    }
-}
-
-/// Builds a continuation prefix that keeps the `▎` bar aligned under the
-/// original prefix. For a prefix like `"  ▎ "` (4 cols), produces spans
-/// `["  ", "▎", " "]` where the bar span is styled.
-fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
-    // Split at the bar character to determine left padding and right padding.
-    if let Some(bar_pos) = prefix.find(BAR) {
-        let left = &prefix[..bar_pos];
-        let right = &prefix[bar_pos + BAR.len()..];
-        vec![
-            Span::raw(left.to_owned()),
-            Span::styled(BAR, bar_style),
-            Span::raw(right.to_owned()),
-        ]
-    } else {
-        vec![Span::raw(" ".repeat(prefix.len()))]
-    }
-}
-
-/// Prepends a styled border prefix to a markdown-rendered line.
-fn border_markdown_line(line: Line<'static>, prefix: &str, bar_style: Style) -> Line<'static> {
-    let mut spans = vec![Span::styled(prefix.to_owned(), bar_style)];
-    spans.extend(line.spans);
-    Line::from(spans)
-}
-
-/// Truncates a string to `max_chars` characters, appending `...` if cut.
-fn truncate_to_chars(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        return s.to_owned();
-    }
-    // Find a char boundary at or before max_chars.
-    let boundary = s.floor_char_boundary(max_chars);
-    format!("{}...", &s[..boundary])
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(subtitle_pad)),
+        Span::styled(subtitle, ctx.theme.dim()),
+    ]));
 }
 
 #[cfg(test)]
@@ -826,9 +429,12 @@ mod tests {
     use indoc::indoc;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::message::{ContentBlock, Role};
+
+    // ── Fixtures ──
 
     fn test_chat() -> ChatView {
         ChatView::new(Theme::default(), true)
@@ -845,13 +451,8 @@ mod tests {
         ])
     }
 
-    /// Count lines produced by `build_text` at a default width.
-    fn line_count(chat: &ChatView) -> usize {
-        chat.build_text(80).lines.len()
-    }
-
-    /// Collects all raw text from `build_text` into a single string for
-    /// substring assertions.
+    /// Render `build_text` at default width and join all span content
+    /// into a single string for substring assertions.
     fn all_text(chat: &ChatView) -> String {
         chat.build_text(80)
             .lines
@@ -864,6 +465,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn line_count(chat: &ChatView) -> usize {
+        chat.build_text(80).lines.len()
     }
 
     fn key_event(code: KeyCode) -> Event {
@@ -883,6 +488,17 @@ mod tests {
         })
     }
 
+    fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
+        chat.update_layout(Rect::new(0, 0, width, height));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                chat.render(frame, frame.area());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
     // ── load_history ──
 
     #[test]
@@ -892,26 +508,18 @@ mod tests {
             &[Message::user("hello"), Message::assistant("hi there")],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 2);
-        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "hello"));
-        assert!(matches!(&chat.entries[1], ChatEntry::Assistant(t) if t == "hi there"));
+        assert_eq!(chat.blocks.len(), 2);
+        let text = all_text(&chat);
+        assert!(text.contains("hello"));
+        assert!(text.contains("hi there"));
     }
 
     #[test]
     fn load_history_multi_tool_turn_pairs_inline_with_orphan_fallback() {
-        // The session JSONL for a multi-tool turn groups calls and
-        // results into separate messages: Assistant[Call₁, Call₂] then
-        // User[Result₁, Result₂]. Live rendering emits them paired:
-        // Call₁ → Result₁ → Call₂ → Result₂. The resumed view must
-        // match that order so scrollback doesn't visibly drift from
-        // how the same content rendered while streaming.
-        //
-        // Mixing in an orphan result ("ghost", no matching call)
-        // verifies the guard on the ToolResult arm: paired results
-        // are consumed inline at their call site, only the orphan
-        // reaches the fallback path and renders at its original
-        // position with the "(result)" label — it must not inherit a
-        // sibling tool's label from `tool_labels`.
+        // Live rendering pairs Call → Result inline. The resumed walk
+        // must preserve that order regardless of JSONL batching; an
+        // orphan result ("ghost", no matching call) surfaces at its
+        // original position with the "(result)" fallback label.
         let mut chat = test_chat();
         chat.load_history(
             &[
@@ -953,30 +561,20 @@ mod tests {
             ],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 5);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::ToolCall { label, .. } if label == "a.rs"
-        ));
-        assert!(matches!(
-            &chat.entries[1],
-            ChatEntry::ToolResult { label, content, is_error: false }
-                if label == "a.rs" && content == "file a"
-        ));
-        assert!(matches!(
-            &chat.entries[2],
-            ChatEntry::ToolCall { label, .. } if label == "TODO"
-        ));
-        assert!(matches!(
-            &chat.entries[3],
-            ChatEntry::ToolResult { label, content, is_error: false }
-                if label == "TODO" && content == "3 matches"
-        ));
-        assert!(matches!(
-            &chat.entries[4],
-            ChatEntry::ToolResult { label, content, is_error: true }
-                if label == "(result)" && content == "stale output"
-        ));
+        assert_eq!(chat.blocks.len(), 5);
+        let text = all_text(&chat);
+        // Order: call(a.rs), result(a.rs)=file a, call(TODO), result(TODO)=3 matches, orphan=stale
+        let a_call = text.find("a.rs").unwrap();
+        let file_a = text.find("file a").unwrap();
+        let todo_call = text.find("TODO").unwrap();
+        let matches = text.find("3 matches").unwrap();
+        let stale = text.find("stale output").unwrap();
+        let result_label = text.find("(result)").unwrap();
+        assert!(a_call < file_a);
+        assert!(file_a < todo_call);
+        assert!(todo_call < matches);
+        assert!(matches < stale);
+        assert!(result_label < stale);
     }
 
     #[test]
@@ -1005,24 +603,24 @@ mod tests {
             ],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 4);
-        assert!(matches!(&chat.entries[0], ChatEntry::User(t) if t == "ask"));
-        assert!(matches!(
-            &chat.entries[1],
-            ChatEntry::ToolCall { label, .. } if label == "ls"
-        ));
-        assert!(matches!(
-            &chat.entries[2],
-            ChatEntry::ToolResult { label, content, is_error: false } if label == "ls" && content == "output"
-        ));
-        assert!(matches!(&chat.entries[3], ChatEntry::Assistant(t) if t == "reply"));
+        assert_eq!(chat.blocks.len(), 4);
+        let text = all_text(&chat);
+        assert!(
+            text.find("ask")
+                < text
+                    .find("ls")
+                    .and_then(|i| text[i..].find("output").map(|j| i + j))
+        );
+        assert!(text.contains("ask"));
+        assert!(text.contains("ls"));
+        assert!(text.contains("output"));
+        assert!(text.contains("reply"));
     }
 
     #[test]
     fn load_history_tool_result_without_matching_tool_use_uses_fallback_label() {
-        // Orphan tool_result (no preceding tool_use with the same id).
-        // Unusual but possible after crash sanitization; render with a
-        // generic fallback instead of dropping.
+        // Orphan tool_result — possible after crash sanitization. Render
+        // with a generic fallback rather than dropping.
         let mut chat = test_chat();
         chat.load_history(
             &[Message {
@@ -1035,18 +633,11 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 1);
-        let ChatEntry::ToolResult {
-            label,
-            content,
-            is_error,
-        } = &chat.entries[0]
-        else {
-            panic!("expected tool result, got {:?}", chat.entries[0]);
-        };
-        assert_eq!(label, "(result)");
-        assert_eq!(content, "stderr");
-        assert!(*is_error);
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains("(result)"));
+        assert!(text.contains("stderr"));
+        assert!(text.contains('✗'));
     }
 
     #[test]
@@ -1066,8 +657,16 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 1);
-        assert!(matches!(&chat.entries[0], ChatEntry::Assistant(t) if t == "first\nsecond"));
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains("first"));
+        assert!(text.contains("second"));
+        // Assistant text renders bar-less after the redesign; load_history
+        // is a natural place to pin this without a standalone test.
+        assert!(
+            !text.contains('▎'),
+            "assistant text should render without the left bar: {text}"
+        );
     }
 
     #[test]
@@ -1082,18 +681,18 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert!(chat.entries.is_empty());
+        assert!(chat.blocks.is_empty());
     }
 
     #[test]
     fn load_history_empty_slice_is_noop() {
         let mut chat = test_chat();
         chat.load_history(&[], &test_tools());
-        assert!(chat.entries.is_empty());
+        assert!(chat.blocks.is_empty());
     }
 
     #[test]
-    fn load_history_restores_tool_call_markers_after_assistant_text() {
+    fn load_history_restores_tool_call_after_assistant_text() {
         let mut chat = test_chat();
         chat.load_history(
             &[Message {
@@ -1111,48 +710,10 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 2);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::Assistant(t) if t == "Let me check that."
-        ));
-        let ChatEntry::ToolCall { icon, label } = &chat.entries[1] else {
-            panic!("expected tool call, got {:?}", chat.entries[1]);
-        };
-        assert_eq!(*icon, "$");
-        assert_eq!(label, "ls -la");
-    }
-
-    #[test]
-    fn load_history_renders_consecutive_tool_calls_separately() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "read".to_owned(),
-                        input: serde_json::json!({"file_path": "src/foo.rs"}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t2".to_owned(),
-                        name: "grep".to_owned(),
-                        input: serde_json::json!({"pattern": "TODO"}),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        assert_eq!(chat.entries.len(), 2);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::ToolCall { icon: "→", label } if label == "src/foo.rs"
-        ));
-        assert!(matches!(
-            &chat.entries[1],
-            ChatEntry::ToolCall { icon: "⌕", label } if label == "TODO"
-        ));
+        assert_eq!(chat.blocks.len(), 2);
+        let text = all_text(&chat);
+        assert!(text.find("Let me check that.") < text.find("ls -la"));
+        assert!(text.contains('$')); // bash icon
     }
 
     #[test]
@@ -1169,12 +730,10 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 1);
-        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
-            panic!("expected tool call, got {:?}", chat.entries[0]);
-        };
-        assert_eq!(*icon, "⟡");
-        assert_eq!(label, "custom_tool");
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains('⟡'));
+        assert!(text.contains("custom_tool"));
     }
 
     #[test]
@@ -1191,100 +750,10 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 1);
-        let ChatEntry::ToolCall { icon, label } = &chat.entries[0] else {
-            panic!("expected tool call, got {:?}", chat.entries[0]);
-        };
-        assert_eq!(*icon, "⟡");
-        assert_eq!(label, "web_search");
-    }
-
-    #[test]
-    fn load_history_assistant_text_after_tool_use_emits_new_assistant_entry() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "Checking logs...".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::json!({"command": "tail -f log"}),
-                    },
-                    ContentBlock::Text {
-                        text: "Looks good.".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        assert_eq!(chat.entries.len(), 3);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::Assistant(t) if t == "Checking logs..."
-        ));
-        assert!(matches!(&chat.entries[1], ChatEntry::ToolCall { .. }));
-        assert!(matches!(
-            &chat.entries[2],
-            ChatEntry::Assistant(t) if t == "Looks good."
-        ));
-    }
-
-    #[test]
-    fn load_history_renders_thinking_entries_before_following_text() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "long internal reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "visible reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        assert_eq!(chat.entries.len(), 2);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::Thinking(t) if t == "long internal reasoning"
-        ));
-        assert!(matches!(
-            &chat.entries[1],
-            ChatEntry::Assistant(t) if t == "visible reply"
-        ));
-    }
-
-    #[test]
-    fn load_history_thinking_entry_is_dropped_when_body_is_whitespace() {
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "   \n  ".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        assert_eq!(chat.entries.len(), 1);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::Assistant(t) if t == "reply"
-        ));
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains('⟡'));
+        assert!(text.contains("web_search"));
     }
 
     #[test]
@@ -1304,11 +773,131 @@ mod tests {
             }],
             &test_tools(),
         );
-        assert_eq!(chat.entries.len(), 1);
-        assert!(matches!(
-            &chat.entries[0],
-            ChatEntry::Assistant(t) if t == "fine"
-        ));
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains("fine"));
+        assert!(!text.contains("opaque-ciphertext"));
+    }
+
+    #[test]
+    fn load_history_renders_resumed_thinking_when_show_thinking_enabled() {
+        let mut chat = test_chat();
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "resumed reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking..."));
+        assert!(text.contains("resumed reasoning"));
+    }
+
+    #[test]
+    fn load_history_hides_resumed_thinking_when_show_thinking_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.load_history(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "private reasoning".to_owned(),
+                        signature: "sig".to_owned(),
+                    },
+                    ContentBlock::Text {
+                        text: "reply".to_owned(),
+                    },
+                ],
+            }],
+            &test_tools(),
+        );
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking..."));
+        assert!(!text.contains("private reasoning"));
+        assert!(text.contains("reply"));
+    }
+
+    // ── push_user_message ──
+
+    #[test]
+    fn push_user_message_has_icon_and_content() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello world".to_owned());
+        let text = all_text(&chat);
+        assert!(text.contains('❯'));
+        assert!(text.contains("hello world"));
+        // Bar redesign: user messages render bar-less. A regressed snapshot
+        // that re-adds `▎` would land silently without this invariant.
+        assert!(
+            !text.contains('▎'),
+            "user message should render without the left bar: {text}"
+        );
+    }
+
+    #[test]
+    fn push_user_message_has_trailing_blank_before_tool_call() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.push_tool_call("$", "ls");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
+        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
+        assert!(
+            (user + 1..tool).any(|i| lines[i].trim().is_empty()),
+            "expected blank line after user message"
+        );
+    }
+
+    #[test]
+    fn user_followed_by_assistant_has_no_double_blank() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.blocks.push(Box::new(AssistantText::new("reply")));
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let max_consecutive_blanks = lines
+            .windows(2)
+            .filter(|w| w[0].trim().is_empty() && w[1].trim().is_empty())
+            .count();
+        assert_eq!(
+            max_consecutive_blanks, 0,
+            "no double blank lines between user and assistant: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn push_user_message_enables_auto_scroll() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+        chat.push_user_message("hello".to_owned());
+        assert!(chat.auto_scroll);
+    }
+
+    #[test]
+    fn push_user_message_multiline_renders_every_line() {
+        let mut chat = test_chat();
+        chat.push_user_message(
+            indoc! {"
+                line1
+                line2
+                line3
+            "}
+            .to_owned(),
+        );
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
     }
 
     // ── append_stream_token ──
@@ -1323,40 +912,479 @@ mod tests {
         assert!(chat.thinking_buffer.is_empty());
     }
 
+    #[test]
+    fn append_stream_token_shows_partial_text() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("partial response");
+        let text = all_text(&chat);
+        assert!(text.contains('◉'), "should show assistant icon");
+        assert!(text.contains("partial response"));
+    }
+
+    #[test]
+    fn append_stream_token_cached_and_tail_both_visible() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("cached line\n");
+        chat.append_stream_token("tail text");
+
+        let text = all_text(&chat);
+        assert!(text.contains("cached line"));
+        assert!(text.contains("tail text"));
+    }
+
+    #[test]
+    fn append_stream_token_uncommitted_newlines_all_render() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.viewport_width = 80;
+        chat.append_stream_token("line1\nline2\npartial");
+
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("partial"));
+    }
+
+    #[test]
+    fn append_stream_token_without_prior_assistant_shows_icon() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("response");
+
+        let text = all_text(&chat);
+        assert!(text.contains('◉'), "new turn should show assistant icon");
+    }
+
+    #[test]
+    fn append_stream_token_after_committed_assistant_omits_duplicate_icon() {
+        let mut chat = test_chat();
+        chat.blocks.push(Box::new(AssistantText::new("committed")));
+        // Push streaming directly — simulates a continued turn.
+        let mut s = StreamingAssistant::new();
+        s.append("streaming");
+        chat.streaming = Some(s);
+
+        let text = all_text(&chat);
+        let count = text.matches('◉').count();
+        assert_eq!(count, 1, "icon should appear once, not duplicated");
+    }
+
+    #[test]
+    fn append_stream_token_inserts_blank_separator_after_tool_output() {
+        // When streaming tokens arrive after a non-standalone block (tool
+        // call / tool result / error — no trailing blank of its own), the
+        // streaming block must insert its own leading blank so the icon
+        // doesn't sit flush against the preceding line.
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.append_stream_token("response");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let tool_pos = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let stream_pos = lines.iter().position(|l| l.contains("response")).unwrap();
+        assert!(
+            (tool_pos + 1..stream_pos).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between tool call and streaming: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn append_stream_token_renders_committed_and_trailing_before_cache_advance() {
+        // With viewport_width = 0, advance_cache no-ops, so the streaming
+        // buffer accumulates newlines that rfind('\n') inside render_into
+        // then splits on first paint. Covers the Some(nl) match arm plus
+        // the `!committed.is_empty()` branch that an advance-cache-first
+        // flow skips.
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("cached line\ntail text");
+        // Pre-check the invariant that makes this test meaningful: cache
+        // deferred because viewport wasn't measured.
+        assert_eq!(
+            chat.streaming.as_ref().unwrap().rendered_boundary(),
+            0,
+            "advance_cache must defer when viewport_width is 0"
+        );
+
+        let text = all_text(&chat);
+        assert!(text.contains("cached line"));
+        assert!(text.contains("tail text"));
+    }
+
+    #[test]
+    fn append_stream_token_renders_buffer_ending_in_newline_before_cache_advance() {
+        // Trailing newline with viewport_width = 0: `advance_cache` defers,
+        // so `render_into` sees a tail that ends in `\n`. The rfind split
+        // gives committed = "line1\nline2" and trailing = "" — this is the
+        // fall-through where `if !trailing.is_empty()` is false.
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.append_stream_token("line1\nline2\n");
+        assert_eq!(
+            chat.streaming.as_ref().unwrap().rendered_boundary(),
+            0,
+            "advance_cache must defer when viewport_width is 0"
+        );
+
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+    }
+
+    #[test]
+    fn append_stream_token_trailing_newline_with_empty_tail() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        chat.viewport_width = 80;
+        chat.append_stream_token("line1\nline2\n");
+
+        let text = all_text(&chat);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+    }
+
+    // ── append_thinking_token ──
+
+    #[test]
+    fn append_thinking_token_visible_when_enabled() {
+        let mut chat = test_chat();
+        chat.append_thinking_token("pondering...");
+        let text = all_text(&chat);
+        assert!(text.contains("Thinking..."));
+        assert!(text.contains("pondering..."));
+    }
+
+    #[test]
+    fn append_thinking_token_hidden_when_disabled() {
+        let mut chat = ChatView::new(Theme::default(), false);
+        chat.append_thinking_token("pondering...");
+        let text = all_text(&chat);
+        assert!(!text.contains("Thinking..."));
+        assert!(!text.contains("pondering..."));
+    }
+
+    #[test]
+    fn append_thinking_token_after_user_has_separator() {
+        let mut chat = test_chat();
+        chat.push_user_message("hello".to_owned());
+        chat.append_thinking_token("deep thought");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let last_user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
+        let thinking = lines.iter().position(|l| l.contains("Thinking")).unwrap();
+        assert!(
+            (last_user + 1..thinking).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between user message and thinking block"
+        );
+    }
+
+    #[test]
+    fn append_thinking_token_after_tool_call_has_separator() {
+        // Live thinking pushes a leading blank when the tail block has no
+        // trailing blank of its own. Tool call is the natural example —
+        // standalone = false, no trail blank, so the thinking header needs
+        // its own separator.
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.append_thinking_token("deep thought");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let tool_pos = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let thinking_pos = lines.iter().position(|l| l.contains("Thinking")).unwrap();
+        assert!(
+            (tool_pos + 1..thinking_pos).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between tool call and thinking: {lines:?}"
+        );
+    }
+
     // ── commit_streaming ──
 
     #[test]
-    fn commit_streaming_moves_buffer_to_entry() {
+    fn commit_streaming_moves_buffer_to_block() {
         let mut chat = test_chat();
         chat.append_stream_token("hello world");
-        assert!(chat.entries.is_empty());
+        assert!(chat.blocks.is_empty());
 
         chat.commit_streaming();
-        assert_eq!(chat.entries.len(), 1);
-        assert!(matches!(&chat.entries[0], ChatEntry::Assistant(s) if s == "hello world"));
-        assert!(chat.streaming_buffer.is_empty());
+        assert_eq!(chat.blocks.len(), 1);
+        let text = all_text(&chat);
+        assert!(text.contains("hello world"));
+        assert!(chat.streaming.is_none());
     }
 
     #[test]
-    fn commit_streaming_empty_buffer_no_entry() {
+    fn commit_streaming_empty_buffer_no_block() {
         let mut chat = test_chat();
         chat.commit_streaming();
-        assert!(chat.entries.is_empty());
+        assert!(chat.blocks.is_empty());
     }
 
     #[test]
-    fn commit_streaming_clears_cache() {
+    fn commit_streaming_clears_state() {
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        chat.streaming_buffer = "line1\nline2\npartial".to_owned();
-        chat.advance_streaming_cache();
-        assert!(!chat.streaming_rendered.is_empty());
+        chat.append_stream_token("line1\nline2\npartial");
+        assert!(chat.streaming.is_some());
 
         chat.commit_streaming();
-        assert!(chat.streaming_rendered.is_empty());
-        assert_eq!(chat.streaming_rendered_boundary, 0);
-        assert_eq!(chat.streaming_cached_width, 0);
+        assert!(chat.streaming.is_none());
         assert!(chat.thinking_buffer.is_empty());
+    }
+
+    // ── push_tool_call ──
+
+    #[test]
+    fn push_tool_call_shows_icon_and_label() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls -la");
+        let text = all_text(&chat);
+        assert!(text.contains('$'));
+        assert!(text.contains("ls -la"));
+        // Bar is preserved specifically on tool call / tool result — it
+        // visually groups the call with its output and color-codes status.
+        assert!(
+            text.contains('▎'),
+            "tool call should retain the left bar: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_call_after_assistant_has_blank_separator() {
+        let mut chat = test_chat();
+        chat.blocks.push(Box::new(AssistantText::new("some text")));
+        chat.push_tool_call("$", "ls");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let assistant = lines.iter().rposition(|l| l.contains("some text")).unwrap();
+        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
+        assert!(
+            (assistant + 1..tool).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator between assistant text and tool call"
+        );
+    }
+
+    #[test]
+    fn consecutive_tool_calls_have_no_gap() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.push_tool_call("$", "cat foo");
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let ls_line = lines.iter().position(|l| l.contains("ls")).unwrap();
+        let cat_line = lines.iter().position(|l| l.contains("cat foo")).unwrap();
+        assert_eq!(
+            cat_line,
+            ls_line + 1,
+            "consecutive tool calls should have no blank gap"
+        );
+    }
+
+    #[test]
+    fn push_tool_call_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_cmd =
+            "cd /home/user/projects/example-app && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
+        chat.push_tool_call("$", long_cmd);
+        let text = chat.build_text(60);
+        assert!(
+            text.lines.len() > 1,
+            "long tool call label should wrap across multiple lines: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                width <= 60,
+                "wrapped tool call line must fit the width budget (got {width}): {line:?}",
+            );
+        }
+    }
+
+    // ── push_tool_result ──
+
+    #[test]
+    fn push_tool_result_success() {
+        let mut chat = test_chat();
+        chat.push_tool_result("done", "output text", false);
+        let text = all_text(&chat);
+        assert!(text.contains("✓"));
+        assert!(text.contains("done"));
+        assert!(text.contains("output text"));
+    }
+
+    #[test]
+    fn push_tool_result_error() {
+        let mut chat = test_chat();
+        chat.push_tool_result("failed", "error details", true);
+        let text = all_text(&chat);
+        assert!(text.contains("✗"));
+        assert!(text.contains("failed"));
+        assert!(text.contains("error details"));
+        // The bar color is the status channel: neutral on success, error
+        // on failure. Walk the rendered spans and pin that the `▎` span
+        // carries the theme's error style here — a bug swapping the
+        // tool_border / error branches in `border_style_for` would flip
+        // success and error results identically otherwise.
+        let rendered = chat.build_text(60);
+        let bar_style = rendered
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains('▎'))
+            .map(|s| s.style)
+            .expect("rendered line should contain a ▎ span");
+        assert_eq!(
+            bar_style,
+            Theme::default().error(),
+            "error-result bar should use the theme error style, got {bar_style:?}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_label =
+            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
+        chat.push_tool_result(long_label, "", false);
+        let text = chat.build_text(50);
+        assert!(
+            text.lines.len() > 1,
+            "long tool result label should wrap: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                width <= 50,
+                "wrapped tool result line must fit width (got {width}): {line:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn push_tool_result_truncation() {
+        let mut chat = test_chat();
+        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        chat.push_tool_result("result", &long_output.join("\n"), false);
+        let text = all_text(&chat);
+
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 4"));
+        assert!(!text.contains("line 5"));
+        assert!(text.contains("... +5 lines"));
+        // Body-indent invariant: output lines sit at col 4 (`▎   `), past
+        // the `✓`/`✗` header at col 2. Anchored to the exact prefix so a
+        // regression collapsing back to col 2 fails here, not just in
+        // snapshots.
+        assert!(
+            text.contains("▎   line 0"),
+            "tool result body should indent past the status indicator: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_empty_content_adds_nothing() {
+        let mut chat = test_chat();
+        chat.push_tool_result("result", "  \n  ", false);
+        let before = line_count(&chat);
+
+        let mut chat2 = test_chat();
+        chat2.push_tool_result("result", "", false);
+        let after = line_count(&chat2);
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn push_tool_result_exactly_max_no_truncation() {
+        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(
+            !text.contains("... +"),
+            "no truncation summary expected: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_one_over_max_shows_singular_line() {
+        const MAX: usize = 5;
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(text.contains("... +1 line"));
+        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
+    }
+
+    #[test]
+    fn push_tool_result_long_line_is_truncated() {
+        const MAX_CHARS: usize = 512;
+        let mut chat = test_chat();
+        let long_line = "x".repeat(MAX_CHARS + 100);
+        chat.push_tool_result("result", &long_line, false);
+        let text = all_text(&chat);
+        assert!(text.contains("..."), "long line should be truncated");
+        assert!(
+            !text.contains(&long_line),
+            "full long line should not appear"
+        );
+    }
+
+    // ── push_error ──
+
+    #[test]
+    fn push_error_shows_error_indicator() {
+        let mut chat = test_chat();
+        chat.push_error("something broke");
+        let text = all_text(&chat);
+        assert!(text.contains("✗"));
+        assert!(text.contains("something broke"));
+        assert!(
+            !text.contains('▎'),
+            "error block should render without the left bar: {text}"
+        );
+    }
+
+    // ── last_is_error ──
+
+    #[test]
+    fn last_is_error_true_after_push_error() {
+        let mut chat = test_chat();
+        chat.push_error("boom");
+        assert!(chat.last_is_error());
+    }
+
+    #[test]
+    fn last_is_error_false_for_non_error_blocks() {
+        // Exercises the `ChatBlock::is_error_marker` default impl on every
+        // non-error variant. A failed tool result also renders a ✗ but
+        // `is_error_marker` stays `false` — the predicate is about block
+        // identity, not rendered glyphs.
+        let mut chat = test_chat();
+        chat.push_user_message("hello".into());
+        assert!(!chat.last_is_error());
+
+        chat.push_tool_call("$", "ls");
+        assert!(!chat.last_is_error());
+
+        chat.push_tool_result("failed", "boom", true);
+        assert!(
+            !chat.last_is_error(),
+            "failed tool result is not an error marker"
+        );
+    }
+
+    #[test]
+    fn last_is_error_false_when_no_blocks() {
+        let chat = test_chat();
+        assert!(!chat.last_is_error());
     }
 
     // ── update_layout ──
@@ -1376,6 +1404,22 @@ mod tests {
 
         chat.update_layout(Rect::new(0, 0, 80, 20));
         assert_eq!(chat.scroll_offset, 80);
+    }
+
+    #[test]
+    fn update_layout_invalidates_streaming_cache_on_width_change() {
+        let mut chat = test_chat();
+        chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("a complete line\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_ne!(s.rendered_len(), 0);
+        assert_eq!(s.cached_width(), 80);
+
+        chat.update_layout(Rect::new(0, 0, 40, 24));
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_len(), 0);
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.cached_width(), 0);
     }
 
     // ── handle_event ──
@@ -1486,7 +1530,80 @@ mod tests {
         assert!(action.is_none());
     }
 
-    // ── scroll_to_bottom ──
+    // ── render ──
+
+    #[test]
+    fn render_updates_content_height() {
+        let mut chat = test_chat();
+        render_chat(&mut chat, 80, 24);
+        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
+        assert_eq!(chat.content_height.get(), 4);
+    }
+
+    #[test]
+    fn render_empty_shows_welcome_screen() {
+        let mut chat = test_chat();
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+    }
+
+    #[test]
+    fn render_user_and_assistant_interleaved() {
+        let mut chat = test_chat();
+        chat.push_user_message("what is 2 + 2?".into());
+        chat.append_stream_token("The answer is 4.");
+        chat.commit_streaming();
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_followed_by_result() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "echo hi");
+        chat.push_tool_result("ran echo", "hi", false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_result_overflow_shows_line_count() {
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        let long = (0..5 + 3)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chat.push_tool_result("ls out", &long, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 14));
+    }
+
+    #[test]
+    fn render_error_entry_is_styled_distinctly() {
+        let mut chat = test_chat();
+        chat.push_error("API error (HTTP 503): overloaded");
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 4));
+    }
+
+    #[test]
+    fn render_history_with_resumed_thinking_block() {
+        let mut chat = ChatView::new(Theme::default(), true);
+        let tools = test_tools();
+        let history = vec![
+            Message::user("hello"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "pondering...".into(),
+                        signature: "sig".into(),
+                    },
+                    ContentBlock::Text { text: "Hi!".into() },
+                ],
+            },
+        ];
+        chat.load_history(&history, &tools);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    // ── scroll_to_bottom / scroll_up / scroll_down ──
 
     #[test]
     fn scroll_to_bottom_sets_offset_correctly() {
@@ -1507,8 +1624,6 @@ mod tests {
         chat.scroll_to_bottom();
         assert_eq!(chat.scroll_offset, 0);
     }
-
-    // ── scroll_up ──
 
     #[test]
     fn scroll_up_decreases_offset_and_disables_auto_scroll() {
@@ -1531,8 +1646,6 @@ mod tests {
         chat.scroll_up(10);
         assert_eq!(chat.scroll_offset, 0);
     }
-
-    // ── scroll_down ──
 
     #[test]
     fn scroll_down_increases_offset() {
@@ -1573,8 +1686,8 @@ mod tests {
     fn build_text_full_conversation() {
         let mut chat = test_chat();
         chat.push_user_message("What is 2+2?".to_owned());
-        chat.entries
-            .push(ChatEntry::Assistant("The answer is 4.".to_owned()));
+        chat.blocks
+            .push(Box::new(AssistantText::new("The answer is 4.")));
         chat.push_tool_call("$", "python -c 'print(2+2)'");
         chat.push_tool_result("4", "4", false);
         chat.push_user_message("Thanks!".to_owned());
@@ -1585,8 +1698,91 @@ mod tests {
         assert!(text.contains("The answer is 4."));
         assert!(text.contains("python -c 'print(2+2)'"));
         assert!(text.contains("You're welcome"));
-        // Two user messages → two user icon prefixes.
+        // Two user messages → two user-icon prefixes.
         assert_eq!(text.matches('❯').count(), 2);
+    }
+
+    // ── advance_streaming_cache ──
+
+    #[test]
+    fn advance_streaming_cache_no_newline_keeps_boundary_zero() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("no newline here");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.rendered_len(), 0);
+    }
+
+    #[test]
+    fn advance_streaming_cache_single_newline() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("first line\nincomplete");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_boundary(), "first line\n".len());
+        assert_eq!(s.rendered_len(), 1);
+    }
+
+    #[test]
+    fn advance_streaming_cache_multiple_newlines() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("line1\nline2\nline3\npartial");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_boundary(), "line1\nline2\nline3\n".len());
+    }
+
+    #[test]
+    fn advance_streaming_cache_incremental() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+
+        chat.append_stream_token("first\n");
+        {
+            let s = chat.streaming.as_ref().unwrap();
+            assert_eq!(s.rendered_boundary(), 6);
+            assert_eq!(s.rendered_len(), 1);
+        }
+
+        chat.append_stream_token("second\n");
+        {
+            let s = chat.streaming.as_ref().unwrap();
+            assert_eq!(s.rendered_boundary(), 13);
+            assert_eq!(s.rendered_len(), 2);
+        }
+    }
+
+    #[test]
+    fn advance_streaming_cache_trailing_newline_only() {
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_boundary(), 1);
+    }
+
+    #[test]
+    fn advance_streaming_cache_defers_until_viewport_measured() {
+        // Streaming before update_layout runs must not bake unwrapped
+        // markdown into the cache. The cache stays empty until the
+        // viewport width is supplied.
+        let mut chat = test_chat();
+        chat.append_stream_token("first complete line\n");
+        {
+            let s = chat.streaming.as_ref().unwrap();
+            assert_eq!(s.rendered_len(), 0);
+            assert_eq!(s.rendered_boundary(), 0);
+            assert_eq!(s.cached_width(), 0);
+        }
+
+        chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("second complete line\n");
+        {
+            let s = chat.streaming.as_ref().unwrap();
+            assert_ne!(s.rendered_len(), 0);
+            assert_eq!(s.cached_width(), 80);
+        }
     }
 
     // ── push_welcome ──
@@ -1601,618 +1797,5 @@ mod tests {
         let narrow_pad = narrow.lines[2].spans.first().map_or(0, |s| s.content.len());
         let wide_pad = wide.lines[2].spans.first().map_or(0, |s| s.content.len());
         assert!(wide_pad > narrow_pad);
-    }
-
-    // ── push_user_message_lines ──
-
-    #[test]
-    fn push_user_message_lines_has_icon_and_content() {
-        let mut chat = test_chat();
-        chat.push_user_message("hello world".to_owned());
-        let text = all_text(&chat);
-        assert!(text.contains('❯'));
-        assert!(text.contains("hello world"));
-    }
-
-    #[test]
-    fn push_user_message_lines_has_trailing_blank() {
-        let mut chat = test_chat();
-        chat.push_user_message("hello".to_owned());
-        chat.push_tool_call("$", "ls");
-        let text = all_text(&chat);
-        let lines: Vec<&str> = text.lines().collect();
-        let user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
-        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
-        assert!(
-            (user + 1..tool).any(|i| lines[i].trim().is_empty()),
-            "expected blank line after user message"
-        );
-    }
-
-    #[test]
-    fn push_user_message_no_double_blank_before_assistant() {
-        let mut chat = test_chat();
-        chat.push_user_message("hello".to_owned());
-        chat.entries.push(ChatEntry::Assistant("reply".to_owned()));
-        let text = all_text(&chat);
-        let lines: Vec<&str> = text.lines().collect();
-        // Count consecutive blank lines — should never exceed 1.
-        let max_consecutive_blanks = lines
-            .windows(2)
-            .filter(|w| w[0].trim().is_empty() && w[1].trim().is_empty())
-            .count();
-        assert_eq!(
-            max_consecutive_blanks, 0,
-            "no double blank lines between user and assistant: {lines:?}"
-        );
-    }
-
-    #[test]
-    fn push_user_message_enables_auto_scroll() {
-        let mut chat = test_chat();
-        chat.auto_scroll = false;
-        chat.push_user_message("hello".to_owned());
-        assert!(chat.auto_scroll);
-    }
-
-    #[test]
-    fn push_user_message_lines_multiline() {
-        let mut chat = test_chat();
-        chat.push_user_message(
-            indoc! {"
-                line1
-                line2
-                line3
-            "}
-            .to_owned(),
-        );
-        let text = all_text(&chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
-        assert!(text.contains("line3"));
-    }
-
-    // ── push_assistant_message_lines ──
-
-    #[test]
-    fn push_assistant_message_lines_has_icon_and_content() {
-        let mut chat = test_chat();
-        chat.entries
-            .push(ChatEntry::Assistant("response".to_owned()));
-        let text = all_text(&chat);
-        assert!(text.contains('⟡'));
-        assert!(text.contains("response"));
-    }
-
-    // ── push_tool_call_line ──
-
-    #[test]
-    fn push_tool_call_line_shows_icon_and_label() {
-        let mut chat = test_chat();
-        chat.push_tool_call("$", "ls -la");
-        let text = all_text(&chat);
-        assert!(text.contains('$'));
-        assert!(text.contains("ls -la"));
-    }
-
-    #[test]
-    fn push_tool_call_line_after_assistant_has_blank_separator() {
-        let mut chat = test_chat();
-        chat.entries
-            .push(ChatEntry::Assistant("some text".to_owned()));
-        chat.push_tool_call("$", "ls");
-        let text = all_text(&chat);
-        let lines: Vec<&str> = text.lines().collect();
-        let assistant = lines.iter().rposition(|l| l.contains("some text")).unwrap();
-        let tool = lines.iter().position(|l| l.contains("ls")).unwrap();
-        assert!(
-            (assistant + 1..tool).any(|i| lines[i].trim().is_empty()),
-            "expected blank separator between assistant text and tool call"
-        );
-    }
-
-    #[test]
-    fn push_tool_call_line_consecutive_no_extra_gap() {
-        let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
-        chat.push_tool_call("$", "cat foo");
-        let text = all_text(&chat);
-        let lines: Vec<&str> = text.lines().collect();
-        let ls_line = lines.iter().position(|l| l.contains("ls")).unwrap();
-        let cat_line = lines.iter().position(|l| l.contains("cat foo")).unwrap();
-        assert_eq!(
-            cat_line,
-            ls_line + 1,
-            "consecutive tool calls should have no blank gap"
-        );
-    }
-
-    #[test]
-    fn push_tool_call_line_wraps_long_label() {
-        let mut chat = test_chat();
-        let long_cmd =
-            "cd /Users/hakula/GitHub/oxide-code && ls ${XDG_DATA_HOME:-$HOME/.local/share}/ox";
-        chat.push_tool_call("$", long_cmd);
-        let text = chat.build_text(60);
-        assert!(
-            text.lines.len() > 1,
-            "long tool call label should wrap across multiple lines: {}",
-            text.lines.len(),
-        );
-        for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
-            assert!(
-                width <= 60,
-                "wrapped tool call line must fit the width budget (got {width}): {line:?}",
-            );
-        }
-    }
-
-    // ── push_tool_result_line ──
-
-    #[test]
-    fn push_tool_result_line_success() {
-        let mut chat = test_chat();
-        chat.push_tool_result("done", "output text", false);
-        let text = all_text(&chat);
-        assert!(text.contains("✓"));
-        assert!(text.contains("done"));
-        assert!(text.contains("output text"));
-    }
-
-    #[test]
-    fn push_tool_result_line_error() {
-        let mut chat = test_chat();
-        chat.push_tool_result("failed", "error details", true);
-        let text = all_text(&chat);
-        assert!(text.contains("✗"));
-        assert!(text.contains("failed"));
-        assert!(text.contains("error details"));
-    }
-
-    #[test]
-    fn push_tool_result_line_wraps_long_label() {
-        let mut chat = test_chat();
-        let long_label =
-            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
-        chat.push_tool_result(long_label, "", false);
-        let text = chat.build_text(50);
-        assert!(
-            text.lines.len() > 1,
-            "long tool result label should wrap: {}",
-            text.lines.len(),
-        );
-        for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.as_ref().len()).sum();
-            assert!(
-                width <= 50,
-                "wrapped tool result line must fit width (got {width}): {line:?}",
-            );
-        }
-    }
-
-    // ── push_error ──
-
-    #[test]
-    fn push_error_shows_error_indicator() {
-        let mut chat = test_chat();
-        chat.push_error("something broke");
-        let text = all_text(&chat);
-        assert!(text.contains("✗"));
-        assert!(text.contains("something broke"));
-    }
-
-    // ── push_tool_output_lines ──
-
-    #[test]
-    fn push_tool_output_lines_truncation() {
-        let mut chat = test_chat();
-        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
-        chat.push_tool_result("result", &long_output.join("\n"), false);
-        let text = all_text(&chat);
-
-        assert!(text.contains("line 0"));
-        assert!(text.contains("line 4"));
-        assert!(!text.contains("line 5"));
-        assert!(text.contains("... 5 more lines"));
-    }
-
-    #[test]
-    fn push_tool_output_lines_empty_content() {
-        let mut chat = test_chat();
-        chat.push_tool_result("result", "  \n  ", false);
-        let before = line_count(&chat);
-
-        let mut chat2 = test_chat();
-        chat2.push_tool_result("result", "", false);
-        let after = line_count(&chat2);
-
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn push_tool_output_lines_exactly_max_no_truncation() {
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..MAX_TOOL_OUTPUT_LINES)
-            .map(|i| format!("line {i}"))
-            .collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(!text.contains("more lines"));
-    }
-
-    #[test]
-    fn push_tool_output_lines_one_over_max_shows_truncation() {
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..=MAX_TOOL_OUTPUT_LINES)
-            .map(|i| format!("line {i}"))
-            .collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(text.contains("... 1 more line"));
-        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
-    }
-
-    #[test]
-    fn push_tool_output_lines_long_line_truncated() {
-        let mut chat = test_chat();
-        let long_line = "x".repeat(MAX_TOOL_OUTPUT_LINE_CHARS + 100);
-        chat.push_tool_result("result", &long_line, false);
-        let text = all_text(&chat);
-        assert!(
-            text.contains("..."),
-            "long line should be truncated with ..."
-        );
-        assert!(
-            !text.contains(&long_line),
-            "full long line should not appear"
-        );
-    }
-
-    // ── push_thinking_lines ──
-
-    #[test]
-    fn push_thinking_lines_visible_when_enabled() {
-        let mut chat = test_chat();
-        chat.append_thinking_token("pondering...");
-        let text = all_text(&chat);
-        assert!(text.contains("Thinking..."));
-        assert!(text.contains("pondering..."));
-    }
-
-    #[test]
-    fn push_thinking_lines_hidden_when_disabled() {
-        let mut chat = ChatView::new(Theme::default(), false);
-        chat.append_thinking_token("pondering...");
-        let text = all_text(&chat);
-        assert!(!text.contains("Thinking..."));
-        assert!(!text.contains("pondering..."));
-    }
-
-    #[test]
-    fn push_thinking_lines_after_entries_has_separator() {
-        let mut chat = test_chat();
-        chat.push_user_message("hello".to_owned());
-        chat.append_thinking_token("deep thought");
-        let text = all_text(&chat);
-        let lines: Vec<&str> = text.lines().collect();
-        let last_user = lines.iter().rposition(|l| l.contains("hello")).unwrap();
-        let thinking = lines.iter().position(|l| l.contains("Thinking")).unwrap();
-        assert!(
-            (last_user + 1..thinking).any(|i| lines[i].trim().is_empty()),
-            "expected blank separator between user message and thinking block"
-        );
-    }
-
-    #[test]
-    fn build_text_renders_loaded_thinking_entry_when_show_thinking_is_enabled() {
-        // The live-streaming tests above cover `thinking_buffer`, but
-        // resumed sessions re-enter via `load_history` and populate
-        // `entries` with `ChatEntry::Thinking`. `build_text` has a
-        // separate branch for that path — cover it explicitly.
-        let mut chat = test_chat();
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "resumed reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        let text = all_text(&chat);
-        assert!(text.contains("Thinking..."), "header missing: {text}");
-        assert!(
-            text.contains("resumed reasoning"),
-            "thinking body missing: {text}",
-        );
-    }
-
-    #[test]
-    fn build_text_hides_loaded_thinking_entry_when_show_thinking_is_disabled() {
-        let mut chat = ChatView::new(Theme::default(), false);
-        chat.load_history(
-            &[Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "private reasoning".to_owned(),
-                        signature: "sig".to_owned(),
-                    },
-                    ContentBlock::Text {
-                        text: "reply".to_owned(),
-                    },
-                ],
-            }],
-            &test_tools(),
-        );
-        let text = all_text(&chat);
-        assert!(!text.contains("Thinking..."), "leaked header: {text}");
-        assert!(!text.contains("private reasoning"), "leaked body: {text}");
-        assert!(text.contains("reply"), "text reply should still render");
-    }
-
-    // ── push_streaming_lines ──
-
-    #[test]
-    fn push_streaming_lines_shows_partial_text() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.append_stream_token("partial response");
-        let text = all_text(&chat);
-        assert!(text.contains('⟡'), "should show assistant icon");
-        assert!(text.contains("partial response"));
-    }
-
-    #[test]
-    fn push_streaming_lines_cached_and_tail() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-        chat.streaming_buffer = "cached line\ntail text".to_owned();
-        chat.advance_streaming_cache();
-
-        let text = all_text(&chat);
-        assert!(text.contains("cached line"));
-        assert!(text.contains("tail text"));
-    }
-
-    #[test]
-    fn push_streaming_lines_uncommitted_newlines() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.streaming_buffer = "line1\nline2\npartial".to_owned();
-
-        let text = all_text(&chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
-        assert!(text.contains("partial"));
-    }
-
-    #[test]
-    fn push_streaming_lines_without_prior_assistant_shows_icon() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.streaming_buffer = "response".to_owned();
-
-        let text = all_text(&chat);
-        assert!(text.contains('⟡'), "new turn should show assistant icon");
-    }
-
-    #[test]
-    fn push_streaming_lines_after_assistant_omits_duplicate_icon() {
-        let mut chat = test_chat();
-        chat.entries
-            .push(ChatEntry::Assistant("committed".to_owned()));
-        chat.streaming_buffer = "streaming".to_owned();
-
-        let text = all_text(&chat);
-        let count = text.matches('⟡').count();
-        assert_eq!(count, 1, "icon should appear once, not duplicated");
-    }
-
-    #[test]
-    fn push_streaming_lines_uncommitted_newline_with_empty_trailing() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.streaming_buffer = "line1\nline2\n".to_owned();
-
-        let text = all_text(&chat);
-        assert!(text.contains("line1"));
-        assert!(text.contains("line2"));
-    }
-
-    #[test]
-    fn push_streaming_lines_empty_committed_with_trailing() {
-        let mut chat = test_chat();
-        chat.push_user_message("hi".to_owned());
-        chat.streaming_buffer = "cached\n\ntrailing".to_owned();
-        chat.streaming_rendered_boundary = 7;
-
-        let text = all_text(&chat);
-        assert!(text.contains("trailing"));
-    }
-
-    // ── advance_streaming_cache ──
-
-    #[test]
-    fn advance_streaming_cache_no_newline_stays_at_zero() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-        chat.streaming_buffer = "no newline here".to_owned();
-        chat.advance_streaming_cache();
-        assert_eq!(chat.streaming_rendered_boundary, 0);
-        assert!(chat.streaming_rendered.is_empty());
-    }
-
-    #[test]
-    fn advance_streaming_cache_single_newline() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-        chat.streaming_buffer = "first line\nincomplete".to_owned();
-        chat.advance_streaming_cache();
-        assert_eq!(chat.streaming_rendered_boundary, "first line\n".len());
-        assert_eq!(chat.streaming_rendered.len(), 1);
-    }
-
-    #[test]
-    fn advance_streaming_cache_multiple_newlines() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-        chat.streaming_buffer = "line1\nline2\nline3\npartial".to_owned();
-        chat.advance_streaming_cache();
-        assert_eq!(
-            chat.streaming_rendered_boundary,
-            "line1\nline2\nline3\n".len()
-        );
-    }
-
-    #[test]
-    fn advance_streaming_cache_incremental() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-
-        chat.streaming_buffer = "first\n".to_owned();
-        chat.advance_streaming_cache();
-        assert_eq!(chat.streaming_rendered_boundary, 6); // "first\n".len()
-        let cached1 = chat.streaming_rendered.len();
-        assert_eq!(cached1, 1);
-
-        chat.streaming_buffer.push_str("second\n");
-        chat.advance_streaming_cache();
-        assert_eq!(chat.streaming_rendered_boundary, 13); // "first\nsecond\n".len()
-        assert_eq!(chat.streaming_rendered.len(), 2);
-    }
-
-    #[test]
-    fn advance_streaming_cache_trailing_newline_only() {
-        let mut chat = test_chat();
-        chat.viewport_width = 80;
-        chat.streaming_buffer = "\n".to_owned();
-        chat.advance_streaming_cache();
-        assert_eq!(chat.streaming_rendered_boundary, 1);
-    }
-
-    #[test]
-    fn advance_streaming_cache_skips_when_viewport_unset() {
-        // Streaming a complete line before the first frame paints must
-        // not bake unwrapped markdown into the cache. The cache stays
-        // empty until update_layout supplies a real width.
-        let mut chat = test_chat();
-        chat.append_stream_token("first complete line\n");
-        assert!(chat.streaming_rendered.is_empty());
-        assert_eq!(chat.streaming_rendered_boundary, 0);
-        assert_eq!(chat.streaming_cached_width, 0);
-
-        chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("second complete line\n");
-        assert!(!chat.streaming_rendered.is_empty());
-        assert_eq!(chat.streaming_cached_width, 80);
-    }
-
-    #[test]
-    fn update_layout_invalidates_cache_on_width_change() {
-        let mut chat = test_chat();
-        chat.update_layout(Rect::new(0, 0, 80, 24));
-        chat.append_stream_token("a complete line\n");
-        assert!(!chat.streaming_rendered.is_empty());
-        assert_eq!(chat.streaming_cached_width, 80);
-
-        chat.update_layout(Rect::new(0, 0, 40, 24));
-        assert!(chat.streaming_rendered.is_empty());
-        assert_eq!(chat.streaming_rendered_boundary, 0);
-        assert_eq!(chat.streaming_cached_width, 0);
-    }
-
-    // ── render ──
-
-    fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
-        chat.update_layout(Rect::new(0, 0, width, height));
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| {
-                chat.render(frame, frame.area());
-            })
-            .unwrap();
-        terminal.backend().clone()
-    }
-
-    #[test]
-    fn render_updates_content_height() {
-        let mut chat = test_chat();
-        render_chat(&mut chat, 80, 24);
-        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
-        assert_eq!(chat.content_height.get(), 4);
-    }
-
-    #[test]
-    fn render_empty_shows_welcome_screen() {
-        let mut chat = test_chat();
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
-    }
-
-    #[test]
-    fn render_user_and_assistant_interleaved() {
-        let mut chat = test_chat();
-        chat.push_user_message("what is 2 + 2?".into());
-        chat.append_stream_token("The answer is 4.");
-        chat.commit_streaming();
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
-    }
-
-    #[test]
-    fn render_tool_call_followed_by_result() {
-        let mut chat = test_chat();
-        chat.push_tool_call("$", "echo hi");
-        chat.push_tool_result("ran echo", "hi", false);
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
-    }
-
-    #[test]
-    fn render_tool_result_overflow_shows_line_count() {
-        let mut chat = test_chat();
-        chat.push_tool_call("$", "ls");
-        let long = (0..MAX_TOOL_OUTPUT_LINES + 3)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        chat.push_tool_result("ls out", &long, false);
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 14));
-    }
-
-    #[test]
-    fn render_error_entry_is_styled_distinctly() {
-        let mut chat = test_chat();
-        chat.push_error("API error (HTTP 503): overloaded");
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 4));
-    }
-
-    #[test]
-    fn render_history_with_resumed_thinking_block() {
-        // Resumed history feeds into ChatView via load_history; with
-        // show_thinking = true the thinking block must render dimmed
-        // between the user prompt and the assistant text.
-        let mut chat = ChatView::new(Theme::default(), true);
-        let tools = test_tools();
-        let history = vec![
-            Message::user("hello"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Thinking {
-                        thinking: "pondering...".into(),
-                        signature: "sig".into(),
-                    },
-                    ContentBlock::Text { text: "Hi!".into() },
-                ],
-            },
-        ];
-        chat.load_history(&history, &tools);
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 }
