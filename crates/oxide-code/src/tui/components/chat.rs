@@ -1071,6 +1071,49 @@ mod tests {
     }
 
     #[test]
+    fn append_stream_token_no_spurious_blank_between_consecutive_list_items() {
+        // Guard against over-inserting: when the committed tail ends
+        // with a list item and the trailing starts another one, they
+        // share a block type and must render adjacent (tight list).
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("- item 1\n- item 2");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let first = lines.iter().position(|l| l.contains("item 1")).unwrap();
+        let second = lines.iter().position(|l| l.contains("item 2")).unwrap();
+        assert!(
+            (first + 1..second).all(|i| !lines[i].trim().is_empty()),
+            "expected no blank between consecutive list items: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn append_stream_token_preserves_blank_before_partial_list_item_trailing() {
+        // Mid-stream, a list item that arrives before the paragraph's
+        // `\n\n` terminator gets rendered as a raw trailing fragment
+        // (not through pulldown-cmark). Without an explicit block gap
+        // the bullet visually glues to the preceding paragraph until
+        // the next `\n` lands — pin the expected separator here.
+        let mut chat = test_chat();
+        chat.viewport_width = 80;
+        chat.append_stream_token("Here are items:\n- item 1");
+
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let header = lines
+            .iter()
+            .position(|l| l.contains("Here are items:"))
+            .unwrap();
+        let item = lines.iter().position(|l| l.contains("item 1")).unwrap();
+        assert!(
+            (header + 1..item).any(|i| lines[i].trim().is_empty()),
+            "expected blank separator before partial list item: {lines:?}",
+        );
+    }
+
+    #[test]
     fn append_stream_token_preserves_blank_between_cache_and_live_tail() {
         // Same invariant at the cache / live-tail seam: a committed
         // paragraph followed by a partially-typed next paragraph
