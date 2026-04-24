@@ -655,7 +655,9 @@ fn compute_betas(
     is_first_party: bool,
 ) -> Vec<&'static str> {
     let caps = crate::model::capabilities_for(model);
-    let is_haiku = model.to_lowercase().contains("haiku");
+    let is_haiku = model
+        .split('-')
+        .any(|tok| tok.eq_ignore_ascii_case("haiku"));
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
     // sets: identity / auth → universal agentic → capability-gated.
@@ -759,10 +761,13 @@ fn has_1m_tag(model: &str) -> bool {
 
 /// Byte offset of the `[1m]` tag, case-insensitive. Shared by
 /// [`has_1m_tag`] and [`api_model_id`] so the two agree on every
-/// accepted spelling. Model IDs are ASCII, so lowercased byte indices
-/// line up with the original string.
+/// accepted spelling. Model IDs are ASCII, so byte-window scanning
+/// lines up with character boundaries.
 fn tag_offset(model: &str) -> Option<usize> {
-    model.to_lowercase().find("[1m]")
+    model
+        .as_bytes()
+        .windows(4)
+        .position(|w| w.eq_ignore_ascii_case(b"[1m]"))
 }
 
 /// Serializes the JSON request body for [`Client::complete`].
