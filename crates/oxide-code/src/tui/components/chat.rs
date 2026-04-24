@@ -1609,6 +1609,64 @@ mod tests {
     // ── push_tool_result_view ──
 
     #[test]
+    fn push_tool_result_view_read_excerpt_renders_context_and_line_numbers() {
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::ReadExcerpt {
+            path: "/tmp/example.rs".to_owned(),
+            lines: vec![
+                crate::tool::ReadExcerptLine {
+                    number: 2,
+                    text: "fn main() {".to_owned(),
+                },
+                crate::tool::ReadExcerptLine {
+                    number: 3,
+                    text: "}".to_owned(),
+                },
+            ],
+            total_lines: 5,
+        };
+        chat.push_tool_result_view("Read example.rs", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("/tmp/example.rs:2-3 of 5"));
+        assert!(text.contains("2 │ fn main() {"));
+        assert!(text.contains("3 │ }"));
+    }
+
+    #[test]
+    fn push_tool_result_view_read_excerpt_truncates_body_lines() {
+        let mut chat = test_chat();
+        let lines = (1..=6)
+            .map(|number| crate::tool::ReadExcerptLine {
+                number,
+                text: format!("line {number}"),
+            })
+            .collect();
+        let view = crate::tool::ToolResultView::ReadExcerpt {
+            path: "/tmp/example.rs".to_owned(),
+            lines,
+            total_lines: 6,
+        };
+        chat.push_tool_result_view("Read example.rs", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("... +1 line"));
+        assert!(text.contains("5 │ line 5"));
+        assert!(!text.contains("6 │ line 6"));
+    }
+
+    #[test]
+    fn push_tool_result_view_read_excerpt_empty_file_keeps_context() {
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::ReadExcerpt {
+            path: "/tmp/empty.rs".to_owned(),
+            lines: Vec::new(),
+            total_lines: 0,
+        };
+        chat.push_tool_result_view("Read empty.rs", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("/tmp/empty.rs (empty file)"));
+    }
+
+    #[test]
     fn push_tool_result_view_edit_renders_diff_markers() {
         // An Edit tool result wired through the structured view should
         // render the replaced text with `- ` for the old side and `+ `

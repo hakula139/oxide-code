@@ -119,14 +119,21 @@ impl ToolOutput {
 /// [`Tool::result_view`] and rendered by the TUI's tool-result block.
 ///
 /// This enum lives here — not in the TUI layer — so per-tool parsing
-/// (Edit's diff extraction, future Read/Grep/Glob shapes) stays in the
-/// module that owns each tool's input/output contract. The TUI still
-/// owns rendering; this is pure data.
+/// (Edit's diff extraction, Read's line-numbered excerpts, future
+/// Grep/Glob shapes) stays in the module that owns each tool's
+/// input/output contract. The TUI still owns rendering; this is pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolResultView {
     /// Default shape — the raw tool output, shown as a truncated
     /// monospace block with a `+N lines` footer when it overflows.
     Text { content: String },
+    /// Read tool — renders as a line-numbered excerpt with path/range
+    /// context while leaving the model-facing output unchanged.
+    ReadExcerpt {
+        path: String,
+        lines: Vec<ReadExcerptLine>,
+        total_lines: usize,
+    },
     /// Edit tool — renders as a `-` old / `+` new unified diff.
     /// `replacements` is the number of matches actually replaced
     /// (> 1 only when `replace_all` succeeded on multiple matches).
@@ -136,6 +143,13 @@ pub(crate) enum ToolResultView {
         replace_all: bool,
         replacements: usize,
     },
+}
+
+/// One line in a structured `read` result view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadExcerptLine {
+    pub(crate) number: usize,
+    pub(crate) text: String,
 }
 
 // ── Tool Trait ──
@@ -180,7 +194,7 @@ pub(crate) trait Tool: Send + Sync {
     /// `input` is the original tool-call arguments (already used by
     /// `run`); `content` is the success-path `ToolOutput::content`;
     /// `metadata` is the same `ToolMetadata` the tool attached in
-    /// `run` (title, exit code, replacements, …) so tools can drive
+    /// `run` (title, exit code, replacements, ...) so tools can drive
     /// the view structurally instead of re-parsing `content`.
     ///
     /// Returning `None` — the default — falls back to [`ToolResultView::Text`].
@@ -705,7 +719,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_to_tool_for_structured_output() {
-        // Edit is the one registered override today; routing through
+        // Edit was the first registered override; routing through
         // the registry must produce the same `Diff` the tool owns —
         // including the field values, so a mutation returning an
         // empty diff wouldn't pass.
@@ -735,8 +749,27 @@ mod tests {
     }
 
     #[test]
+    fn result_view_delegates_read_excerpt() {
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
+        let metadata = ToolMetadata::default();
+        let view = registry.result_view("read", &input, "1\tmod foo;", &metadata, false);
+        assert_eq!(
+            view,
+            ToolResultView::ReadExcerpt {
+                path: "/tmp/lib.rs".to_owned(),
+                lines: vec![ReadExcerptLine {
+                    number: 1,
+                    text: "mod foo;".to_owned(),
+                }],
+                total_lines: 1,
+            },
+        );
+    }
+
+    #[test]
     fn result_view_short_circuits_errors_to_text() {
-        // Error outputs are prose ("old_string not found …"); rendering
+        // Error outputs are prose ("old_string not found ..."); rendering
         // them as a diff would hide the failure. The short-circuit lives
         // in the registry so individual tools don't each re-implement it.
         let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
