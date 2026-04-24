@@ -61,6 +61,8 @@ mod tests {
 
     use super::super::store::{test_session_file, test_store};
     use super::*;
+    use crate::message::{ContentBlock, Role};
+    use crate::session::entry::Entry;
 
     /// Recording sink: captures every event the helper emits so tests
     /// can assert both "sent exactly this" and "sent nothing".
@@ -108,8 +110,19 @@ mod tests {
         record_session_message(&session, &Message::user("hello"), None).await;
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-        assert!(content.contains(r#""type":"message""#));
-        assert!(content.contains("hello"));
+        let last_line = content.lines().last().expect("session file has no lines");
+        let entry: Entry =
+            serde_json::from_str(last_line).expect("last line should parse as Entry");
+        let Entry::Message { message, .. } = entry else {
+            panic!("expected Entry::Message, got {entry:?}");
+        };
+        assert_eq!(message.role, Role::User);
+        assert_eq!(message.content.len(), 1);
+        assert!(
+            matches!(&message.content[0], ContentBlock::Text { text } if text == "hello"),
+            "unexpected content: {:?}",
+            message.content,
+        );
     }
 
     // ── log_session_err ──
