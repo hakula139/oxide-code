@@ -154,9 +154,11 @@ impl App {
     }
 
     /// Translate a user action into UI state changes, then forward it to the
-    /// agent loop over the bounded channel. `try_send` would only fail if the
-    /// agent task has died; in that case `should_quit` tears down the TUI on
-    /// the next iteration so nothing is lost.
+    /// agent loop over the bounded channel. A `Closed` error means the agent
+    /// task has died; surface that so the user isn't left staring at a
+    /// wedged "Streaming" status. `Full` is implausible (input is disabled
+    /// while streaming, so at most one in-flight action at a time), but
+    /// worth treating symmetrically if it ever trips.
     fn dispatch_user_action(&mut self, action: UserAction) {
         match &action {
             UserAction::SubmitPrompt(text) => {
@@ -168,7 +170,20 @@ impl App {
                 self.should_quit = true;
             }
         }
-        _ = self.user_tx.try_send(action);
+        if let Err(e) = self.user_tx.try_send(action) {
+            match e {
+                mpsc::error::TrySendError::Closed(_) => {
+                    self.chat
+                        .push_error("agent task exited unexpectedly; restart `ox` to recover");
+                    self.input.set_enabled(false);
+                    self.should_quit = true;
+                }
+                mpsc::error::TrySendError::Full(_) => {
+                    self.chat
+                        .push_error("user-action channel full; prompt dropped (this is a bug)");
+                }
+            }
+        }
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
