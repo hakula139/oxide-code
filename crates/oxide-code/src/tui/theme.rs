@@ -22,10 +22,8 @@ pub(crate) struct Theme {
     pub(crate) fg_dim: Color,
 
     // Surfaces
-    /// Elevated surfaces, tool call backgrounds
+    /// Elevated surfaces, tool call backgrounds, inline code fill
     pub(crate) surface: Color,
-    /// Code block background
-    pub(crate) code_bg: Color,
 
     // Semantic accents (UI roles)
     /// Highlights, active borders, links, list markers
@@ -38,9 +36,11 @@ pub(crate) struct Theme {
     // Code
     /// Inline code, code block fallback
     pub(crate) code: Color,
+    /// Code block background (reserved for future theming; currently unused)
+    pub(crate) code_bg: Color,
 
     // Status indicators (ascending severity)
-    /// Informational highlights, cost display
+    /// Informational highlights (reserved for future theming; currently unused)
     pub(crate) info: Color,
     /// Successful tool results, normal status
     pub(crate) success: Color,
@@ -58,11 +58,11 @@ impl Default for Theme {
             fg_muted: Color::from_u32(0x006c_7086),  // Overlay0
             fg_dim: Color::from_u32(0x0058_5b70),    // Surface2
             surface: Color::from_u32(0x0031_3244),   // Surface0
-            code_bg: Color::from_u32(0x001e_1e2e),   // Base
-            code: Color::from_u32(0x0094_e2d5),      // Teal
             accent: Color::from_u32(0x0089_b4fa),    // Blue
             user: Color::from_u32(0x00fa_b387),      // Peach
             secondary: Color::from_u32(0x00b4_befe), // Lavender
+            code: Color::from_u32(0x0094_e2d5),      // Teal
+            code_bg: Color::from_u32(0x001e_1e2e),   // Base
             info: Color::from_u32(0x0089_dceb),      // Sky
             success: Color::from_u32(0x00a6_e3a1),   // Green
             warning: Color::from_u32(0x00f9_e2af),   // Yellow
