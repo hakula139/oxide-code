@@ -448,16 +448,20 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
+        // Propagate the surrounding inline style (bold, italic, heading
+        // modifiers) onto the code span; `inline_code()` supplies the
+        // distinctive fg + bg, enclosing modifiers apply on top.
+        let style = self.current_inline_style().patch(self.theme.inline_code());
         if self.table.active {
             self.table
                 .cell_buf
-                .push(Span::styled(code.into_string(), self.theme.inline_code()));
+                .push(Span::styled(code.into_string(), style));
             return;
         }
         if self.pending_marker.is_some() {
             self.push_line(Line::default());
         }
-        self.push_span(Span::styled(code.into_string(), self.theme.inline_code()));
+        self.push_span(Span::styled(code.into_string(), style));
     }
 
     fn html(&mut self, html: &str) {
@@ -1526,6 +1530,52 @@ mod tests {
             span.style.bg,
             Some(t.surface),
             "inline code should have a surface background fill to stand out"
+        );
+    }
+
+    #[test]
+    fn inline_code_inside_bold_inherits_bold() {
+        let t = theme();
+        let text = render_markdown("**use `foo()` here**", &t, 0);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("foo()"))
+            .expect("code span not found");
+        assert_eq!(
+            span.style.fg,
+            Some(t.code),
+            "code span keeps its distinctive fg"
+        );
+        assert_eq!(
+            span.style.bg,
+            Some(t.surface),
+            "code span keeps its surface fill"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code span inside **bold** should inherit BOLD modifier"
+        );
+    }
+
+    #[test]
+    fn inline_code_inside_heading_inherits_modifiers() {
+        let t = theme();
+        let text = render_markdown("# see `foo()`", &t, 0);
+        let span = text
+            .lines
+            .iter()
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
+            .expect("code span not found in heading");
+        assert_eq!(span.style.fg, Some(t.code));
+        assert_eq!(span.style.bg, Some(t.surface));
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code inside an H1 should inherit the heading's BOLD"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "code inside an H1 should inherit the heading's UNDERLINED"
         );
     }
 
