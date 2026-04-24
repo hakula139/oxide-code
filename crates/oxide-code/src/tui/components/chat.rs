@@ -1597,6 +1597,29 @@ mod tests {
     }
 
     #[test]
+    fn push_tool_result_drops_surrounding_blank_lines() {
+        // Some tools pad output with leading / trailing blank lines;
+        // those must not produce empty body rows, but per-line indent
+        // on real data lines in between must survive.
+        let mut chat = test_chat();
+        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
+        let text = all_text(&chat);
+
+        // Exactly one body row with the `▎   ` prefix (4-col status-line
+        // continuation). A regression that kept surrounding blanks would
+        // render 2+ body rows.
+        let body_row_count = text.lines().filter(|l| l.starts_with("▎   ")).count();
+        assert_eq!(
+            body_row_count, 1,
+            "expected one body row after blank-line stripping: {text}",
+        );
+        assert!(
+            text.contains("▎    real line"),
+            "data-line indent must survive: {text}",
+        );
+    }
+
+    #[test]
     fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
         // When content is just the duplicated label (no trailing body
         // lines), rendering collapses to a bare status line.
