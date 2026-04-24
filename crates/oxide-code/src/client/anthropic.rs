@@ -1548,7 +1548,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         let mut rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
-        let _ = rx.recv().await;
+        _ = rx.recv().await;
         drop(rx);
         // Lets the background task observe the closed channel and exit;
         // any panic would surface in test output.
@@ -1864,7 +1864,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
                 Some("sid".to_owned()),
             )
             .unwrap();
-            let _ = client
+            _ = client
                 .complete(model, "sys", "prompt", 40, Some(&fmt))
                 .await
                 .unwrap();
@@ -1916,7 +1916,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             Some("sid".to_owned()),
         )
         .unwrap();
-        let _ = client
+        _ = client
             .complete("claude-haiku-4-5", "", "hi", 40, None)
             .await
             .unwrap();
@@ -1949,7 +1949,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     // ── compute_betas ──
 
     #[test]
-    fn compute_betas_agentic_opus_46_plain_carries_full_set_except_1m() {
+    fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
         // Plain model (no `[1m]` tag) must not auto-enable 1M context —
         // a gateway without 1M access would 400.
         let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
@@ -1964,7 +1964,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_opus_46_with_1m_tag_adds_context_1m() {
+    fn compute_betas_opus_4_6_with_1m_tag_adds_context_1m() {
         let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false, true);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
@@ -1977,7 +1977,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_sonnet_45_has_thinking_but_not_effort() {
+    fn compute_betas_sonnet_4_5_has_thinking_but_not_effort() {
         // Sonnet 4.5 supports interleaved thinking but not effort;
         // plain (no `[1m]` tag) means no 1M beta either.
         let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false, true);
@@ -2030,7 +2030,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_opus_47_matches_opus_46_family() {
+    fn compute_betas_opus_4_7_matches_opus_4_6_family() {
         let plain = compute_betas("claude-opus-4-7", &api_key(), true, false, true);
         assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
