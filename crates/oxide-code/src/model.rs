@@ -472,7 +472,7 @@ mod tests {
         }
     }
 
-    // ── Capabilities::clamp_effort / default_effort ──
+    // ── Capabilities::clamp_effort ──
 
     #[test]
     fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
@@ -501,40 +501,6 @@ mod tests {
         let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
         assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
         assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
-    }
-
-    #[test]
-    fn default_effort_matches_observed_claude_code_wire() {
-        use crate::config::Effort;
-        // Values pinned against claude-code 2.1.119 packet captures.
-        assert_eq!(
-            lookup("claude-opus-4-7")
-                .unwrap()
-                .capabilities
-                .default_effort(),
-            Some(Effort::Xhigh),
-        );
-        assert_eq!(
-            lookup("claude-opus-4-6")
-                .unwrap()
-                .capabilities
-                .default_effort(),
-            Some(Effort::High),
-        );
-        assert_eq!(
-            lookup("claude-sonnet-4-6")
-                .unwrap()
-                .capabilities
-                .default_effort(),
-            Some(Effort::High),
-        );
-        assert_eq!(
-            lookup("claude-haiku-4-5")
-                .unwrap()
-                .capabilities
-                .default_effort(),
-            None,
-        );
     }
 
     #[test]

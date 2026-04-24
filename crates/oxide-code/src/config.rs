@@ -291,29 +291,17 @@ mod tests {
     // ── Effort ──
 
     #[test]
-    fn effort_serialize_matches_wire_tokens() {
-        for (variant, wire) in [
+    fn effort_round_trips_through_serde_and_fromstr() {
+        for (variant, token) in [
             (Effort::Low, "low"),
             (Effort::Medium, "medium"),
             (Effort::High, "high"),
             (Effort::Xhigh, "xhigh"),
             (Effort::Max, "max"),
         ] {
-            assert_eq!(serde_json::to_value(variant).unwrap(), wire);
-            assert_eq!(variant.to_string(), wire);
-        }
-    }
-
-    #[test]
-    fn effort_parses_all_valid_tokens() {
-        for (token, expected) in [
-            ("low", Effort::Low),
-            ("medium", Effort::Medium),
-            ("high", Effort::High),
-            ("xhigh", Effort::Xhigh),
-            ("max", Effort::Max),
-        ] {
-            assert_eq!(token.parse::<Effort>().unwrap(), expected);
+            assert_eq!(serde_json::to_value(variant).unwrap(), token);
+            assert_eq!(variant.to_string(), token);
+            assert_eq!(token.parse::<Effort>().unwrap(), variant);
         }
     }
 
