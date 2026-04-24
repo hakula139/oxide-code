@@ -21,6 +21,8 @@
 
 use std::collections::HashMap;
 
+use crate::tool::ToolMetadata;
+
 /// Generic fallback label used when a tool result arrives with
 /// `title: None` AND no matching pending entry exists (orphan result
 /// from a replayed transcript with missing start, or an agent-loop
@@ -32,6 +34,20 @@ use std::collections::HashMap;
 /// computed label is the fallback, which carries more information
 /// (tool name + input) than this sentinel.
 pub(crate) const FALLBACK_RESULT_HEADER: &str = "(result)";
+
+/// Resolves the status-line header for a completed tool result.
+///
+/// Tool-provided metadata wins because it is the most specific result
+/// summary (`Edited f.rs`). The pending call label is next because it
+/// still identifies the tool and input (`Edit(/tmp/f.rs)`). The generic
+/// fallback is only for orphaned results whose start event is missing.
+pub(crate) fn result_header(metadata: &ToolMetadata, pending_label: Option<&str>) -> String {
+    metadata
+        .title
+        .clone()
+        .or_else(|| pending_label.map(str::to_owned))
+        .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned())
+}
 
 /// Per-call metadata observed at tool-call emission, consumed at the
 /// matching result.
@@ -105,6 +121,36 @@ mod tests {
             input: serde_json::json!({"file_path": "/tmp/f.rs"}),
         }
     }
+
+    // ── result_header ──
+
+    #[test]
+    fn result_header_prefers_metadata_title() {
+        let metadata = ToolMetadata {
+            title: Some("Edited f.rs".to_owned()),
+            ..ToolMetadata::default()
+        };
+
+        let header = result_header(&metadata, Some("Edit(/tmp/f.rs)"));
+
+        assert_eq!(header, "Edited f.rs");
+    }
+
+    #[test]
+    fn result_header_falls_back_to_pending_label() {
+        let header = result_header(&ToolMetadata::default(), Some("Edit(/tmp/f.rs)"));
+
+        assert_eq!(header, "Edit(/tmp/f.rs)");
+    }
+
+    #[test]
+    fn result_header_falls_back_to_generic_header_for_orphans() {
+        let header = result_header(&ToolMetadata::default(), None);
+
+        assert_eq!(header, FALLBACK_RESULT_HEADER);
+    }
+
+    // ── PendingCalls ──
 
     #[test]
     fn insert_and_remove_round_trip() {

@@ -31,7 +31,7 @@ use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
-use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
+use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call
@@ -141,10 +141,7 @@ impl ChatView {
                         .get(tool_use_id)
                         .unwrap_or(&default_metadata);
                     let view = tools.result_view(&p.name, &p.input, content, metadata, is_error);
-                    // Prefer the persisted title; fall back to the
-                    // call label so pre-upgrade sessions keep
-                    // rendering (just without the live-path title).
-                    let header = metadata.title.clone().unwrap_or_else(|| p.label.clone());
+                    let header = result_header(metadata, Some(p.label.as_str()));
                     self.blocks
                         .push(Box::new(ToolResultBlock::new(header, view, is_error)));
                 }
