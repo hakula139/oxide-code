@@ -24,7 +24,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::billing;
-use crate::config::{Auth, Config, PromptCacheTtl, ThinkingConfig};
+use crate::config::{Auth, Config, Effort, PromptCacheTtl, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -64,20 +64,70 @@ struct CreateMessageRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
-    /// JSON-schema-constrained output format for one-shot utility calls
-    /// (title generation, future classifiers). Must travel alongside the
-    /// `structured-outputs-2025-12-15` beta header; both are gated on
-    /// `Capabilities::structured_outputs` so unsupported models silently
-    /// drop back to free-form text rather than 400ing the gateway.
+    /// Carries both the `format` (JSON-schema-constrained output for
+    /// one-shot calls) and `effort` (agentic-path intelligence tier)
+    /// knobs. Wrapped in `Option` so an empty `OutputConfig` never
+    /// ships — callers build one via [`OutputConfig::new`] and pass
+    /// `None` when neither sub-field is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig<'a>>,
+    /// `context_management.edits` — the client-side context-editing
+    /// directive that partners the `context-management-2025-06-27`
+    /// beta header. Populated on the streaming path for any model
+    /// with [`Capabilities::context_management`] set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_management: Option<ContextManagement>,
     messages: &'a [Message],
 }
 
-/// Wrapper matching the wire shape `output_config.format = {...}`.
-#[derive(Serialize)]
+/// Shared wrapper for the `output_config` body field. Either field
+/// may be absent; when both are, [`Self::is_empty`] lets the builder
+/// collapse to `None` so the empty object never ships.
+#[derive(Serialize, Default)]
 struct OutputConfig<'a> {
-    format: &'a OutputFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a OutputFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<Effort>,
+}
+
+impl<'a> OutputConfig<'a> {
+    /// Returns `None` when every field is empty so callers can avoid
+    /// shipping a bare `{}`. `Some(_)` otherwise.
+    fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
+        if format.is_none() && effort.is_none() {
+            None
+        } else {
+            Some(Self { format, effort })
+        }
+    }
+}
+
+/// `context_management.edits` body field. oxide-code mirrors
+/// claude-code 2.1.119's observed wire shape — a single
+/// `clear_thinking_20251015` edit with `keep = "all"` on every
+/// agentic request that also ships the matching beta header.
+#[derive(Serialize)]
+struct ContextManagement {
+    edits: [ContextEdit; 1],
+}
+
+impl ContextManagement {
+    /// Wire shape claude-code 2.1.119 sends on every 4.6+ request.
+    /// Single place to edit when Anthropic ships newer edit types or
+    /// we need to diverge from the default.
+    fn clear_thinking_keep_all() -> Self {
+        Self {
+            edits: [ContextEdit::ClearThinking20251015 { keep: "all" }],
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum ContextEdit {
+    #[serde(rename = "clear_thinking_20251015")]
+    ClearThinking20251015 { keep: &'static str },
 }
 
 /// JSON-schema-constrained completion format. Constructed via
@@ -456,6 +506,10 @@ impl Client {
             });
         }
 
+        let caps = crate::model::lookup(&self.config.model)
+            .map(|info| info.capabilities)
+            .unwrap_or_default();
+
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             // `[1m]` is a client-side tag; strip before the wire.
@@ -466,7 +520,14 @@ impl Client {
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
-            output_config: None,
+            output_config: OutputConfig::new(None, self.config.effort),
+            // Gated on the same capability flag as the
+            // `context-management-2025-06-27` beta header so body and
+            // header stay in sync — claude-code 2.1.119 ships them
+            // together on every 4.6+ agentic request.
+            context_management: caps
+                .context_management
+                .then(ContextManagement::clear_thinking_keep_all),
             messages: effective_messages,
         })
         .context("failed to serialize request")?;
@@ -763,7 +824,10 @@ fn build_completion_body(
         system: system_blocks,
         tools: None,
         thinking: None,
-        output_config: output_format.map(|format| OutputConfig { format }),
+        output_config: OutputConfig::new(output_format, None),
+        // One-shot completions never opt into context management —
+        // matches claude-code's one-shot path.
+        context_management: None,
         messages: &messages,
     })
     .context("failed to serialize request")?;
@@ -1791,6 +1855,126 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
     }
 
+    // ── Client::stream_message / agentic body fields ──
+
+    /// Captures the serialized body of a single streaming request.
+    /// Most agentic-body tests only care about what oxide-code sends,
+    /// not the response — this collapses the ceremony to two lines
+    /// per test.
+    async fn capture_stream_body(config: Config) -> serde_json::Value {
+        let server = MockServer::start().await;
+        let sink: Captured<String> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut cfg = config;
+        cfg.base_url = server.uri();
+        let client = Client::new(cfg, Some("sid".to_owned())).unwrap();
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let body = sink.lock().unwrap().clone().expect("request captured");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_message_opus_4_7_emits_output_config_effort_xhigh() {
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.effort = Some(Effort::Xhigh);
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+    }
+
+    #[tokio::test]
+    async fn stream_message_omits_output_config_when_effort_is_none() {
+        // Non-effort-capable model → `Config.effort == None` → the
+        // whole `output_config` block is absent (not `{}`).
+        let cfg = test_config(
+            "https://placeholder.invalid",
+            api_key(),
+            "claude-sonnet-4-5",
+        );
+        assert!(cfg.effort.is_none(), "precondition: effort unset");
+        let body = capture_stream_body(cfg).await;
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config absent: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_context_management_body_present_on_4_6_plus() {
+        // Every model whose `context_management` capability flag is
+        // set must also ship the body directive alongside the beta
+        // header.
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        ] {
+            let cfg = test_config("https://placeholder.invalid", api_key(), model);
+            let body = capture_stream_body(cfg).await;
+            let edits = body["context_management"]["edits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("context_management.edits missing for {model}: {body}"));
+            assert_eq!(edits.len(), 1, "{model}");
+            assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{model}");
+            assert_eq!(edits[0]["keep"], "all", "{model}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_message_context_management_absent_on_unknown_model() {
+        // Unknown model ids (no `MODELS` row matches) fall back to
+        // the all-false `Capabilities::default()` — no beta, no body
+        // directive. Keeps "beta sent ⇒ body populated" an invariant.
+        let cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-5-0");
+        let body = capture_stream_body(cfg).await;
+        assert!(
+            body.get("context_management").is_none(),
+            "context_management absent on unknown models: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_show_thinking_emits_display_summarized() {
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.thinking = Some(ThinkingConfig::Adaptive {
+            display: Some(crate::config::ThinkingDisplay::Summarized),
+        });
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[tokio::test]
+    async fn stream_message_show_thinking_false_omits_display_field() {
+        // `Adaptive { display: None }` must serialize without a
+        // `display` key — `skip_serializing_if` on the wire.
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.thinking = Some(ThinkingConfig::Adaptive { display: None });
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body["thinking"].get("display").is_none(),
+            "display field absent: {body}",
+        );
+    }
+
     // ── Client::complete ──
 
     #[tokio::test]
@@ -1945,6 +2129,41 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             "billing block present: {body}",
         );
         assert!(!body.contains("cch=00000"), "cch populated: {body}");
+    }
+
+    #[tokio::test]
+    async fn complete_does_not_emit_context_management_edits() {
+        // `context_management.edits` is an agentic-path directive; it
+        // must stay off the one-shot `complete` path even on models
+        // that carry the capability flag (Haiku 4.5 here).
+        let server = MockServer::start().await;
+        let sink: Captured<String> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+            })
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        _ = client
+            .complete("claude-haiku-4-5", "sys", "hi", 40, None)
+            .await
+            .unwrap();
+
+        let body = sink.lock().unwrap().clone().expect("body captured");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v.get("context_management").is_none(),
+            "context_management absent on one-shot path: {body}",
+        );
     }
 
     // ── build_metadata ──

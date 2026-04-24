@@ -31,8 +31,23 @@ pub enum Auth {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
-    /// Model decides the thinking budget (Claude 4.6+).
-    Adaptive,
+    /// Model decides the thinking budget (Claude 4.6+). `display`
+    /// controls what the API streams back: `Omitted` (4.7 default,
+    /// empty `thinking` field) or `Summarized` (the 4.6 default, and
+    /// what oxide-code enables whenever `show_thinking=true`).
+    Adaptive {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+    },
+}
+
+/// `thinking.display` values accepted by the API on 4.7+. Only
+/// `Summarized` is ever emitted — omitting the field entirely (via
+/// `display: None`) already yields the `omitted` default on 4.7.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    Summarized,
 }
 
 /// Intelligence-vs-latency tier sent as `output_config.effort` on
@@ -140,13 +155,6 @@ pub struct Config {
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
     /// omitted. Resolved once at [`Config::load`] — callers forward.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by client::anthropic::stream_message in the wire-body commit"
-        )
-    )]
     pub effort: Option<Effort>,
     pub max_tokens: u32,
     /// `cache_control.ttl` for every cacheable block. Default is
@@ -208,12 +216,17 @@ impl Config {
             .or(client.max_tokens)
             .unwrap_or_else(|| default_max_tokens(effort));
 
-        // Adaptive thinking is always enabled — the model decides the budget.
-        let thinking = Some(ThinkingConfig::Adaptive);
-
         let show_thinking = env::bool("OX_SHOW_THINKING")
             .or(tui.show_thinking)
             .unwrap_or(false);
+
+        // Adaptive thinking is always enabled — the model decides the
+        // budget. `display` opts 4.7 into streaming summarized thinking
+        // text (its default changed to `omitted` silently); 4.6 and
+        // older ignore the field.
+        let thinking = Some(ThinkingConfig::Adaptive {
+            display: show_thinking.then_some(ThinkingDisplay::Summarized),
+        });
 
         let prompt_cache_ttl = match env::string("OX_PROMPT_CACHE_TTL") {
             Some(raw) => raw
@@ -259,9 +272,22 @@ mod tests {
     // ── ThinkingConfig ──
 
     #[test]
-    fn thinking_config_adaptive_serializes() {
-        let json = serde_json::to_value(&ThinkingConfig::Adaptive).unwrap();
+    fn thinking_config_adaptive_without_display_serializes_bare() {
+        // Older models ignore `display`; absence keeps the wire as
+        // pre-4.7 clients expect.
+        let json = serde_json::to_value(&ThinkingConfig::Adaptive { display: None }).unwrap();
         assert_eq!(json["type"], "adaptive");
+        assert!(json.get("display").is_none(), "display omitted: {json}");
+    }
+
+    #[test]
+    fn thinking_config_adaptive_with_summarized_display_serializes() {
+        let json = serde_json::to_value(&ThinkingConfig::Adaptive {
+            display: Some(ThinkingDisplay::Summarized),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "adaptive");
+        assert_eq!(json["display"], "summarized");
     }
 
     // ── Effort ──
@@ -535,7 +561,10 @@ mod tests {
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
-        assert!(matches!(config.thinking, Some(ThinkingConfig::Adaptive)));
+        assert!(matches!(
+            config.thinking,
+            Some(ThinkingConfig::Adaptive { display: None }),
+        ));
     }
 
     #[tokio::test]
