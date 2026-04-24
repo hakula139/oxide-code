@@ -326,6 +326,16 @@ pub(crate) fn lookup(model: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| model.contains(info.id_substr))
 }
 
+/// Capabilities for `model`, falling back to the all-false
+/// [`Capabilities::default`] when the id doesn't match any known row.
+/// Single entry point for the "unknown model → conservative defaults"
+/// invariant so every call site decays the same way.
+pub(crate) fn capabilities_for(model: &str) -> Capabilities {
+    lookup(model)
+        .map(|info| info.capabilities)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

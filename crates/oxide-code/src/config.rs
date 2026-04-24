@@ -198,9 +198,7 @@ impl Config {
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
-        let caps = crate::model::lookup(&model)
-            .map(|info| info.capabilities)
-            .unwrap_or_default();
+        let caps = crate::model::capabilities_for(&model);
 
         let effort_pick = match env::string("ANTHROPIC_EFFORT") {
             Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),

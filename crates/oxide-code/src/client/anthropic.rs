@@ -506,9 +506,7 @@ impl Client {
             });
         }
 
-        let caps = crate::model::lookup(&self.config.model)
-            .map(|info| info.capabilities)
-            .unwrap_or_default();
+        let caps = crate::model::capabilities_for(&self.config.model);
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
@@ -655,9 +653,7 @@ fn compute_betas(
     want_structured: bool,
     is_first_party: bool,
 ) -> Vec<&'static str> {
-    let caps = crate::model::lookup(model)
-        .map(|info| info.capabilities)
-        .unwrap_or_default();
+    let caps = crate::model::capabilities_for(model);
     let is_haiku = model.to_lowercase().contains("haiku");
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
@@ -710,7 +706,7 @@ fn compute_betas(
 /// Whether the target model accepts the `structured-outputs-2025-12-15`
 /// beta. Thin wrapper over the capability table for pre-checks.
 pub(crate) fn supports_structured_outputs(model: &str) -> bool {
-    crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
+    crate::model::capabilities_for(model).structured_outputs
 }
 
 /// Whether `base_url` points at the first-party Anthropic API, gating
