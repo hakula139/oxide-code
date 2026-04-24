@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -187,11 +188,11 @@ async fn edit_file(
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
     let eol = dominant_eol(&content);
-    let content = normalize_eol(content);
-    let old_string = &normalize_eol(old_string.to_owned());
-    let new_string = &normalize_eol(new_string.to_owned());
+    let content = normalize_eol(&content);
+    let old_string = normalize_eol(old_string);
+    let new_string = normalize_eol(new_string);
 
-    let match_count = content.matches(old_string.as_str()).count();
+    let match_count = content.matches(old_string.as_ref()).count();
     if match_count == 0 {
         return Err(format!(
             "old_string not found in {path}. Make sure the string matches exactly, \
@@ -208,9 +209,9 @@ async fn edit_file(
     }
 
     let updated = if replace_all {
-        content.replace(old_string, new_string)
+        content.replace(old_string.as_ref(), new_string.as_ref())
     } else {
-        content.replacen(old_string, new_string, 1)
+        content.replacen(old_string.as_ref(), new_string.as_ref(), 1)
     };
     let updated = apply_eol(updated, eol);
 
@@ -237,11 +238,11 @@ fn dominant_eol(content: &str) -> &'static str {
     if crlf > lf_only { "\r\n" } else { "\n" }
 }
 
-fn normalize_eol(content: String) -> String {
+fn normalize_eol(content: &str) -> Cow<'_, str> {
     if content.contains("\r\n") {
-        content.replace("\r\n", "\n")
+        Cow::Owned(content.replace("\r\n", "\n"))
     } else {
-        content
+        Cow::Borrowed(content)
     }
 }
 
@@ -762,12 +763,19 @@ mod tests {
 
     #[test]
     fn normalize_eol_converts_crlf_to_lf() {
-        assert_eq!(normalize_eol("a\r\nb\r\n".into()), "a\nb\n");
+        let out = normalize_eol("a\r\nb\r\n");
+        assert_eq!(out, "a\nb\n");
+        assert!(matches!(out, Cow::Owned(_)));
     }
 
     #[test]
-    fn normalize_eol_lf_unchanged() {
-        assert_eq!(normalize_eol("a\nb\n".into()), "a\nb\n");
+    fn normalize_eol_lf_input_borrows() {
+        // Pure-LF input must not allocate — the Cow lets the caller
+        // skip a copy on the common case. `Cow::Borrowed` also locks
+        // in that the returned reference ties back to the input.
+        let out = normalize_eol("a\nb\n");
+        assert_eq!(out, "a\nb\n");
+        assert!(matches!(out, Cow::Borrowed(_)));
     }
 
     // ── apply_eol ──
