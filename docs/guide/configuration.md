@@ -21,7 +21,7 @@ base_url = "https://api.anthropic.com"
 effort = "high"
 max_tokens = 32000
 prompt_cache_ttl = "1h"
-# api_key = "sk-ant-..."   # prefer the environment variable for secrets
+# api_key = "sk-ant-..."   # see Authentication below — env var is safer
 
 [tui]
 show_thinking = true
@@ -93,10 +93,12 @@ oxide-code checks three credential sources in order:
 1. `ANTHROPIC_API_KEY` environment variable.
 2. `api_key` under `[client]` in a config file.
 3. Claude Code OAuth credentials, if [Claude Code](https://code.claude.com/docs) is installed and signed in:
-    - **macOS** — the `"Claude Code-credentials"` Keychain entry (preferred), falling back to `~/.claude/.credentials.json`.
-    - **Linux** — `~/.claude/.credentials.json`.
+   - **macOS** — the `"Claude Code-credentials"` Keychain entry (preferred), falling back to `~/.claude/.credentials.json`.
+   - **Linux** — `~/.claude/.credentials.json`.
 
-    Expired tokens are refreshed automatically. No configuration needed.
+   Expired tokens are refreshed automatically. No configuration needed.
+
+Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` is resolved by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident; a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk. This matches what Claude Code itself does — Anthropic's CLI reads `ANTHROPIC_API_KEY` and otherwise keeps OAuth tokens in the macOS Keychain where it can.
 
 ## Environment variables
 
