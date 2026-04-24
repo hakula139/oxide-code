@@ -1090,13 +1090,17 @@ mod tests {
         Auth::OAuth("t".to_owned())
     }
 
-    /// Concatenates SSE frames into a valid response body, each
-    /// followed by the required `\n\n` terminator.
-    fn sse_body(frames: &[&str]) -> String {
+    /// Builds an SSE response body from `(event, data)` pairs. Each
+    /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
+    /// the frame-separator invariant in one place so call sites don't
+    /// hand-roll it (and can't silently omit the `\n\n`).
+    fn sse_body(frames: &[(&str, &str)]) -> String {
+        use std::fmt::Write;
         let mut body = String::new();
-        for f in frames {
-            body.push_str(f);
-            body.push_str("\n\n");
+        for (event, data) in frames {
+            writeln!(body, "event: {event}").unwrap();
+            writeln!(body, "data: {data}").unwrap();
+            body.push('\n');
         }
         body
     }
@@ -1114,18 +1118,27 @@ mod tests {
     /// Well-formed SSE body for a short text response.
     fn text_stream_body() -> String {
         sse_body(&[
-            r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}"#,
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            r#"event: content_block_stop
-data: {"type":"content_block_stop","index":0}"#,
-            r#"event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ])
     }
 
@@ -1438,12 +1451,15 @@ data: {"type":"message_stop"}"#,
         // would mangle a 4-byte emoji split across TCP chunk boundaries.
         let server = MockServer::start().await;
         let body = sse_body(&[
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1483,14 +1499,16 @@ data: {"type":"message_stop"}"#,
         // one bad frame cannot poison the whole turn.
         let server = MockServer::start().await;
         let body = sse_body(&[
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r"event: content_block_delta
-data: {not valid json",
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", "{not valid json"),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1529,8 +1547,10 @@ data: {"type":"message_stop"}"#,
         // `StreamEvent::Error` flows as `Ok(Error { .. })` on the channel;
         // the caller (`agent.rs`) converts it to a bail!.
         let server = MockServer::start().await;
-        let body = sse_body(&[r#"event: error
-data: {"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#]);
+        let body = sse_body(&[(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#,
+        )]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(
