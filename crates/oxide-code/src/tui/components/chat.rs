@@ -1582,6 +1582,22 @@ mod tests {
     }
 
     #[test]
+    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
+        // `git diff --stat` and similar tools indent every body line with
+        // a meaningful leading space. Trimming whole-content whitespace
+        // used to strip it off the first line only, misaligning the
+        // first row against the rest.
+        let mut chat = test_chat();
+        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains(" a.rs | 1 +"),
+            "first body line must keep its leading space: {text}",
+        );
+        assert!(text.contains(" b.rs | 2 +"));
+    }
+
+    #[test]
     fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
         // When content is just the duplicated label (no trailing body
         // lines), rendering collapses to a bare status line.
