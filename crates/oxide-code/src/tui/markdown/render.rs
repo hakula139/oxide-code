@@ -1364,69 +1364,6 @@ mod tests {
         );
     }
 
-    // ── Table Helpers (direct) ──
-
-    #[test]
-    fn fit_column_widths_empty_input_returns_empty() {
-        assert_eq!(fit_column_widths(&[], 80), Vec::<usize>::new());
-    }
-
-    #[test]
-    fn fit_column_widths_natural_fits_budget_unchanged() {
-        // Natural total (5 + 5 = 10) + overhead (1 + 3*2 = 7) = 17 ≤ 80.
-        let natural = vec![5, 5];
-        assert_eq!(fit_column_widths(&natural, 80), natural);
-    }
-
-    #[test]
-    fn fit_column_widths_shrinks_widest_column_first() {
-        // Budget = 20, overhead for 2 cols = 7, available = 13.
-        // Natural [3, 20] → sum 23 > 13. Cap should settle at 10 so
-        // sums to 3 + 10 = 13, leaving the narrow column untouched.
-        let out = fit_column_widths(&[3, 20], 20);
-        assert_eq!(out, vec![3, 10]);
-    }
-
-    #[test]
-    fn fit_column_widths_preserves_zero_width_columns() {
-        // An empty column (natural=0) stays at 0 even when shrinking;
-        // non-empty columns keep a minimum of 1 so wrapping stays viable.
-        let out = fit_column_widths(&[0, 40], 10);
-        assert_eq!(out[0], 0);
-        assert!(out[1] >= 1);
-    }
-
-    #[test]
-    fn wrap_cell_empty_returns_single_empty_sub_line() {
-        let out = wrap_cell(&[], 10);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].is_empty());
-    }
-
-    #[test]
-    fn wrap_cell_zero_target_width_returns_cell_as_is() {
-        let cell = vec![Span::raw("hello".to_owned())];
-        let out = wrap_cell(&cell, 0);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0], cell);
-    }
-
-    #[test]
-    fn wrap_cell_wraps_long_content_to_target_width() {
-        let cell = vec![Span::raw("one two three four".to_owned())];
-        let out = wrap_cell(&cell, 8);
-        assert!(out.len() >= 2, "long cell should wrap: {out:?}");
-        for sub_line in &out {
-            let width: usize = sub_line
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            assert!(width <= 8, "sub-line exceeds target width: {sub_line:?}");
-        }
-    }
-
-    // ── Tables (rendered) ──
-
     #[test]
     fn table_wrapped_cell_keeps_alignment_in_other_columns() {
         // A wrapping cell in one column should leave the other columns
@@ -1468,6 +1405,69 @@ mod tests {
                 "sub-row should keep all column pipes: {row:?}"
             );
         }
+    }
+
+    // ── fit_column_widths ──
+
+    #[test]
+    fn fit_column_widths_natural_fits_budget_unchanged() {
+        // Natural total (5 + 5 = 10) + overhead (1 + 3*2 = 7) = 17 ≤ 80.
+        let natural = vec![5, 5];
+        assert_eq!(fit_column_widths(&natural, 80), natural);
+    }
+
+    #[test]
+    fn fit_column_widths_shrinks_widest_column_first() {
+        // Budget = 20, overhead for 2 cols = 7, available = 13.
+        // Natural [3, 20] → sum 23 > 13. Cap should settle at 10 so
+        // sums to 3 + 10 = 13, leaving the narrow column untouched.
+        let out = fit_column_widths(&[3, 20], 20);
+        assert_eq!(out, vec![3, 10]);
+    }
+
+    #[test]
+    fn fit_column_widths_preserves_zero_width_columns() {
+        // An empty column (natural=0) stays at 0 even when shrinking;
+        // non-empty columns keep a minimum of 1 so wrapping stays viable.
+        let out = fit_column_widths(&[0, 40], 10);
+        assert_eq!(out[0], 0);
+        assert!(out[1] >= 1);
+    }
+
+    #[test]
+    fn fit_column_widths_empty_input_returns_empty() {
+        assert_eq!(fit_column_widths(&[], 80), Vec::<usize>::new());
+    }
+
+    // ── wrap_cell ──
+
+    #[test]
+    fn wrap_cell_wraps_long_content_to_target_width() {
+        let cell = vec![Span::raw("one two three four".to_owned())];
+        let out = wrap_cell(&cell, 8);
+        assert!(out.len() >= 2, "long cell should wrap: {out:?}");
+        for sub_line in &out {
+            let width: usize = sub_line
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(width <= 8, "sub-line exceeds target width: {sub_line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_empty_returns_single_empty_sub_line() {
+        let out = wrap_cell(&[], 10);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_empty());
+    }
+
+    #[test]
+    fn wrap_cell_zero_target_width_returns_cell_as_is() {
+        let cell = vec![Span::raw("hello".to_owned())];
+        let out = wrap_cell(&cell, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], cell);
     }
 
     // ── Inline Content ──
