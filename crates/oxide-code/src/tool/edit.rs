@@ -174,11 +174,7 @@ async fn edit_file(
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
     if metadata.len() > MAX_EDIT_FILE_SIZE {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "file sizes are well within f64 range"
-        )]
-        let mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        let mb = super::bytes_to_mb(metadata.len());
         let limit_mb = MAX_EDIT_FILE_SIZE / (1024 * 1024);
         return Err(format!(
             "File is too large ({mb:.1} MB, max {limit_mb} MB). \

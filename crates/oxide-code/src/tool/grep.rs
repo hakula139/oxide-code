@@ -292,11 +292,7 @@ fn append_skipped_warnings(output: &mut String, skipped: &[(PathBuf, u64)], base
     let limit_mb = MAX_GREP_FILE_SIZE / (1024 * 1024);
     _ = write!(output, "\n\nSkipped (exceeds {limit_mb} MB size limit):");
     for (path, size) in skipped {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "file sizes are well within f64 range"
-        )]
-        let mb = *size as f64 / (1024.0 * 1024.0);
+        let mb = super::bytes_to_mb(*size);
         let display = super::display_path(path, base);
         _ = write!(output, "\n  {display} ({mb:.1} MB)");
     }

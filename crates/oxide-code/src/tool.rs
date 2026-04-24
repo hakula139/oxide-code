@@ -441,6 +441,18 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
+/// Converts a byte count to megabytes for display. Centralizes the
+/// `clippy::cast_precision_loss` suppression — every file-size cap in
+/// this crate is well below 2^53 bytes, so the f64 cast is exact.
+pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
+    )]
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    mb
+}
+
 /// Cap on tool output size. Prevents flooding the LLM context window.
 /// Roughly 32K tokens at ~4 chars / token.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
