@@ -658,6 +658,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_summarize_call_shortens_file_paths_inside_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let path = cwd.join("crates/oxide-code/src/tool/read.rs");
+        let path = path.to_str().unwrap();
+        let cases = [
+            (
+                "edit",
+                serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
+                "Edit(crates/oxide-code/src/tool/read.rs)",
+            ),
+            (
+                "read",
+                serde_json::json!({"file_path": path}),
+                "Read(crates/oxide-code/src/tool/read.rs)",
+            ),
+            (
+                "write",
+                serde_json::json!({"file_path": path, "content": "x"}),
+                "Write(crates/oxide-code/src/tool/read.rs)",
+            ),
+        ];
+        let tools = all_tools();
+        for (name, input, expected) in &cases {
+            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            assert_eq!(t.summarize_call(input), *expected, "tool {name}");
+        }
+    }
+
     // ── title_case ──
 
     #[test]

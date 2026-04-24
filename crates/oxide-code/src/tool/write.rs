@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, extract_input_field};
+use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
 
 pub(crate) struct WriteTool;
 
@@ -39,6 +39,10 @@ impl Tool for WriteTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "file_path")
+    }
+
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        summarize_path_call(self.name(), input, "file_path")
     }
 
     fn run(

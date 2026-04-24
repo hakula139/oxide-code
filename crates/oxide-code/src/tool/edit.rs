@@ -3,7 +3,9 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
+use super::{
+    Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field, summarize_path_call,
+};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -52,6 +54,10 @@ impl Tool for EditTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "file_path")
+    }
+
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        summarize_path_call(self.name(), input, "file_path")
     }
 
     fn result_view(
