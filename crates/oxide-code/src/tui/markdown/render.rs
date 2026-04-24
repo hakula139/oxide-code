@@ -1346,11 +1346,10 @@ mod tests {
             .map(String::as_str)
             .collect();
         for row in &data_rows {
+            let row_width = UnicodeWidthStr::width(*row);
             assert_eq!(
-                UnicodeWidthStr::width(*row),
-                border_width,
-                "data row width ({}) != border width ({border_width}): {row:?}",
-                UnicodeWidthStr::width(*row)
+                row_width, border_width,
+                "data row width ({row_width}) != border width ({border_width}): {row:?}",
             );
         }
 
