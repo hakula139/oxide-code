@@ -41,7 +41,7 @@ The direction is simple:
 ### Terminal UI
 
 - Streaming display with markdown rendering and syntax-highlighted code blocks.
-- Catppuccin Mocha theme, tool-call blocks with per-tool icons and success / error indicators, multi-line input, and a status bar with model, working directory, and streaming spinner.
+- Catppuccin Mocha theme, tool-call blocks with per-tool icons and success / error indicators, inline Edit diffs, multi-line input, and a status bar with model, working directory, and streaming spinner.
 - Works in TUI, bare REPL (`--no-tui`), and headless (`-p`) modes, with panic-safe terminal restore.
 
 ### Session Persistence
@@ -55,8 +55,8 @@ The direction is simple:
 
 ### Terminal UI
 
-- Viewport virtualization for long conversations.
-- Per-tool result rendering — `edit` diffs ship today; grouped matches for `grep` / `glob` and styled excerpts for `read` are next.
+- Per-tool result rendering beyond Edit diffs: grouped matches for `grep`, structured file lists for `glob`, and styled excerpts for `read`.
+- Viewport virtualization for long conversations after the richer result views and block measurement hooks are in place.
 
 ### Tool & Prompt Enhancements
 
