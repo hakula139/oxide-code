@@ -8,8 +8,8 @@
 //! trait module, so it scopes to exactly the blocks that use it.
 //!
 //! Result rendering is per-variant via [`ToolResultView`]: the default
-//! is a truncated text body; tools with structured inputs (Edit today;
-//! Read / Grep / Glob later) produce richer variants via
+//! is a truncated text body; tools with structured output (Edit diffs,
+//! Read excerpts today; Grep / Glob later) produce richer variants via
 //! [`Tool::result_view`](crate::tool::Tool::result_view). The enum
 //! itself lives in `crate::tool` — rendering stays here, so adding a
 //! new variant touches the tool module + this file + the renderer.
@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{ChatBlock, RenderCtx};
-use crate::tool::ToolResultView;
+use crate::tool::{ReadExcerptLine, ToolResultView};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
@@ -132,6 +132,13 @@ impl ChatBlock for ToolResultBlock {
             ToolResultView::Text { content } => {
                 render_text_body(&mut out, ctx, content, &self.label, self.is_error);
             }
+            ToolResultView::ReadExcerpt {
+                path,
+                lines,
+                total_lines,
+            } => {
+                render_read_excerpt_body(&mut out, ctx, path, lines, *total_lines, self.is_error);
+            }
             ToolResultView::Diff {
                 old,
                 new,
@@ -219,6 +226,90 @@ fn render_text_body(
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
             Span::styled(format!("... +{n} {label}"), ctx.theme.dim()),
         ]));
+    }
+}
+
+fn render_read_excerpt_body(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    path: &str,
+    lines: &[ReadExcerptLine],
+    total_lines: usize,
+    is_error: bool,
+) {
+    let border_style = border_style_for(ctx.theme, is_error);
+    let width = usize::from(ctx.width);
+    let status_cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let context = read_context_label(path, lines, total_lines);
+    let context_line = Line::from(vec![
+        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(context, ctx.theme.dim()),
+    ]);
+    out.extend(wrap_line(
+        context_line,
+        width,
+        STATUS_LINE_CONT.width(),
+        Some(&status_cont_prefix),
+    ));
+    if lines.is_empty() {
+        return;
+    }
+
+    let visible = if lines.len() > MAX_TOOL_OUTPUT_LINES {
+        &lines[..MAX_TOOL_OUTPUT_LINES]
+    } else {
+        lines
+    };
+    let line_number_width = visible
+        .iter()
+        .map(|line| line.number.to_string().width())
+        .max()
+        .unwrap_or(1);
+    let line_cont_prefix = format!("{STATUS_LINE_CONT}{}   ", " ".repeat(line_number_width));
+    let line_cont_spans = border_continuation_prefix(&line_cont_prefix, border_style);
+
+    for line in visible {
+        let expanded = expand_tabs(&line.text);
+        let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
+        let line_number = format!("{:>width$}", line.number, width = line_number_width);
+        let rendered = Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(line_number, ctx.theme.muted()),
+            Span::styled(" │ ", ctx.theme.dim()),
+            Span::styled(display_text, ctx.theme.text()),
+        ]);
+        out.extend(wrap_line(
+            rendered,
+            width,
+            line_cont_prefix.width(),
+            Some(&line_cont_spans),
+        ));
+    }
+
+    if lines.len() > MAX_TOOL_OUTPUT_LINES {
+        let hidden = lines.len() - MAX_TOOL_OUTPUT_LINES;
+        let noun = if hidden == 1 { "line" } else { "lines" };
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(format!("... +{hidden} {noun}"), ctx.theme.dim()),
+        ]));
+    }
+}
+
+fn read_context_label(path: &str, lines: &[ReadExcerptLine], total_lines: usize) -> String {
+    let Some(first) = lines.first() else {
+        return format!("{path} (empty file)");
+    };
+    let last = lines.last().unwrap_or(first);
+    let range = if first.number == last.number {
+        first.number.to_string()
+    } else {
+        format!("{}-{}", first.number, last.number)
+    };
+    if first.number == 1 && last.number == total_lines {
+        format!("{path}:{range}")
+    } else {
+        format!("{path}:{range} of {total_lines}")
     }
 }
 
@@ -530,6 +621,40 @@ mod tests {
     use ratatui::style::Style;
 
     use super::*;
+
+    // ── read_context_label ──
+
+    #[test]
+    fn read_context_label_full_file_omits_total_suffix() {
+        let lines = vec![
+            ReadExcerptLine {
+                number: 1,
+                text: "alpha".to_owned(),
+            },
+            ReadExcerptLine {
+                number: 2,
+                text: "beta".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            read_context_label("/tmp/example.rs", &lines, 2),
+            "/tmp/example.rs:1-2"
+        );
+    }
+
+    #[test]
+    fn read_context_label_single_line_uses_single_number() {
+        let lines = vec![ReadExcerptLine {
+            number: 4,
+            text: "delta".to_owned(),
+        }];
+
+        assert_eq!(
+            read_context_label("/tmp/example.rs", &lines, 10),
+            "/tmp/example.rs:4 of 10"
+        );
+    }
 
     // ── split_diff_side ──
 

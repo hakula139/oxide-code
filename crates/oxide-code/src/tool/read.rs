@@ -4,7 +4,10 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, extract_input_field};
+use super::{
+    ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
+    extract_input_field, summarize_path_call,
+};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 /// Per-file size cap for `read` (10 MB). Accommodates typical large
@@ -49,6 +52,20 @@ impl Tool for ReadTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "file_path")
+    }
+
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        summarize_path_call(self.name(), input, "file_path")
+    }
+
+    fn result_view(
+        &self,
+        input: &serde_json::Value,
+        content: &str,
+        _metadata: &ToolMetadata,
+    ) -> Option<ToolResultView> {
+        let path = display_cwd_path(extract_input_field(input, "file_path")?);
+        read_excerpt_view(path, content)
     }
 
     fn run(
@@ -183,12 +200,59 @@ async fn read_file(
 
 // ── Formatting ──
 
+fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
+    if content.trim() == "(empty file)" {
+        return Some(ToolResultView::ReadExcerpt {
+            path,
+            lines: Vec::new(),
+            total_lines: 0,
+        });
+    }
+
+    let (body, footer) = split_read_footer(content);
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        lines.push(parse_read_line(line)?);
+    }
+
+    let total_lines = footer
+        .and_then(parse_total_lines_footer)
+        .or_else(|| lines.last().map(|line| line.number))?;
+    Some(ToolResultView::ReadExcerpt {
+        path,
+        lines,
+        total_lines,
+    })
+}
+
+fn split_read_footer(content: &str) -> (&str, Option<&str>) {
+    match content.split_once("\n\n") {
+        Some((body, footer)) if footer.starts_with("(Showing lines ") => (body, Some(footer)),
+        _ => (content, None),
+    }
+}
+
+fn parse_read_line(line: &str) -> Option<ReadExcerptLine> {
+    let (number, text) = line.split_once('\t')?;
+    Some(ReadExcerptLine {
+        number: number.parse().ok()?,
+        text: text.to_owned(),
+    })
+}
+
+fn parse_total_lines_footer(footer: &str) -> Option<usize> {
+    let (_, total) = footer.split_once(" of ")?;
+    total.strip_suffix(" total)")?.parse().ok()
+}
+
 fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
     // ── run ──
@@ -357,6 +421,107 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("beyond the end"));
+    }
+
+    // ── result_view ──
+
+    #[test]
+    fn result_view_builds_read_excerpt() {
+        let cwd = std::env::current_dir().unwrap();
+        let path = cwd.join("example.rs");
+        let input = serde_json::json!({"file_path": path});
+        let view = ReadTool
+            .result_view(&input, "10\tfn main() {}\n11\t}", &ToolMetadata::default())
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::ReadExcerpt {
+                path: "example.rs".to_owned(),
+                lines: vec![
+                    ReadExcerptLine {
+                        number: 10,
+                        text: "fn main() {}".to_owned(),
+                    },
+                    ReadExcerptLine {
+                        number: 11,
+                        text: "}".to_owned(),
+                    },
+                ],
+                total_lines: 11,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_preserves_total_lines_from_footer() {
+        let input = serde_json::json!({"file_path": "/tmp/example.rs"});
+        let view = ReadTool
+            .result_view(
+                &input,
+                indoc! { "\
+                    2\tbeta
+                    3\tgamma
+
+                    (Showing lines 2–3 of 5 total)" },
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::ReadExcerpt {
+                path: "/tmp/example.rs".to_owned(),
+                lines: vec![
+                    ReadExcerptLine {
+                        number: 2,
+                        text: "beta".to_owned(),
+                    },
+                    ReadExcerptLine {
+                        number: 3,
+                        text: "gamma".to_owned(),
+                    },
+                ],
+                total_lines: 5,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_handles_empty_file() {
+        let input = serde_json::json!({"file_path": "/tmp/empty.rs"});
+        let view = ReadTool
+            .result_view(&input, "(empty file)", &ToolMetadata::default())
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::ReadExcerpt {
+                path: "/tmp/empty.rs".to_owned(),
+                lines: Vec::new(),
+                total_lines: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_for_malformed_output() {
+        let input = serde_json::json!({"file_path": "/tmp/example.rs"});
+        assert!(
+            ReadTool
+                .result_view(&input, "not line-numbered", &ToolMetadata::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_for_missing_file_path() {
+        let input = serde_json::json!({});
+        assert!(
+            ReadTool
+                .result_view(&input, "1\tline", &ToolMetadata::default())
+                .is_none()
+        );
     }
 
     // ── strip_bom ──

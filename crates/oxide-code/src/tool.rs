@@ -119,14 +119,21 @@ impl ToolOutput {
 /// [`Tool::result_view`] and rendered by the TUI's tool-result block.
 ///
 /// This enum lives here — not in the TUI layer — so per-tool parsing
-/// (Edit's diff extraction, future Read/Grep/Glob shapes) stays in the
-/// module that owns each tool's input/output contract. The TUI still
-/// owns rendering; this is pure data.
+/// (Edit's diff extraction, Read's line-numbered excerpts, future
+/// Grep/Glob shapes) stays in the module that owns each tool's
+/// input/output contract. The TUI still owns rendering; this is pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolResultView {
     /// Default shape — the raw tool output, shown as a truncated
     /// monospace block with a `+N lines` footer when it overflows.
     Text { content: String },
+    /// Read tool — renders as a line-numbered excerpt with path/range
+    /// context while leaving the model-facing output unchanged.
+    ReadExcerpt {
+        path: String,
+        lines: Vec<ReadExcerptLine>,
+        total_lines: usize,
+    },
     /// Edit tool — renders as a `-` old / `+` new unified diff.
     /// `replacements` is the number of matches actually replaced
     /// (> 1 only when `replace_all` succeeded on multiple matches).
@@ -136,6 +143,13 @@ pub(crate) enum ToolResultView {
         replace_all: bool,
         replacements: usize,
     },
+}
+
+/// One line in a structured `read` result view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadExcerptLine {
+    pub(crate) number: usize,
+    pub(crate) text: String,
 }
 
 // ── Tool Trait ──
@@ -180,7 +194,7 @@ pub(crate) trait Tool: Send + Sync {
     /// `input` is the original tool-call arguments (already used by
     /// `run`); `content` is the success-path `ToolOutput::content`;
     /// `metadata` is the same `ToolMetadata` the tool attached in
-    /// `run` (title, exit code, replacements, …) so tools can drive
+    /// `run` (title, exit code, replacements, ...) so tools can drive
     /// the view structurally instead of re-parsing `content`.
     ///
     /// Returning `None` — the default — falls back to [`ToolResultView::Text`].
@@ -325,6 +339,34 @@ pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, Str
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
     Ok(search_path.map_or(cwd, PathBuf::from))
+}
+
+/// Returns a relative path string when `path` is inside the current working
+/// directory, otherwise the absolute path. Falls back to `path` when the cwd
+/// cannot be read.
+pub(crate) fn display_cwd_path(path: &str) -> String {
+    let cwd = std::env::current_dir().ok();
+    display_cwd_path_from(path, cwd.as_deref())
+}
+
+fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
+    match cwd {
+        Some(cwd) => display_path(Path::new(path), cwd),
+        None => path.to_owned(),
+    }
+}
+
+/// Returns a tool-call label using a cwd-relative path argument when possible.
+pub(crate) fn summarize_path_call(
+    tool_name: &str,
+    input: &serde_json::Value,
+    path_key: &str,
+) -> String {
+    let label = title_case(tool_name);
+    match extract_input_field(input, path_key) {
+        Some(path) => format!("{label}({})", display_cwd_path(path)),
+        None => label,
+    }
 }
 
 /// Returns a relative path string when `path` is inside `base`, otherwise the
@@ -621,6 +663,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
+        assert_eq!(
+            display_cwd_path_from("/tmp/example.rs", None),
+            "/tmp/example.rs"
+        );
+    }
+
+    #[test]
+    fn tool_summarize_call_shortens_file_paths_inside_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let path = cwd.join("crates/oxide-code/src/tool/read.rs");
+        let path = path.to_str().unwrap();
+        let cases = [
+            (
+                "edit",
+                serde_json::json!({"file_path": path, "old_string": "x", "new_string": "y"}),
+                "Edit(crates/oxide-code/src/tool/read.rs)",
+            ),
+            (
+                "read",
+                serde_json::json!({"file_path": path}),
+                "Read(crates/oxide-code/src/tool/read.rs)",
+            ),
+            (
+                "write",
+                serde_json::json!({"file_path": path, "content": "x"}),
+                "Write(crates/oxide-code/src/tool/read.rs)",
+            ),
+        ];
+        let tools = all_tools();
+        for (name, input, expected) in &cases {
+            let t = tools.iter().find(|t| t.name() == *name).unwrap();
+            assert_eq!(t.summarize_call(input), *expected, "tool {name}");
+        }
+    }
+
     // ── title_case ──
 
     #[test]
@@ -705,7 +784,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_to_tool_for_structured_output() {
-        // Edit is the one registered override today; routing through
+        // Edit was the first registered override; routing through
         // the registry must produce the same `Diff` the tool owns —
         // including the field values, so a mutation returning an
         // empty diff wouldn't pass.
@@ -735,8 +814,27 @@ mod tests {
     }
 
     #[test]
+    fn result_view_delegates_read_excerpt() {
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
+        let metadata = ToolMetadata::default();
+        let view = registry.result_view("read", &input, "1\tmod foo;", &metadata, false);
+        assert_eq!(
+            view,
+            ToolResultView::ReadExcerpt {
+                path: "/tmp/lib.rs".to_owned(),
+                lines: vec![ReadExcerptLine {
+                    number: 1,
+                    text: "mod foo;".to_owned(),
+                }],
+                total_lines: 1,
+            },
+        );
+    }
+
+    #[test]
     fn result_view_short_circuits_errors_to_text() {
-        // Error outputs are prose ("old_string not found …"); rendering
+        // Error outputs are prose ("old_string not found ..."); rendering
         // them as a diff would hide the failure. The short-circuit lives
         // in the registry so individual tools don't each re-implement it.
         let registry = ToolRegistry::new(vec![Box::new(EditTool)]);
