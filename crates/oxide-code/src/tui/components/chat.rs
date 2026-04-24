@@ -27,11 +27,13 @@ use self::blocks::{
     ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
+use crate::agent::pending_calls::{
+    FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header,
+};
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
-use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call

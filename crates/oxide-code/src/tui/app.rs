@@ -21,10 +21,10 @@ use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
+use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 

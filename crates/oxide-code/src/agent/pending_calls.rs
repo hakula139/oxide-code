@@ -1,11 +1,11 @@
 //! Pending tool-call bookkeeping shared between live streaming and
 //! transcript resume.
 //!
-//! Both the live event path ([`super::app::App::handle_agent_event`])
-//! and the resumed-history walk
-//! ([`super::components::chat::ChatView::load_history`]) need to
-//! bridge a tool-call observation to its later matching result so they
-//! can render the result with:
+//! Both the live event path
+//! ([`crate::tui::app::App::handle_agent_event`]) and the resumed-history
+//! walk ([`crate::tui::components::chat::ChatView::load_history`]) need
+//! to bridge a tool-call observation to its later matching result so
+//! they can render the result with:
 //!
 //! - The call's label as the status-line fallback when the tool
 //!   emits `title: None`.

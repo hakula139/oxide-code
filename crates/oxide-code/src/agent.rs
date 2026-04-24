@@ -6,6 +6,7 @@
 //! cap [`MAX_TOOL_ROUNDS`] trips.
 
 pub(crate) mod event;
+pub(crate) mod pending_calls;
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::{Mutex, mpsc};
