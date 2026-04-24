@@ -81,6 +81,53 @@ impl FromStr for Effort {
     }
 }
 
+/// Prompt-cache TTL sent as `cache_control.ttl`. Anthropic silently
+/// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
+/// explicit opt-in. oxide-code defaults to `OneHour`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[serde(rename = "5m")]
+    FiveMin,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl PromptCacheTtl {
+    /// Wire value for `cache_control.ttl`. `None` when the TTL is
+    /// the server default (5 m) so the JSON omits the field entirely.
+    pub(crate) const fn wire(self) -> Option<&'static str> {
+        match self {
+            Self::FiveMin => None,
+            Self::OneHour => Some("1h"),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveMin => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
+impl fmt::Display for PromptCacheTtl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PromptCacheTtl {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "5m" => Ok(Self::FiveMin),
+            "1h" => Ok(Self::OneHour),
+            _ => bail!("invalid prompt_cache_ttl {s:?}; expected one of: 5m, 1h"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: Auth,
@@ -100,6 +147,11 @@ pub struct Config {
         )
     )]
     pub effort: Option<Effort>,
+    /// `cache_control.ttl` for every cacheable block. Default is
+    /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
+    /// drop made the server default (5 m) a silent cost regression
+    /// on long sessions.
+    pub prompt_cache_ttl: PromptCacheTtl,
 }
 
 impl Config {
@@ -159,6 +211,13 @@ impl Config {
             .or(tui.show_thinking)
             .unwrap_or(false);
 
+        let prompt_cache_ttl = match env::string("OX_PROMPT_CACHE_TTL") {
+            Some(raw) => raw
+                .parse::<PromptCacheTtl>()
+                .context("OX_PROMPT_CACHE_TTL")?,
+            None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
+        };
+
         Ok(Self {
             auth,
             model,
@@ -167,6 +226,7 @@ impl Config {
             thinking,
             show_thinking,
             effort,
+            prompt_cache_ttl,
         })
     }
 }
@@ -249,6 +309,36 @@ mod tests {
         assert_eq!(wrap.effort, Effort::Xhigh);
     }
 
+    // ── PromptCacheTtl ──
+
+    #[test]
+    fn prompt_cache_ttl_wire_shape() {
+        // 5m is the server default → field omitted. 1h opts in → "1h".
+        assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
+        assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
+    }
+
+    #[test]
+    fn prompt_cache_ttl_round_trips_through_serde_and_fromstr() {
+        for (variant, token) in [
+            (PromptCacheTtl::FiveMin, "5m"),
+            (PromptCacheTtl::OneHour, "1h"),
+        ] {
+            assert_eq!(serde_json::to_value(variant).unwrap(), token);
+            assert_eq!(variant.to_string(), token);
+            assert_eq!(token.parse::<PromptCacheTtl>().unwrap(), variant);
+        }
+    }
+
+    #[test]
+    fn prompt_cache_ttl_rejects_unknown_tokens_with_actionable_error() {
+        let err = "30m".parse::<PromptCacheTtl>().expect_err("unknown token");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("30m"), "{msg}");
+        assert!(msg.contains("5m"), "{msg}");
+        assert!(msg.contains("1h"), "{msg}");
+    }
+
     // ── Config::load ──
 
     /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
@@ -262,6 +352,7 @@ mod tests {
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
         "OX_SHOW_THINKING",
+        "OX_PROMPT_CACHE_TTL",
         "XDG_CONFIG_HOME",
     ];
 
@@ -314,7 +405,8 @@ mod tests {
     async fn load_defaults_apply_when_no_config_and_no_env() {
         // Default model (Opus 4.7) supports `xhigh`, so both `effort`
         // and `max_tokens` derive from that ceiling — matches the
-        // claude-code 2.1.119 packet capture.
+        // claude-code 2.1.119 packet capture. Prompt cache defaults
+        // to 1h (opt-out via `OX_PROMPT_CACHE_TTL=5m`).
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -323,6 +415,7 @@ mod tests {
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.max_tokens, 64_000);
         assert_eq!(config.effort, Some(Effort::Xhigh));
+        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(!config.show_thinking);
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
     }
@@ -607,5 +700,62 @@ mod tests {
         assert_eq!(default_max_tokens(Some(Effort::Medium)), DEFAULT_MAX_TOKENS);
         assert_eq!(default_max_tokens(Some(Effort::Low)), DEFAULT_MAX_TOKENS);
         assert_eq!(default_max_tokens(None), DEFAULT_MAX_TOKENS);
+    }
+
+    // ── Config::load / prompt_cache_ttl ──
+
+    #[tokio::test]
+    async fn load_prompt_cache_ttl_env_overrides_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "5m")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+    }
+
+    #[tokio::test]
+    async fn load_prompt_cache_ttl_file_picks_up_when_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                prompt_cache_ttl = "5m"
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+    }
+
+    #[tokio::test]
+    async fn load_prompt_cache_ttl_env_beats_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                prompt_cache_ttl = "5m"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "1h")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+    }
+
+    #[tokio::test]
+    async fn load_prompt_cache_ttl_invalid_env_surfaces_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("OX_PROMPT_CACHE_TTL", "forever")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("invalid ttl must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OX_PROMPT_CACHE_TTL"), "{msg}");
+        assert!(msg.contains("forever"), "{msg}");
     }
 }

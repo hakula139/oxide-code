@@ -41,6 +41,7 @@ pub(super) struct ClientConfig {
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
     pub effort: Option<super::Effort>,
+    pub prompt_cache_ttl: Option<super::PromptCacheTtl>,
 }
 
 /// Terminal UI settings (`[tui]` section).
@@ -70,6 +71,7 @@ impl ClientConfig {
             base_url: other.base_url.or(self.base_url),
             max_tokens: other.max_tokens.or(self.max_tokens),
             effort: other.effort.or(self.effort),
+            prompt_cache_ttl: other.prompt_cache_ttl.or(self.prompt_cache_ttl),
         }
     }
 }
@@ -192,6 +194,7 @@ mod tests {
                 base_url: Some("https://base.example.com".to_owned()),
                 max_tokens: Some(1000),
                 effort: Some(super::super::Effort::Low),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
@@ -204,6 +207,7 @@ mod tests {
                 base_url: Some("https://other.example.com".to_owned()),
                 max_tokens: Some(2000),
                 effort: Some(super::super::Effort::Max),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::OneHour),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -220,6 +224,10 @@ mod tests {
         );
         assert_eq!(client.max_tokens, Some(2000));
         assert_eq!(client.effort, Some(super::super::Effort::Max));
+        assert_eq!(
+            client.prompt_cache_ttl,
+            Some(super::super::PromptCacheTtl::OneHour)
+        );
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
@@ -234,6 +242,7 @@ mod tests {
                 base_url: Some("https://example.com".to_owned()),
                 max_tokens: Some(4096),
                 effort: Some(super::super::Effort::High),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -247,6 +256,10 @@ mod tests {
         assert_eq!(client.base_url.as_deref(), Some("https://example.com"));
         assert_eq!(client.max_tokens, Some(4096));
         assert_eq!(client.effort, Some(super::super::Effort::High));
+        assert_eq!(
+            client.prompt_cache_ttl,
+            Some(super::super::PromptCacheTtl::FiveMin)
+        );
 
         let tui = merged.tui.expect("tui section should survive");
         assert_eq!(tui.show_thinking, Some(true));

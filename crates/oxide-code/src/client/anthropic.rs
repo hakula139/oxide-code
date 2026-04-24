@@ -24,7 +24,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::billing;
-use crate::config::{Auth, Config, ThinkingConfig};
+use crate::config::{Auth, Config, PromptCacheTtl, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -128,6 +128,8 @@ struct SystemBlock<'a> {
 /// Prompt caching control. The `scope` field determines the cache sharing
 /// level: `"global"` for static content identical across sessions (1P only),
 /// `None` for the default org-scoped ephemeral cache (universally accepted).
+/// The `ttl` field overrides the server default (5 m as of 2026-03) —
+/// oxide-code defaults to `"1h"`, opt-out via `prompt_cache_ttl = "5m"`.
 ///
 /// `scope: "global"` must be a true prefix of all preceding request content
 /// — the server rejects a global-scoped block preceded by a non-global
@@ -138,6 +140,8 @@ struct CacheControl {
     r#type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 // ── SSE response types ──
@@ -438,7 +442,10 @@ impl Client {
             system_blocks.push(SystemBlock {
                 r#type: "text",
                 text: &static_joined,
-                cache_control: Some(static_prefix_cache_control(is_first_party)),
+                cache_control: Some(static_prefix_cache_control(
+                    is_first_party,
+                    self.config.prompt_cache_ttl,
+                )),
             });
         }
         if !dynamic_joined.is_empty() {
@@ -669,11 +676,13 @@ fn is_first_party_base_url(base_url: &str) -> bool {
 /// global scope so the prefix is shared across sessions; on 3P, fall
 /// back to the default (org-scoped) ephemeral cache — 3P gateways
 /// reject `scope: "global"` because tool definitions render first and
-/// taint the cache prefix.
-fn static_prefix_cache_control(is_first_party: bool) -> CacheControl {
+/// taint the cache prefix. `ttl` overrides the server default (5 m)
+/// when set via `config.prompt_cache_ttl`.
+fn static_prefix_cache_control(is_first_party: bool, ttl: PromptCacheTtl) -> CacheControl {
     CacheControl {
         r#type: "ephemeral",
         scope: is_first_party.then_some("global"),
+        ttl: ttl.wire(),
     }
 }
 
@@ -972,6 +981,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         thinking: None,
         show_thinking: false,
         effort: None,
+        prompt_cache_ttl: PromptCacheTtl::OneHour,
     }
 }
 
@@ -1777,6 +1787,8 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             cc.get("scope").is_none(),
             "scope field omitted entirely on 3P (not null): {body}",
         );
+        // TTL rides through on 3P — only `scope` is gated on 1P.
+        assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
     }
 
     // ── Client::complete ──
@@ -2106,22 +2118,30 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[test]
     fn static_prefix_cache_control_emits_global_scope_on_first_party_only() {
-        // 1P → `{"type":"ephemeral","scope":"global"}` — global cache.
-        // 3P → `{"type":"ephemeral"}` — default (org) scope; every
-        // gateway accepts this.
-        let first = static_prefix_cache_control(true);
+        let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
         assert_eq!(first.r#type, "ephemeral");
         assert_eq!(first.scope, Some("global"));
 
-        let third = static_prefix_cache_control(false);
+        let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
         assert_eq!(third.r#type, "ephemeral");
         assert_eq!(third.scope, None);
+    }
 
-        // Round-trip through JSON to pin the on-wire shape — the
-        // `scope` key must be absent (not `null`) in the 3P case so
-        // gateways that validate the field strictly accept it.
-        let wire = serde_json::to_string(&third).unwrap();
-        assert_eq!(wire, r#"{"type":"ephemeral"}"#);
+    #[test]
+    fn static_prefix_cache_control_ttl_matches_config() {
+        // 1h → `ttl: "1h"` in the wire. 5m → field absent entirely
+        // (matches server default; keeps the pre-2026-03 wire shape).
+        let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
+        assert_eq!(
+            serde_json::to_string(&one_hour).unwrap(),
+            r#"{"type":"ephemeral","ttl":"1h"}"#,
+        );
+
+        let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
+        assert_eq!(
+            serde_json::to_string(&five_min).unwrap(),
+            r#"{"type":"ephemeral"}"#,
+        );
     }
 
     // ── api_model_id / has_1m_tag ──
