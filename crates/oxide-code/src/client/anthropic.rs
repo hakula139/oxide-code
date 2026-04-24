@@ -116,16 +116,18 @@ impl ContextManagement {
     /// we need to diverge from the default.
     fn clear_thinking_keep_all() -> Self {
         Self {
-            edits: [ContextEdit::ClearThinking20251015 { keep: "all" }],
+            edits: [ContextEdit {
+                r#type: "clear_thinking_20251015",
+                keep: "all",
+            }],
         }
     }
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type")]
-enum ContextEdit {
-    #[serde(rename = "clear_thinking_20251015")]
-    ClearThinking20251015 { keep: &'static str },
+struct ContextEdit {
+    r#type: &'static str,
+    keep: &'static str,
 }
 
 /// JSON-schema-constrained completion format. Constructed via
@@ -1148,6 +1150,19 @@ mod tests {
 
     fn captured<T>() -> Captured<T> {
         Arc::new(Mutex::new(None))
+    }
+
+    // ── ContextManagement ──
+
+    #[test]
+    fn context_management_clear_thinking_keep_all_serializes_tagged_shape() {
+        let v = serde_json::to_value(ContextManagement::clear_thinking_keep_all()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
+            }),
+        );
     }
 
     // ── OutputFormat ──
