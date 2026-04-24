@@ -61,5 +61,6 @@ unresumable
 urandom
 venv
 vtable
+xhigh
 xxhash
 yazi

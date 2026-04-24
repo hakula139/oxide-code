@@ -85,7 +85,8 @@ Key rules:
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
 - **`prompt-caching-scope` requires a 1P base URL** — the beta only matters when a block carries `cache_control.scope: "global"`, which 3P gateways reject (see [Prompt Caching Scope](#prompt-caching-scope)). oxide-code gates the header on `is_first_party_base_url()` so requests going through a proxy ship neither the scope field nor its beta.
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
-- **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`.
+- **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. The per-level ceiling (`xhigh` on 4.7, `max` on Opus 4.6 / 4.7) is separately encoded in `Capabilities::effort_xhigh` / `effort_max`.
+- **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op — the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
 - **`structured-outputs` is per-version and caller-opt-in** — the upstream allowlist is Opus 4.1 / 4.5 / 4.6+, Sonnet 4.5 / 4.6+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag: a schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
 - **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas; bump the `MODELS` table when a new family lands.
 
@@ -214,6 +215,59 @@ The shape is otherwise identical in both modes: same static / dynamic section sp
 
 This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a proxy still parses as first-party by that check.
 
+## Agentic Request Body Fields
+
+Some capabilities live in the request body alongside (not instead of) the `anthropic-beta` header that gates them. Shipping the header but omitting the body field is a silent no-op — the feature doesn't activate. All three fields below were captured live from `claude-code 2.1.119` and cross-checked against the official migration guide.
+
+### `output_config.effort`
+
+GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns via one of five tokens: `low`, `medium`, `high`, `xhigh`, `max`.
+
+```json
+{
+  "output_config": { "effort": "xhigh" }
+}
+```
+
+- **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field; the header became a no-op and the model ran at an undefined default.
+- **Per-model ceiling.** `max` is Opus-only; Sonnet 4.6 400s on it. `xhigh` is Opus 4.7-only. The `Capabilities::effort_max` / `effort_xhigh` flags encode this; `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
+- **Per-model default.** claude-code 2.1.119 sends `xhigh` on Opus 4.7, `high` on Opus 4.6 and Sonnet 4.6, omits the field entirely on earlier models. oxide-code mirrors this via `Capabilities::default_effort`.
+- **`max_tokens` should scale with effort.** claude-code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` applies the same scaling when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
+
+### `context_management.edits`
+
+Partners the `context-management-2025-06-27` beta header. claude-code ships the same directive on every 4.6+ request:
+
+```json
+{
+  "context_management": {
+    "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }]
+  }
+}
+```
+
+oxide-code applies the body-header coupling as an invariant: the body field is populated on every request whose model has `Capabilities::context_management` set, i.e. the same condition that enables the beta header. One-shot completions (the `complete` path in `client::anthropic`) skip both — matches the reference wire and keeps the title-generation path minimal.
+
+### `cache_control.ttl`
+
+Anthropic silently dropped the default ephemeral-cache TTL from 1 h to 5 m on 2026-03-06 — a 40-55 % savings regression on any session longer than 5 min. The opt-in is a body field, not a beta:
+
+```json
+{
+  "cache_control": { "type": "ephemeral", "ttl": "1h" }
+}
+```
+
+Accepted values: `"5m"` (server default, equivalent to omitting the field) and `"1h"` (opt-in at higher write premium). No beta header is required — the field is GA.
+
+**oxide-code default.** `prompt_cache_ttl = "1h"`. The hit-rate recovery on real agent sessions (tool-use loops, resumed conversations) dominates the write premium, so 1 h is the right safe default. Users opt down via `[client].prompt_cache_ttl = "5m"` or `OX_PROMPT_CACHE_TTL=5m`.
+
+Invalidation order (from the Anthropic caching docs) is `tools → system → messages` — any change at a level busts that level and every level after it. oxide-code attaches a single `cache_control` to the static system-prompt prefix block (scope-gated on 1 P / 3 P per the previous section); the TTL rides through on both paths.
+
+### `thinking.display`
+
+See [Extended Thinking § Display modes (Opus 4.7+)](./extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`; `show_thinking=true` in oxide-code opts back into `"summarized"`.
+
 ## Third-Party Tool Restrictions
 
 As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / Max) are only valid for official Claude Code and claude.ai clients. Third-party tools that reuse the OAuth flow are classified as "third-party harness traffic" and must use either:
@@ -267,3 +321,5 @@ oxide-code implements the same refresh flow: proactive refresh with the 5-minute
 - `claude-code/src/utils/secureStorage/index.ts` — platform-specific storage dispatch
 - `claude-code/src/utils/secureStorage/macOsKeychainStorage.ts` — macOS Keychain backend
 - `claude-code/src/utils/secureStorage/plainTextStorage.ts` — credential file I/O
+
+Body-field research is empirical rather than source-backed: the `output_config.effort`, `context_management.edits`, and `cache_control.ttl` wire shapes documented above were captured live from a `claude-code --bare -p --model claude-opus-4-7` session against a local SSE proxy on 2026-04-24 and cross-referenced with the [Opus 4.7 migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) and [Anthropic prompt-caching docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).

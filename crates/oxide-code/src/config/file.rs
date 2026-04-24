@@ -33,13 +33,19 @@ pub(super) struct FileConfig {
 }
 
 /// API client settings (`[client]` section).
+///
+/// Fields are grouped by concern so adjacent lines stay related:
+/// connection (`api_key`, `base_url`), model selection (`model`,
+/// `effort`), then request tuning (`max_tokens`, `prompt_cache_ttl`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
     pub api_key: Option<String>,
-    pub model: Option<String>,
     pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<super::Effort>,
     pub max_tokens: Option<u32>,
+    pub prompt_cache_ttl: Option<super::PromptCacheTtl>,
 }
 
 /// Terminal UI settings (`[tui]` section).
@@ -65,9 +71,11 @@ impl ClientConfig {
     fn merge(self, other: Self) -> Self {
         Self {
             api_key: other.api_key.or(self.api_key),
-            model: other.model.or(self.model),
             base_url: other.base_url.or(self.base_url),
+            model: other.model.or(self.model),
+            effort: other.effort.or(self.effort),
             max_tokens: other.max_tokens.or(self.max_tokens),
+            prompt_cache_ttl: other.prompt_cache_ttl.or(self.prompt_cache_ttl),
         }
     }
 }
@@ -186,9 +194,11 @@ mod tests {
         let base = FileConfig {
             client: Some(ClientConfig {
                 api_key: Some("base-key".to_owned()),
-                model: Some("base-model".to_owned()),
                 base_url: Some("https://base.example.com".to_owned()),
+                model: Some("base-model".to_owned()),
+                effort: Some(super::super::Effort::Low),
                 max_tokens: Some(1000),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
@@ -197,9 +207,11 @@ mod tests {
         let other = FileConfig {
             client: Some(ClientConfig {
                 api_key: Some("other-key".to_owned()),
-                model: Some("other-model".to_owned()),
                 base_url: Some("https://other.example.com".to_owned()),
+                model: Some("other-model".to_owned()),
+                effort: Some(super::super::Effort::Max),
                 max_tokens: Some(2000),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::OneHour),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -209,12 +221,17 @@ mod tests {
 
         let client = merged.client.expect("client section should be present");
         assert_eq!(client.api_key.as_deref(), Some("other-key"));
-        assert_eq!(client.model.as_deref(), Some("other-model"));
         assert_eq!(
             client.base_url.as_deref(),
             Some("https://other.example.com")
         );
+        assert_eq!(client.model.as_deref(), Some("other-model"));
+        assert_eq!(client.effort, Some(super::super::Effort::Max));
         assert_eq!(client.max_tokens, Some(2000));
+        assert_eq!(
+            client.prompt_cache_ttl,
+            Some(super::super::PromptCacheTtl::OneHour)
+        );
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
@@ -225,9 +242,11 @@ mod tests {
         let base = FileConfig {
             client: Some(ClientConfig {
                 api_key: Some("key".to_owned()),
-                model: Some("model".to_owned()),
                 base_url: Some("https://example.com".to_owned()),
+                model: Some("model".to_owned()),
+                effort: Some(super::super::Effort::High),
                 max_tokens: Some(4096),
+                prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -237,9 +256,14 @@ mod tests {
 
         let client = merged.client.expect("client section should survive");
         assert_eq!(client.api_key.as_deref(), Some("key"));
-        assert_eq!(client.model.as_deref(), Some("model"));
         assert_eq!(client.base_url.as_deref(), Some("https://example.com"));
+        assert_eq!(client.model.as_deref(), Some("model"));
+        assert_eq!(client.effort, Some(super::super::Effort::High));
         assert_eq!(client.max_tokens, Some(4096));
+        assert_eq!(
+            client.prompt_cache_ttl,
+            Some(super::super::PromptCacheTtl::FiveMin)
+        );
 
         let tui = merged.tui.expect("tui section should survive");
         assert_eq!(tui.show_thinking, Some(true));

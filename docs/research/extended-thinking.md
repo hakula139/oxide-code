@@ -43,6 +43,27 @@ When thinking is enabled, `temperature` must be omitted from the request (API re
 - `interleaved-thinking-2025-05-14` — enables thinking blocks interleaved with text / tool_use.
 - Without this header, thinking blocks appear only at the start of the response.
 
+### Display modes (Opus 4.7+)
+
+Opus 4.7 adds a `thinking.display` field with two wire values:
+
+| Value          | Meaning                                                 |
+| -------------- | ------------------------------------------------------- |
+| `"summarized"` | Thinking blocks stream summarized reasoning text.       |
+| `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty. |
+
+**Silent default change.** On Opus 4.6, the server defaulted to `"summarized"`. On Opus 4.7 the default is `"omitted"` — any UI that renders streaming reasoning (including oxide-code's `show_thinking` TUI mode) sees a long pause followed by the final answer unless it opts back in:
+
+```json
+{
+  "thinking": { "type": "adaptive", "display": "summarized" }
+}
+```
+
+Older models (4.6, 4.5) accept the field and ignore it, so sending it unconditionally is safe when the caller wants summarized output. oxide-code couples `display` to `config.show_thinking`: `Some(Summarized)` when the TUI is set up to render reasoning, `None` (field absent) otherwise. The `None` path preserves the pre-4.7 wire shape and lets 4.7's `omitted` default do what it says.
+
+No beta header gates `display` — it's GA on 4.7.
+
 ## Thinking Block Lifecycle
 
 ### Streaming
@@ -85,7 +106,7 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code handles credential rotation in `stripSignatureBlocks()`, which removes all thinking / redacted_thinking blocks when the active credential changes.
 
-oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default. Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default; `thinking.display` is set to `"summarized"` whenever the TUI's `show_thinking` flag is on (and omitted otherwise so 4.7's `"omitted"` default applies). Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
 
 ## Sources
 

@@ -24,7 +24,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::billing;
-use crate::config::{Auth, Config, ThinkingConfig};
+use crate::config::{Auth, Config, Effort, PromptCacheTtl, ThinkingConfig};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -39,8 +39,10 @@ const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
 const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
-/// Matches the installed Claude Code version.
-const CLAUDE_CLI_VERSION: &str = "2.1.101";
+/// Matches the installed Claude Code version. The rest of this PR is
+/// pinned against 2.1.119 packet captures; keep the wire
+/// `User-Agent` / `cc_version` claim aligned.
+const CLAUDE_CLI_VERSION: &str = "2.1.119";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
 /// models with OAuth tokens unless the system prompt starts with this exact
@@ -64,20 +66,66 @@ struct CreateMessageRequest<'a> {
     tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<&'a ThinkingConfig>,
-    /// JSON-schema-constrained output format for one-shot utility calls
-    /// (title generation, future classifiers). Must travel alongside the
-    /// `structured-outputs-2025-12-15` beta header; both are gated on
-    /// `Capabilities::structured_outputs` so unsupported models silently
-    /// drop back to free-form text rather than 400ing the gateway.
+    /// Carries both the `format` (JSON-schema-constrained output for
+    /// one-shot calls) and `effort` (agentic-path intelligence tier)
+    /// knobs. Wrapped in `Option` so an empty `OutputConfig` never
+    /// ships — callers build one via [`OutputConfig::new`] and pass
+    /// `None` when neither sub-field is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig<'a>>,
+    /// `context_management.edits` — the client-side context-editing
+    /// directive that partners the `context-management-2025-06-27`
+    /// beta header. Populated on the streaming path for any model
+    /// with [`Capabilities::context_management`] set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_management: Option<ContextManagement>,
     messages: &'a [Message],
 }
 
-/// Wrapper matching the wire shape `output_config.format = {...}`.
+/// Shared wrapper for the `output_config` body field. Either field
+/// may be absent; when both are, [`Self::new`] returns `None` so the
+/// builder never ships an empty object.
 #[derive(Serialize)]
 struct OutputConfig<'a> {
-    format: &'a OutputFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a OutputFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<Effort>,
+}
+
+impl<'a> OutputConfig<'a> {
+    /// Returns `None` when every field is empty so callers can avoid
+    /// shipping a bare `{}`. `Some(_)` otherwise.
+    fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
+        (format.is_some() || effort.is_some()).then_some(Self { format, effort })
+    }
+}
+
+/// `context_management.edits` body field. oxide-code mirrors
+/// claude-code 2.1.119's observed wire shape — a single
+/// `clear_thinking_20251015` edit with `keep = "all"` on every
+/// agentic request that also ships the matching beta header.
+#[derive(Serialize)]
+struct ContextManagement {
+    edits: [ContextEdit; 1],
+}
+
+impl ContextManagement {
+    /// Wire shape claude-code 2.1.119 sends on every 4.6+ request.
+    /// Single place to edit when Anthropic ships newer edit types or
+    /// we need to diverge from the default.
+    fn clear_thinking_keep_all() -> Self {
+        Self {
+            edits: [ContextEdit::ClearThinking20251015 { keep: "all" }],
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum ContextEdit {
+    #[serde(rename = "clear_thinking_20251015")]
+    ClearThinking20251015 { keep: &'static str },
 }
 
 /// JSON-schema-constrained completion format. Constructed via
@@ -128,6 +176,8 @@ struct SystemBlock<'a> {
 /// Prompt caching control. The `scope` field determines the cache sharing
 /// level: `"global"` for static content identical across sessions (1P only),
 /// `None` for the default org-scoped ephemeral cache (universally accepted).
+/// The `ttl` field overrides the server default (5 m as of 2026-03) —
+/// oxide-code defaults to `"1h"`, opt-out via `prompt_cache_ttl = "5m"`.
 ///
 /// `scope: "global"` must be a true prefix of all preceding request content
 /// — the server rejects a global-scoped block preceded by a non-global
@@ -138,6 +188,8 @@ struct CacheControl {
     r#type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 // ── SSE response types ──
@@ -438,7 +490,10 @@ impl Client {
             system_blocks.push(SystemBlock {
                 r#type: "text",
                 text: &static_joined,
-                cache_control: Some(static_prefix_cache_control(is_first_party)),
+                cache_control: Some(static_prefix_cache_control(
+                    is_first_party,
+                    self.config.prompt_cache_ttl,
+                )),
             });
         }
         if !dynamic_joined.is_empty() {
@@ -448,6 +503,8 @@ impl Client {
                 cache_control: None,
             });
         }
+
+        let caps = crate::model::capabilities_for(&self.config.model);
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
@@ -459,7 +516,14 @@ impl Client {
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
-            output_config: None,
+            output_config: OutputConfig::new(None, self.config.effort),
+            // Gated on the same capability flag as the
+            // `context-management-2025-06-27` beta header so body and
+            // header stay in sync — claude-code 2.1.119 ships them
+            // together on every 4.6+ agentic request.
+            context_management: caps
+                .context_management
+                .then(ContextManagement::clear_thinking_keep_all),
             messages: effective_messages,
         })
         .context("failed to serialize request")?;
@@ -587,9 +651,7 @@ fn compute_betas(
     want_structured: bool,
     is_first_party: bool,
 ) -> Vec<&'static str> {
-    let caps = crate::model::lookup(model)
-        .map(|info| info.capabilities)
-        .unwrap_or_default();
+    let caps = crate::model::capabilities_for(model);
     let is_haiku = model.to_lowercase().contains("haiku");
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
@@ -642,7 +704,7 @@ fn compute_betas(
 /// Whether the target model accepts the `structured-outputs-2025-12-15`
 /// beta. Thin wrapper over the capability table for pre-checks.
 pub(crate) fn supports_structured_outputs(model: &str) -> bool {
-    crate::model::lookup(model).is_some_and(|info| info.capabilities.structured_outputs)
+    crate::model::capabilities_for(model).structured_outputs
 }
 
 /// Whether `base_url` points at the first-party Anthropic API, gating
@@ -669,11 +731,13 @@ fn is_first_party_base_url(base_url: &str) -> bool {
 /// global scope so the prefix is shared across sessions; on 3P, fall
 /// back to the default (org-scoped) ephemeral cache — 3P gateways
 /// reject `scope: "global"` because tool definitions render first and
-/// taint the cache prefix.
-fn static_prefix_cache_control(is_first_party: bool) -> CacheControl {
+/// taint the cache prefix. `ttl` overrides the server default (5 m)
+/// when set via `config.prompt_cache_ttl`.
+fn static_prefix_cache_control(is_first_party: bool, ttl: PromptCacheTtl) -> CacheControl {
     CacheControl {
         r#type: "ephemeral",
         scope: is_first_party.then_some("global"),
+        ttl: ttl.wire(),
     }
 }
 
@@ -754,7 +818,10 @@ fn build_completion_body(
         system: system_blocks,
         tools: None,
         thinking: None,
-        output_config: output_format.map(|format| OutputConfig { format }),
+        output_config: OutputConfig::new(output_format, None),
+        // One-shot completions never opt into context management —
+        // matches claude-code's one-shot path.
+        context_management: None,
         messages: &messages,
     })
     .context("failed to serialize request")?;
@@ -966,9 +1033,11 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth,
-        model: model.to_owned(),
         base_url: base_url.into(),
+        model: model.to_owned(),
+        effort: None,
         max_tokens: 128,
+        prompt_cache_ttl: PromptCacheTtl::OneHour,
         thinking: None,
         show_thinking: false,
     }
@@ -1021,13 +1090,17 @@ mod tests {
         Auth::OAuth("t".to_owned())
     }
 
-    /// Concatenates SSE frames into a valid response body, each
-    /// followed by the required `\n\n` terminator.
-    fn sse_body(frames: &[&str]) -> String {
+    /// Builds an SSE response body from `(event, data)` pairs. Each
+    /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
+    /// the frame-separator invariant in one place so call sites don't
+    /// hand-roll it (and can't silently omit the `\n\n`).
+    fn sse_body(frames: &[(&str, &str)]) -> String {
+        use std::fmt::Write;
         let mut body = String::new();
-        for f in frames {
-            body.push_str(f);
-            body.push_str("\n\n");
+        for (event, data) in frames {
+            writeln!(body, "event: {event}").unwrap();
+            writeln!(body, "data: {data}").unwrap();
+            body.push('\n');
         }
         body
     }
@@ -1045,18 +1118,27 @@ mod tests {
     /// Well-formed SSE body for a short text response.
     fn text_stream_body() -> String {
         sse_body(&[
-            r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}"#,
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            r#"event: content_block_stop
-data: {"type":"content_block_stop","index":0}"#,
-            r#"event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":0}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ])
     }
 
@@ -1369,12 +1451,15 @@ data: {"type":"message_stop"}"#,
         // would mangle a 4-byte emoji split across TCP chunk boundaries.
         let server = MockServer::start().await;
         let body = sse_body(&[
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"🦀rust"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1414,14 +1499,16 @@ data: {"type":"message_stop"}"#,
         // one bad frame cannot poison the whole turn.
         let server = MockServer::start().await;
         let body = sse_body(&[
-            r#"event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r"event: content_block_delta
-data: {not valid json",
-            r#"event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
-            r#"event: message_stop
-data: {"type":"message_stop"}"#,
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            ("content_block_delta", "{not valid json"),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
         ]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -1460,8 +1547,10 @@ data: {"type":"message_stop"}"#,
         // `StreamEvent::Error` flows as `Ok(Error { .. })` on the channel;
         // the caller (`agent.rs`) converts it to a bail!.
         let server = MockServer::start().await;
-        let body = sse_body(&[r#"event: error
-data: {"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#]);
+        let body = sse_body(&[(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Servers overloaded"}}"#,
+        )]);
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(
@@ -1548,7 +1637,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         let mut rx = client
             .stream_message(&[Message::user("hi")], &[], None, &[])
             .unwrap();
-        let _ = rx.recv().await;
+        _ = rx.recv().await;
         drop(rx);
         // Lets the background task observe the closed channel and exit;
         // any panic would surface in test output.
@@ -1776,6 +1865,128 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             cc.get("scope").is_none(),
             "scope field omitted entirely on 3P (not null): {body}",
         );
+        // TTL rides through on 3P — only `scope` is gated on 1P.
+        assert_eq!(cc["ttl"], "1h", "default 1h ttl survives on 3P: {body}");
+    }
+
+    // ── Client::stream_message / agentic body fields ──
+
+    /// Captures the serialized body of a single streaming request.
+    /// Most agentic-body tests only care about what oxide-code sends,
+    /// not the response — this collapses the ceremony to two lines
+    /// per test.
+    async fn capture_stream_body(config: Config) -> serde_json::Value {
+        let server = MockServer::start().await;
+        let sink: Captured<String> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body())
+            })
+            .mount(&server)
+            .await;
+
+        let mut cfg = config;
+        cfg.base_url = server.uri();
+        let client = Client::new(cfg, Some("sid".to_owned())).unwrap();
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let body = sink.lock().unwrap().clone().expect("request captured");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_message_opus_4_7_emits_output_config_effort_xhigh() {
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.effort = Some(Effort::Xhigh);
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+    }
+
+    #[tokio::test]
+    async fn stream_message_omits_output_config_when_effort_is_none() {
+        // Non-effort-capable model → `Config.effort == None` → the
+        // whole `output_config` block is absent (not `{}`).
+        let cfg = test_config(
+            "https://placeholder.invalid",
+            api_key(),
+            "claude-sonnet-4-5",
+        );
+        assert!(cfg.effort.is_none(), "precondition: effort unset");
+        let body = capture_stream_body(cfg).await;
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config absent: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_context_management_body_present_on_4_6_plus() {
+        // Every model whose `context_management` capability flag is
+        // set must also ship the body directive alongside the beta
+        // header.
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        ] {
+            let cfg = test_config("https://placeholder.invalid", api_key(), model);
+            let body = capture_stream_body(cfg).await;
+            let edits = body["context_management"]["edits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("context_management.edits missing for {model}: {body}"));
+            assert_eq!(edits.len(), 1, "{model}");
+            assert_eq!(edits[0]["type"], "clear_thinking_20251015", "{model}");
+            assert_eq!(edits[0]["keep"], "all", "{model}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_message_context_management_absent_on_unknown_model() {
+        // Unknown model ids (no `MODELS` row matches) fall back to
+        // the all-false `Capabilities::default()` — no beta, no body
+        // directive. Keeps "beta sent ⇒ body populated" an invariant.
+        let cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-5-0");
+        let body = capture_stream_body(cfg).await;
+        assert!(
+            body.get("context_management").is_none(),
+            "context_management absent on unknown models: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_message_show_thinking_emits_display_summarized() {
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.thinking = Some(ThinkingConfig::Adaptive {
+            display: Some(crate::config::ThinkingDisplay::Summarized),
+        });
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[tokio::test]
+    async fn stream_message_show_thinking_false_omits_display_field() {
+        // `Adaptive { display: None }` must serialize without a
+        // `display` key — `skip_serializing_if` on the wire.
+        let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
+        cfg.thinking = Some(ThinkingConfig::Adaptive { display: None });
+        let body = capture_stream_body(cfg).await;
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body["thinking"].get("display").is_none(),
+            "display field absent: {body}",
+        );
     }
 
     // ── Client::complete ──
@@ -1864,7 +2075,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
                 Some("sid".to_owned()),
             )
             .unwrap();
-            let _ = client
+            _ = client
                 .complete(model, "sys", "prompt", 40, Some(&fmt))
                 .await
                 .unwrap();
@@ -1916,7 +2127,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
             Some("sid".to_owned()),
         )
         .unwrap();
-        let _ = client
+        _ = client
             .complete("claude-haiku-4-5", "", "hi", 40, None)
             .await
             .unwrap();
@@ -1934,6 +2145,41 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
         assert!(!body.contains("cch=00000"), "cch populated: {body}");
     }
 
+    #[tokio::test]
+    async fn complete_does_not_emit_context_management_edits() {
+        // `context_management.edits` is an agentic-path directive; it
+        // must stay off the one-shot `complete` path even on models
+        // that carry the capability flag (Haiku 4.5 here).
+        let server = MockServer::start().await;
+        let sink: Captured<String> = captured();
+        let sink_clone = std::sync::Arc::clone(&sink);
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(move |req: &Request| {
+                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
+                ResponseTemplate::new(200).set_body_string(completion_body("ok"))
+            })
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        _ = client
+            .complete("claude-haiku-4-5", "sys", "hi", 40, None)
+            .await
+            .unwrap();
+
+        let body = sink.lock().unwrap().clone().expect("body captured");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v.get("context_management").is_none(),
+            "context_management absent on one-shot path: {body}",
+        );
+    }
+
     // ── build_metadata ──
 
     #[test]
@@ -1949,7 +2195,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     // ── compute_betas ──
 
     #[test]
-    fn compute_betas_agentic_opus_46_plain_carries_full_set_except_1m() {
+    fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
         // Plain model (no `[1m]` tag) must not auto-enable 1M context —
         // a gateway without 1M access would 400.
         let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
@@ -1964,7 +2210,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_opus_46_with_1m_tag_adds_context_1m() {
+    fn compute_betas_opus_4_6_with_1m_tag_adds_context_1m() {
         let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false, true);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
@@ -1977,7 +2223,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_sonnet_45_has_thinking_but_not_effort() {
+    fn compute_betas_sonnet_4_5_has_thinking_but_not_effort() {
         // Sonnet 4.5 supports interleaved thinking but not effort;
         // plain (no `[1m]` tag) means no 1M beta either.
         let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false, true);
@@ -2030,7 +2276,7 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
     }
 
     #[test]
-    fn compute_betas_opus_47_matches_opus_46_family() {
+    fn compute_betas_opus_4_7_matches_opus_4_6_family() {
         let plain = compute_betas("claude-opus-4-7", &api_key(), true, false, true);
         assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
@@ -2105,22 +2351,30 @@ data: {"type":"error","error":{"type":"overloaded_error","message":"Servers over
 
     #[test]
     fn static_prefix_cache_control_emits_global_scope_on_first_party_only() {
-        // 1P → `{"type":"ephemeral","scope":"global"}` — global cache.
-        // 3P → `{"type":"ephemeral"}` — default (org) scope; every
-        // gateway accepts this.
-        let first = static_prefix_cache_control(true);
+        let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
         assert_eq!(first.r#type, "ephemeral");
         assert_eq!(first.scope, Some("global"));
 
-        let third = static_prefix_cache_control(false);
+        let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
         assert_eq!(third.r#type, "ephemeral");
         assert_eq!(third.scope, None);
+    }
 
-        // Round-trip through JSON to pin the on-wire shape — the
-        // `scope` key must be absent (not `null`) in the 3P case so
-        // gateways that validate the field strictly accept it.
-        let wire = serde_json::to_string(&third).unwrap();
-        assert_eq!(wire, r#"{"type":"ephemeral"}"#);
+    #[test]
+    fn static_prefix_cache_control_ttl_matches_config() {
+        // 1h → `ttl: "1h"` in the wire. 5m → field absent entirely
+        // (matches server default; keeps the pre-2026-03 wire shape).
+        let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
+        assert_eq!(
+            serde_json::to_string(&one_hour).unwrap(),
+            r#"{"type":"ephemeral","ttl":"1h"}"#,
+        );
+
+        let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
+        assert_eq!(
+            serde_json::to_string(&five_min).unwrap(),
+            r#"{"type":"ephemeral"}"#,
+        );
     }
 
     // ── api_model_id / has_1m_tag ──
