@@ -49,15 +49,16 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                                            |
-| --------------------------------- | -------------------------------------------------- |
-| `interleaved-thinking-2025-05-14` | Extended thinking support                          |
-| `context-1m-2025-08-07`           | 1M context window                                  |
-| `context-management-2025-06-27`   | Context management                                 |
-| `prompt-caching-scope-2026-01-05` | Prompt caching                                     |
-| `effort-2025-11-24`               | Effort control                                     |
-| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls) |
-| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
+| Header                            | Purpose                                                      |
+| --------------------------------- | ------------------------------------------------------------ |
+| `interleaved-thinking-2025-05-14` | Extended thinking support                                    |
+| `context-1m-2025-08-07`           | 1M context window                                            |
+| `context-management-2025-06-27`   | Context management                                           |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                                               |
+| `effort-2025-11-24`               | Effort control                                               |
+| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls)           |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                               |
+| `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop (Opus 4.7 only) |
 
 #### Per-model beta sets
 
