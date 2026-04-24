@@ -147,6 +147,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
     // ── run ──
 
     #[tokio::test]

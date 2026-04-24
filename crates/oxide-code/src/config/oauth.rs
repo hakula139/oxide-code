@@ -632,6 +632,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
     }
+
     // ── read_credentials ──
 
     #[test]

@@ -771,6 +771,7 @@ data: {"type":"message_stop"}
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "hello"),);
     }
+
     // ── BlockAccumulator::into_content_block ──
 
     #[test]

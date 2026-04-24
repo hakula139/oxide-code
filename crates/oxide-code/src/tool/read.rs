@@ -251,6 +251,7 @@ mod tests {
 
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
+
     // ── run ──
 
     #[tokio::test]

@@ -453,6 +453,7 @@ mod tests {
         );
         insta::assert_snapshot!(render_to_backend(&input, 30, 5));
     }
+
     // ── visual_line_count ──
 
     #[test]

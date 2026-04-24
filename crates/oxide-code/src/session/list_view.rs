@@ -241,6 +241,7 @@ mod tests {
         render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
     }
+
     // ── render_sessions ──
 
     #[test]
