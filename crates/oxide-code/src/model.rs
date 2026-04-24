@@ -36,6 +36,8 @@
 //! `structured_outputs`) are exercised by per-flag enumeration tests
 //! because they don't reduce to a substring rule.
 
+use crate::config::Effort;
+
 /// Metadata and capability flags for a single Claude model.
 pub(crate) struct ModelInfo {
     /// Substring that identifies this model. The first substring match in
@@ -273,8 +275,7 @@ impl Capabilities {
     /// Centralises the `low`/`medium`/`high` → [`Self::effort`],
     /// `xhigh` → [`Self::effort_xhigh`], `max` → [`Self::effort_max`]
     /// mapping so callers don't re-derive it.
-    pub(crate) fn accepts_effort(self, level: crate::config::Effort) -> bool {
-        use crate::config::Effort;
+    fn accepts_effort(self, level: Effort) -> bool {
         match level {
             Effort::Low | Effort::Medium | Effort::High => self.effort,
             Effort::Xhigh => self.effort_xhigh,
@@ -287,8 +288,7 @@ impl Capabilities {
     /// [`crate::config::Config::load`] to clamp an out-of-range user
     /// pick down to the nearest supported level rather than 400ing
     /// the gateway.
-    pub(crate) fn clamp_effort(self, pick: crate::config::Effort) -> Option<crate::config::Effort> {
-        use crate::config::Effort;
+    pub(crate) fn clamp_effort(self, pick: Effort) -> Option<Effort> {
         if !self.effort {
             return None;
         }
@@ -306,8 +306,7 @@ impl Capabilities {
     /// Per-model default when the user hasn't specified one: `Xhigh`
     /// on 4.7 (matches claude-code 2.1.119), `High` on other
     /// effort-capable models, `None` otherwise.
-    pub(crate) fn default_effort(self) -> Option<crate::config::Effort> {
-        use crate::config::Effort;
+    pub(crate) fn default_effort(self) -> Option<Effort> {
         if self.effort_xhigh {
             Some(Effort::Xhigh)
         } else if self.effort {
@@ -477,8 +476,6 @@ mod tests {
 
     #[test]
     fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
-        use crate::config::Effort;
-
         let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
         assert_eq!(opus_4_7.clamp_effort(Effort::Max), Some(Effort::Max));
         assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
