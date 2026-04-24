@@ -341,6 +341,29 @@ pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, Str
     Ok(search_path.map_or(cwd, PathBuf::from))
 }
 
+/// Returns a relative path string when `path` is inside the current working
+/// directory, otherwise the absolute path. Falls back to `path` when the cwd
+/// cannot be read.
+pub(crate) fn display_cwd_path(path: &str) -> String {
+    std::env::current_dir().ok().map_or_else(
+        || path.to_owned(),
+        |cwd| display_path(Path::new(path), &cwd),
+    )
+}
+
+/// Returns a tool-call label using a cwd-relative path argument when possible.
+pub(crate) fn summarize_path_call(
+    tool_name: &str,
+    input: &serde_json::Value,
+    path_key: &str,
+) -> String {
+    let label = title_case(tool_name);
+    match extract_input_field(input, path_key) {
+        Some(path) => format!("{label}({})", display_cwd_path(path)),
+        None => label,
+    }
+}
+
 /// Returns a relative path string when `path` is inside `base`, otherwise the
 /// absolute path. When stripping the prefix yields an empty path (i.e.,
 /// `path == base`), falls back to the filename. Saves tokens in tool output

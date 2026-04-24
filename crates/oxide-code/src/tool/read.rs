@@ -4,7 +4,10 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
+use super::{
+    ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
+    extract_input_field, summarize_path_call,
+};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 /// Per-file size cap for `read` (10 MB). Accommodates typical large
@@ -51,13 +54,17 @@ impl Tool for ReadTool {
         extract_input_field(input, "file_path")
     }
 
+    fn summarize_call(&self, input: &serde_json::Value) -> String {
+        summarize_path_call(self.name(), input, "file_path")
+    }
+
     fn result_view(
         &self,
         input: &serde_json::Value,
         content: &str,
         _metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        let path = extract_input_field(input, "file_path")?.to_owned();
+        let path = display_cwd_path(extract_input_field(input, "file_path")?);
         read_excerpt_view(path, content)
     }
 
@@ -420,7 +427,9 @@ mod tests {
 
     #[test]
     fn result_view_builds_read_excerpt() {
-        let input = serde_json::json!({"file_path": "/tmp/example.rs"});
+        let cwd = std::env::current_dir().unwrap();
+        let path = cwd.join("example.rs");
+        let input = serde_json::json!({"file_path": path});
         let view = ReadTool
             .result_view(&input, "10\tfn main() {}\n11\t}", &ToolMetadata::default())
             .unwrap();
@@ -428,7 +437,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::ReadExcerpt {
-                path: "/tmp/example.rs".to_owned(),
+                path: "example.rs".to_owned(),
                 lines: vec![
                     ReadExcerptLine {
                         number: 10,
