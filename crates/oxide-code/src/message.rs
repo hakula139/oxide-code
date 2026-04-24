@@ -13,7 +13,7 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Role {
+pub(crate) enum Role {
     User,
     Assistant,
 }
@@ -25,7 +25,7 @@ pub enum Role {
 /// `RedactedThinking` blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
+pub(crate) enum ContentBlock {
     Text {
         text: String,
     },
@@ -57,20 +57,20 @@ pub enum ContentBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: Vec<ContentBlock>,
+pub(crate) struct Message {
+    pub(crate) role: Role,
+    pub(crate) content: Vec<ContentBlock>,
 }
 
 impl Message {
-    pub fn user(text: impl Into<String>) -> Self {
+    pub(crate) fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
 
-    pub fn assistant(text: impl Into<String>) -> Self {
+    pub(crate) fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
             content: vec![ContentBlock::Text { text: text.into() }],
@@ -88,7 +88,7 @@ impl Message {
 ///
 /// Only the most recent assistant message can have un-stripped trailing thinking
 /// — earlier ones were already processed in prior iterations.
-pub fn strip_trailing_thinking(messages: &mut [Message]) {
+pub(crate) fn strip_trailing_thinking(messages: &mut [Message]) {
     let Some(msg) = messages.iter_mut().rfind(|m| m.role == Role::Assistant) else {
         return;
     };

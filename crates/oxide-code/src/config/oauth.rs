@@ -66,7 +66,7 @@ impl OAuthCredential {
 
 /// Loads an OAuth access token from Claude Code credentials, refreshing
 /// proactively if the token is within 5 minutes of expiry.
-pub async fn load_token() -> Result<String> {
+pub(super) async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
     load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL).await

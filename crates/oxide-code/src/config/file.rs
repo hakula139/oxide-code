@@ -28,8 +28,8 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
-    pub client: Option<ClientConfig>,
-    pub tui: Option<TuiConfig>,
+    pub(super) client: Option<ClientConfig>,
+    pub(super) tui: Option<TuiConfig>,
 }
 
 /// API client settings (`[client]` section).
@@ -40,19 +40,19 @@ pub(super) struct FileConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<super::Effort>,
-    pub max_tokens: Option<u32>,
-    pub prompt_cache_ttl: Option<super::PromptCacheTtl>,
+    pub(super) api_key: Option<String>,
+    pub(super) base_url: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) effort: Option<super::Effort>,
+    pub(super) max_tokens: Option<u32>,
+    pub(super) prompt_cache_ttl: Option<super::PromptCacheTtl>,
 }
 
 /// Terminal UI settings (`[tui]` section).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
-    pub show_thinking: Option<bool>,
+    pub(super) show_thinking: Option<bool>,
 }
 
 // ── Merge ──

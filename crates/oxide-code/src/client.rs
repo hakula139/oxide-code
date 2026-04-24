@@ -1,4 +1,4 @@
 //! Anthropic Messages API client.
 
-pub mod anthropic;
+pub(crate) mod anthropic;
 mod billing;
