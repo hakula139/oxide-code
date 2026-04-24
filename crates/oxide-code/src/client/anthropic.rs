@@ -81,9 +81,9 @@ struct CreateMessageRequest<'a> {
 }
 
 /// Shared wrapper for the `output_config` body field. Either field
-/// may be absent; when both are, [`Self::is_empty`] lets the builder
-/// collapse to `None` so the empty object never ships.
-#[derive(Serialize, Default)]
+/// may be absent; when both are, [`Self::new`] returns `None` so the
+/// builder never ships an empty object.
+#[derive(Serialize)]
 struct OutputConfig<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<&'a OutputFormat>,
@@ -95,11 +95,7 @@ impl<'a> OutputConfig<'a> {
     /// Returns `None` when every field is empty so callers can avoid
     /// shipping a bare `{}`. `Some(_)` otherwise.
     fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
-        if format.is_none() && effort.is_none() {
-            None
-        } else {
-            Some(Self { format, effort })
-        }
+        (format.is_some() || effort.is_some()).then_some(Self { format, effort })
     }
 }
 
