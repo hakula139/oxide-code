@@ -318,7 +318,7 @@ where
         let highlighted = highlight_code(
             lang.as_deref().unwrap_or(""),
             &code,
-            self.theme.inline_code(),
+            self.theme.code_block_fallback(),
         );
         for line in highlighted {
             self.lines.push(line);
@@ -448,16 +448,20 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
+        // Propagate the surrounding inline style (bold, italic, heading
+        // modifiers) onto the code span; `inline_code()` supplies the
+        // distinctive fg + bg, enclosing modifiers apply on top.
+        let style = self.current_inline_style().patch(self.theme.inline_code());
         if self.table.active {
             self.table
                 .cell_buf
-                .push(Span::styled(code.into_string(), self.theme.inline_code()));
+                .push(Span::styled(code.into_string(), style));
             return;
         }
         if self.pending_marker.is_some() {
             self.push_line(Line::default());
         }
-        self.push_span(Span::styled(code.into_string(), self.theme.inline_code()));
+        self.push_span(Span::styled(code.into_string(), style));
     }
 
     fn html(&mut self, html: &str) {
@@ -772,12 +776,21 @@ mod tests {
         Theme::default()
     }
 
-    fn rendered_text(input: &str) -> Vec<String> {
-        render_markdown(input, &theme(), 0)
+    /// Render `input` at the given width budget and flatten each line
+    /// into a concatenated string (spans joined in order). `width == 0`
+    /// disables word-wrapping.
+    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
+        render_markdown(input, &theme(), width)
             .lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    /// Convenience wrapper around [`rendered_text_at_width`] at width 0
+    /// (no wrapping) — used by most tests that don't exercise wrapping.
+    fn rendered_text(input: &str) -> Vec<String> {
+        rendered_text_at_width(input, 0)
     }
 
     // ── render_markdown ──
@@ -1049,12 +1062,21 @@ mod tests {
     fn inline_code_in_list_item() {
         let t = theme();
         let text = render_markdown("- Use `foo()` here", &t, 0);
-        let has_code_span = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("foo()") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code_span, "inline code should be styled in list items");
+        let code_span = text
+            .lines
+            .iter()
+            .find_map(|line| line.spans.iter().find(|s| s.content.contains("foo()")))
+            .expect("inline code span missing inside list item");
+        assert_eq!(
+            code_span.style.fg,
+            Some(t.code),
+            "inline code keeps teal fg inside list items"
+        );
+        assert_eq!(
+            code_span.style.bg,
+            Some(t.surface),
+            "inline code keeps surface bg inside list items"
+        );
     }
 
     #[test]
@@ -1074,6 +1096,63 @@ mod tests {
             ```
         "});
         assert!(lines.iter().any(|l| l.contains("fn main()")));
+    }
+
+    #[test]
+    fn fenced_code_block_plain_has_no_background() {
+        // Plain fenced blocks (no language) use the `code_block_fallback`
+        // style, which omits the bg fill so wrapping / width variance
+        // across lines doesn't leave ragged highlight edges. The inline
+        // code bg (surface) must not leak into fenced blocks.
+        //
+        // The fallback path builds each line via `Line::styled(..)`, so
+        // the style lands on the Line, not the inner spans. Walk both
+        // layers to guard against either placement.
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                ```
+                fn main() {}
+                let x = 1;
+                ```
+            "},
+            &t,
+            0,
+        );
+        let code_lines: Vec<_> = text
+            .lines
+            .iter()
+            .filter(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("fn") || s.content.contains("let"))
+            })
+            .collect();
+        assert!(
+            !code_lines.is_empty(),
+            "fenced block content missing from render"
+        );
+        for line in code_lines {
+            assert_eq!(
+                line.style.bg, None,
+                "fenced block line style must not have a bg fill: {line:?}"
+            );
+            let effective_fg = line
+                .style
+                .fg
+                .or_else(|| line.spans.iter().find_map(|s| s.style.fg));
+            assert_eq!(
+                effective_fg,
+                Some(t.code),
+                "plain fenced block falls back to `code` fg: {line:?}"
+            );
+            for span in &line.spans {
+                assert_eq!(
+                    span.style.bg, None,
+                    "fenced block span must not have a bg fill: {span:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1219,12 +1298,21 @@ mod tests {
             &t,
             0,
         );
-        let has_code = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("code") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code, "inline code should be styled inside table cells");
+        let code_span = text
+            .lines
+            .iter()
+            .find_map(|line| line.spans.iter().find(|s| s.content.contains("code")))
+            .expect("inline code span missing inside table cell");
+        assert_eq!(
+            code_span.style.fg,
+            Some(t.code),
+            "inline code keeps teal fg inside table cells"
+        );
+        assert_eq!(
+            code_span.style.bg,
+            Some(t.surface),
+            "inline code keeps surface bg inside table cells"
+        );
     }
 
     #[test]
@@ -1522,6 +1610,57 @@ mod tests {
             .find(|s| s.content.contains("foo()"))
             .unwrap();
         assert_eq!(span.style.fg, Some(t.code));
+        assert_eq!(
+            span.style.bg,
+            Some(t.surface),
+            "inline code should have a surface background fill to stand out"
+        );
+    }
+
+    #[test]
+    fn inline_code_inside_bold_inherits_bold() {
+        let t = theme();
+        let text = render_markdown("**use `foo()` here**", &t, 0);
+        let span = text.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("foo()"))
+            .expect("code span not found");
+        assert_eq!(
+            span.style.fg,
+            Some(t.code),
+            "code span keeps its distinctive fg"
+        );
+        assert_eq!(
+            span.style.bg,
+            Some(t.surface),
+            "code span keeps its surface fill"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code span inside **bold** should inherit BOLD modifier"
+        );
+    }
+
+    #[test]
+    fn inline_code_inside_heading_inherits_modifiers() {
+        let t = theme();
+        let text = render_markdown("# see `foo()`", &t, 0);
+        let span = text
+            .lines
+            .iter()
+            .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
+            .expect("code span not found in heading");
+        assert_eq!(span.style.fg, Some(t.code));
+        assert_eq!(span.style.bg, Some(t.surface));
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "code inside an H1 should inherit the heading's BOLD"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "code inside an H1 should inherit the heading's UNDERLINED"
+        );
     }
 
     // ── HTML ──
@@ -1642,13 +1781,5 @@ mod tests {
                 "continuation should not repeat list marker: {line:?}"
             );
         }
-    }
-
-    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
-        render_markdown(input, &theme(), width)
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
     }
 }

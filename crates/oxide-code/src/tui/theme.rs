@@ -22,10 +22,8 @@ pub(crate) struct Theme {
     pub(crate) fg_dim: Color,
 
     // Surfaces
-    /// Elevated surfaces, tool call backgrounds
+    /// Elevated surfaces, tool call backgrounds, inline code fill
     pub(crate) surface: Color,
-    /// Code block background
-    pub(crate) code_bg: Color,
 
     // Semantic accents (UI roles)
     /// Highlights, active borders, links, list markers
@@ -38,9 +36,11 @@ pub(crate) struct Theme {
     // Code
     /// Inline code, code block fallback
     pub(crate) code: Color,
+    /// Code block background (reserved for future theming; currently unused)
+    pub(crate) code_bg: Color,
 
     // Status indicators (ascending severity)
-    /// Informational highlights, cost display
+    /// Informational highlights (reserved for future theming; currently unused)
     pub(crate) info: Color,
     /// Successful tool results, normal status
     pub(crate) success: Color,
@@ -58,11 +58,11 @@ impl Default for Theme {
             fg_muted: Color::from_u32(0x006c_7086),  // Overlay0
             fg_dim: Color::from_u32(0x0058_5b70),    // Surface2
             surface: Color::from_u32(0x0031_3244),   // Surface0
-            code_bg: Color::from_u32(0x001e_1e2e),   // Base
-            code: Color::from_u32(0x0094_e2d5),      // Teal
             accent: Color::from_u32(0x0089_b4fa),    // Blue
             user: Color::from_u32(0x00fa_b387),      // Peach
             secondary: Color::from_u32(0x00b4_befe), // Lavender
+            code: Color::from_u32(0x0094_e2d5),      // Teal
+            code_bg: Color::from_u32(0x001e_1e2e),   // Base
             info: Color::from_u32(0x0089_dceb),      // Sky
             success: Color::from_u32(0x00a6_e3a1),   // Green
             warning: Color::from_u32(0x00f9_e2af),   // Yellow
@@ -170,13 +170,17 @@ impl Theme {
         Style::default().fg(self.accent)
     }
 
-    /// Border style for unfocused components
+    /// Border style for unfocused components — aliased to [`dim`] since
+    /// both are "low-contrast UI chrome"; palette shifts apply in lockstep.
+    ///
+    /// [`dim`]: Self::dim
     pub(crate) fn border_unfocused(&self) -> Style {
-        Style::default().fg(self.fg_dim)
+        self.dim()
     }
 
     // Markdown rendering
 
+    /// H1 — bold + underlined (most prominent heading)
     pub(crate) fn heading_h1(&self) -> Style {
         Style::default()
             .fg(self.fg)
@@ -184,10 +188,13 @@ impl Theme {
             .add_modifier(Modifier::UNDERLINED)
     }
 
+    /// H2 — bold. Also the canonical style for bold section headers
+    /// (reused by [`table_header`](Self::table_header)).
     pub(crate) fn heading_h2(&self) -> Style {
         Style::default().fg(self.fg).add_modifier(Modifier::BOLD)
     }
 
+    /// H3 — bold italic
     pub(crate) fn heading_h3(&self) -> Style {
         Style::default()
             .fg(self.fg)
@@ -195,38 +202,64 @@ impl Theme {
             .add_modifier(Modifier::ITALIC)
     }
 
+    /// H4–H6 — italic (demoted minor headings)
     pub(crate) fn heading_minor(&self) -> Style {
         Style::default().fg(self.fg).add_modifier(Modifier::ITALIC)
     }
 
+    /// Inline code (`` `code` ``) — teal on a subtle surface fill so it
+    /// reads as a highlighted token against body text and bold headings.
     pub(crate) fn inline_code(&self) -> Style {
+        Style::default().fg(self.code).bg(self.surface)
+    }
+
+    /// Fallback style for fenced code blocks with unknown languages.
+    /// Shares the teal foreground with inline code but omits the
+    /// background fill, which would paint only the content portion of
+    /// each line and leave ragged edges.
+    pub(crate) fn code_block_fallback(&self) -> Style {
         Style::default().fg(self.code)
     }
 
+    /// Markdown link URL — accent color with underline
     pub(crate) fn link(&self) -> Style {
         Style::default()
             .fg(self.accent)
             .add_modifier(Modifier::UNDERLINED)
     }
 
+    /// Blockquote marker (`> `) — uses the palette's success green as a
+    /// distinctive accent; not a semantic "success" signal, and not
+    /// intentionally aliased to other chrome roles.
     pub(crate) fn blockquote(&self) -> Style {
         Style::default().fg(self.success)
     }
 
+    /// List item bullet / number marker — accent color
     pub(crate) fn list_marker(&self) -> Style {
         Style::default().fg(self.accent)
     }
 
+    /// Markdown horizontal rule — aliased to [`dim`] as low-contrast chrome.
+    ///
+    /// [`dim`]: Self::dim
     pub(crate) fn horizontal_rule(&self) -> Style {
-        Style::default().fg(self.fg_dim)
+        self.dim()
     }
 
+    /// Table header cell — aliased to [`heading_h2`] since both are
+    /// "bold section header on primary foreground".
+    ///
+    /// [`heading_h2`]: Self::heading_h2
     pub(crate) fn table_header(&self) -> Style {
-        Style::default().fg(self.fg).add_modifier(Modifier::BOLD)
+        self.heading_h2()
     }
 
+    /// Table border glyphs — aliased to [`dim`] as low-contrast chrome.
+    ///
+    /// [`dim`]: Self::dim
     pub(crate) fn table_border(&self) -> Style {
-        Style::default().fg(self.fg_dim)
+        self.dim()
     }
 }
 
@@ -262,6 +295,9 @@ mod tests {
         assert_eq!(t.warning().fg, Some(t.warning));
         assert_eq!(t.error().fg, Some(t.error));
         assert_eq!(t.inline_code().fg, Some(t.code));
+        assert_eq!(t.inline_code().bg, Some(t.surface));
+        assert_eq!(t.code_block_fallback().fg, Some(t.code));
+        assert_eq!(t.code_block_fallback().bg, None);
     }
 
     #[test]
@@ -373,5 +409,28 @@ mod tests {
     fn table_border_uses_dim_color() {
         let t = Theme::default();
         assert_eq!(t.table_border().fg, Some(t.fg_dim));
+    }
+
+    // ── Semantic aliases ──
+
+    /// `border_unfocused`, `horizontal_rule`, `table_border` all share
+    /// the "low-contrast UI chrome" role and must evolve together. If
+    /// any diverges from `dim()`, pull it out of the aliased cluster
+    /// intentionally rather than by accident.
+    #[test]
+    fn dim_aliases_stay_in_lockstep() {
+        let t = Theme::default();
+        let dim = t.dim();
+        assert_eq!(t.border_unfocused(), dim);
+        assert_eq!(t.horizontal_rule(), dim);
+        assert_eq!(t.table_border(), dim);
+    }
+
+    /// Table headers and H2 both represent "bold section header on
+    /// primary fg"; they must stay visually identical.
+    #[test]
+    fn table_header_matches_heading_h2() {
+        let t = Theme::default();
+        assert_eq!(t.table_header(), t.heading_h2());
     }
 }
