@@ -345,10 +345,15 @@ pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, Str
 /// directory, otherwise the absolute path. Falls back to `path` when the cwd
 /// cannot be read.
 pub(crate) fn display_cwd_path(path: &str) -> String {
-    std::env::current_dir().ok().map_or_else(
-        || path.to_owned(),
-        |cwd| display_path(Path::new(path), &cwd),
-    )
+    let cwd = std::env::current_dir().ok();
+    display_cwd_path_from(path, cwd.as_deref())
+}
+
+fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
+    match cwd {
+        Some(cwd) => display_path(Path::new(path), cwd),
+        None => path.to_owned(),
+    }
 }
 
 /// Returns a tool-call label using a cwd-relative path argument when possible.
@@ -656,6 +661,14 @@ mod tests {
             let got = t.summarize_call(&serde_json::json!({}));
             assert_eq!(got, title_case(t.name()), "tool {}", t.name());
         }
+    }
+
+    #[test]
+    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
+        assert_eq!(
+            display_cwd_path_from("/tmp/example.rs", None),
+            "/tmp/example.rs"
+        );
     }
 
     #[test]

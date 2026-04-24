@@ -643,6 +643,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_context_label_single_line_uses_single_number() {
+        let lines = vec![ReadExcerptLine {
+            number: 4,
+            text: "delta".to_owned(),
+        }];
+
+        assert_eq!(
+            read_context_label("/tmp/example.rs", &lines, 10),
+            "/tmp/example.rs:4 of 10"
+        );
+    }
+
     // ── split_diff_side ──
 
     #[test]
