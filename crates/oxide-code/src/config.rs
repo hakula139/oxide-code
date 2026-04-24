@@ -20,7 +20,7 @@ const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, Clone)]
-pub enum Auth {
+pub(crate) enum Auth {
     /// Explicit API key (`x-api-key` header).
     ApiKey(String),
     /// OAuth access token from Claude Code (`Authorization: Bearer` header).
@@ -29,7 +29,7 @@ pub enum Auth {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ThinkingConfig {
+pub(crate) enum ThinkingConfig {
     /// Model decides the thinking budget (Claude 4.6+). `display`
     /// controls what the API streams back: `Omitted` (4.7 default,
     /// empty `thinking` field) or `Summarized` (the 4.6 default, and
@@ -45,7 +45,7 @@ pub enum ThinkingConfig {
 /// `display: None`) already yields the `omitted` default on 4.7.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThinkingDisplay {
+pub(crate) enum ThinkingDisplay {
     Summarized,
 }
 
@@ -54,7 +54,7 @@ pub enum ThinkingDisplay {
 /// [`crate::model::Capabilities`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Effort {
+pub(crate) enum Effort {
     Low,
     Medium,
     High,
@@ -99,7 +99,7 @@ impl FromStr for Effort {
 /// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
 /// explicit opt-in. oxide-code defaults to `OneHour`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-pub enum PromptCacheTtl {
+pub(crate) enum PromptCacheTtl {
     #[serde(rename = "5m")]
     FiveMin,
     #[serde(rename = "1h")]
@@ -144,22 +144,22 @@ impl FromStr for PromptCacheTtl {
 
 /// Resolved configuration.
 #[derive(Debug, Clone)]
-pub struct Config {
-    pub auth: Auth,
-    pub base_url: String,
-    pub model: String,
+pub(crate) struct Config {
+    pub(crate) auth: Auth,
+    pub(crate) base_url: String,
+    pub(crate) model: String,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
     /// omitted. Resolved once at [`Config::load`] — callers forward.
-    pub effort: Option<Effort>,
-    pub max_tokens: u32,
+    pub(crate) effort: Option<Effort>,
+    pub(crate) max_tokens: u32,
     /// `cache_control.ttl` for every cacheable block. Default is
     /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
     /// drop made the server default (5 m) a silent cost regression
     /// on long sessions.
-    pub prompt_cache_ttl: PromptCacheTtl,
-    pub thinking: Option<ThinkingConfig>,
-    pub show_thinking: bool,
+    pub(crate) prompt_cache_ttl: PromptCacheTtl,
+    pub(crate) thinking: Option<ThinkingConfig>,
+    pub(crate) show_thinking: bool,
 }
 
 impl Config {
@@ -170,7 +170,7 @@ impl Config {
     ///
     /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
     /// file > Claude Code OAuth credentials.
-    pub async fn load() -> Result<Self> {
+    pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();

@@ -241,6 +241,7 @@ mod tests {
         render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
     }
+
     // ── render_sessions ──
 
     #[test]
@@ -429,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_width_returns_empty_when_max_width_is_zero() {
+    fn truncate_to_width_zero_produces_empty() {
         assert_eq!(truncate_to_width("anything", 0), "");
     }
 

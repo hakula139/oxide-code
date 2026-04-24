@@ -28,8 +28,8 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
-    pub client: Option<ClientConfig>,
-    pub tui: Option<TuiConfig>,
+    pub(super) client: Option<ClientConfig>,
+    pub(super) tui: Option<TuiConfig>,
 }
 
 /// API client settings (`[client]` section).
@@ -40,19 +40,19 @@ pub(super) struct FileConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<super::Effort>,
-    pub max_tokens: Option<u32>,
-    pub prompt_cache_ttl: Option<super::PromptCacheTtl>,
+    pub(super) api_key: Option<String>,
+    pub(super) base_url: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) effort: Option<super::Effort>,
+    pub(super) max_tokens: Option<u32>,
+    pub(super) prompt_cache_ttl: Option<super::PromptCacheTtl>,
 }
 
 /// Terminal UI settings (`[tui]` section).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
-    pub show_thinking: Option<bool>,
+    pub(super) show_thinking: Option<bool>,
 }
 
 // ── Merge ──
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn load_file_missing_file_returns_none() {
+    fn load_file_missing_is_absent() {
         let result =
             load_file(Path::new("/nonexistent/config.toml")).expect("missing file is not an error");
         assert!(result.is_none());
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn find_project_config_from_returns_none_when_absent() {
+    fn find_project_config_from_is_absent_when_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert!(find_project_config_from(dir.path().to_path_buf()).is_none());
     }

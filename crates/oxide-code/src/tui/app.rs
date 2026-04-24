@@ -21,10 +21,10 @@ use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
-use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
+use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
@@ -154,9 +154,11 @@ impl App {
     }
 
     /// Translate a user action into UI state changes, then forward it to the
-    /// agent loop over the bounded channel. `try_send` would only fail if the
-    /// agent task has died; in that case `should_quit` tears down the TUI on
-    /// the next iteration so nothing is lost.
+    /// agent loop over the bounded channel. A `Closed` error means the agent
+    /// task has died; surface that so the user isn't left staring at a
+    /// wedged "Streaming" status. `Full` is implausible (input is disabled
+    /// while streaming, so at most one in-flight action at a time), but
+    /// worth treating symmetrically if it ever trips.
     fn dispatch_user_action(&mut self, action: UserAction) {
         match &action {
             UserAction::SubmitPrompt(text) => {
@@ -168,7 +170,20 @@ impl App {
                 self.should_quit = true;
             }
         }
-        _ = self.user_tx.try_send(action);
+        if let Err(e) = self.user_tx.try_send(action) {
+            match e {
+                mpsc::error::TrySendError::Closed(_) => {
+                    self.chat
+                        .push_error("agent task exited unexpectedly; restart `ox` to recover");
+                    self.input.set_enabled(false);
+                    self.should_quit = true;
+                }
+                mpsc::error::TrySendError::Full(_) => {
+                    self.chat
+                        .push_error("user-action channel full; prompt dropped (this is a bug)");
+                }
+            }
+        }
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -460,6 +475,48 @@ mod tests {
         // Status bar stays idle — Quit flows past the streaming setup so
         // the tear-down path doesn't have to un-spinner it.
         assert_eq!(app.status_bar.status(), Status::Idle);
+    }
+
+    #[test]
+    fn dispatch_closed_channel_surfaces_error_and_quits() {
+        // Dropping `user_rx` simulates the agent task exiting — try_send
+        // returns `Closed`. The UI must announce the failure and tear
+        // itself down so the user isn't left staring at a stuck spinner.
+        let (mut app, rx, _agent_tx) = test_app(None);
+        drop(rx);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+
+        assert!(app.should_quit, "closed channel must trigger teardown");
+        assert!(
+            !app.input.is_enabled(),
+            "input stays disabled during teardown"
+        );
+        // User message pushed before try_send, error block after — two entries.
+        assert_eq!(app.chat.entry_count(), 2);
+        assert!(
+            app.chat.last_is_error(),
+            "closed-channel error should be the final block"
+        );
+    }
+
+    #[test]
+    fn dispatch_full_channel_surfaces_error_but_keeps_app_alive() {
+        // Fill the 8-slot channel without draining, then overflow. Full is
+        // implausible in production (input disables during streaming) but
+        // if it ever trips, the app must NOT tear down — just warn.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        for _ in 0..8 {
+            app.dispatch_user_action(UserAction::SubmitPrompt("fill".to_owned()));
+        }
+        let before_overflow = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("overflow".to_owned()));
+
+        assert!(!app.should_quit, "Full is not fatal");
+        // One more user message (pushed unconditionally) plus an error block.
+        assert_eq!(app.chat.entry_count(), before_overflow + 2);
+        assert!(app.chat.last_is_error());
     }
 
     // ── handle_agent_event ──

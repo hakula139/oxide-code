@@ -27,11 +27,13 @@ use self::blocks::{
     ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
+use crate::agent::pending_calls::{
+    FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header,
+};
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
-use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call
@@ -1989,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_unhandled_key_returns_none() {
+    fn handle_event_unhandled_key_produces_no_action() {
         let mut chat = test_chat();
         let action = chat.handle_event(&key_event(KeyCode::Char('a')));
         assert!(action.is_none());

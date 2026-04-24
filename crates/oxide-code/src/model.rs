@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_returns_none_for_unknown_model_family() {
+    fn lookup_unknown_model_family_is_absent() {
         // A hypothetical future family with no entry should miss entirely
         // so callers can opt into conservative defaults.
         assert!(lookup("claude-opus-5-0").is_none());

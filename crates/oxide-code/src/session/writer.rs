@@ -107,9 +107,17 @@ mod tests {
 
         record_session_message(&session, &Message::user("hello"), None).await;
 
+        // Assert against the wire shape rather than the internal `Entry`
+        // variant — parsing + destructuring would leave an unreachable
+        // "got unexpected variant" arm that can't be driven by this code
+        // path. The JSON assertion is just as strict and has no dead arm.
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-        assert!(content.contains(r#""type":"message""#));
-        assert!(content.contains("hello"));
+        let last_line = content.lines().last().expect("session file has no lines");
+        let json: serde_json::Value = serde_json::from_str(last_line).expect("valid JSONL");
+        assert_eq!(json["type"], "message");
+        assert_eq!(json["message"]["role"], "user");
+        assert_eq!(json["message"]["content"][0]["type"], "text");
+        assert_eq!(json["message"]["content"][0]["text"], "hello");
     }
 
     // ── log_session_err ──

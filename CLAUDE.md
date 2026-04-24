@@ -25,7 +25,8 @@ ox     # Start an interactive session
 .
 ├── agent.rs                        # Agent turn loop, stream accumulation, tool dispatch
 ├── agent/
-│   └── event.rs                    # AgentEvent, UserAction, AgentSink trait, StdioSink
+│   ├── event.rs                    # AgentEvent, UserAction, AgentSink trait, StdioSink
+│   └── pending_calls.rs            # PendingCall / PendingCalls correlation state shared by live streaming and transcript resume
 ├── client.rs                       # Client module root
 ├── client/
 │   ├── anthropic.rs                # Anthropic Messages API streaming client
@@ -121,8 +122,8 @@ ox     # Start an interactive session
 
 ### Blank Lines
 
-- One blank line between top-level items (functions, structs, enums, impls, constants).
-- One blank line before and after section dividers (`// ── Name ──`).
+- One blank line between top-level items (functions, structs, enums, impls, constants). Exception: runs of closely-related one-line `const` / `static` declarations that share a theme (e.g., all the OAuth client constants, all the beta-header names) may sit together without blanks, then take one blank before unrelated items.
+- One blank line before and after section dividers (`// ── Name ──`). This applies inside `#[cfg(test)]` modules too — the first divider takes a blank line after the `use super::*;` block.
 - Inside function bodies, use blank lines to separate logical phases (e.g., setup → validation → execution → result).
 - Group a single-line computation with its immediate validation guard (early-return `if`) — no blank between them. Multi-line `let` bindings (async chains, builder patterns) keep the blank before their guard.
 
@@ -132,7 +133,7 @@ ox     # Start an interactive session
 - Keep files focused: one primary type or concern per file. When a file or function grows large, split it into smaller units proactively rather than letting it accumulate.
 - Place functions and types in the module that reflects their conceptual domain — import paths should not mislead about what the item does. Create new modules when needed for clean organization.
 - Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
-- Order helper functions after their caller (top-down reading order).
+- Order helper functions after their caller (top-down reading order) _within each section_. Whole trait impls or unrelated feature sections don't need to be reshuffled to satisfy this — the rule is about local readability, not cross-section call graphs.
 - When adding new fields to structs or variants to enums, place them at the most semantically appropriate position among existing members, not simply appended at the bottom.
 - A type used by N callers across M modules belongs in the module that names the **contract**, not the module of the first **implementation**. If `tui::event::AgentSink` is implemented by both a TUI channel and a stdio writer, the trait belongs in `agent::` (the contract), not `tui::` (one implementation).
 
@@ -143,7 +144,7 @@ ox     # Start an interactive session
 
 ### Imports
 
-- Group `use` statements in three blocks separated by blank lines: std → external crates → internal modules.
+- Group `use` statements in three blocks separated by blank lines: std → external crates → internal modules. `super::` and `crate::` paths belong together in the internal block — do not split them.
 - Within each block, sort alphabetically.
 
 ### String Literals
@@ -180,13 +181,14 @@ ox     # Start an interactive session
   - Prose intro summarizing what and why.
   - Per-file Changes table (for non-trivial PRs).
   - Test plan checklist.
+- PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.
 
 ### Testing
 
 - Unit tests in the same file as the code they test (`#[cfg(test)]` module).
 - Integration tests in `tests/` directory for cross-module behavior.
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
-- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`). For parameterless single-behavior functions where the value IS the test, use property form (`icon_is_dollar_sign`), not mechanism form (`icon_returns_dollar_sign`).
+- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`). When the scenario and the return value are synonyms (unset env var → `None`), phrase the scenario side (`string_unset_is_absent`), not the mechanism (`string_unset_returns_none`). For parameterless single-behavior functions where the value IS the test, use property form (`icon_is_dollar_sign`), not mechanism form (`icon_returns_dollar_sign`).
 - Use `indoc!` for multi-line string literals in tests.
 - Reach for the established test infrastructure before hand-rolling: `wiremock` for HTTP round-trips, `temp-env` for environment-variable isolation, `ratatui::backend::TestBackend` + `insta` for TUI render snapshots (review with `cargo insta review`), and an extracted trait with an in-process fake (see `agent::AgentClient`) when a dependency is hard to mock at the network boundary.
 - Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.

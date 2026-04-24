@@ -441,6 +441,18 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
+/// Converts a byte count to megabytes for display. Centralizes the
+/// `clippy::cast_precision_loss` suppression — every file-size cap in
+/// this crate is well below 2^53 bytes, so the f64 cast is exact.
+pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
+    )]
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    mb
+}
+
 /// Cap on tool output size. Prevents flooding the LLM context window.
 /// Roughly 32K tokens at ~4 chars / token.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
@@ -454,20 +466,19 @@ pub(crate) const MAX_LINE_LENGTH: usize = 500;
 /// Truncates a line beyond [`MAX_LINE_LENGTH`] characters, appending a
 /// `[N chars]` suffix. Returns a borrowed slice when no truncation is needed.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
+    // Fast path: fewer bytes than the char cap means we can't exceed the cap.
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
     }
-
-    // Single pass: find both the truncation boundary and the total char count.
-    let mut boundary = 0;
-    let mut total_chars = 0;
-    for (i, (byte_idx, _)) in line.char_indices().enumerate() {
-        if i == MAX_LINE_LENGTH {
-            boundary = byte_idx;
-        }
-        total_chars = i + 1;
+    let total_chars = line.chars().count();
+    if total_chars <= MAX_LINE_LENGTH {
+        return Cow::Borrowed(line);
     }
-
+    // `nth(MAX_LINE_LENGTH)` is Some: we just proved `total_chars > MAX_LINE_LENGTH`.
+    let boundary = line
+        .char_indices()
+        .nth(MAX_LINE_LENGTH)
+        .map_or(line.len(), |(i, _)| i);
     Cow::Owned(format!("{}... [{total_chars} chars]", &line[..boundary]))
 }
 
@@ -980,5 +991,18 @@ mod tests {
         assert_eq!(prefix, expected_prefix);
         assert_eq!(prefix.chars().count(), MAX_LINE_LENGTH);
         assert_eq!(suffix, format!("{} chars]", MAX_LINE_LENGTH + 99));
+    }
+
+    #[test]
+    fn truncate_line_multibyte_under_char_cap_unchanged() {
+        // Regression: MAX_LINE_LENGTH é's take 2*MAX_LINE_LENGTH bytes,
+        // tripping a byte-length gate but staying within the char cap.
+        // A bad implementation returns `"... [N chars]"` with an empty
+        // prefix (silent data loss); the correct behavior is a no-op
+        // borrow.
+        let line = "é".repeat(MAX_LINE_LENGTH);
+        let result = truncate_line(&line);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.as_ref(), line);
     }
 }

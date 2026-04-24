@@ -116,16 +116,18 @@ impl ContextManagement {
     /// we need to diverge from the default.
     fn clear_thinking_keep_all() -> Self {
         Self {
-            edits: [ContextEdit::ClearThinking20251015 { keep: "all" }],
+            edits: [ContextEdit {
+                r#type: "clear_thinking_20251015",
+                keep: "all",
+            }],
         }
     }
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type")]
-enum ContextEdit {
-    #[serde(rename = "clear_thinking_20251015")]
-    ClearThinking20251015 { keep: &'static str },
+struct ContextEdit {
+    r#type: &'static str,
+    keep: &'static str,
 }
 
 /// JSON-schema-constrained completion format. Constructed via
@@ -203,7 +205,7 @@ struct CacheControl {
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum StreamEvent {
+pub(crate) enum StreamEvent {
     MessageStart {
         message: MessageResponse,
     },
@@ -241,15 +243,15 @@ pub enum StreamEvent {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct MessageResponse {
-    pub id: String,
-    pub model: String,
-    pub usage: Option<Usage>,
+pub(crate) struct MessageResponse {
+    pub(crate) id: String,
+    pub(crate) model: String,
+    pub(crate) usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlockInfo {
+pub(crate) enum ContentBlockInfo {
     Text {
         text: String,
     },
@@ -280,7 +282,7 @@ pub enum ContentBlockInfo {
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Delta {
+pub(crate) enum Delta {
     TextDelta {
         text: String,
     },
@@ -308,8 +310,8 @@ pub enum Delta {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct MessageDeltaBody {
-    pub stop_reason: Option<String>,
+pub(crate) struct MessageDeltaBody {
+    pub(crate) stop_reason: Option<String>,
 }
 
 #[cfg_attr(
@@ -320,31 +322,31 @@ pub struct MessageDeltaBody {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct Usage {
+pub(crate) struct Usage {
     #[serde(default)]
-    pub input_tokens: u32,
+    pub(crate) input_tokens: u32,
     #[serde(default)]
-    pub output_tokens: u32,
+    pub(crate) output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApiError {
+pub(crate) struct ApiError {
     #[serde(rename = "type")]
-    pub error_type: String,
-    pub message: String,
+    pub(crate) error_type: String,
+    pub(crate) message: String,
 }
 
 // ── Client ──
 
 #[derive(Clone)]
-pub struct Client {
+pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
 }
 
 impl Client {
-    pub fn new(config: Config, session_id: Option<String>) -> Result<Self> {
+    pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
@@ -411,7 +413,7 @@ impl Client {
     }
 
     /// Returns the model name for use in the system prompt.
-    pub fn model(&self) -> &str {
+    pub(crate) fn model(&self) -> &str {
         &self.config.model
     }
 
@@ -429,8 +431,16 @@ impl Client {
     /// is prepended as a synthetic user message (keeping dynamic content
     /// like CLAUDE.md out of the cacheable `system` parameter).
     ///
+    /// System-block assembly order (the boundary marker is filtered out):
+    ///
+    /// 1. Billing header (OAuth only; no `cache_control`).
+    /// 2. Identity prefix (no `cache_control`).
+    /// 3. Static sections joined (ephemeral cache; `scope=global` on 1P,
+    ///    default org-scoped on 3P).
+    /// 4. Dynamic sections joined (no `cache_control`).
+    ///
     /// Returns an mpsc receiver of [`StreamEvent`]s.
-    pub fn stream_message(
+    pub(crate) fn stream_message(
         &self,
         messages: &[Message],
         system_sections: &[&str],
@@ -462,13 +472,6 @@ impl Client {
         // ephemeral cache, which every gateway accepts.
         let is_first_party = is_first_party_base_url(&self.config.base_url);
 
-        // System-block order (boundary marker filtered):
-        //
-        // 1. Billing header (OAuth only; no cache_control).
-        // 2. Identity prefix (no cache_control).
-        // 3. Static sections joined (ephemeral cache; scope=global on 1P,
-        //    default org-scoped on 3P).
-        // 4. Dynamic sections joined (no cache_control).
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
@@ -564,7 +567,7 @@ impl Client {
     /// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
     /// is `false`, both the body field and the beta are silently
     /// dropped — the caller must tolerate free-form text in that case.
-    pub async fn complete(
+    pub(crate) async fn complete(
         &self,
         model: &str,
         system: &str,
@@ -608,8 +611,16 @@ impl Client {
             .await?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let body = response.text().await.unwrap_or_default();
-            bail!("API error (HTTP {status}): {body}");
+            bail!(
+                "{}",
+                format_api_error(status, retry_after.as_deref(), &body)
+            );
         }
 
         let CompletionResponse { content } = response
@@ -652,7 +663,9 @@ fn compute_betas(
     is_first_party: bool,
 ) -> Vec<&'static str> {
     let caps = crate::model::capabilities_for(model);
-    let is_haiku = model.to_lowercase().contains("haiku");
+    let is_haiku = model
+        .split('-')
+        .any(|tok| tok.eq_ignore_ascii_case("haiku"));
 
     // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
     // sets: identity / auth → universal agentic → capability-gated.
@@ -756,10 +769,13 @@ fn has_1m_tag(model: &str) -> bool {
 
 /// Byte offset of the `[1m]` tag, case-insensitive. Shared by
 /// [`has_1m_tag`] and [`api_model_id`] so the two agree on every
-/// accepted spelling. Model IDs are ASCII, so lowercased byte indices
-/// line up with the original string.
+/// accepted spelling. Model IDs are ASCII, so byte-window scanning
+/// lines up with character boundaries.
 fn tag_offset(model: &str) -> Option<usize> {
-    model.to_lowercase().find("[1m]")
+    model
+        .as_bytes()
+        .windows(4)
+        .position(|w| w.eq_ignore_ascii_case(b"[1m]"))
 }
 
 /// Serializes the JSON request body for [`Client::complete`].
@@ -940,8 +956,16 @@ async fn stream_sse(
 
     let status = response.status();
     if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body = response.text().await.unwrap_or_default();
-        bail!("API error (HTTP {status}): {body}");
+        bail!(
+            "{}",
+            format_api_error(status, retry_after.as_deref(), &body)
+        );
     }
 
     let mut stream = response.bytes_stream();
@@ -987,6 +1011,25 @@ async fn stream_sse(
     }
 
     Ok(())
+}
+
+/// Builds an actionable error message for a non-2xx Anthropic API
+/// response. The raw body is always appended as `details: {body}` so
+/// debug context is preserved on every branch.
+fn format_api_error(status: reqwest::StatusCode, retry_after: Option<&str>, body: &str) -> String {
+    let prefix = match status.as_u16() {
+        401 => "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth.".to_owned(),
+        429 => match retry_after {
+            Some(after) => format!("Anthropic API rate limited (HTTP 429); retry after {after}."),
+            None => "Anthropic API rate limited (HTTP 429); retry after a short delay.".to_owned(),
+        },
+        529 => "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds.".to_owned(),
+        s if (500..600).contains(&s) => {
+            format!("Anthropic API server error (HTTP {status}). Usually transient; retry.")
+        }
+        _ => format!("API error (HTTP {status})"),
+    };
+    format!("{prefix} details: {body}")
 }
 
 /// Parses a single SSE frame into a [`StreamEvent`].
@@ -1147,6 +1190,19 @@ mod tests {
 
     fn captured<T>() -> Captured<T> {
         Arc::new(Mutex::new(None))
+    }
+
+    // ── ContextManagement ──
+
+    #[test]
+    fn context_management_clear_thinking_keep_all_serializes_tagged_shape() {
+        let v = serde_json::to_value(ContextManagement::clear_thinking_keep_all()).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
+            }),
+        );
     }
 
     // ── OutputFormat ──
@@ -1439,10 +1495,7 @@ mod tests {
             panic!("expected text delta, got {:?}", events[2]);
         };
         assert_eq!(text, "Hi");
-        assert!(matches!(
-            events[5],
-            StreamEvent::MessageStop | StreamEvent::Unknown,
-        ));
+        assert!(matches!(events[5], StreamEvent::MessageStop));
     }
 
     #[tokio::test]
@@ -2646,6 +2699,76 @@ mod tests {
             }],
         }];
         assert_eq!(first_user_text(&tool_only), "");
+    }
+
+    // ── format_api_error ──
+
+    #[test]
+    fn format_api_error_401_names_both_auth_paths() {
+        let msg = format_api_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            None,
+            r#"{"error":"invalid_api_key"}"#,
+        );
+        assert!(
+            msg.starts_with(
+                "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth."
+            ),
+            "401 prefix: {msg}",
+        );
+        assert!(msg.contains(r#"details: {"error":"invalid_api_key"}"#));
+    }
+
+    #[test]
+    fn format_api_error_429_mentions_retry_after_when_present() {
+        let with = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("42"), "rl");
+        assert!(
+            with.starts_with("Anthropic API rate limited (HTTP 429); retry after 42."),
+            "429 with retry-after: {with}",
+        );
+        let without = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, None, "rl");
+        assert!(
+            without
+                .starts_with("Anthropic API rate limited (HTTP 429); retry after a short delay."),
+            "429 without retry-after: {without}",
+        );
+        assert!(with.contains("details: rl"));
+        assert!(without.contains("details: rl"));
+    }
+
+    #[test]
+    fn format_api_error_529_flags_overload_as_transient() {
+        let status = reqwest::StatusCode::from_u16(529).unwrap();
+        let msg = format_api_error(status, None, "overloaded");
+        assert!(
+            msg.starts_with(
+                "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds."
+            ),
+            "529 prefix: {msg}",
+        );
+        assert!(msg.contains("details: overloaded"));
+    }
+
+    #[test]
+    fn format_api_error_5xx_uses_generic_server_branch() {
+        let msg = format_api_error(reqwest::StatusCode::BAD_GATEWAY, None, "bad gw");
+        assert!(
+            msg.starts_with(
+                "Anthropic API server error (HTTP 502 Bad Gateway). Usually transient; retry."
+            ),
+            "5xx prefix: {msg}",
+        );
+        assert!(msg.contains("details: bad gw"));
+    }
+
+    #[test]
+    fn format_api_error_other_falls_back_to_generic_shape() {
+        let msg = format_api_error(reqwest::StatusCode::BAD_REQUEST, None, "invalid");
+        assert!(
+            msg.starts_with("API error (HTTP 400 Bad Request)"),
+            "generic prefix: {msg}",
+        );
+        assert!(msg.contains("details: invalid"));
     }
 
     // ── parse_sse_frame ──

@@ -357,7 +357,7 @@ mod tests {
     // ── detect_os_version ──
 
     #[test]
-    fn detect_os_version_returns_nonempty() {
+    fn detect_os_version_is_nonempty() {
         let version = detect_os_version();
         assert!(!version.is_empty());
     }

@@ -125,11 +125,7 @@ async fn read_file(
     }
 
     if metadata.len() > MAX_READ_FILE_SIZE {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "file sizes are well within f64 range"
-        )]
-        let mb = metadata.len() as f64 / (1024.0 * 1024.0);
+        let mb = super::bytes_to_mb(metadata.len());
         let limit_mb = MAX_READ_FILE_SIZE / (1024 * 1024);
         return Err(format!(
             "File is too large ({mb:.1} MB, max {limit_mb} MB). \
@@ -255,6 +251,7 @@ mod tests {
 
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
+
     // ── run ──
 
     #[tokio::test]

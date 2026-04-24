@@ -418,7 +418,10 @@ mod tests {
         terminal.backend().clone()
     }
 
-    /// Returns row 0 as a plain string for substring assertions.
+    /// Returns row 0 as a plain string for substring assertions about
+    /// relative ordering, presence of ellipsis, or conditional slot
+    /// drops — cases where a full snapshot would be more brittle than
+    /// informative.
     fn render_top_row(bar: &mut StatusBar, width: u16) -> String {
         let backend = render_status(bar, width);
         let buf = backend.buffer();
@@ -439,45 +442,6 @@ mod tests {
         let mut bar = StatusBar::new(Theme::default(), "Claude Opus 4.7".into(), cwd.into());
         bar.set_title(title.map(ToOwned::to_owned));
         bar
-    }
-
-    #[test]
-    fn render_idle_shows_ready() {
-        let mut bar = test_bar();
-        let output = render_top_row(&mut bar, 80);
-        assert!(output.contains("ox"));
-        assert!(output.contains("test-model"));
-        assert!(output.contains("ready"));
-    }
-
-    #[test]
-    fn render_streaming_shows_spinner() {
-        let mut bar = test_bar();
-        bar.set_status(Status::Streaming);
-        let output = render_top_row(&mut bar, 80);
-        assert!(output.contains("streaming..."));
-    }
-
-    #[test]
-    fn render_tool_running_shows_spinner() {
-        let mut bar = test_bar();
-        bar.set_status(Status::ToolRunning);
-        let output = render_top_row(&mut bar, 80);
-        assert!(output.contains("running tool..."));
-    }
-
-    #[test]
-    fn render_wide_shows_cwd() {
-        let mut bar = test_bar();
-        let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("~/test"));
-    }
-
-    #[test]
-    fn render_narrow_omits_cwd() {
-        let mut bar = test_bar();
-        let output = render_top_row(&mut bar, 30);
-        assert!(!output.contains("~/test"));
     }
 
     #[test]

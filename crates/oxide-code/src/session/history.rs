@@ -144,7 +144,7 @@ mod tests {
     // ── walk_transcript ──
 
     #[test]
-    fn walk_transcript_empty_returns_empty() {
+    fn walk_transcript_empty_yields_no_interactions() {
         assert!(walk_transcript(&[]).is_empty());
     }
 

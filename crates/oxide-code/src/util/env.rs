@@ -24,21 +24,21 @@ mod tests {
     // ── string ──
 
     #[test]
-    fn string_unset_returns_none() {
+    fn string_unset_is_absent() {
         temp_env::with_var_unset(KEY, || {
             assert_eq!(string(KEY), None);
         });
     }
 
     #[test]
-    fn string_empty_returns_none() {
+    fn string_empty_is_absent() {
         temp_env::with_var(KEY, Some(""), || {
             assert_eq!(string(KEY), None);
         });
     }
 
     #[test]
-    fn string_non_empty_returns_owned_value() {
+    fn string_non_empty_reads_value() {
         temp_env::with_var(KEY, Some("hello"), || {
             assert_eq!(string(KEY).as_deref(), Some("hello"));
         });
@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn bool_unset_and_empty_both_return_none() {
+    fn bool_unset_and_empty_are_absent() {
         temp_env::with_var_unset(KEY, || {
             assert_eq!(bool(KEY), None);
         });

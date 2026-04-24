@@ -453,6 +453,7 @@ mod tests {
         );
         insta::assert_snapshot!(render_to_backend(&input, 30, 5));
     }
+
     // ── visual_line_count ──
 
     #[test]
@@ -519,7 +520,7 @@ mod tests {
     // ── submit ──
 
     #[test]
-    fn submit_empty_returns_none() {
+    fn submit_empty_produces_no_action() {
         let mut input = test_input();
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(action.is_none());

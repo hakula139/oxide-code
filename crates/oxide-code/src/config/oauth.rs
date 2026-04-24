@@ -66,7 +66,7 @@ impl OAuthCredential {
 
 /// Loads an OAuth access token from Claude Code credentials, refreshing
 /// proactively if the token is within 5 minutes of expiry.
-pub async fn load_token() -> Result<String> {
+pub(super) async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
     load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL).await
@@ -203,11 +203,14 @@ fn enforce_private_mode(path: &Path) {
 fn enforce_private_mode(_path: &Path) {}
 
 fn is_near_expiry(expires_at_ms: u64) -> bool {
-    now_millis() + TOKEN_EXPIRY_BUFFER_MS >= expires_at_ms
+    // A broken host clock can't disprove expiry: if we can't tell, treat as
+    // expiring so the caller refreshes. A stale access token fails server-side;
+    // a needless refresh is cheap.
+    now_millis().is_none_or(|now| now.saturating_add(TOKEN_EXPIRY_BUFFER_MS) >= expires_at_ms)
 }
 
 fn is_expired(expires_at_ms: u64) -> bool {
-    now_millis() >= expires_at_ms
+    now_millis().is_none_or(|now| now >= expires_at_ms)
 }
 
 // ── Token Refresh ──
@@ -277,10 +280,11 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
 
     oauth["accessToken"] = serde_json::Value::String(response.access_token.clone());
     oauth["refreshToken"] = serde_json::Value::String(response.refresh_token.clone());
-    // Computed from local clock — will be wrong if the machine clock is skewed,
-    // but the refresh endpoint only returns a relative `expires_in`, not an
-    // absolute timestamp.
-    oauth["expiresAt"] = serde_json::json!(now_millis() + response.expires_in * 1000);
+    // Computed from local clock — derived from relative `expires_in`, the
+    // refresh endpoint does not return an absolute timestamp.
+    let now = now_millis().context("system clock before UNIX epoch; cannot record token expiry")?;
+    oauth["expiresAt"] =
+        serde_json::json!(now.saturating_add(response.expires_in.saturating_mul(1000)));
 
     if let Some(scope) = &response.scope {
         // `split_whitespace` tolerates extra or leading/trailing spaces in the
@@ -356,14 +360,18 @@ fn write_keychain(json: &str) -> Result<()> {
         .context("failed to write to Keychain")
 }
 
-fn now_millis() -> u64 {
+/// Current wall clock in milliseconds since UNIX epoch. Returns `None` if the
+/// host clock is set before 1970 — in that case OAuth expiry math is
+/// meaningless, so callers should treat the credential as expired and let the
+/// refresh path (or server-side rejection) take over.
+fn now_millis() -> Option<u64> {
     u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before epoch")
+            .ok()?
             .as_millis(),
     )
-    .expect("current time fits in u64")
+    .ok()
 }
 
 fn credentials_path() -> Option<PathBuf> {
@@ -503,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_returns_existing_when_far_from_expiry() {
+    async fn load_token_from_keeps_existing_when_far_from_expiry() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
@@ -516,11 +524,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_without_refresh_token_returns_nonexpired_as_is() {
+    async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
-        write_creds(&creds, "tok", None, now_millis() + 60_000);
+        write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
 
         let token = load_token_from(&creds, &lock, "http://should-not-be-called")
             .await
@@ -558,7 +566,12 @@ mod tests {
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
         // Under the 5-min refresh buffer so load_token_from must refresh.
-        write_creds(&creds, "old", Some("old-refresh"), now_millis() + 1_000);
+        write_creds(
+            &creds,
+            "old",
+            Some("old-refresh"),
+            now_millis().unwrap() + 1_000,
+        );
 
         let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
         assert_eq!(token, "fresh-access");
@@ -568,7 +581,7 @@ mod tests {
         assert_eq!(json["claudeAiOauth"]["accessToken"], "fresh-access");
         assert_eq!(json["claudeAiOauth"]["refreshToken"], "fresh-refresh");
         let expires_at = json["claudeAiOauth"]["expiresAt"].as_u64().unwrap();
-        let now = now_millis();
+        let now = now_millis().unwrap();
         assert!(
             expires_at >= now + 3_500_000 && expires_at <= now + 3_700_000,
             "expiresAt out of band: {expires_at}",
@@ -588,7 +601,12 @@ mod tests {
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
         // Near-expiry but not expired — refresh failure warns + keeps token.
-        write_creds(&creds, "stale", Some("old-refresh"), now_millis() + 60_000);
+        write_creds(
+            &creds,
+            "stale",
+            Some("old-refresh"),
+            now_millis().unwrap() + 60_000,
+        );
 
         let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
         assert_eq!(token, "stale");
@@ -614,6 +632,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("expired OAuth"), "wrapped context: {msg}");
     }
+
     // ── read_credentials ──
 
     #[test]
@@ -832,7 +851,7 @@ mod tests {
         assert_eq!(oauth["accessToken"], "new-access");
         assert_eq!(oauth["refreshToken"], "new-refresh");
         let expires_at = oauth["expiresAt"].as_u64().unwrap();
-        let now = now_millis();
+        let now = now_millis().unwrap();
         // expires_in is 3600s → 3_600_000ms from now, with tolerance for test execution time
         assert!(
             expires_at >= now + 3_500_000,

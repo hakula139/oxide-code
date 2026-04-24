@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn highlight_code_empty_code_returns_empty() {
+    fn highlight_code_empty_input_yields_empty() {
         let lines = highlight_code("rust", "", fallback());
         assert!(lines.is_empty(), "empty code should produce no lines");
     }
