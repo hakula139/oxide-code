@@ -101,7 +101,7 @@ impl ChatBlock for AssistantThinking {
         let style = theme.thinking();
 
         let bar_width = THINKING_PREFIX.width();
-        let inner_width = width.saturating_sub(bar_width);
+        let md_width = width.saturating_sub(bar_width);
         let bar_spans = vec![Span::styled(THINKING_PREFIX, style)];
 
         let mut out = Vec::new();
@@ -113,14 +113,10 @@ impl ChatBlock for AssistantThinking {
         out.extend(wrap_line(header, width, bar_width, Some(&bar_spans)));
 
         if !self.text.trim().is_empty() {
-            let rendered = render_markdown(&self.text, theme, inner_width);
+            let rendered = render_markdown(&self.text, theme, md_width);
             for line in rendered.lines {
                 let dimmed = apply_thinking_style(line, theme);
-                let mut spans = bar_spans.clone();
-                spans.extend(dimmed.spans);
-                let mut out_line = Line::from(spans);
-                out_line.style = dimmed.style;
-                out.push(out_line);
+                out.push(prepend_markdown_prefix(dimmed, THINKING_PREFIX, style));
             }
         }
 
@@ -164,12 +160,36 @@ mod tests {
         }
     }
 
+    // ── THINKING_PREFIX ──
+
     #[test]
     fn thinking_prefix_shares_bar_glyph_with_tool_blocks() {
         assert!(
             THINKING_PREFIX.starts_with(BAR),
             "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?})",
         );
+    }
+
+    // ── AssistantText::render ──
+
+    #[test]
+    fn assistant_text_fenced_code_preserves_highlight_style() {
+        // Regression: `prepend_markdown_prefix` used to drop `line.style`
+        // on its output, so an unknown-lang fenced block inside an
+        // assistant reply silently lost its whole-line fg.
+        let theme = Theme::default();
+        let block = AssistantText::new(indoc! {"
+            ```
+            let x = 1;
+            ```
+        "});
+        let ctx = ctx_at(60, &theme);
+        let lines = block.render(&ctx);
+        let fence_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
+            .expect("fence body line missing from render");
+        assert_eq!(fence_line.style.fg, Some(theme.code));
     }
 
     // ── AssistantThinking::render ──

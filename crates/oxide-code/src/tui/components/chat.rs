@@ -197,7 +197,6 @@ impl ChatView {
         }
     }
 
-    /// Commit in-flight thinking into a block. No-op when empty.
     fn commit_thinking_buffer(&mut self) {
         if self.thinking_buffer.is_empty() {
             return;
