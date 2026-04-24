@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn force_break_on_long_word() {
-        let line = Line::from("abcdefghijklmnopqrstuvwxyz");
-        let result = wrap_line(line, 10, 0, None);
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let result = wrap_line(Line::from(input), 10, 0, None);
         // 26 chars at width 10 must produce three segments: 10 + 10 + 6.
         assert_eq!(
             result.len(),
@@ -281,7 +281,7 @@ mod tests {
             "should force-break into three lines: {result:?}"
         );
         let texts: Vec<&str> = result.iter().map(|l| l.spans[0].content.as_ref()).collect();
-        assert_eq!(texts, ["abcdefghij", "klmnopqrst", "uvwxyz"]);
+        assert_eq!(texts, [&input[..10], &input[10..20], &input[20..]]);
     }
 
     #[test]
