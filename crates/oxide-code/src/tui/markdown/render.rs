@@ -1062,12 +1062,21 @@ mod tests {
     fn inline_code_in_list_item() {
         let t = theme();
         let text = render_markdown("- Use `foo()` here", &t, 0);
-        let has_code_span = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("foo()") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code_span, "inline code should be styled in list items");
+        let code_span = text
+            .lines
+            .iter()
+            .find_map(|line| line.spans.iter().find(|s| s.content.contains("foo()")))
+            .expect("inline code span missing inside list item");
+        assert_eq!(
+            code_span.style.fg,
+            Some(t.code),
+            "inline code keeps teal fg inside list items"
+        );
+        assert_eq!(
+            code_span.style.bg,
+            Some(t.surface),
+            "inline code keeps surface bg inside list items"
+        );
     }
 
     #[test]
@@ -1087,6 +1096,63 @@ mod tests {
             ```
         "});
         assert!(lines.iter().any(|l| l.contains("fn main()")));
+    }
+
+    #[test]
+    fn fenced_code_block_plain_has_no_background() {
+        // Plain fenced blocks (no language) use the `code_block_fallback`
+        // style, which omits the bg fill so wrapping / width variance
+        // across lines doesn't leave ragged highlight edges. The inline
+        // code bg (surface) must not leak into fenced blocks.
+        //
+        // The fallback path builds each line via `Line::styled(..)`, so
+        // the style lands on the Line, not the inner spans. Walk both
+        // layers to guard against either placement.
+        let t = theme();
+        let text = render_markdown(
+            indoc! {"
+                ```
+                fn main() {}
+                let x = 1;
+                ```
+            "},
+            &t,
+            0,
+        );
+        let code_lines: Vec<_> = text
+            .lines
+            .iter()
+            .filter(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("fn") || s.content.contains("let"))
+            })
+            .collect();
+        assert!(
+            !code_lines.is_empty(),
+            "fenced block content missing from render"
+        );
+        for line in code_lines {
+            assert_eq!(
+                line.style.bg, None,
+                "fenced block line style must not have a bg fill: {line:?}"
+            );
+            let effective_fg = line
+                .style
+                .fg
+                .or_else(|| line.spans.iter().find_map(|s| s.style.fg));
+            assert_eq!(
+                effective_fg,
+                Some(t.code),
+                "plain fenced block falls back to `code` fg: {line:?}"
+            );
+            for span in &line.spans {
+                assert_eq!(
+                    span.style.bg, None,
+                    "fenced block span must not have a bg fill: {span:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1232,12 +1298,21 @@ mod tests {
             &t,
             0,
         );
-        let has_code = text.lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|s| s.content.contains("code") && s.style.fg == Some(t.code))
-        });
-        assert!(has_code, "inline code should be styled inside table cells");
+        let code_span = text
+            .lines
+            .iter()
+            .find_map(|line| line.spans.iter().find(|s| s.content.contains("code")))
+            .expect("inline code span missing inside table cell");
+        assert_eq!(
+            code_span.style.fg,
+            Some(t.code),
+            "inline code keeps teal fg inside table cells"
+        );
+        assert_eq!(
+            code_span.style.bg,
+            Some(t.surface),
+            "inline code keeps surface bg inside table cells"
+        );
     }
 
     #[test]
