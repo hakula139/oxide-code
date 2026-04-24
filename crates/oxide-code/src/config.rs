@@ -51,7 +51,7 @@ impl Config {
     /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
     /// file > Claude Code OAuth credentials.
     pub async fn load() -> Result<Self> {
-        let fc = file::load();
+        let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();
 
@@ -293,6 +293,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_adaptive_thinking_is_always_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert!(matches!(config.thinking, Some(ThinkingConfig::Adaptive)));
+    }
+
+    #[tokio::test]
     async fn load_invalid_max_tokens_env_falls_through_to_file() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
@@ -312,12 +321,28 @@ mod tests {
         );
     }
 
+    /// Regression: a misplaced field used to drop the entire config
+    /// silently (parse error logged at `warn`, invisible without
+    /// `RUST_LOG`), which then surfaced as a confusing
+    /// "no credentials" error when the dropped config also held the
+    /// API key. The parse error must propagate instead.
     #[tokio::test]
-    async fn load_adaptive_thinking_is_always_enabled() {
+    async fn load_propagates_invalid_config_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                api_key = "sk-from-file"
+                show_thinking = true
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_API_KEY", "")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
             .await
-            .unwrap();
-        assert!(matches!(config.thinking, Some(ThinkingConfig::Adaptive)));
+            .expect_err("misplaced field must surface as an error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid config at"), "{msg}");
+        assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 }

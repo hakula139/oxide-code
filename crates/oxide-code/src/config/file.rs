@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::util::path::xdg_dir;
 
@@ -98,29 +99,44 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 ///
 /// Precedence (highest wins): project config > user config.
 /// Environment variable overrides are applied later in [`super::Config::load`].
-pub(super) fn load() -> FileConfig {
-    let user = user_config_path().and_then(|p| load_file(&p));
-    let project = find_project_config().and_then(|p| load_file(&p));
+///
+/// Returns an error if any discovered file is unreadable or malformed —
+/// silent fallthrough would otherwise hide typos (e.g. a misplaced
+/// `show_thinking` under `[client]`) and surface as a confusing
+/// downstream "no credentials" error after the dropped config takes
+/// the API key with it.
+pub(super) fn load() -> Result<FileConfig> {
+    let user = user_config_path()
+        .map(|p| load_file(&p))
+        .transpose()?
+        .flatten();
+    let project = find_project_config()
+        .map(|p| load_file(&p))
+        .transpose()?
+        .flatten();
 
     let base = user.unwrap_or_default();
-    match project {
+    Ok(match project {
         Some(p) => base.merge(p),
         None => base,
-    }
+    })
 }
 
-fn load_file(path: &Path) -> Option<FileConfig> {
-    let content = std::fs::read_to_string(path).ok()?;
-    match toml::from_str(&content) {
-        Ok(config) => {
-            debug!("loaded config from {}", path.display());
-            Some(config)
-        }
+/// Reads a single config file. `Ok(None)` when the file does not
+/// exist; `Err` when it exists but cannot be read or parsed (so the
+/// caller can surface the path and underlying TOML diagnostic).
+fn load_file(path: &Path) -> Result<Option<FileConfig>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            warn!("invalid config at {}: {e}", path.display());
-            None
+            return Err(e).with_context(|| format!("failed to read config at {}", path.display()));
         }
-    }
+    };
+    let config = toml::from_str(&content)
+        .with_context(|| format!("invalid config at {}", path.display()))?;
+    debug!("loaded config from {}", path.display());
+    Ok(Some(config))
 }
 
 // ── Path Discovery ──
@@ -281,7 +297,9 @@ mod tests {
         )
         .unwrap();
 
-        let config = load_file(&path).expect("should parse valid TOML");
+        let config = load_file(&path)
+            .expect("should parse valid TOML")
+            .expect("file should exist");
 
         let client = config.client.expect("client section should be present");
         assert_eq!(client.api_key.as_deref(), Some("sk-test"));
@@ -306,7 +324,9 @@ mod tests {
         )
         .unwrap();
 
-        let config = load_file(&path).expect("should parse partial TOML");
+        let config = load_file(&path)
+            .expect("should parse partial TOML")
+            .expect("file should exist");
         assert_eq!(
             config
                 .client
@@ -324,48 +344,88 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
 
-        let config = load_file(&path).expect("empty TOML is valid");
+        let config = load_file(&path)
+            .expect("empty TOML is valid")
+            .expect("file should exist");
         assert!(config.client.is_none());
         assert!(config.tui.is_none());
     }
 
+    #[test]
+    fn load_file_missing_file_returns_none() {
+        let result =
+            load_file(Path::new("/nonexistent/config.toml")).expect("missing file is not an error");
+        assert!(result.is_none());
+    }
+
+    /// Read errors other than `NotFound` (here: pointing at a
+    /// directory raises `IsADirectory`) must surface with the
+    /// offending path so the user can act on it. Splitting this from
+    /// the missing-file branch is the whole point of distinguishing
+    /// `NotFound` from other IO errors in `load_file`.
+    #[test]
+    fn load_file_unreadable_path_propagates_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_file(dir.path()).expect_err("directory read should fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!(
+                "failed to read config at {}",
+                dir.path().display()
+            )),
+            "{msg}",
+        );
+    }
+
+    #[test]
+    fn load_file_rejects_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[invalid").unwrap();
+
+        let err = load_file(&path).expect_err("malformed TOML should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid config at"), "{msg}");
+    }
+
+    /// Surfaced as a hard error so the user sees the offending path
+    /// and the TOML diagnostic instead of a silent fallthrough.
+    /// Covers `FileConfig`'s `deny_unknown_fields` (top-level keys);
+    /// the section-level analog is [`load_file_rejects_misplaced_field`].
     #[test]
     fn load_file_rejects_unknown_top_level_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, r#"model = "misplaced""#).unwrap();
 
-        assert!(load_file(&path).is_none());
+        let err = load_file(&path).expect_err("unknown key should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid config at"), "{msg}");
+        assert!(msg.contains("unknown field `model`"), "{msg}");
     }
 
+    /// Catches the original bug report shape: `show_thinking` belongs
+    /// in `[tui]`, not `[client]`. Without `deny_unknown_fields` +
+    /// hard-fail, the whole file used to be dropped silently and the
+    /// user got an unrelated "no credentials" error instead. Also
+    /// covers a generic typo within a section (same code path).
     #[test]
-    fn load_file_rejects_unknown_section_key() {
+    fn load_file_rejects_misplaced_field() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
             indoc! {r#"
                 [client]
-                api-key = "typo"
+                api_key = "sk-test"
+                show_thinking = true
             "#},
         )
         .unwrap();
 
-        assert!(load_file(&path).is_none());
-    }
-
-    #[test]
-    fn load_file_invalid_toml_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[invalid").unwrap();
-
-        assert!(load_file(&path).is_none());
-    }
-
-    #[test]
-    fn load_file_missing_file_returns_none() {
-        assert!(load_file(Path::new("/nonexistent/config.toml")).is_none());
+        let err = load_file(&path).expect_err("misplaced field should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
     // ── find_project_config_from ──
