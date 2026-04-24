@@ -128,14 +128,15 @@ impl FromStr for PromptCacheTtl {
     }
 }
 
+/// Resolved configuration. Fields are grouped by concern so adjacent
+/// lines stay related: connection (`auth`, `base_url`), model selection
+/// (`model`, `effort`), request tuning (`max_tokens`,
+/// `prompt_cache_ttl`, `thinking`), then display (`show_thinking`).
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: Auth,
-    pub model: String,
     pub base_url: String,
-    pub max_tokens: u32,
-    pub thinking: Option<ThinkingConfig>,
-    pub show_thinking: bool,
+    pub model: String,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
     /// omitted. Resolved once at [`Config::load`] — callers forward.
@@ -147,11 +148,14 @@ pub struct Config {
         )
     )]
     pub effort: Option<Effort>,
+    pub max_tokens: u32,
     /// `cache_control.ttl` for every cacheable block. Default is
     /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
     /// drop made the server default (5 m) a silent cost regression
     /// on long sessions.
     pub prompt_cache_ttl: PromptCacheTtl,
+    pub thinking: Option<ThinkingConfig>,
+    pub show_thinking: bool,
 }
 
 impl Config {
@@ -220,13 +224,13 @@ impl Config {
 
         Ok(Self {
             auth,
-            model,
             base_url,
+            model,
+            effort,
             max_tokens,
+            prompt_cache_ttl,
             thinking,
             show_thinking,
-            effort,
-            prompt_cache_ttl,
         })
     }
 }

@@ -21,12 +21,12 @@
 //!   `sonnet-4`.
 //! - `context_management` ← `modelSupportsContextManagement` — substring
 //!   `opus-4`, `sonnet-4`, or `haiku-4`.
+//! - `context_1m` ← `modelSupports1M` — substring `claude-sonnet-4` or
+//!   `opus-4-6`.
 //! - `effort` ← `modelSupportsEffort` — substring `opus-4-6` or
 //!   `sonnet-4-6`.
 //! - `effort_max` — explicit allowlist: Opus 4.6, Opus 4.7.
 //! - `effort_xhigh` — explicit allowlist: Opus 4.7.
-//! - `context_1m` ← `modelSupports1M` — substring `claude-sonnet-4` or
-//!   `opus-4-6`.
 //! - `structured_outputs` ← `modelSupportsStructuredOutputs` — explicit
 //!   allowlist: opus-4-1 / 4-5 / 4-6, sonnet-4-5 / 4-6, haiku-4-5.
 //!
@@ -70,6 +70,11 @@ pub(crate) struct ModelInfo {
 pub(crate) struct Capabilities {
     pub(crate) interleaved_thinking: bool,
     pub(crate) context_management: bool,
+    /// Whether the model accepts the `context-1m-2025-08-07` beta.
+    /// `compute_betas` gates the beta on `has_1m_tag(model) AND
+    /// context_1m` so a user who tags `claude-haiku-4[1m]` doesn't
+    /// silently send an unsupported beta and 400.
+    pub(crate) context_1m: bool,
     /// Gates `output_config.effort` at `low` / `medium` / `high`.
     /// Upper bound: see [`Self::effort_max`] / [`Self::effort_xhigh`].
     pub(crate) effort: bool,
@@ -77,11 +82,6 @@ pub(crate) struct Capabilities {
     pub(crate) effort_max: bool,
     /// Whether `effort = "xhigh"` is accepted. Opus 4.7 only.
     pub(crate) effort_xhigh: bool,
-    /// Whether the model accepts the `context-1m-2025-08-07` beta.
-    /// `compute_betas` gates the beta on `has_1m_tag(model) AND
-    /// context_1m` so a user who tags `claude-haiku-4[1m]` doesn't
-    /// silently send an unsupported beta and 400.
-    pub(crate) context_1m: bool,
     /// Whether the model accepts the `structured-outputs-2025-12-15`
     /// beta (JSON-schema-constrained text output). The upstream
     /// allowlist is Opus 4.1/4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5;
@@ -120,10 +120,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: true,
             effort: true,
             effort_max: true,
             effort_xhigh: true,
-            context_1m: true,
             structured_outputs: true,
         },
     },
@@ -134,10 +134,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: true,
             effort: true,
             effort_max: true,
             effort_xhigh: false,
-            context_1m: true,
             structured_outputs: true,
         },
     },
@@ -148,12 +148,12 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: true,
             effort: true,
             // `max` is Opus-only per the migration guide; Sonnet 4.6
             // 400s on it.
             effort_max: false,
             effort_xhigh: false,
-            context_1m: true,
             structured_outputs: true,
         },
     },
@@ -164,10 +164,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: false,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: false,
             structured_outputs: true,
         },
     },
@@ -178,10 +178,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: true,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: true,
             structured_outputs: true,
         },
     },
@@ -196,10 +196,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             // target 3P throughout.
             interleaved_thinking: false,
             context_management: true,
+            context_1m: false,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: false,
             structured_outputs: true,
         },
     },
@@ -210,10 +210,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: false,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: false,
             structured_outputs: true,
         },
     },
@@ -228,10 +228,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: false,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: false,
             structured_outputs: false,
         },
     },
@@ -245,10 +245,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
+            context_1m: true,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: true,
             structured_outputs: false,
         },
     },
@@ -259,10 +259,10 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             interleaved_thinking: false,
             context_management: true,
+            context_1m: false,
             effort: false,
             effort_max: false,
             effort_xhigh: false,
-            context_1m: false,
             structured_outputs: false,
         },
     },
@@ -381,8 +381,8 @@ mod tests {
             let is_opus_or_sonnet_4 = m.contains("opus-4") || m.contains("sonnet-4");
             let expect_interleaved_thinking = is_opus_or_sonnet_4; // haiku-4 is not in modelSupportsISP
             let expect_context_management = is_opus_or_sonnet_4 || m.contains("haiku-4");
-            let expect_effort = m.contains("opus-4-6") || m.contains("sonnet-4-6");
             let expect_context_1m = m.contains("claude-sonnet-4") || m.contains("opus-4-6");
+            let expect_effort = m.contains("opus-4-6") || m.contains("sonnet-4-6");
 
             assert_eq!(
                 info.capabilities.interleaved_thinking, expect_interleaved_thinking,
@@ -393,12 +393,12 @@ mod tests {
                 "{m}: context_management should match modelSupportsContextManagement",
             );
             assert_eq!(
-                info.capabilities.effort, expect_effort,
-                "{m}: effort should match modelSupportsEffort",
-            );
-            assert_eq!(
                 info.capabilities.context_1m, expect_context_1m,
                 "{m}: context_1m should match modelSupports1M",
+            );
+            assert_eq!(
+                info.capabilities.effort, expect_effort,
+                "{m}: effort should match modelSupportsEffort",
             );
         }
     }
@@ -414,10 +414,10 @@ mod tests {
         let caps = lookup("claude-opus-4-7").unwrap().capabilities;
         assert!(caps.interleaved_thinking);
         assert!(caps.context_management);
+        assert!(caps.context_1m);
         assert!(caps.effort);
         assert!(caps.effort_max);
         assert!(caps.effort_xhigh);
-        assert!(caps.context_1m);
         assert!(caps.structured_outputs);
 
         for other in [

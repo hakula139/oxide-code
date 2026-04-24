@@ -975,13 +975,13 @@ fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
     Config {
         auth,
-        model: model.to_owned(),
         base_url: base_url.into(),
+        model: model.to_owned(),
+        effort: None,
         max_tokens: 128,
+        prompt_cache_ttl: PromptCacheTtl::OneHour,
         thinking: None,
         show_thinking: false,
-        effort: None,
-        prompt_cache_ttl: PromptCacheTtl::OneHour,
     }
 }
 
