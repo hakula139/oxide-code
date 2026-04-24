@@ -143,10 +143,7 @@ impl FromStr for PromptCacheTtl {
     }
 }
 
-/// Resolved configuration. Fields are grouped by concern so adjacent
-/// lines stay related: connection (`auth`, `base_url`), model selection
-/// (`model`, `effort`), request tuning (`max_tokens`,
-/// `prompt_cache_ttl`, `thinking`), then display (`show_thinking`).
+/// Resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: Auth,
