@@ -160,3 +160,91 @@ fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static>
     }
     line
 }
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+    use ratatui::style::Style;
+
+    use super::*;
+    use crate::tui::theme::Theme;
+
+    fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            width,
+            theme,
+            show_thinking: true,
+        }
+    }
+
+    // ── AssistantThinking::render ──
+
+    #[test]
+    fn render_empty_body_emits_header_only() {
+        // Whitespace-only text must skip the body loop — `render` is
+        // invoked against the transient live-thinking buffer on every
+        // frame, including the zero-token frame between the thinking
+        // block opening and the first delta arriving.
+        let theme = Theme::default();
+        let block = AssistantThinking::new("   \n  ");
+        let lines = block.render(&ctx_at(60, &theme));
+        assert_eq!(lines.len(), 1, "only the header should render: {lines:?}");
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.starts_with("│ Thinking..."));
+    }
+
+    #[test]
+    fn render_fenced_code_block_preserves_highlight_style() {
+        // Syntax-highlighted fence lines carry an fg on the whole-line
+        // style; `apply_thinking_style` must leave them alone so the
+        // highlight survives under the bar prefix. A bug that patches
+        // `theme.thinking()` onto these lines would swap code colors
+        // for dim gray — pin the early-return here.
+        let theme = Theme::default();
+        let block = AssistantThinking::new(indoc! {"
+            Consider:
+
+            ```
+            let x = 1;
+            ```
+        "});
+        let lines = block.render(&ctx_at(60, &theme));
+
+        let fence_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
+            .expect("fence body line missing from render");
+        assert_eq!(
+            fence_line.style.fg,
+            Some(theme.code),
+            "fenced code line should keep its whole-line fg, got {:?}",
+            fence_line.style,
+        );
+
+        // Bar prefix is still applied in front of the untouched fence.
+        let first_span = fence_line.spans.first().expect("empty fence line");
+        assert_eq!(first_span.content, "│ ");
+        assert_eq!(first_span.style, theme.thinking());
+    }
+
+    // ── apply_thinking_style ──
+
+    #[test]
+    fn apply_thinking_style_dims_plain_spans_only() {
+        // Plain prose spans (no fg) get dimmed; spans with an explicit
+        // fg — inline code here — keep their color. This is the split
+        // that lets reasoning read as muted while code remains legible.
+        let theme = Theme::default();
+        let line = Line::from(vec![
+            Span::raw("plain "),
+            Span::styled("code", Style::default().fg(theme.code)),
+        ]);
+        let out = apply_thinking_style(line, &theme);
+        assert_eq!(out.spans[0].style.fg, theme.thinking().fg);
+        assert_eq!(
+            out.spans[1].style.fg,
+            Some(theme.code),
+            "code span keeps its fg",
+        );
+    }
+}
