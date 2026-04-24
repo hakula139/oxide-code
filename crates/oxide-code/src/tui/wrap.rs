@@ -231,11 +231,16 @@ mod tests {
 
     #[test]
     fn continuation_indent_applied() {
-        // "    Hello world foo bar" (23 chars), width 16, indent 4
+        // "    Hello world foo bar" (23 chars), width 16, indent 4.
+        // First line fits "    Hello world "; the break lands there and
+        // the continuation carries the 4-space indent plus "foo bar".
         let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
         let result = wrap_line(line, 16, 4, None);
-        assert!(result.len() >= 2, "should wrap: {result:?}");
-        // Continuation lines start with 4-space indent.
+        assert_eq!(
+            result.len(),
+            2,
+            "should wrap to exactly two lines: {result:?}"
+        );
         let cont = &result[1];
         assert!(
             cont.spans[0].content.starts_with("    "),
@@ -251,8 +256,13 @@ mod tests {
             Span::raw("normal text that is long enough to wrap"),
         ]);
         let result = wrap_line(line, 20, 0, None);
-        assert!(result.len() >= 2, "should wrap: {result:?}");
-        // First span on first line should preserve bold.
+        // 44 chars at width 20 wraps at the two word boundaries:
+        // "Bold normal text " | "that is long enough " | "to wrap".
+        assert_eq!(
+            result.len(),
+            3,
+            "should wrap to exactly three lines: {result:?}"
+        );
         let first_span = &result[0].spans[0];
         assert!(
             first_span.style.add_modifier.contains(Modifier::BOLD),
@@ -264,7 +274,14 @@ mod tests {
     fn force_break_on_long_word() {
         let line = Line::from("abcdefghijklmnopqrstuvwxyz");
         let result = wrap_line(line, 10, 0, None);
-        assert!(result.len() >= 2, "should force-break: {result:?}");
+        // 26 chars at width 10 must produce three segments: 10 + 10 + 6.
+        assert_eq!(
+            result.len(),
+            3,
+            "should force-break into three lines: {result:?}"
+        );
+        let texts: Vec<&str> = result.iter().map(|l| l.spans[0].content.as_ref()).collect();
+        assert_eq!(texts, ["abcdefghij", "klmnopqrst", "uvwxyz"]);
     }
 
     #[test]
