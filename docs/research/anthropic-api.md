@@ -49,15 +49,16 @@ anthropic-beta: claude-code-20250219,oauth-2025-04-20
 
 Additional useful betas:
 
-| Header                            | Purpose                                            |
-| --------------------------------- | -------------------------------------------------- |
-| `interleaved-thinking-2025-05-14` | Extended thinking support                          |
-| `context-1m-2025-08-07`           | 1M context window                                  |
-| `context-management-2025-06-27`   | Context management                                 |
-| `prompt-caching-scope-2026-01-05` | Prompt caching                                     |
-| `effort-2025-11-24`               | Effort control                                     |
-| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls) |
-| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                     |
+| Header                            | Purpose                                                      |
+| --------------------------------- | ------------------------------------------------------------ |
+| `interleaved-thinking-2025-05-14` | Extended thinking support                                    |
+| `context-1m-2025-08-07`           | 1M context window                                            |
+| `context-management-2025-06-27`   | Context management                                           |
+| `prompt-caching-scope-2026-01-05` | Prompt caching                                               |
+| `effort-2025-11-24`               | Effort control                                               |
+| `structured-outputs-2025-12-15`   | JSON-schema-constrained responses (one-shot calls)           |
+| `advanced-tool-use-2025-11-20`    | Tool search (first-party only)                               |
+| `task-budgets-2026-03-13`         | Advisory token budget across an agentic loop (Opus 4.7 only) |
 
 #### Per-model beta sets
 
@@ -232,7 +233,7 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 - **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field; the header became a no-op and the model ran at an undefined default.
 - **Per-model ceiling.** `max` is Opus-only; Sonnet 4.6 400s on it. `xhigh` is Opus 4.7-only. The `Capabilities::effort_max` / `effort_xhigh` flags encode this; `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
 - **Per-model default.** claude-code 2.1.119 sends `xhigh` on Opus 4.7, `high` on Opus 4.6 and Sonnet 4.6, omits the field entirely on earlier models. oxide-code mirrors this via `Capabilities::default_effort`.
-- **`max_tokens` should scale with effort.** claude-code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` applies the same scaling when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
+- **`max_tokens` should scale with effort.** claude-code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` matches the upper tiers and uses 16 K otherwise when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
 
 ### `context_management.edits`
 

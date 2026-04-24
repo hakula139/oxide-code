@@ -61,7 +61,7 @@ Tier guide (from the [Opus 4.7 migration guide](https://platform.claude.com/docs
 
 #### `max_tokens` — response ceiling
 
-When unset, oxide-code derives `max_tokens` from the resolved `effort` to match the claude-code reference: 64 000 for `xhigh` / `max`, 32 000 for `high`, 16 384 otherwise. Setting `max_tokens` explicitly (via TOML or `ANTHROPIC_MAX_TOKENS`) overrides the derivation.
+When unset, oxide-code derives `max_tokens` from the resolved `effort`: 64 000 for `xhigh` / `max`, 32 000 for `high`, 16 000 otherwise. Setting `max_tokens` explicitly (via TOML or `ANTHROPIC_MAX_TOKENS`) overrides the derivation.
 
 #### `prompt_cache_ttl` — cache duration
 
