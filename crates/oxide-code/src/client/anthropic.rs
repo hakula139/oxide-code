@@ -611,8 +611,16 @@ impl Client {
             .await?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let body = response.text().await.unwrap_or_default();
-            bail!("API error (HTTP {status}): {body}");
+            bail!(
+                "{}",
+                format_api_error(status, retry_after.as_deref(), &body)
+            );
         }
 
         let CompletionResponse { content } = response
@@ -948,8 +956,16 @@ async fn stream_sse(
 
     let status = response.status();
     if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body = response.text().await.unwrap_or_default();
-        bail!("API error (HTTP {status}): {body}");
+        bail!(
+            "{}",
+            format_api_error(status, retry_after.as_deref(), &body)
+        );
     }
 
     let mut stream = response.bytes_stream();
@@ -995,6 +1011,25 @@ async fn stream_sse(
     }
 
     Ok(())
+}
+
+/// Builds an actionable error message for a non-2xx Anthropic API
+/// response. The raw body is always appended as `details: {body}` so
+/// debug context is preserved on every branch.
+fn format_api_error(status: reqwest::StatusCode, retry_after: Option<&str>, body: &str) -> String {
+    let prefix = match status.as_u16() {
+        401 => "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth.".to_owned(),
+        429 => match retry_after {
+            Some(after) => format!("Anthropic API rate limited (HTTP 429); retry after {after}."),
+            None => "Anthropic API rate limited (HTTP 429); retry after a short delay.".to_owned(),
+        },
+        529 => "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds.".to_owned(),
+        s if (500..600).contains(&s) => {
+            format!("Anthropic API server error (HTTP {status}). Usually transient; retry.")
+        }
+        _ => format!("API error (HTTP {status})"),
+    };
+    format!("{prefix} details: {body}")
 }
 
 /// Parses a single SSE frame into a [`StreamEvent`].
@@ -2667,6 +2702,76 @@ mod tests {
             }],
         }];
         assert_eq!(first_user_text(&tool_only), "");
+    }
+
+    // ── format_api_error ──
+
+    #[test]
+    fn format_api_error_401_names_both_auth_paths() {
+        let msg = format_api_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            None,
+            r#"{"error":"invalid_api_key"}"#,
+        );
+        assert!(
+            msg.starts_with(
+                "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth."
+            ),
+            "401 prefix: {msg}",
+        );
+        assert!(msg.contains(r#"details: {"error":"invalid_api_key"}"#));
+    }
+
+    #[test]
+    fn format_api_error_429_mentions_retry_after_when_present() {
+        let with = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("42"), "rl");
+        assert!(
+            with.starts_with("Anthropic API rate limited (HTTP 429); retry after 42."),
+            "429 with retry-after: {with}",
+        );
+        let without = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, None, "rl");
+        assert!(
+            without
+                .starts_with("Anthropic API rate limited (HTTP 429); retry after a short delay."),
+            "429 without retry-after: {without}",
+        );
+        assert!(with.contains("details: rl"));
+        assert!(without.contains("details: rl"));
+    }
+
+    #[test]
+    fn format_api_error_529_flags_overload_as_transient() {
+        let status = reqwest::StatusCode::from_u16(529).unwrap();
+        let msg = format_api_error(status, None, "overloaded");
+        assert!(
+            msg.starts_with(
+                "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds."
+            ),
+            "529 prefix: {msg}",
+        );
+        assert!(msg.contains("details: overloaded"));
+    }
+
+    #[test]
+    fn format_api_error_5xx_uses_generic_server_branch() {
+        let msg = format_api_error(reqwest::StatusCode::BAD_GATEWAY, None, "bad gw");
+        assert!(
+            msg.starts_with(
+                "Anthropic API server error (HTTP 502 Bad Gateway). Usually transient; retry."
+            ),
+            "5xx prefix: {msg}",
+        );
+        assert!(msg.contains("details: bad gw"));
+    }
+
+    #[test]
+    fn format_api_error_other_falls_back_to_generic_shape() {
+        let msg = format_api_error(reqwest::StatusCode::BAD_REQUEST, None, "invalid");
+        assert!(
+            msg.starts_with("API error (HTTP 400 Bad Request)"),
+            "generic prefix: {msg}",
+        );
+        assert!(msg.contains("details: invalid"));
     }
 
     // ── parse_sse_frame ──
