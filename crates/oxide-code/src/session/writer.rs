@@ -61,8 +61,6 @@ mod tests {
 
     use super::super::store::{test_session_file, test_store};
     use super::*;
-    use crate::message::{ContentBlock, Role};
-    use crate::session::entry::Entry;
 
     /// Recording sink: captures every event the helper emits so tests
     /// can assert both "sent exactly this" and "sent nothing".
@@ -109,20 +107,17 @@ mod tests {
 
         record_session_message(&session, &Message::user("hello"), None).await;
 
+        // Assert against the wire shape rather than the internal `Entry`
+        // variant — parsing + destructuring would leave an unreachable
+        // "got unexpected variant" arm that can't be driven by this code
+        // path. The JSON assertion is just as strict and has no dead arm.
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let last_line = content.lines().last().expect("session file has no lines");
-        let entry: Entry =
-            serde_json::from_str(last_line).expect("last line should parse as Entry");
-        let Entry::Message { message, .. } = entry else {
-            panic!("expected Entry::Message, got {entry:?}");
-        };
-        assert_eq!(message.role, Role::User);
-        assert_eq!(message.content.len(), 1);
-        assert!(
-            matches!(&message.content[0], ContentBlock::Text { text } if text == "hello"),
-            "unexpected content: {:?}",
-            message.content,
-        );
+        let json: serde_json::Value = serde_json::from_str(last_line).expect("valid JSONL");
+        assert_eq!(json["type"], "message");
+        assert_eq!(json["message"]["role"], "user");
+        assert_eq!(json["message"]["content"][0]["type"], "text");
+        assert_eq!(json["message"]["content"][0]["text"], "hello");
     }
 
     // ── log_session_err ──
