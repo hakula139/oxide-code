@@ -26,6 +26,19 @@ use super::store::{
     read_session_id_from_path,
 };
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
+use crate::tool::ToolMetadata;
+
+/// Data handed back by [`SessionManager::resume`] +
+/// [`SessionManager::resume_from_path`]: the ready-to-use manager,
+/// the replayed message log, and display-only extras
+/// (session title, per-tool-result metadata) the TUI needs to
+/// reconstruct the same view the user saw live.
+pub(crate) struct ResumedSession {
+    pub(crate) manager: SessionManager,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) title: Option<String>,
+    pub(crate) tool_result_metadata: std::collections::HashMap<String, ToolMetadata>,
+}
 
 /// Maximum title length (in characters) derived from the first user prompt.
 ///
@@ -141,10 +154,7 @@ impl SessionManager {
     /// process could append messages in between, making the loaded
     /// messages stale; the loser branch survives in the file but is
     /// invisible to later resumes.
-    pub(crate) async fn resume(
-        store: &SessionStore,
-        session_id: &str,
-    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+    pub(crate) async fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
         let data = store.load_session_data(session_id)?;
         let writer = store.open_append(session_id).await?;
         Self::from_resumed_data(store, session_id.to_owned(), data, writer)
@@ -160,10 +170,7 @@ impl SessionManager {
     /// point; it is never used on the resumed path since
     /// [`record_message`][Self::record_message] skips the
     /// `store.create()` branch when `pending_header` is `None`.
-    pub(crate) fn resume_from_path(
-        store: &SessionStore,
-        path: &Path,
-    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+    pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
         let session_id = read_session_id_from_path(path)?;
         let data = load_session_data_from_path(path)?;
         let writer = open_append_at(path)?;
@@ -178,7 +185,7 @@ impl SessionManager {
         session_id: String,
         mut data: SessionData,
         writer: SessionWriter,
-    ) -> Result<(Self, Vec<Message>, Option<String>)> {
+    ) -> Result<ResumedSession> {
         sanitize_resumed_messages(&mut data.messages);
         // Run the emptiness check *after* sanitization. Otherwise a file
         // that loads into a non-empty vector but becomes empty after
@@ -211,7 +218,12 @@ impl SessionManager {
             finished: false,
             write_failed: false,
         };
-        Ok((manager, data.messages, title))
+        Ok(ResumedSession {
+            manager,
+            messages: data.messages,
+            title,
+            tool_result_metadata: data.tool_result_metadata,
+        })
     }
 
     /// Record a conversation message to the session file.
@@ -311,6 +323,34 @@ impl SessionManager {
     /// sessions.
     pub(crate) fn take_ai_title_seed(&mut self) -> Option<String> {
         self.ai_title_seed.take()
+    }
+
+    /// Records display metadata for a completed tool call. Written
+    /// as [`Entry::ToolResultMetadata`], keyed by `tool_use_id` so
+    /// resume can reattach it to the matching
+    /// [`ContentBlock::ToolResult`](crate::message::ContentBlock)
+    /// without polluting the API-facing wire format.
+    ///
+    /// No-ops when `metadata` carries nothing to display (avoids
+    /// writing a stream of empty sidecar entries for tools that
+    /// don't set any metadata).
+    pub(crate) fn record_tool_result_metadata(
+        &mut self,
+        tool_use_id: &str,
+        metadata: &ToolMetadata,
+    ) -> Result<()> {
+        if metadata == &ToolMetadata::default() {
+            return Ok(());
+        }
+        let writer = self
+            .writer
+            .as_mut()
+            .context("cannot record tool metadata before the session file is materialized")?;
+        writer.append(&Entry::ToolResultMetadata {
+            tool_use_id: tool_use_id.to_owned(),
+            metadata: metadata.clone(),
+            timestamp: OffsetDateTime::now_utc(),
+        })
     }
 
     /// Appends an AI-generated title to the session file. Latest
@@ -564,8 +604,11 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages, _title) =
-            SessionManager::resume(&store, &session_id).await.unwrap();
+        let ResumedSession {
+            manager: resumed,
+            messages,
+            ..
+        } = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
         assert_eq!(resumed.message_count, 2);
@@ -584,8 +627,11 @@ mod tests {
             .unwrap();
         drop(original); // no finish() — simulates a crash
 
-        let (resumed, messages, _title) =
-            SessionManager::resume(&store, &session_id).await.unwrap();
+        let ResumedSession {
+            manager: resumed,
+            messages,
+            ..
+        } = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
     }
@@ -609,8 +655,11 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (resumed, messages, _title) =
-            SessionManager::resume(&store, &session_id).await.unwrap();
+        let ResumedSession {
+            manager: resumed,
+            messages,
+            ..
+        } = SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
@@ -668,7 +717,7 @@ mod tests {
             .unwrap();
         drop(original); // crash before tool_result
 
-        let (_resumed, messages, _title) =
+        let ResumedSession { messages, .. } =
             SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 2);
         let assistant = &messages[1];
@@ -712,7 +761,7 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (_resumed, messages, _title) =
+        let ResumedSession { messages, .. } =
             SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(
             messages.len(),
@@ -788,7 +837,7 @@ mod tests {
             .unwrap();
         drop(original); // crash before next assistant response
 
-        let (_resumed, messages, _title) =
+        let ResumedSession { messages, .. } =
             SessionManager::resume(&store, &session_id).await.unwrap();
         assert_eq!(messages.len(), 4, "sentinel should be appended");
         assert_eq!(messages[3].role, Role::Assistant);
@@ -813,7 +862,10 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let mut resumed = SessionManager::resume(&store, &session_id)
+            .await
+            .unwrap()
+            .manager;
         resumed
             .record_message(&Message::user("follow up"))
             .await
@@ -864,7 +916,10 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let mut resumed = SessionManager::resume(&store, &session_id)
+            .await
+            .unwrap()
+            .manager;
         resumed
             .record_message(&Message::assistant("Done."))
             .await
@@ -1069,7 +1124,10 @@ mod tests {
         original.finish().unwrap();
         drop(original);
 
-        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let mut resumed = SessionManager::resume(&store, &session_id)
+            .await
+            .unwrap()
+            .manager;
         resumed.finish().unwrap();
         drop(resumed);
 
@@ -1127,8 +1185,92 @@ mod tests {
             .unwrap();
         drop(original);
 
-        let (mut resumed, _, _) = SessionManager::resume(&store, &session_id).await.unwrap();
+        let mut resumed = SessionManager::resume(&store, &session_id)
+            .await
+            .unwrap()
+            .manager;
         assert!(resumed.take_ai_title_seed().is_none());
+    }
+
+    // ── record_tool_result_metadata ──
+
+    #[tokio::test]
+    async fn record_tool_result_metadata_round_trips_title_and_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+        let sid = manager.session_id().to_owned();
+        // Materialize the session file first; the metadata entry
+        // writer needs an open `SessionWriter`.
+        manager
+            .record_message(&Message::user("edit something"))
+            .await
+            .unwrap();
+
+        manager
+            .record_tool_result_metadata(
+                "t1",
+                &ToolMetadata {
+                    title: Some("Edited f.rs".to_owned()),
+                    replacements: Some(4),
+                    ..ToolMetadata::default()
+                },
+            )
+            .unwrap();
+        manager.finish().unwrap();
+        drop(manager);
+
+        let data = store.load_session_data(&sid).unwrap();
+        let metadata = data
+            .tool_result_metadata
+            .get("t1")
+            .expect("metadata entry should round-trip");
+        assert_eq!(metadata.title.as_deref(), Some("Edited f.rs"));
+        assert_eq!(metadata.replacements, Some(4));
+    }
+
+    #[tokio::test]
+    async fn record_tool_result_metadata_skips_default_metadata() {
+        // Don't emit a sidecar for tools that attached nothing —
+        // otherwise every bash call would bloat the transcript with
+        // empty `{"type":"tool_result_metadata"}` lines.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut manager = SessionManager::start(&store, "m");
+        let sid = manager.session_id().to_owned();
+        manager
+            .record_message(&Message::user("trigger"))
+            .await
+            .unwrap();
+
+        manager
+            .record_tool_result_metadata("t1", &ToolMetadata::default())
+            .unwrap();
+        manager.finish().unwrap();
+        drop(manager);
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            !content.contains(r#""type":"tool_result_metadata""#),
+            "default metadata must not be written: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_tool_result_metadata_errors_before_session_file_materializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SessionManager::start(&test_store(dir.path()), "m");
+        let err = manager
+            .record_tool_result_metadata(
+                "t1",
+                &ToolMetadata {
+                    title: Some("x".to_owned()),
+                    ..ToolMetadata::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("materialized"), "got: {err}");
     }
 
     // ── append_ai_title ──

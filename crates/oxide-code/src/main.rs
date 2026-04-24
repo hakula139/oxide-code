@@ -32,7 +32,7 @@ use config::Config;
 use message::Message;
 use prompt::environment::marketing_name;
 use session::list_view::render_list;
-use session::manager::SessionManager;
+use session::manager::{ResumedSession, SessionManager};
 use session::resolver::resolve_session;
 use session::store::SessionStore;
 use session::writer::{log_session_err, record_session_message};
@@ -121,30 +121,36 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let (session, messages, title) =
-        resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    let client = Client::new(config, Some(session.session_id().to_owned()))?;
+    let resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
+    let client = Client::new(config, Some(resumed.manager.session_id().to_owned()))?;
 
     let tools = Arc::new(create_tool_registry());
 
     if let Some(prompt_text) = cli.prompt {
-        return headless(&client, tools, &model, show_thinking, &prompt_text, session).await;
+        return headless(
+            &client,
+            tools,
+            &model,
+            show_thinking,
+            &prompt_text,
+            resumed.manager,
+        )
+        .await;
     }
 
     if cli.no_tui || !std::io::stdout().is_terminal() {
-        return bare_repl(&client, tools, &model, show_thinking, session, messages).await;
+        return bare_repl(
+            &client,
+            tools,
+            &model,
+            show_thinking,
+            resumed.manager,
+            resumed.messages,
+        )
+        .await;
     }
 
-    run_tui(
-        &client,
-        &model,
-        show_thinking,
-        tools,
-        session,
-        messages,
-        title,
-    )
-    .await
+    run_tui(&client, &model, show_thinking, tools, resumed).await
 }
 
 // ── Session Helpers ──
@@ -235,10 +241,14 @@ async fn run_tui(
     model: &str,
     show_thinking: bool,
     tools: Arc<ToolRegistry>,
-    session: SessionManager,
-    resumed_messages: Vec<Message>,
-    resumed_title: Option<String>,
+    resumed: ResumedSession,
 ) -> Result<()> {
+    let ResumedSession {
+        manager: session,
+        messages: resumed_messages,
+        title: resumed_title,
+        tool_result_metadata: resumed_tool_metadata,
+    } = resumed;
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
@@ -266,6 +276,7 @@ async fn run_tui(
         agent_rx,
         user_tx,
         &resumed_messages,
+        &resumed_tool_metadata,
         Arc::clone(&tools),
     );
 

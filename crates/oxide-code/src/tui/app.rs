@@ -7,6 +7,7 @@
 //! redraw work proportional to state change rather than event
 //! throughput.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,11 +21,12 @@ use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -37,6 +39,11 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
+    /// Bridges [`AgentEvent::ToolCallStart`] to its matching
+    /// [`AgentEvent::ToolCallEnd`]. The End arm looks up `name` +
+    /// `input` to build a structured [`ToolResultView`] and falls
+    /// back to `label` when the tool emits `title: None`.
+    pending_calls: PendingCalls,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -55,11 +62,12 @@ impl App {
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
+        history_metadata: &HashMap<String, ToolMetadata>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(history, tools.as_ref());
+        chat.load_history(history, history_metadata, tools.as_ref());
         let mut status_bar = StatusBar::new(theme, model, cwd);
         status_bar.set_title(title);
         Self {
@@ -69,6 +77,7 @@ impl App {
             agent_rx,
             user_tx,
             tools,
+            pending_calls: PendingCalls::new(),
             should_quit: false,
             dirty: true,
         }
@@ -173,22 +182,42 @@ impl App {
                 self.chat.append_thinking_token(&token);
                 self.status_bar.set_status(Status::Streaming);
             }
-            AgentEvent::ToolCallStart { name, input, .. } => {
-                self.chat.commit_streaming();
+            AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
+                // `push_tool_call` implicitly flushes any in-flight
+                // streaming assistant text — no explicit
+                // `commit_streaming` side channel needed.
                 self.chat.push_tool_call(icon, &label);
+                self.pending_calls
+                    .insert(id, PendingCall { label, name, input });
                 self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
-                title,
+                id,
                 content,
                 is_error,
-                ..
+                metadata,
             } => {
-                if let Some(title) = &title {
-                    self.chat.push_tool_result(title, &content, is_error);
-                }
+                // The End arm always pushes a result, even when the
+                // tool didn't set a title — the tool-call label is
+                // the natural fallback. The cached input drives
+                // per-tool structured views (Edit diff, etc.).
+                let pending = self.pending_calls.remove(&id);
+                let view = pending.as_ref().map_or_else(
+                    || ToolResultView::Text {
+                        content: content.clone(),
+                    },
+                    |p| {
+                        self.tools
+                            .result_view(&p.name, &p.input, &content, &metadata, is_error)
+                    },
+                );
+                let header = metadata
+                    .title
+                    .or_else(|| pending.as_ref().map(|p| p.label.clone()))
+                    .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned());
+                self.chat.push_tool_result_view(&header, view, is_error);
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -206,6 +235,13 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        // A tool call whose matching `ToolCallEnd` didn't arrive by
+        // turn end is orphaned — either the agent loop dropped the
+        // pairing (bug) or the tool crashed before emitting a result.
+        // Either way, the entry will never be consumed; clearing at
+        // the turn boundary bounds `pending_calls` to at most one
+        // turn's worth of in-flight calls.
+        self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
     }
@@ -259,6 +295,28 @@ mod tests {
     fn test_app(
         title: Option<&str>,
     ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+        test_app_with_registry(title, Arc::new(ToolRegistry::new(Vec::new())))
+    }
+
+    /// Variant that plumbs the real tool catalog into the `App` so
+    /// `ToolCallStart` label lookups match what production would render.
+    /// Used by tool-event tests that exercise the Start → End flow.
+    fn test_app_with_tools() -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
+        let tools = ToolRegistry::new(vec![
+            Box::new(crate::tool::bash::BashTool),
+            Box::new(crate::tool::read::ReadTool),
+            Box::new(crate::tool::write::WriteTool),
+            Box::new(crate::tool::edit::EditTool),
+            Box::new(crate::tool::glob::GlobTool),
+            Box::new(crate::tool::grep::GrepTool),
+        ]);
+        test_app_with_registry(None, Arc::new(tools))
+    }
+
+    fn test_app_with_registry(
+        title: Option<&str>,
+        tools: Arc<ToolRegistry>,
+    ) -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(8);
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
@@ -269,7 +327,8 @@ mod tests {
             agent_rx,
             user_tx,
             &[],
-            Arc::new(ToolRegistry::new(Vec::new())),
+            &HashMap::new(),
+            tools,
         );
         (app, user_rx, agent_tx)
     }
@@ -463,6 +522,27 @@ mod tests {
     }
 
     #[test]
+    fn finish_turn_evicts_orphaned_pending_calls() {
+        // `ToolCallStart` without a matching `ToolCallEnd` by turn-end
+        // is an orphan (crashed tool, agent-loop bug, mid-turn abort).
+        // The pending entry must be discarded so long sessions don't
+        // accumulate stale ids across turns.
+        let (mut app, _rx, _agent_tx) = test_app_with_tools();
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "orphan".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(app.pending_calls.len(), 1);
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        assert_eq!(
+            app.pending_calls.len(),
+            0,
+            "turn end must evict calls whose result never arrived",
+        );
+    }
+
+    #[test]
     fn handle_error_pushes_error_entry_and_finishes_turn() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("boom".to_owned()));
@@ -484,32 +564,79 @@ mod tests {
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
-            title: Some("ls /".to_owned()),
             content: "file1\nfile2\n".to_owned(),
             is_error: false,
+            metadata: crate::tool::ToolMetadata {
+                title: Some("ls /".to_owned()),
+                ..crate::tool::ToolMetadata::default()
+            },
         });
         assert_eq!(app.chat.entry_count(), before + 1);
     }
 
     #[test]
-    fn handle_tool_call_end_without_title_skips_result_entry() {
-        // `title: None` signals the tool dispatch layer chose to hide the
-        // result (e.g., for tools whose output is purely model-facing).
-        // The chat entry count must not grow in that case.
-        let (mut app, _rx, _agent_tx) = test_app(None);
+    fn handle_tool_call_end_without_title_falls_back_to_call_label() {
+        // `title: None` means the tool didn't set a result header —
+        // typically a failure path (timeout, invalid input) that
+        // aborted before `.with_title(...)`. The result must still be
+        // pushed (previously: silently swallowed, hiding the error
+        // body from the user) and the header must render the
+        // tool-call label stashed at `ToolCallStart`, not a blank
+        // string or the generic `(result)` fallback.
+        let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
             name: "bash".to_owned(),
-            input: serde_json::json!({"command": "ls"}),
+            input: serde_json::json!({"command": "distinctive_label_xyz"}),
         });
         let before = app.chat.entry_count();
         app.handle_agent_event(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
-            title: None,
-            content: "silent".to_owned(),
-            is_error: false,
+            content: "spawn failed: permission denied".to_owned(),
+            is_error: true,
+            metadata: crate::tool::ToolMetadata::default(),
         });
-        assert_eq!(app.chat.entry_count(), before);
+        assert_eq!(
+            app.chat.entry_count(),
+            before + 1,
+            "result must render even when the tool did not set a title",
+        );
+        // The result header must be the stashed call label (the bash
+        // command). It appears twice in the rendered view — once for
+        // the tool call line, once for the result header — which is
+        // what we want to confirm: both the call row and the result
+        // row carry the same label.
+        let text = rendered_text(&mut app, 60, 8);
+        let occurrences = text.matches("distinctive_label_xyz").count();
+        assert_eq!(
+            occurrences, 2,
+            "expected call label on both the call and result rows, got {occurrences}:\n{text}",
+        );
+        assert!(
+            !text.contains("(result)"),
+            "generic fallback must not leak through when the pending call label is known, got:\n{text}",
+        );
+    }
+
+    #[test]
+    fn handle_tool_call_end_without_start_uses_generic_fallback_header() {
+        // Defensive: an End without a matching Start (agent-layer bug
+        // or dropped event) must still render so the user sees the
+        // output. No pending entry → header falls back to `(result)`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::ToolCallEnd {
+            id: "orphan".to_owned(),
+            content: "stray output".to_owned(),
+            is_error: false,
+            metadata: crate::tool::ToolMetadata::default(),
+        });
+        assert_eq!(app.chat.entry_count(), before + 1);
+        let text = rendered_text(&mut app, 60, 6);
+        assert!(
+            text.contains("(result)"),
+            "orphan End with no pending call should use the generic fallback, got:\n{text}",
+        );
     }
 
     // ── draw_frame ──
@@ -524,6 +651,26 @@ mod tests {
             .unwrap();
         app.chat.update_layout(chat_area);
         terminal.backend().clone()
+    }
+
+    /// Renders the app and returns the buffer as a newline-joined
+    /// string. Use when substring-asserting on the rendered UI is more
+    /// readable than a full `insta::assert_snapshot!`.
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = render_app(app, width, height);
+        let buffer = backend.buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]

@@ -1,0 +1,14 @@
+---
+source: crates/oxide-code/src/tui/components/chat.rs
+expression: "render_chat(&mut chat, 40, 10)"
+---
+"▎ ✎ Edit(/tmp/f.rs)                     "
+"▎ ✓ Edited f.rs                         "
+"▎   - short                             "
+"▎   + an intentionally quite long       "
+"▎     replacement line that forces      "
+"▎     wrapping                          "
+"                                        "
+"                                        "
+"                                        "
+"                                        "

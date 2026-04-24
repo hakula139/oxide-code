@@ -56,7 +56,7 @@ The direction is simple:
 ### Terminal UI
 
 - Viewport virtualization for long conversations.
-- Per-tool result rendering (diffs for `edit`, grouped matches for `grep`, etc.).
+- Per-tool result rendering — `edit` diffs ship today; grouped matches for `grep` / `glob` and styled excerpts for `read` are next.
 
 ### Tool & Prompt Enhancements
 

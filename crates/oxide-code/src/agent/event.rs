@@ -17,26 +17,28 @@ pub(crate) enum AgentEvent {
     StreamToken(String),
     /// A chunk of thinking text (streamed incrementally).
     ThinkingToken(String),
-    /// A tool call has started execution.
+    /// A tool call has started execution. `id` is the call's
+    /// correlation handle — [`PendingCalls`](crate::tui::pending_calls::PendingCalls)
+    /// stashes the tool name + input under it so the paired
+    /// [`Self::ToolCallEnd`] can build a structured
+    /// [`ToolResultView`](crate::tool::ToolResultView).
     ToolCallStart {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "read only by cfg(test) assertions")
-        )]
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// A tool call has finished.
+    /// A tool call has finished. `metadata` carries the tool's
+    /// [`ToolMetadata`](crate::tool::ToolMetadata) — the display
+    /// title (nullable; falls back to the pending-call label),
+    /// plus structured hints like Edit's replacement count that the
+    /// TUI threads into
+    /// [`ToolRegistry::result_view`](crate::tool::ToolRegistry::result_view)
+    /// so per-tool renderers don't re-parse `content`.
     ToolCallEnd {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "read only by cfg(test) assertions")
-        )]
         id: String,
-        title: Option<String>,
         content: String,
         is_error: bool,
+        metadata: crate::tool::ToolMetadata,
     },
     /// The current assistant turn is complete (text-only response, no more
     /// tool calls).
@@ -117,8 +119,10 @@ impl AgentSink for StdioSink {
                 let label = self.tools.label(&name, &input);
                 eprintln!("{icon} {label}");
             }
-            AgentEvent::ToolCallEnd { title, content, .. } => {
-                if let Some(title) = title {
+            AgentEvent::ToolCallEnd {
+                content, metadata, ..
+            } => {
+                if let Some(title) = metadata.title {
                     eprintln!("  {title}");
                 }
                 let trimmed = content.trim();
@@ -234,16 +238,19 @@ mod tests {
         let sink = test_sink(false);
         sink.send(AgentEvent::ToolCallEnd {
             id: "t1".to_owned(),
-            title: Some("ls".to_owned()),
             content: "file1\nfile2\n".to_owned(),
             is_error: false,
+            metadata: crate::tool::ToolMetadata {
+                title: Some("ls".to_owned()),
+                ..crate::tool::ToolMetadata::default()
+            },
         })
         .unwrap();
         sink.send(AgentEvent::ToolCallEnd {
             id: "t2".to_owned(),
-            title: None,
             content: "   \n".to_owned(),
             is_error: true,
+            metadata: crate::tool::ToolMetadata::default(),
         })
         .unwrap();
     }

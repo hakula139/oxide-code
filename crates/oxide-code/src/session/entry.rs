@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::message::Message;
+use crate::tool::ToolMetadata;
 
 /// Current session file format version. Bump on incompatible changes.
 pub(crate) const CURRENT_VERSION: u32 = 1;
@@ -71,6 +72,27 @@ pub(crate) enum Entry {
         message_count: u32,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
+    },
+    /// TUI-only metadata for a completed tool call, persisted
+    /// alongside the [`Entry::Message`] that carries the matching
+    /// [`ContentBlock::ToolResult`](crate::message::ContentBlock).
+    ///
+    /// The API-facing `ContentBlock::ToolResult` wire format only
+    /// carries `tool_use_id` + `content` + `is_error`; display fields
+    /// like the result's header title or the edit tool's replacement
+    /// count would pollute that contract. This sidecar entry lets
+    /// the replay path reconstruct a rich view without polluting the
+    /// wire format — resumed sessions match what the user saw live.
+    ///
+    /// On replay, [`SessionData`] (via `load_session_data`) indexes
+    /// these by `tool_use_id`; a missing entry means pre-upgrade
+    /// sessions (fallback to content-derived defaults) or a tool
+    /// that attached no metadata.
+    ToolResultMetadata {
+        tool_use_id: String,
+        metadata: ToolMetadata,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
     },
     /// Catch-all for unrecognized entry types. Preserves parse
     /// compatibility when a newer writer emits a type this reader
@@ -322,6 +344,55 @@ mod tests {
         };
         assert_eq!(message_count, 8);
         assert_eq!(updated_at, datetime!(2026-04-16 12:05:00 UTC));
+    }
+
+    // ── Entry::ToolResultMetadata ──
+
+    #[test]
+    fn tool_result_metadata_round_trips_with_title_and_replacements() {
+        let entry = Entry::ToolResultMetadata {
+            tool_use_id: "edit1".to_owned(),
+            metadata: ToolMetadata {
+                title: Some("Edited f.rs".to_owned()),
+                replacements: Some(3),
+                ..ToolMetadata::default()
+            },
+            timestamp: datetime!(2026-04-16 12:06:00 UTC),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "tool_result_metadata");
+        assert_eq!(json["tool_use_id"], "edit1");
+        assert_eq!(json["metadata"]["title"], "Edited f.rs");
+        assert_eq!(json["metadata"]["replacements"], 3);
+        assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
+        // Unset fields must be absent, not serialized as null — the
+        // file bytes grow quickly across many tool turns.
+        assert!(json["metadata"].get("exit_code").is_none());
+
+        // Bytes → Entry → bytes must be identical so every field
+        // (not just the ones spot-checked above) round-trips.
+        let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn tool_result_metadata_parses_with_unknown_metadata_fields() {
+        // Forward-compat: a newer writer may emit metadata fields
+        // this version doesn't know about. The entry must still
+        // parse and surface the known fields — per `#[serde(other)]`
+        // on `Entry`, unknown entry *types* fall through to
+        // `Entry::Unknown`, but unknown metadata *fields* should
+        // just be ignored by serde default behavior.
+        let json = r#"{"type":"tool_result_metadata","tool_use_id":"e","metadata":{"title":"t","future_field":123},"timestamp":"2026-04-16T12:00:00Z"}"#;
+        let parsed: Entry = serde_json::from_str(json).unwrap();
+        // Re-serialize to observe the surviving known fields without
+        // destructuring (which would require an unreachable else-arm).
+        let reserialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(reserialized["type"], "tool_result_metadata");
+        assert_eq!(reserialized["tool_use_id"], "e");
+        assert_eq!(reserialized["metadata"]["title"], "t");
+        // Unknown field is silently dropped on re-serialization.
+        assert!(reserialized["metadata"].get("future_field").is_none());
     }
 
     // ── Entry::Unknown ──

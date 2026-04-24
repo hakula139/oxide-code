@@ -38,6 +38,7 @@ RAII
 ratatui
 replacen
 reqwest
+reserialized
 rfind
 riscv
 rustls

@@ -29,8 +29,9 @@ use self::blocks::{
 use crate::agent::event::UserAction;
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
+use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with markdown rendering, tool call
@@ -91,8 +92,14 @@ impl ChatView {
     /// Thinking blocks are always pushed; [`AssistantThinking::visible`]
     /// collapses them to zero when `show_thinking` is off, so flipping
     /// the toggle at runtime doesn't require reloading the session.
-    pub(crate) fn load_history(&mut self, messages: &[Message], tools: &ToolRegistry) {
-        let mut labels: HashMap<&str, String> = HashMap::new();
+    pub(crate) fn load_history(
+        &mut self,
+        messages: &[Message],
+        metadata_by_tool_use_id: &HashMap<String, ToolMetadata>,
+        tools: &ToolRegistry,
+    ) {
+        let mut pending = PendingCalls::new();
+        let default_metadata = ToolMetadata::default();
         for interaction in walk_transcript(messages) {
             match interaction {
                 Interaction::UserText(text) => {
@@ -107,24 +114,48 @@ impl ChatView {
                 Interaction::ToolCall { id, name, input } => {
                     let icon = tools.icon(name);
                     let label = tools.label(name, input);
-                    labels.insert(id, label.clone());
-                    self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
+                    self.blocks
+                        .push(Box::new(ToolCallBlock::new(icon, label.clone())));
+                    pending.insert(
+                        id.to_owned(),
+                        PendingCall {
+                            label,
+                            name: name.to_owned(),
+                            input: input.clone(),
+                        },
+                    );
                 }
                 Interaction::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
                 } => {
-                    let label = labels
+                    // [`walk_transcript`] emits `ToolResult` only
+                    // inline right after its paired `ToolCall` —
+                    // unpaired ids surface through `OrphanToolResult`
+                    // instead — so the lookup is total.
+                    let p = pending
+                        .remove(tool_use_id)
+                        .expect("walk_transcript pairs every ToolResult with its ToolCall");
+                    let metadata = metadata_by_tool_use_id
                         .get(tool_use_id)
-                        .cloned()
-                        .unwrap_or_else(|| "(result)".to_owned());
+                        .unwrap_or(&default_metadata);
+                    let view = tools.result_view(&p.name, &p.input, content, metadata, is_error);
+                    // Prefer the persisted title; fall back to the
+                    // call label so pre-upgrade sessions keep
+                    // rendering (just without the live-path title).
+                    let header = metadata.title.clone().unwrap_or_else(|| p.label.clone());
                     self.blocks
-                        .push(Box::new(ToolResultBlock::new(label, content, is_error)));
+                        .push(Box::new(ToolResultBlock::new(header, view, is_error)));
                 }
                 Interaction::OrphanToolResult { content, is_error } => {
+                    let view = ToolResultView::Text {
+                        content: content.to_owned(),
+                    };
                     self.blocks.push(Box::new(ToolResultBlock::new(
-                        "(result)", content, is_error,
+                        FALLBACK_RESULT_HEADER,
+                        view,
+                        is_error,
                     )));
                 }
             }
@@ -172,14 +203,37 @@ impl ChatView {
     }
 
     /// Appends a tool call entry with its icon and label.
+    ///
+    /// Finalizes any in-flight streaming buffer first — a tool call
+    /// implicitly ends the current assistant turn's text, so callers
+    /// don't need to remember to `commit_streaming()` beforehand.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
+        self.commit_streaming();
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
-    /// Appends a tool result summary line with optional output content.
-    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
+    /// Appends a tool result with a pre-built structured view. Used
+    /// by [`App::handle_agent_event`](super::super::app::App::handle_agent_event)
+    /// (which builds the view from the cached tool name + input) and
+    /// by [`load_history`](Self::load_history) when resuming sessions.
+    pub(crate) fn push_tool_result_view(
+        &mut self,
+        label: &str,
+        view: ToolResultView,
+        is_error: bool,
+    ) {
         self.blocks
-            .push(Box::new(ToolResultBlock::new(label, content, is_error)));
+            .push(Box::new(ToolResultBlock::new(label, view, is_error)));
+    }
+
+    /// Test shortcut for the `Text` variant — production callers
+    /// route through [`push_tool_result_view`](Self::push_tool_result_view).
+    #[cfg(test)]
+    pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
+        let view = ToolResultView::Text {
+            content: content.to_owned(),
+        };
+        self.push_tool_result_view(label, view, is_error);
     }
 
     /// Appends an error message.
@@ -504,6 +558,7 @@ mod tests {
         let mut chat = test_chat();
         chat.load_history(
             &[Message::user("hello"), Message::assistant("hi there")],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 2);
@@ -557,6 +612,7 @@ mod tests {
                     ],
                 },
             ],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 5);
@@ -599,6 +655,7 @@ mod tests {
                 },
                 Message::assistant("reply"),
             ],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 4);
@@ -629,6 +686,7 @@ mod tests {
                     is_error: true,
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -653,6 +711,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -677,6 +736,7 @@ mod tests {
                     text: "  \n  ".to_owned(),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert!(chat.blocks.is_empty());
@@ -685,7 +745,7 @@ mod tests {
     #[test]
     fn load_history_empty_slice_is_noop() {
         let mut chat = test_chat();
-        chat.load_history(&[], &test_tools());
+        chat.load_history(&[], &HashMap::new(), &test_tools());
         assert!(chat.blocks.is_empty());
     }
 
@@ -706,6 +766,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 2);
@@ -726,6 +787,7 @@ mod tests {
                     input: serde_json::json!({"arg": "value"}),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -746,6 +808,7 @@ mod tests {
                     input: serde_json::json!({"query": "rust"}),
                 }],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -769,6 +832,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         assert_eq!(chat.blocks.len(), 1);
@@ -793,11 +857,74 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         let text = all_text(&chat);
         assert!(text.contains("Thinking..."));
         assert!(text.contains("resumed reasoning"));
+    }
+
+    #[test]
+    fn load_history_uses_persisted_metadata_title_and_replacements() {
+        // The architect flagged a live/replay header asymmetry: live
+        // shows the tool-set title (`Edited f.rs`), replay used to
+        // fall back to the call label (`Edit(/tmp/f.rs)`). Now that
+        // `Entry::ToolResultMetadata` persists the title alongside
+        // the tool result, replay must reattach it via
+        // `load_history`'s metadata map. Also pins that
+        // `metadata.replacements` wins over the content-derived
+        // default — if the Diff's match count came back as 1, the
+        // metadata lookup silently failed and the test would catch
+        // it.
+        let tools = test_tools();
+        let mut chat = test_chat();
+        let history = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "edit1".to_owned(),
+                    name: "edit".to_owned(),
+                    input: serde_json::json!({
+                        "file_path": "/tmp/f.rs",
+                        "old_string": "a",
+                        "new_string": "b",
+                        "replace_all": true,
+                    }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "edit1".to_owned(),
+                    content: "Replaced 4 occurrences in /tmp/f.rs.".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let mut metadata_map = HashMap::new();
+        metadata_map.insert(
+            "edit1".to_owned(),
+            crate::tool::ToolMetadata {
+                title: Some("Edited f.rs".to_owned()),
+                replacements: Some(4),
+                ..crate::tool::ToolMetadata::default()
+            },
+        );
+        chat.load_history(&history, &metadata_map, &tools);
+        let text = all_text(&chat);
+        // Both labels appear: `Edit(/tmp/f.rs)` on the call row
+        // (from `ToolCallBlock`), `Edited f.rs` on the result row
+        // (from `ToolResultBlock`). Pre-commit the result row used
+        // the call label — so `Edited` was absent entirely.
+        assert!(
+            text.contains("✓ Edited f.rs"),
+            "persisted title should drive the result row: {text}",
+        );
+        assert!(
+            text.contains("4 occurrences replaced"),
+            "metadata.replacements should drive the diff footer: {text}",
+        );
     }
 
     #[test]
@@ -816,6 +943,7 @@ mod tests {
                     },
                 ],
             }],
+            &HashMap::new(),
             &test_tools(),
         );
         let text = all_text(&chat);
@@ -1481,6 +1609,77 @@ mod tests {
         );
     }
 
+    // ── push_tool_result_view ──
+
+    #[test]
+    fn push_tool_result_view_edit_renders_diff_markers() {
+        // An Edit tool result wired through the structured view should
+        // render the replaced text with `- ` for the old side and `+ `
+        // for the new side, not the default 5-line truncation body.
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo()".to_owned(),
+            new: "fn bar()".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("- fn foo()"), "old side missing: {text}");
+        assert!(text.contains("+ fn bar()"), "new side missing: {text}");
+        // Diff rendering replaces the default body — the "Successfully
+        // edited" message must not leak through.
+        assert!(
+            !text.contains("Successfully edited"),
+            "diff should replace the raw content body: {text}",
+        );
+        // Single-replacement edits must not emit the
+        // "N occurrences replaced" footer — closes an `&&` → `||`
+        // mutation on the guard in `render_diff_body`.
+        assert!(
+            !text.contains("occurrences replaced"),
+            "replace_all=false should suppress the match-count footer: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_edit_replace_all_shows_match_count() {
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::Diff {
+            old: "a".to_owned(),
+            new: "b".to_owned(),
+            replace_all: true,
+            replacements: 3,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("3 occurrences replaced"),
+            "replace-all footer missing: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_edit_single_replacement_hides_count_footer() {
+        // The `applied to N matches` footer only makes sense when the
+        // edit actually multiplied. A single replacement (either
+        // replace_all=false or replace_all=true with one match) should
+        // render a clean diff with no count footer.
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::Diff {
+            old: "a".to_owned(),
+            new: "b".to_owned(),
+            replace_all: true,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(
+            !text.contains("applied to"),
+            "single-replacement footer should be suppressed: {text}",
+        );
+    }
+
     // ── push_error ──
 
     #[test]
@@ -1710,6 +1909,131 @@ mod tests {
     }
 
     #[test]
+    fn render_tool_call_with_edit_diff_result() {
+        // Per-tool rendering: the Edit tool's result renders as a
+        // `-` / `+` diff body, not the default truncated text block.
+        // Pins the first structured-view override so a regression
+        // routing Edit through `Text` again shows up here.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo() {}".to_owned(),
+            new: "fn foo() -> i32 { 42 }".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_over_budget_truncates_both_sides() {
+        // Pins the symmetric truncation policy: when the combined line
+        // count exceeds `MAX_DIFF_BODY_LINES`, each side renders with
+        // a head + ellipsis + tail shape. Regressions that revert to
+        // the old asymmetric policy — or that emit a bogus
+        // `... +0 lines` footer on pure deletion — show up here.
+        // 14 lines per side (combined = 28 > MAX_DIFF_BODY_LINES = 20)
+        // is small enough to read but big enough to stay over budget
+        // if the constant inches up.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/big.rs)");
+        let old = (0..14)
+            .map(|i| format!("old{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (0..14)
+            .map(|i| format!("new{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let view = crate::tool::ToolResultView::Diff {
+            old,
+            new,
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited big.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 26));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_error_uses_error_border_color() {
+        // Error-path Edit (e.g., `old_string` didn't match) still
+        // renders through the Diff view but with the error-colored
+        // border on the result row. Pins the `is_error = true`
+        // branch in `render_diff_body` — all other diff snapshots
+        // exercise the success border, so any theme regression on
+        // the error path would otherwise slip through.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo() {}".to_owned(),
+            new: "fn foo() -> i32 { 42 }".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, true);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
+        // Defensive guard in `render_diff_body`: when
+        // `trim_common_boundaries` collapses both sides to empty
+        // (old == new entirely — reachable on transcript replay
+        // since `edit_file` rejects no-op edits live), emit a single
+        // dim "(no change)" row so the user sees an explicit marker
+        // instead of a bare success header that reads as "edit
+        // applied, diff scrolled off".
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "unchanged".to_owned(),
+            new: "unchanged".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 6));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_trims_identical_boundary_lines() {
+        // Pure tail insertion: the anchor line (`fn foo()`) is
+        // identical on both sides and must NOT render as
+        // `- fn foo()` / `+ fn foo()`. Pinned as a snapshot so the
+        // trim regression would surface at the rendered-layout level,
+        // not just in the unit test on `trim_common_boundaries`.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "fn foo()".to_owned(),
+            new: "fn foo()\n    return 42;".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+    }
+
+    #[test]
+    fn render_tool_call_with_edit_diff_wraps_long_lines_under_bar() {
+        // Pins bar continuation under narrow widths — the `+` sigil
+        // stays on the first visual row only; wrapped continuations
+        // flush under the bar without repeating the sigil.
+        let mut chat = test_chat();
+        chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
+        let view = crate::tool::ToolResultView::Diff {
+            old: "short".to_owned(),
+            new: "an intentionally quite long replacement line that forces wrapping".to_owned(),
+            replace_all: false,
+            replacements: 1,
+        };
+        chat.push_tool_result_view("Edited f.rs", view, false);
+        insta::assert_snapshot!(render_chat(&mut chat, 40, 10));
+    }
+
+    #[test]
     fn render_tool_result_overflow_shows_line_count() {
         let mut chat = test_chat();
         chat.push_tool_call("$", "ls");
@@ -1745,7 +2069,7 @@ mod tests {
                 ],
             },
         ];
-        chat.load_history(&history, &tools);
+        chat.load_history(&history, &HashMap::new(), &tools);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 

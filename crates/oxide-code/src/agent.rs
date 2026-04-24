@@ -91,6 +91,7 @@ pub(crate) async fn agent_turn(
         }
 
         let mut results = Vec::new();
+        let mut sidecars: Vec<(String, ToolMetadata)> = Vec::new();
         for (id, name, input) in tool_uses {
             _ = sink.send(AgentEvent::ToolCallStart {
                 id: id.clone(),
@@ -109,11 +110,12 @@ pub(crate) async fn agent_turn(
 
             _ = sink.send(AgentEvent::ToolCallEnd {
                 id: id.clone(),
-                title: output.metadata.title.clone(),
                 content: output.content.clone(),
                 is_error: output.is_error,
+                metadata: output.metadata.clone(),
             });
 
+            sidecars.push((id.clone(), output.metadata));
             results.push(ContentBlock::ToolResult {
                 tool_use_id: id,
                 content: output.content,
@@ -126,6 +128,17 @@ pub(crate) async fn agent_turn(
             content: results,
         };
         record_session_message(session, &tool_result_msg, Some(sink)).await;
+        // Sidecar metadata is written immediately after the message
+        // so a mid-turn crash can still recover the display info for
+        // results that did land. Each entry is independent — a single
+        // failure doesn't abort the batch.
+        {
+            let mut s = session.lock().await;
+            for (id, metadata) in &sidecars {
+                let r = s.record_tool_result_metadata(id, metadata);
+                crate::session::writer::log_session_err(r, &mut s, Some(sink));
+            }
+        }
         messages.push(tool_result_msg);
     }
 
@@ -555,8 +568,8 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolCallEnd { id, title: Some(t), is_error: false, .. }
-                if id == "tool_1" && t == "echoed",
+            AgentEvent::ToolCallEnd { id, metadata, is_error: false, .. }
+                if id == "tool_1" && metadata.title.as_deref() == Some("echoed"),
         )));
     }
 
