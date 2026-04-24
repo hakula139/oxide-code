@@ -47,10 +47,10 @@ When thinking is enabled, `temperature` must be omitted from the request (API re
 
 Opus 4.7 adds a `thinking.display` field with two wire values:
 
-| Value          | Meaning                                                   |
-| -------------- | --------------------------------------------------------- |
-| `"summarized"` | Thinking blocks stream summarized reasoning text.         |
-| `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty.   |
+| Value          | Meaning                                                 |
+| -------------- | ------------------------------------------------------- |
+| `"summarized"` | Thinking blocks stream summarized reasoning text.       |
+| `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty. |
 
 **Silent default change.** On Opus 4.6, the server defaulted to `"summarized"`. On Opus 4.7 the default is `"omitted"` — any UI that renders streaming reasoning (including oxide-code's `show_thinking` TUI mode) sees a long pause followed by the final answer unless it opts back in:
 
