@@ -205,7 +205,7 @@ struct CacheControl {
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum StreamEvent {
+pub(crate) enum StreamEvent {
     MessageStart {
         message: MessageResponse,
     },
@@ -243,15 +243,15 @@ pub enum StreamEvent {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct MessageResponse {
-    pub id: String,
-    pub model: String,
-    pub usage: Option<Usage>,
+pub(crate) struct MessageResponse {
+    pub(crate) id: String,
+    pub(crate) model: String,
+    pub(crate) usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlockInfo {
+pub(crate) enum ContentBlockInfo {
     Text {
         text: String,
     },
@@ -282,7 +282,7 @@ pub enum ContentBlockInfo {
 )]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Delta {
+pub(crate) enum Delta {
     TextDelta {
         text: String,
     },
@@ -310,8 +310,8 @@ pub enum Delta {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct MessageDeltaBody {
-    pub stop_reason: Option<String>,
+pub(crate) struct MessageDeltaBody {
+    pub(crate) stop_reason: Option<String>,
 }
 
 #[cfg_attr(
@@ -322,31 +322,31 @@ pub struct MessageDeltaBody {
     )
 )]
 #[derive(Debug, Clone, Deserialize)]
-pub struct Usage {
+pub(crate) struct Usage {
     #[serde(default)]
-    pub input_tokens: u32,
+    pub(crate) input_tokens: u32,
     #[serde(default)]
-    pub output_tokens: u32,
+    pub(crate) output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApiError {
+pub(crate) struct ApiError {
     #[serde(rename = "type")]
-    pub error_type: String,
-    pub message: String,
+    pub(crate) error_type: String,
+    pub(crate) message: String,
 }
 
 // ── Client ──
 
 #[derive(Clone)]
-pub struct Client {
+pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
 }
 
 impl Client {
-    pub fn new(config: Config, session_id: Option<String>) -> Result<Self> {
+    pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
 
@@ -413,7 +413,7 @@ impl Client {
     }
 
     /// Returns the model name for use in the system prompt.
-    pub fn model(&self) -> &str {
+    pub(crate) fn model(&self) -> &str {
         &self.config.model
     }
 
@@ -440,7 +440,7 @@ impl Client {
     /// 4. Dynamic sections joined (no `cache_control`).
     ///
     /// Returns an mpsc receiver of [`StreamEvent`]s.
-    pub fn stream_message(
+    pub(crate) fn stream_message(
         &self,
         messages: &[Message],
         system_sections: &[&str],
@@ -567,7 +567,7 @@ impl Client {
     /// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
     /// is `false`, both the body field and the beta are silently
     /// dropped — the caller must tolerate free-form text in that case.
-    pub async fn complete(
+    pub(crate) async fn complete(
         &self,
         model: &str,
         system: &str,
