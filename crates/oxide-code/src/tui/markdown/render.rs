@@ -776,12 +776,21 @@ mod tests {
         Theme::default()
     }
 
-    fn rendered_text(input: &str) -> Vec<String> {
-        render_markdown(input, &theme(), 0)
+    /// Render `input` at the given width budget and flatten each line
+    /// into a concatenated string (spans joined in order). `width == 0`
+    /// disables word-wrapping.
+    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
+        render_markdown(input, &theme(), width)
             .lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
+    }
+
+    /// Convenience wrapper around [`rendered_text_at_width`] at width 0
+    /// (no wrapping) — used by most tests that don't exercise wrapping.
+    fn rendered_text(input: &str) -> Vec<String> {
+        rendered_text_at_width(input, 0)
     }
 
     // ── render_markdown ──
@@ -1697,13 +1706,5 @@ mod tests {
                 "continuation should not repeat list marker: {line:?}"
             );
         }
-    }
-
-    fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
-        render_markdown(input, &theme(), width)
-            .lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
     }
 }
