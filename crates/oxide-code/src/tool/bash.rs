@@ -210,13 +210,16 @@ fn kill_process_group(pgid: Option<u32>) {
 
 // ── Output Truncation ──
 
+/// Upper bound on the bytes inserted by [`truncate_output`] between the
+/// head and tail halves. The separator line is ~35 bytes; 50 gives
+/// headroom for large line counts without slipping truncated output
+/// past [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES) by more than this.
+const TRUNCATION_OVERHEAD: usize = 50;
+
 /// Truncates output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
 /// keeping the first and last halves so the LLM sees both the beginning of the
 /// output and the end (where error messages and summaries usually appear).
 fn truncate_output(content: &mut String) {
-    // The separator line is ~35 bytes; 50 gives headroom for large line counts.
-    const TRUNCATION_OVERHEAD: usize = 50;
-
     if content.len() <= super::MAX_OUTPUT_BYTES {
         return;
     }
@@ -378,7 +381,7 @@ mod tests {
         assert!(content.starts_with("HEAD_SENTINEL\n"));
         assert!(content.ends_with("TAIL_SENTINEL\n"));
         assert!(content.contains("lines truncated"));
-        assert!(content.len() <= MAX_OUTPUT_BYTES + 100);
+        assert!(content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
         assert!(content.len() >= MAX_OUTPUT_BYTES / 2);
         // Separator sits between head and tail, not at the edges.
         let sep_pos = content.find("lines truncated").unwrap();
@@ -404,6 +407,13 @@ mod tests {
         assert!(content.contains("lines truncated"));
         assert!(content.starts_with("aaaa"));
         assert!(content.ends_with('b'));
+        // The emoji straddles the byte boundary at `MAX_OUTPUT_BYTES / 2`;
+        // `floor_char_boundary` must drop it from the head and the tail
+        // both starts past it — so the 4-byte sequence must not appear
+        // anywhere in the truncated output. `starts_with("aaaa")` /
+        // `ends_with('b')` alone would pass even if a partial emoji
+        // leaked into the middle of the string.
+        assert!(!content.contains(emoji));
     }
 
     #[test]
