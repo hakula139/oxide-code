@@ -358,6 +358,25 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// Read errors other than `NotFound` (here: pointing at a
+    /// directory raises `IsADirectory`) must surface with the
+    /// offending path so the user can act on it. Splitting this from
+    /// the missing-file branch is the whole point of distinguishing
+    /// `NotFound` from other IO errors in `load_file`.
+    #[test]
+    fn load_file_unreadable_path_propagates_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_file(dir.path()).expect_err("directory read should fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!(
+                "failed to read config at {}",
+                dir.path().display()
+            )),
+            "{msg}",
+        );
+    }
+
     #[test]
     fn load_file_rejects_invalid_toml() {
         let dir = tempfile::tempdir().unwrap();
