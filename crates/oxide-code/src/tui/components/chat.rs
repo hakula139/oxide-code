@@ -51,12 +51,8 @@ pub(crate) struct ChatView {
     // Transient state (cleared per turn)
     /// In-flight assistant tokens with a rendered-prefix cache.
     streaming: Option<StreamingAssistant>,
-    /// Live thinking tokens arriving for the current block. Flushed
-    /// into a committed [`AssistantThinking`] block in `blocks` when
-    /// the model switches to prose or the turn completes — keeps the
-    /// reasoning visible in the transcript instead of evaporating
-    /// when text streaming begins. Resumed thinking from prior
-    /// sessions is loaded directly through `blocks`.
+    /// Live thinking tokens for the current block; flushed into a
+    /// committed [`AssistantThinking`] block on stream start or turn end.
     thinking_buffer: String,
 
     // View state
@@ -169,10 +165,7 @@ impl ChatView {
     }
 
     /// Appends a streamed token to the current assistant response.
-    ///
-    /// Any in-flight thinking tokens are committed into an
-    /// [`AssistantThinking`] block first so the reasoning stays
-    /// visible in the transcript once the model switches to prose.
+    /// Any pending thinking is committed first.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.commit_thinking_buffer();
         self.streaming
@@ -192,10 +185,8 @@ impl ChatView {
         }
     }
 
-    /// Finalize the current streaming buffer into a committed assistant
-    /// block. Any pending thinking tokens are committed first so
-    /// thinking-only turns (no trailing text) still leave a visible
-    /// block behind.
+    /// Finalize the streaming buffer into a committed block. Flushes
+    /// pending thinking first so thinking-only turns still leave a block.
     pub(crate) fn commit_streaming(&mut self) {
         self.commit_thinking_buffer();
         if let Some(mut s) = self.streaming.take() {
@@ -206,8 +197,7 @@ impl ChatView {
         }
     }
 
-    /// Move any in-flight thinking tokens into a committed
-    /// [`AssistantThinking`] block. No-op when the buffer is empty.
+    /// Commit in-flight thinking into a block. No-op when empty.
     fn commit_thinking_buffer(&mut self) {
         if self.thinking_buffer.is_empty() {
             return;
@@ -1044,10 +1034,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_persists_thinking_into_blocks() {
-        // When text streaming starts mid-turn, the in-flight thinking
-        // tokens must move into a committed block rather than evaporate.
-        // Otherwise the reasoning disappears the moment the model
-        // switches to prose, even though it's still relevant context.
         let mut chat = test_chat();
         chat.append_thinking_token("reasoning here");
         assert!(!chat.thinking_buffer.is_empty());
@@ -1055,13 +1041,10 @@ mod tests {
 
         chat.append_stream_token("reply text");
         assert!(chat.thinking_buffer.is_empty());
-        assert_eq!(chat.blocks.len(), 1, "thinking should have been committed");
+        assert_eq!(chat.blocks.len(), 1);
 
         let text = all_text(&chat);
-        assert!(
-            text.contains("reasoning here"),
-            "thinking still visible: {text}"
-        );
+        assert!(text.contains("reasoning here"));
         assert!(text.contains("reply text"));
     }
 
@@ -1386,10 +1369,7 @@ mod tests {
 
     #[test]
     fn commit_streaming_persists_thinking_only_turn() {
-        // A turn that produces thinking but no text (e.g., model jumps
-        // straight to a tool call) still leaves reasoning worth keeping.
-        // `commit_streaming` must flush the thinking buffer into a
-        // committed block instead of clearing it silently.
+        // Thinking → tool-call turn (no text) still persists the reasoning.
         let mut chat = test_chat();
         chat.append_thinking_token("plan before tool");
         assert!(chat.blocks.is_empty());
