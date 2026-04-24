@@ -429,6 +429,14 @@ impl Client {
     /// is prepended as a synthetic user message (keeping dynamic content
     /// like CLAUDE.md out of the cacheable `system` parameter).
     ///
+    /// System-block assembly order (the boundary marker is filtered out):
+    ///
+    /// 1. Billing header (OAuth only; no `cache_control`).
+    /// 2. Identity prefix (no `cache_control`).
+    /// 3. Static sections joined (ephemeral cache; `scope=global` on 1P,
+    ///    default org-scoped on 3P).
+    /// 4. Dynamic sections joined (no `cache_control`).
+    ///
     /// Returns an mpsc receiver of [`StreamEvent`]s.
     pub fn stream_message(
         &self,
@@ -462,13 +470,6 @@ impl Client {
         // ephemeral cache, which every gateway accepts.
         let is_first_party = is_first_party_base_url(&self.config.base_url);
 
-        // System-block order (boundary marker filtered):
-        //
-        // 1. Billing header (OAuth only; no cache_control).
-        // 2. Identity prefix (no cache_control).
-        // 3. Static sections joined (ephemeral cache; scope=global on 1P,
-        //    default org-scoped on 3P).
-        // 4. Dynamic sections joined (no cache_control).
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
