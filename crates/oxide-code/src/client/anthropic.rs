@@ -1495,10 +1495,7 @@ mod tests {
             panic!("expected text delta, got {:?}", events[2]);
         };
         assert_eq!(text, "Hi");
-        assert!(matches!(
-            events[5],
-            StreamEvent::MessageStop | StreamEvent::Unknown,
-        ));
+        assert!(matches!(events[5], StreamEvent::MessageStop));
     }
 
     #[tokio::test]
