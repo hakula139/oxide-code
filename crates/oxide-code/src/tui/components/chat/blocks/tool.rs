@@ -18,7 +18,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx};
+use super::{BAR, ChatBlock, RenderCtx};
 use crate::tool::{ReadExcerptLine, ToolResultView};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -41,9 +41,6 @@ const MAX_DIFF_BODY_LINES: usize = 20;
 /// budget; this cap exists to avoid pathological multi-kilobyte lines
 /// pasted into tool output.
 const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
-
-/// Left bar character for tool blocks.
-const BAR: &str = "▎";
 
 /// First-line prefix for tool-call and tool-result status lines — bar +
 /// space. Content sits at col 2.
@@ -171,8 +168,7 @@ fn render_text_body(
     label: &str,
     is_error: bool,
 ) {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
+    if content.trim().is_empty() {
         return;
     }
 
@@ -181,13 +177,25 @@ fn render_text_body(
     let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
     let width = usize::from(ctx.width);
 
+    // Preserve per-line leading whitespace — some tools (e.g., `git
+    // diff --stat`) indent every line with a meaningful space that
+    // `content.trim()` would strip off the first line only, producing
+    // a misaligned first row. Drop whole blank surrounding lines
+    // instead, one unit of work at a time.
+    let mut output_lines: Vec<&str> = content.lines().collect();
+    while output_lines.first().is_some_and(|l| l.trim().is_empty()) {
+        output_lines.remove(0);
+    }
+    while output_lines.last().is_some_and(|l| l.trim().is_empty()) {
+        output_lines.pop();
+    }
+
     // Tools (grep, glob) commonly use their own summary line as both
     // the `title` metadata (shown in the status line) and the first
     // line of `content` (shown in the body) — the model needs the
     // summary to parse counts, but rendering both duplicates it on
     // screen. Skip the first body line when it matches the label
     // verbatim.
-    let mut output_lines: Vec<&str> = trimmed.lines().collect();
     if output_lines
         .first()
         .is_some_and(|l| l.trim() == label.trim())

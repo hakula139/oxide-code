@@ -29,6 +29,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
+// ── Shared Glyphs ──
+
+/// Shared left-bar glyph for tool and thinking blocks.
+pub(super) const BAR: &str = "▎";
+
 // ── Trait ──
 
 /// Immutable context passed to [`ChatBlock::render`].
@@ -112,10 +117,10 @@ pub(super) fn push_icon_wrapped(
     out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
 }
 
-/// Prepends a styled prefix span to a markdown-rendered line. Used by
-/// the bar-less markdown blocks (assistant text, streaming, thinking
-/// body) for per-line first-column decoration (icon on line 1, plain
-/// indent on continuations).
+/// Prepends a styled prefix span to a markdown-rendered line,
+/// preserving the input's whole-line style so fenced code blocks
+/// (which carry their fg on `Line.style`, not the spans) keep their
+/// highlight when wrapped in per-block decoration.
 pub(super) fn prepend_markdown_prefix(
     line: Line<'static>,
     prefix: &str,
@@ -123,7 +128,9 @@ pub(super) fn prepend_markdown_prefix(
 ) -> Line<'static> {
     let mut spans = vec![Span::styled(prefix.to_owned(), prefix_style)];
     spans.extend(line.spans);
-    Line::from(spans)
+    let mut out = Line::from(spans);
+    out.style = line.style;
+    out
 }
 
 /// Whether the last rendered line is non-empty. Used to decide where

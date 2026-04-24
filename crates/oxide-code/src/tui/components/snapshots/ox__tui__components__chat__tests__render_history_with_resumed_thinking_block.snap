@@ -1,12 +1,11 @@
 ---
 source: crates/oxide-code/src/tui/components/chat.rs
-assertion_line: 1555
 expression: "render_chat(&mut chat, 60, 10)"
 ---
 "❯ hello                                                     "
 "                                                            "
-"◇ Thinking...                                               "
-"  pondering...                                              "
+"▎ Thinking...                                               "
+"▎ pondering...                                              "
 "                                                            "
 "◉ Hi!                                                       "
 "                                                            "

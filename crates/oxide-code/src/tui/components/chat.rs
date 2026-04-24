@@ -51,9 +51,8 @@ pub(crate) struct ChatView {
     // Transient state (cleared per turn)
     /// In-flight assistant tokens with a rendered-prefix cache.
     streaming: Option<StreamingAssistant>,
-    /// Live thinking tokens — transient; cleared when a stream token or
-    /// turn completion arrives. Resumed thinking comes through
-    /// [`blocks`] as an [`AssistantThinking`] block instead.
+    /// Live thinking tokens for the current block; flushed into a
+    /// committed [`AssistantThinking`] block on stream start or turn end.
     thinking_buffer: String,
 
     // View state
@@ -166,10 +165,9 @@ impl ChatView {
     }
 
     /// Appends a streamed token to the current assistant response.
+    /// Any pending thinking is committed first.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
-        if !self.thinking_buffer.is_empty() {
-            self.thinking_buffer.clear();
-        }
+        self.commit_thinking_buffer();
         self.streaming
             .get_or_insert_with(StreamingAssistant::new)
             .append(token);
@@ -187,16 +185,24 @@ impl ChatView {
         }
     }
 
-    /// Finalize the current streaming buffer into a committed assistant
-    /// block.
+    /// Finalize the streaming buffer into a committed block. Flushes
+    /// pending thinking first so thinking-only turns still leave a block.
     pub(crate) fn commit_streaming(&mut self) {
-        self.thinking_buffer.clear();
+        self.commit_thinking_buffer();
         if let Some(mut s) = self.streaming.take() {
             let text = s.take_buffer();
             if !text.is_empty() {
                 self.blocks.push(Box::new(AssistantText::new(text)));
             }
         }
+    }
+
+    fn commit_thinking_buffer(&mut self) {
+        if self.thinking_buffer.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.thinking_buffer);
+        self.blocks.push(Box::new(AssistantThinking::new(text)));
     }
 
     /// Appends a tool call entry with its icon and label.
@@ -1026,13 +1032,19 @@ mod tests {
     // ── append_stream_token ──
 
     #[test]
-    fn append_stream_token_clears_thinking() {
+    fn append_stream_token_persists_thinking_into_blocks() {
         let mut chat = test_chat();
-        chat.append_thinking_token("thinking...");
+        chat.append_thinking_token("reasoning here");
         assert!(!chat.thinking_buffer.is_empty());
+        assert_eq!(chat.blocks.len(), 0);
 
-        chat.append_stream_token("text");
+        chat.append_stream_token("reply text");
         assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.blocks.len(), 1);
+
+        let text = all_text(&chat);
+        assert!(text.contains("reasoning here"));
+        assert!(text.contains("reply text"));
     }
 
     #[test]
@@ -1354,6 +1366,20 @@ mod tests {
         assert!(chat.thinking_buffer.is_empty());
     }
 
+    #[test]
+    fn commit_streaming_persists_thinking_only_turn() {
+        // Thinking → tool-call turn (no text) still persists the reasoning.
+        let mut chat = test_chat();
+        chat.append_thinking_token("plan before tool");
+        assert!(chat.blocks.is_empty());
+
+        chat.commit_streaming();
+        assert_eq!(chat.blocks.len(), 1);
+        assert!(chat.thinking_buffer.is_empty());
+        let text = all_text(&chat);
+        assert!(text.contains("plan before tool"));
+    }
+
     // ── push_tool_call ──
 
     #[test]
@@ -1551,6 +1577,45 @@ mod tests {
         assert!(
             text.contains("Found 2 files in cache"),
             "body preserved: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
+        // `git diff --stat` and similar tools indent every body line with
+        // a meaningful leading space. Trimming whole-content whitespace
+        // used to strip it off the first line only, misaligning the
+        // first row against the rest.
+        let mut chat = test_chat();
+        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains(" a.rs | 1 +"),
+            "first body line must keep its leading space: {text}",
+        );
+        assert!(text.contains(" b.rs | 2 +"));
+    }
+
+    #[test]
+    fn push_tool_result_drops_surrounding_blank_lines() {
+        // Some tools pad output with leading / trailing blank lines;
+        // those must not produce empty body rows, but per-line indent
+        // on real data lines in between must survive.
+        let mut chat = test_chat();
+        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
+        let text = all_text(&chat);
+
+        // Exactly one body row with the `▎   ` prefix (4-col status-line
+        // continuation). A regression that kept surrounding blanks would
+        // render 2+ body rows.
+        let body_row_count = text.lines().filter(|l| l.starts_with("▎   ")).count();
+        assert_eq!(
+            body_row_count, 1,
+            "expected one body row after blank-line stripping: {text}",
+        );
+        assert!(
+            text.contains("▎    real line"),
+            "data-line indent must survive: {text}",
         );
     }
 
