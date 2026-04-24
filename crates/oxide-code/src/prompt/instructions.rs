@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_files_returns_empty_when_no_files_exist() {
+    async fn load_files_absent_yields_empty() {
         let slots = vec![Slot {
             candidates: vec![
                 PathBuf::from("/nonexistent/CLAUDE.md"),

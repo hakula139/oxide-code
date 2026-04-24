@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_unknown_id_returns_none() {
+    fn remove_unknown_id_is_absent() {
         let mut calls = PendingCalls::new();
         assert!(calls.remove("orphan").is_none());
     }

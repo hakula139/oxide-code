@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn build_user_context_empty_claude_md_returns_none() {
+    fn build_user_context_empty_claude_md_is_absent() {
         assert!(build_user_context("", "Today's date is 2026-04-12.").is_none());
     }
 

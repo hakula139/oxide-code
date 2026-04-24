@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_width_returns_empty_when_max_width_is_zero() {
+    fn truncate_to_width_zero_produces_empty() {
         assert_eq!(truncate_to_width("anything", 0), "");
     }
 

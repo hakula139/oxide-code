@@ -1991,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_unhandled_key_returns_none() {
+    fn handle_event_unhandled_key_produces_no_action() {
         let mut chat = test_chat();
         let action = chat.handle_event(&key_event(KeyCode::Char('a')));
         assert!(action.is_none());

@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn load_session_data_nonexistent_session_returns_error() {
+    fn load_session_data_nonexistent_session_errors() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(store.load_session_data("nonexistent").is_err());

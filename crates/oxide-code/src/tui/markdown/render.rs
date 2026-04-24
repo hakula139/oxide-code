@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_column_widths_empty_input_returns_empty() {
+    fn fit_column_widths_empty_input_yields_empty() {
         assert_eq!(fit_column_widths(&[], 80), Vec::<usize>::new());
     }
 

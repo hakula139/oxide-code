@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn load_file_missing_file_returns_none() {
+    fn load_file_missing_is_absent() {
         let result =
             load_file(Path::new("/nonexistent/config.toml")).expect("missing file is not an error");
         assert!(result.is_none());
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn find_project_config_from_returns_none_when_absent() {
+    fn find_project_config_from_is_absent_when_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert!(find_project_config_from(dir.path().to_path_buf()).is_none());
     }

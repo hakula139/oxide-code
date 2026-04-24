@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_returns_existing_when_far_from_expiry() {
+    async fn load_token_from_keeps_existing_when_far_from_expiry() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_without_refresh_token_returns_nonexpired_as_is() {
+    async fn load_token_from_without_refresh_token_keeps_nonexpired_as_is() {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
