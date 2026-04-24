@@ -181,6 +181,7 @@ ox     # Start an interactive session
   - Prose intro summarizing what and why.
   - Per-file Changes table (for non-trivial PRs).
   - Test plan checklist.
+- PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.
 
 ### Testing
 
