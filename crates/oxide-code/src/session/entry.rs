@@ -364,23 +364,15 @@ mod tests {
         assert_eq!(json["tool_use_id"], "edit1");
         assert_eq!(json["metadata"]["title"], "Edited f.rs");
         assert_eq!(json["metadata"]["replacements"], 3);
+        assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
         // Unset fields must be absent, not serialized as null — the
         // file bytes grow quickly across many tool turns.
         assert!(json["metadata"].get("exit_code").is_none());
 
+        // Bytes → Entry → bytes must be identical so every field
+        // (not just the ones spot-checked above) round-trips.
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
-        let Entry::ToolResultMetadata {
-            tool_use_id,
-            metadata,
-            timestamp,
-        } = parsed
-        else {
-            panic!("expected ToolResultMetadata");
-        };
-        assert_eq!(tool_use_id, "edit1");
-        assert_eq!(metadata.title.as_deref(), Some("Edited f.rs"));
-        assert_eq!(metadata.replacements, Some(3));
-        assert_eq!(timestamp, datetime!(2026-04-16 12:06:00 UTC));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 
     #[test]
@@ -393,10 +385,14 @@ mod tests {
         // just be ignored by serde default behavior.
         let json = r#"{"type":"tool_result_metadata","tool_use_id":"e","metadata":{"title":"t","future_field":123},"timestamp":"2026-04-16T12:00:00Z"}"#;
         let parsed: Entry = serde_json::from_str(json).unwrap();
-        let Entry::ToolResultMetadata { metadata, .. } = parsed else {
-            panic!("expected ToolResultMetadata");
-        };
-        assert_eq!(metadata.title.as_deref(), Some("t"));
+        // Re-serialize to observe the surviving known fields without
+        // destructuring (which would require an unreachable else-arm).
+        let reserialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(reserialized["type"], "tool_result_metadata");
+        assert_eq!(reserialized["tool_use_id"], "e");
+        assert_eq!(reserialized["metadata"]["title"], "t");
+        // Unknown field is silently dropped on re-serialization.
+        assert!(reserialized["metadata"].get("future_field").is_none());
     }
 
     // ── Entry::Unknown ──
