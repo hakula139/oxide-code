@@ -18,7 +18,6 @@ use crate::util::env;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-const DEFAULT_MAX_TOKENS: u32 = 16384;
 
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -243,15 +242,13 @@ impl Config {
     }
 }
 
-/// Per-effort `max_tokens` default. Matches claude-code 2.1.119's
-/// observed values: 64 K for the top two tiers (xhigh / max), 32 K
-/// for high, the legacy 16 384 for everything else. Users override
-/// via `ANTHROPIC_MAX_TOKENS` / `[client].max_tokens`.
+/// Per-effort `max_tokens` default; overridden by
+/// `ANTHROPIC_MAX_TOKENS` / `[client].max_tokens`.
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
     match effort {
         Some(Effort::Xhigh | Effort::Max) => 64_000,
         Some(Effort::High) => 32_000,
-        _ => DEFAULT_MAX_TOKENS,
+        _ => 16_000,
     }
 }
 
@@ -416,10 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Default model (Opus 4.7) supports `xhigh`, so both `effort`
-        // and `max_tokens` derive from that ceiling — matches the
-        // claude-code 2.1.119 packet capture. Prompt cache defaults
-        // to 1h (opt-out via `OX_PROMPT_CACHE_TTL=5m`).
+        // Opus 4.7 supports `xhigh`, so both `effort` and `max_tokens`
+        // derive from that ceiling. Prompt cache defaults to 1h.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -713,9 +708,9 @@ mod tests {
         assert_eq!(default_max_tokens(Some(Effort::Max)), 64_000);
         assert_eq!(default_max_tokens(Some(Effort::Xhigh)), 64_000);
         assert_eq!(default_max_tokens(Some(Effort::High)), 32_000);
-        assert_eq!(default_max_tokens(Some(Effort::Medium)), DEFAULT_MAX_TOKENS);
-        assert_eq!(default_max_tokens(Some(Effort::Low)), DEFAULT_MAX_TOKENS);
-        assert_eq!(default_max_tokens(None), DEFAULT_MAX_TOKENS);
+        assert_eq!(default_max_tokens(Some(Effort::Medium)), 16_000);
+        assert_eq!(default_max_tokens(Some(Effort::Low)), 16_000);
+        assert_eq!(default_max_tokens(None), 16_000);
     }
 
     // ── Config::load / prompt_cache_ttl ──

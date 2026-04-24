@@ -232,7 +232,7 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 - **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field; the header became a no-op and the model ran at an undefined default.
 - **Per-model ceiling.** `max` is Opus-only; Sonnet 4.6 400s on it. `xhigh` is Opus 4.7-only. The `Capabilities::effort_max` / `effort_xhigh` flags encode this; `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
 - **Per-model default.** claude-code 2.1.119 sends `xhigh` on Opus 4.7, `high` on Opus 4.6 and Sonnet 4.6, omits the field entirely on earlier models. oxide-code mirrors this via `Capabilities::default_effort`.
-- **`max_tokens` should scale with effort.** claude-code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` applies the same scaling when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
+- **`max_tokens` should scale with effort.** claude-code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` matches the upper tiers and uses 16 K otherwise when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
 
 ### `context_management.edits`
 
