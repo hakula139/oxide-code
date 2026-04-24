@@ -18,7 +18,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx};
+use super::{BAR, ChatBlock, RenderCtx};
 use crate::tool::{ReadExcerptLine, ToolResultView};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::{expand_tabs, wrap_line};
@@ -41,9 +41,6 @@ const MAX_DIFF_BODY_LINES: usize = 20;
 /// budget; this cap exists to avoid pathological multi-kilobyte lines
 /// pasted into tool output.
 const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
-
-/// Left bar character for tool blocks.
-const BAR: &str = "▎";
 
 /// First-line prefix for tool-call and tool-result status lines — bar +
 /// space. Content sits at col 2.

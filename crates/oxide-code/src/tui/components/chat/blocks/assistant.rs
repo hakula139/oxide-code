@@ -17,10 +17,10 @@ pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
 /// visual width of [`ASSISTANT_PREFIX`].
 pub(super) const ASSISTANT_CONT: &str = "  ";
 
-/// Per-line prefix for thinking blocks — a dim vertical bar marks the
-/// whole block as subordinate (blockquote-style), replacing the
-/// icon-only convention used for user / assistant / tool blocks.
-const THINKING_PREFIX: &str = "│ ";
+/// Per-line prefix for thinking blocks — shares the [`BAR`] glyph with
+/// tool blocks so left borders line up across the transcript, with
+/// the dim thinking style distinguishing reasoning from tool output.
+const THINKING_PREFIX: &str = "▎ ";
 
 /// Label shown on the first line of a thinking block, flush against the
 /// bar (no additional hanging indent).
@@ -86,9 +86,10 @@ pub(super) fn render_assistant_markdown(
 // ── AssistantThinking ──
 
 /// Extended-thinking block, rendered as a dim-barred quote: every
-/// line is prefixed with `│ `, the header reads `Thinking...`, and
-/// the body goes through the markdown pipeline with plain-text spans
-/// dimmed on top. Collapses to zero lines when `show_thinking` is off.
+/// line is prefixed with a dim [`BAR`], the header reads
+/// `Thinking...`, and the body goes through the markdown pipeline
+/// with plain-text spans dimmed on top. Collapses to zero lines
+/// when `show_thinking` is off.
 pub(crate) struct AssistantThinking {
     text: String,
 }
@@ -166,6 +167,7 @@ mod tests {
     use indoc::indoc;
     use ratatui::style::Style;
 
+    use super::super::BAR;
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -175,6 +177,20 @@ mod tests {
             theme,
             show_thinking: true,
         }
+    }
+
+    #[test]
+    fn thinking_prefix_shares_bar_glyph_with_tool_blocks() {
+        // Left borders must align across block types — tool and
+        // thinking bars sit on the same vertical axis. The coupling
+        // lives in a runtime assertion (rather than compile-time
+        // concat) to keep both constants as plain `&str` literals
+        // that readers can grok without chasing macro expansions.
+        assert!(
+            THINKING_PREFIX.starts_with(BAR),
+            "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?}) \
+             so thinking and tool bars align",
+        );
     }
 
     // ── AssistantThinking::render ──
@@ -190,7 +206,11 @@ mod tests {
         let lines = block.render(&ctx_at(60, &theme));
         assert_eq!(lines.len(), 1, "only the header should render: {lines:?}");
         let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header.starts_with("│ Thinking..."));
+        assert!(
+            header.starts_with(THINKING_PREFIX),
+            "header must start with the shared bar prefix: {header:?}",
+        );
+        assert!(header.contains("Thinking..."));
     }
 
     #[test]
@@ -223,7 +243,7 @@ mod tests {
 
         // Bar prefix is still applied in front of the untouched fence.
         let first_span = fence_line.spans.first().expect("empty fence line");
-        assert_eq!(first_span.content, "│ ");
+        assert_eq!(first_span.content, THINKING_PREFIX);
         assert_eq!(first_span.style, theme.thinking());
     }
 

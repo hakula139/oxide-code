@@ -29,6 +29,14 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
+// ── Shared Glyphs ──
+
+/// Left bar character shared by tool blocks and the thinking block.
+/// `▎` (U+258E) sits flush against the column's left edge rather
+/// than centered like `│`, so bars across different block types
+/// align visually along the same vertical axis.
+pub(super) const BAR: &str = "▎";
+
 // ── Trait ──
 
 /// Immutable context passed to [`ChatBlock::render`].
