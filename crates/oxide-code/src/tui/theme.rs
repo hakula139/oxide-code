@@ -199,7 +199,17 @@ impl Theme {
         Style::default().fg(self.fg).add_modifier(Modifier::ITALIC)
     }
 
+    /// Inline code (`` `code` ``) — teal on a subtle surface fill so it
+    /// reads as a highlighted token against body text and bold headings.
     pub(crate) fn inline_code(&self) -> Style {
+        Style::default().fg(self.code).bg(self.surface)
+    }
+
+    /// Fallback style for fenced code blocks with unknown languages.
+    /// Shares the teal foreground with inline code but omits the
+    /// background fill, which would paint only the content portion of
+    /// each line and leave ragged edges.
+    pub(crate) fn code_block_fallback(&self) -> Style {
         Style::default().fg(self.code)
     }
 
@@ -262,6 +272,9 @@ mod tests {
         assert_eq!(t.warning().fg, Some(t.warning));
         assert_eq!(t.error().fg, Some(t.error));
         assert_eq!(t.inline_code().fg, Some(t.code));
+        assert_eq!(t.inline_code().bg, Some(t.surface));
+        assert_eq!(t.code_block_fallback().fg, Some(t.code));
+        assert_eq!(t.code_block_fallback().bg, None);
     }
 
     #[test]

@@ -318,7 +318,7 @@ where
         let highlighted = highlight_code(
             lang.as_deref().unwrap_or(""),
             &code,
-            self.theme.inline_code(),
+            self.theme.code_block_fallback(),
         );
         for line in highlighted {
             self.lines.push(line);
@@ -1522,6 +1522,11 @@ mod tests {
             .find(|s| s.content.contains("foo()"))
             .unwrap();
         assert_eq!(span.style.fg, Some(t.code));
+        assert_eq!(
+            span.style.bg,
+            Some(t.surface),
+            "inline code should have a surface background fill to stand out"
+        );
     }
 
     // ── HTML ──
