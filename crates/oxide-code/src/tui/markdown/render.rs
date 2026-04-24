@@ -354,7 +354,12 @@ where
         let col_count = alignments
             .len()
             .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-        let col_widths = compute_column_widths(&rows, col_count);
+        let natural_widths = compute_column_widths(&rows, col_count);
+        let col_widths = if self.width == 0 {
+            natural_widths
+        } else {
+            fit_column_widths(&natural_widths, self.width)
+        };
 
         let border_style = self.theme.table_border();
         let header_style = self.theme.table_header();
@@ -369,20 +374,21 @@ where
         ));
 
         for (row_idx, row) in rows.iter().enumerate() {
-            // Data row: │ cell │ cell │
             let cell_style = if row_idx < head_rows {
                 header_style
             } else {
                 Style::default()
             };
-            self.lines.push(build_data_row(
+            for line in build_data_rows(
                 row,
                 &col_widths,
                 &alignments,
                 col_count,
                 border_style,
                 cell_style,
-            ));
+            ) {
+                self.lines.push(line);
+            }
 
             // Separator after header: ├─┼─┤
             if row_idx + 1 == head_rows && head_rows < rows.len() {
@@ -619,6 +625,42 @@ fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<u
     widths
 }
 
+/// Shrink column widths so the rendered table fits within `width_budget`.
+///
+/// Table overhead per row is `1 + 3 * n` columns (left border + 2 padding
+/// spaces and 1 separator per column). Non-empty columns are floored at 1
+/// so cell wrapping stays viable on narrow terminals, even if that causes
+/// marginal overflow — preferable to dropping content.
+fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let overhead = 1 + 3 * n;
+    let available = width_budget.saturating_sub(overhead);
+    let total_natural: usize = natural.iter().sum();
+    if total_natural <= available {
+        return natural.to_vec();
+    }
+
+    let max_natural = *natural.iter().max().unwrap_or(&0);
+    let mut lo: usize = 0;
+    let mut hi: usize = max_natural;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let sum: usize = natural.iter().map(|&w| w.min(mid)).sum();
+        if sum <= available {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    natural
+        .iter()
+        .map(|&w| if w > 0 { w.min(lo).max(1) } else { 0 })
+        .collect()
+}
+
 /// Builds a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
 fn build_horizontal_rule(
     col_widths: &[usize],
@@ -639,50 +681,75 @@ fn build_horizontal_rule(
     Line::from(Span::styled(buf, style))
 }
 
-/// Builds a data row: `│ cell │ cell │`, applying alignment and cell style.
-fn build_data_row(
+/// Word-wraps a cell's spans into sub-lines of at most `target_width` columns.
+/// Always returns at least one sub-line so every row has a visual line.
+fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'static>>> {
+    if cell.is_empty() || target_width == 0 {
+        return vec![cell.to_vec()];
+    }
+    wrap_line(Line::from(cell.to_vec()), target_width, 0, None)
+        .into_iter()
+        .map(|line| line.spans)
+        .collect()
+}
+
+/// Builds the visual lines for a data row, wrapping cells to column widths.
+/// A wrapping cell produces multiple lines; other columns pad out on
+/// trailing sub-lines so column separators stay aligned.
+fn build_data_rows(
     row: &[Vec<Span<'static>>],
     col_widths: &[usize],
     alignments: &[Alignment],
     col_count: usize,
     border_style: Style,
     cell_style: Style,
-) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
+) -> Vec<Line<'static>> {
+    let empty: Vec<Span<'static>> = Vec::new();
+    let cols: Vec<(Vec<Vec<Span<'static>>>, usize)> = (0..col_count)
+        .map(|col| {
+            let cell = row.get(col).unwrap_or(&empty).as_slice();
+            let target_width = col_widths.get(col).copied().unwrap_or(0);
+            (wrap_cell(cell, target_width), target_width)
+        })
+        .collect();
+
+    let sub_row_count = cols.iter().map(|(c, _)| c.len()).max().unwrap_or(1).max(1);
     let pipe = Span::styled("│", border_style);
 
-    spans.push(pipe.clone());
-    for col in 0..col_count {
-        let cell = row.get(col).map_or(&[][..], Vec::as_slice);
-        let content_width = cell_width(cell);
-        let target_width = col_widths.get(col).copied().unwrap_or(0);
-        let pad = target_width.saturating_sub(content_width);
+    (0..sub_row_count)
+        .map(|sub_idx| {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(col_count * 4 + 1);
+            spans.push(pipe.clone());
+            for (col, (sub_lines, target_width)) in cols.iter().enumerate() {
+                let sub_cell: &[Span<'static>] = sub_lines
+                    .get(sub_idx)
+                    .map_or(empty.as_slice(), Vec::as_slice);
+                let pad = target_width.saturating_sub(cell_width(sub_cell));
 
-        let alignment = alignments.get(col).copied().unwrap_or(Alignment::None);
-        let (pad_left, pad_right) = match alignment {
-            Alignment::Center => (pad / 2, pad - pad / 2),
-            Alignment::Right => (pad, 0),
-            Alignment::Left | Alignment::None => (0, pad),
-        };
+                let alignment = alignments.get(col).copied().unwrap_or(Alignment::None);
+                let (pad_left, pad_right) = match alignment {
+                    Alignment::Center => (pad / 2, pad - pad / 2),
+                    Alignment::Right => (pad, 0),
+                    Alignment::Left | Alignment::None => (0, pad),
+                };
 
-        // Left padding (always at least 1 space)
-        spans.push(Span::raw(" ".repeat(1 + pad_left)));
+                spans.push(Span::raw(" ".repeat(1 + pad_left)));
 
-        // Cell content with optional style override for headers.
-        for span in cell {
-            let styled = if cell_style == Style::default() {
-                span.clone()
-            } else {
-                Span::styled(span.content.clone(), span.style.patch(cell_style))
-            };
-            spans.push(styled);
-        }
+                for span in sub_cell {
+                    let styled = if cell_style == Style::default() {
+                        span.clone()
+                    } else {
+                        Span::styled(span.content.clone(), span.style.patch(cell_style))
+                    };
+                    spans.push(styled);
+                }
 
-        // Right padding (always at least 1 space)
-        spans.push(Span::raw(" ".repeat(1 + pad_right)));
-        spans.push(pipe.clone());
-    }
-    Line::from(spans)
+                spans.push(Span::raw(" ".repeat(1 + pad_right)));
+                spans.push(pipe.clone());
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Measure the display width of a cell's spans.
@@ -694,8 +761,11 @@ fn cell_width(cell: &[Span<'_>]) -> usize {
 mod tests {
     use indoc::indoc;
     use ratatui::style::{Color, Modifier};
+    use ratatui::text::Span;
+    use unicode_width::UnicodeWidthStr;
 
     use super::super::render_markdown;
+    use super::{fit_column_widths, wrap_cell};
     use crate::tui::theme::Theme;
 
     fn theme() -> Theme {
@@ -1219,6 +1289,185 @@ mod tests {
             !lines.iter().any(|l| l.contains('├')),
             "separator should not appear with no body rows: {lines:?}"
         );
+    }
+
+    #[test]
+    fn table_fits_width_budget_and_wraps_cells() {
+        // Natural width of the second column (~35 cols of content) would
+        // overflow a 40-col budget; the table should shrink that column and
+        // wrap the long cell across multiple visual sub-lines. All rendered
+        // lines — borders and data rows alike — must stay within the budget.
+        let width = 40;
+        let text = render_markdown(
+            indoc! {"
+                | # | Description                         |
+                |---|-------------------------------------|
+                | 1 | short                               |
+                | 2 | a cell with enough words to wrap it |
+            "},
+            &theme(),
+            width,
+        );
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        for line in &rendered {
+            if line.contains('│') || line.contains('┌') || line.contains('└') {
+                assert!(
+                    UnicodeWidthStr::width(line.as_str()) <= width,
+                    "table line exceeds width budget ({width}): {line:?}"
+                );
+            }
+        }
+
+        let border_chars: Vec<&str> = rendered
+            .iter()
+            .filter(|l| l.starts_with('┌') || l.starts_with('├') || l.starts_with('└'))
+            .map(String::as_str)
+            .collect();
+        assert!(!border_chars.is_empty(), "borders missing: {rendered:?}");
+        let border_width = UnicodeWidthStr::width(border_chars[0]);
+        for b in &border_chars {
+            assert_eq!(
+                UnicodeWidthStr::width(*b),
+                border_width,
+                "borders should share the same width: {border_chars:?}"
+            );
+        }
+
+        // All data rows should also share that width so the right border
+        // stays aligned with the top/bottom borders.
+        let data_rows: Vec<&str> = rendered
+            .iter()
+            .filter(|l| l.starts_with('│'))
+            .map(String::as_str)
+            .collect();
+        for row in &data_rows {
+            let row_width = UnicodeWidthStr::width(*row);
+            assert_eq!(
+                row_width, border_width,
+                "data row width ({row_width}) != border width ({border_width}): {row:?}",
+            );
+        }
+
+        // The long cell from row "2" must produce more than one visual
+        // sub-line starting with │ between the separator and the bottom border.
+        let sep_idx = rendered.iter().position(|l| l.starts_with('├')).unwrap();
+        let bot_idx = rendered.iter().position(|l| l.starts_with('└')).unwrap();
+        let body = &rendered[sep_idx + 1..bot_idx];
+        assert!(
+            body.len() >= 3,
+            "long cell should wrap into multiple sub-lines, got body: {body:?}"
+        );
+    }
+
+    #[test]
+    fn table_wrapped_cell_keeps_alignment_in_other_columns() {
+        // A wrapping cell in one column should leave the other columns
+        // padded out on trailing sub-lines so the column pipes stay aligned.
+        let text = render_markdown(
+            indoc! {"
+                | ID | Note                               |
+                |----|------------------------------------|
+                | 42 | enough words here to force a wrap  |
+            "},
+            &theme(),
+            30,
+        );
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        let sep_idx = rendered.iter().position(|l| l.starts_with('├')).unwrap();
+        let bot_idx = rendered.iter().position(|l| l.starts_with('└')).unwrap();
+        let body: Vec<&str> = rendered[sep_idx + 1..bot_idx]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            body.len() >= 2,
+            "expected wrapped sub-lines in body: {body:?}"
+        );
+
+        // Every sub-line should have the same number of `│` separators as
+        // the header row (left + per-column = col_count + 1).
+        let header_idx = rendered.iter().position(|l| l.contains("ID")).unwrap();
+        let expected_pipes = rendered[header_idx].matches('│').count();
+        for row in &body {
+            assert_eq!(
+                row.matches('│').count(),
+                expected_pipes,
+                "sub-row should keep all column pipes: {row:?}"
+            );
+        }
+    }
+
+    // ── fit_column_widths ──
+
+    #[test]
+    fn fit_column_widths_natural_fits_budget_unchanged() {
+        // Natural total (5 + 5 = 10) + overhead (1 + 3*2 = 7) = 17 ≤ 80.
+        let natural = vec![5, 5];
+        assert_eq!(fit_column_widths(&natural, 80), natural);
+    }
+
+    #[test]
+    fn fit_column_widths_shrinks_widest_column_first() {
+        // Budget = 20, overhead for 2 cols = 7, available = 13.
+        // Natural [3, 20] → sum 23 > 13. Cap should settle at 10 so
+        // sums to 3 + 10 = 13, leaving the narrow column untouched.
+        let out = fit_column_widths(&[3, 20], 20);
+        assert_eq!(out, vec![3, 10]);
+    }
+
+    #[test]
+    fn fit_column_widths_preserves_zero_width_columns() {
+        // An empty column (natural=0) stays at 0 even when shrinking;
+        // non-empty columns keep a minimum of 1 so wrapping stays viable.
+        let out = fit_column_widths(&[0, 40], 10);
+        assert_eq!(out[0], 0);
+        assert!(out[1] >= 1);
+    }
+
+    #[test]
+    fn fit_column_widths_empty_input_returns_empty() {
+        assert_eq!(fit_column_widths(&[], 80), Vec::<usize>::new());
+    }
+
+    // ── wrap_cell ──
+
+    #[test]
+    fn wrap_cell_wraps_long_content_to_target_width() {
+        let cell = vec![Span::raw("one two three four".to_owned())];
+        let out = wrap_cell(&cell, 8);
+        assert!(out.len() >= 2, "long cell should wrap: {out:?}");
+        for sub_line in &out {
+            let width: usize = sub_line
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(width <= 8, "sub-line exceeds target width: {sub_line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_empty_returns_single_empty_sub_line() {
+        let out = wrap_cell(&[], 10);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_empty());
+    }
+
+    #[test]
+    fn wrap_cell_zero_target_width_returns_cell_as_is() {
+        let cell = vec![Span::raw("hello".to_owned())];
+        let out = wrap_cell(&cell, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], cell);
     }
 
     // ── Inline Content ──
