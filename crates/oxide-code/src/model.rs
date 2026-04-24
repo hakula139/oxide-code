@@ -22,14 +22,9 @@
 //! - `context_management` ← `modelSupportsContextManagement` — substring
 //!   `opus-4`, `sonnet-4`, or `haiku-4`.
 //! - `effort` ← `modelSupportsEffort` — substring `opus-4-6` or
-//!   `sonnet-4-6`. Gate for the `output_config.effort` body field at
-//!   `low` / `medium` / `high` levels.
-//! - `effort_max` — explicit allowlist: Opus 4.6, Opus 4.7. The `max`
-//!   effort level is Opus-only; Sonnet 4.6 rejects it.
-//! - `effort_xhigh` — explicit allowlist: Opus 4.7. Added by the 4.7
-//!   release; older models 400 on `xhigh`. Callers should clamp an
-//!   out-of-range pick down to the nearest supported level rather than
-//!   ship an unsupported one.
+//!   `sonnet-4-6`.
+//! - `effort_max` — explicit allowlist: Opus 4.6, Opus 4.7.
+//! - `effort_xhigh` — explicit allowlist: Opus 4.7.
 //! - `context_1m` ← `modelSupports1M` — substring `claude-sonnet-4` or
 //!   `opus-4-6`.
 //! - `structured_outputs` ← `modelSupportsStructuredOutputs` — explicit
@@ -75,30 +70,12 @@ pub(crate) struct ModelInfo {
 pub(crate) struct Capabilities {
     pub(crate) interleaved_thinking: bool,
     pub(crate) context_management: bool,
-    /// Whether `output_config.effort` is accepted at all. Gates the
-    /// `low` / `medium` / `high` levels. The model-specific upper
-    /// bound is further refined by `effort_max` / `effort_xhigh`.
+    /// Gates `output_config.effort` at `low` / `medium` / `high`.
+    /// Upper bound: see [`Self::effort_max`] / [`Self::effort_xhigh`].
     pub(crate) effort: bool,
-    /// Whether `output_config.effort = "max"` is accepted. Opus-only
-    /// per the migration guide; Sonnet 4.6 400s on it. Implies
-    /// [`Self::effort`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by Config::load once the Effort clamp lands"
-        )
-    )]
+    /// Whether `effort = "max"` is accepted. Opus-only.
     pub(crate) effort_max: bool,
-    /// Whether `output_config.effort = "xhigh"` is accepted. Introduced
-    /// by Opus 4.7; older models 400 on it. Implies [`Self::effort`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by Config::load once the Effort clamp lands"
-        )
-    )]
+    /// Whether `effort = "xhigh"` is accepted. Opus 4.7 only.
     pub(crate) effort_xhigh: bool,
     /// Whether the model accepts the `context-1m-2025-08-07` beta.
     /// `compute_betas` gates the beta on `has_1m_tag(model) AND
@@ -291,6 +268,56 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
 ];
 
+impl Capabilities {
+    /// Whether the model accepts `output_config.effort = <level>`.
+    /// Centralises the `low`/`medium`/`high` → [`Self::effort`],
+    /// `xhigh` → [`Self::effort_xhigh`], `max` → [`Self::effort_max`]
+    /// mapping so callers don't re-derive it.
+    pub(crate) fn accepts_effort(self, level: crate::config::Effort) -> bool {
+        use crate::config::Effort;
+        match level {
+            Effort::Low | Effort::Medium | Effort::High => self.effort,
+            Effort::Xhigh => self.effort_xhigh,
+            Effort::Max => self.effort_max,
+        }
+    }
+
+    /// Highest level this model accepts ≤ `pick`. `None` when the
+    /// model doesn't accept `output_config.effort` at all. Used by
+    /// [`crate::config::Config::load`] to clamp an out-of-range user
+    /// pick down to the nearest supported level rather than 400ing
+    /// the gateway.
+    pub(crate) fn clamp_effort(self, pick: crate::config::Effort) -> Option<crate::config::Effort> {
+        use crate::config::Effort;
+        if !self.effort {
+            return None;
+        }
+        [
+            Effort::Max,
+            Effort::Xhigh,
+            Effort::High,
+            Effort::Medium,
+            Effort::Low,
+        ]
+        .into_iter()
+        .find(|&level| level <= pick && self.accepts_effort(level))
+    }
+
+    /// Per-model default when the user hasn't specified one: `Xhigh`
+    /// on 4.7 (matches claude-code 2.1.119), `High` on other
+    /// effort-capable models, `None` otherwise.
+    pub(crate) fn default_effort(self) -> Option<crate::config::Effort> {
+        use crate::config::Effort;
+        if self.effort_xhigh {
+            Some(Effort::Xhigh)
+        } else if self.effort {
+            Some(Effort::High)
+        } else {
+            None
+        }
+    }
+}
+
 /// First-match substring lookup against [`MODELS`]. Returns `None` for
 /// model strings that don't contain any known family stem (e.g. a future
 /// `claude-opus-5` before the table is bumped); callers decide whether
@@ -434,6 +461,73 @@ mod tests {
                 "{unsupported} must not claim effort_max",
             );
         }
+    }
+
+    // ── Capabilities::clamp_effort / default_effort ──
+
+    #[test]
+    fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
+        use crate::config::Effort;
+
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        assert_eq!(opus_4_7.clamp_effort(Effort::Max), Some(Effort::Max));
+        assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
+        assert_eq!(opus_4_7.clamp_effort(Effort::Low), Some(Effort::Low));
+
+        // Opus 4.6: Max ✓, Xhigh ✗. `xhigh` clamps down to `high`
+        // (never sideways-up to `max`).
+        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
+        assert_eq!(opus_4_6.clamp_effort(Effort::Max), Some(Effort::Max));
+        assert_eq!(opus_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
+        assert_eq!(opus_4_6.clamp_effort(Effort::High), Some(Effort::High));
+
+        // Sonnet 4.6: Max ✗, Xhigh ✗. Both clamp to `high`.
+        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
+        assert_eq!(sonnet_4_6.clamp_effort(Effort::Max), Some(Effort::High));
+        assert_eq!(sonnet_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
+        assert_eq!(
+            sonnet_4_6.clamp_effort(Effort::Medium),
+            Some(Effort::Medium)
+        );
+
+        // No `effort` at all → None regardless of pick.
+        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
+        assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
+        assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
+    }
+
+    #[test]
+    fn default_effort_matches_observed_claude_code_wire() {
+        use crate::config::Effort;
+        // Values pinned against claude-code 2.1.119 packet captures.
+        assert_eq!(
+            lookup("claude-opus-4-7")
+                .unwrap()
+                .capabilities
+                .default_effort(),
+            Some(Effort::Xhigh),
+        );
+        assert_eq!(
+            lookup("claude-opus-4-6")
+                .unwrap()
+                .capabilities
+                .default_effort(),
+            Some(Effort::High),
+        );
+        assert_eq!(
+            lookup("claude-sonnet-4-6")
+                .unwrap()
+                .capabilities
+                .default_effort(),
+            Some(Effort::High),
+        );
+        assert_eq!(
+            lookup("claude-haiku-4-5")
+                .unwrap()
+                .capabilities
+                .default_effort(),
+            None,
+        );
     }
 
     #[test]

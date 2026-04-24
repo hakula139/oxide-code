@@ -971,6 +971,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         max_tokens: 128,
         thinking: None,
         show_thinking: false,
+        effort: None,
     }
 }
 

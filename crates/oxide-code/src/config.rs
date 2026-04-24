@@ -8,8 +8,11 @@
 mod file;
 mod oauth;
 
-use anyhow::{Context, Result};
-use serde::Serialize;
+use std::fmt;
+use std::str::FromStr;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::util::env;
 
@@ -32,6 +35,52 @@ pub enum ThinkingConfig {
     Adaptive,
 }
 
+/// Intelligence-vs-latency tier sent as `output_config.effort` on
+/// effort-capable models. The per-model ceiling lives in
+/// [`crate::model::Capabilities`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Effort {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => bail!("invalid effort {s:?}; expected one of: low, medium, high, xhigh, max"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: Auth,
@@ -40,6 +89,17 @@ pub struct Config {
     pub max_tokens: u32,
     pub thinking: Option<ThinkingConfig>,
     pub show_thinking: bool,
+    /// `output_config.effort` for the streaming path. `None` means
+    /// the model doesn't accept the parameter and the field is
+    /// omitted. Resolved once at [`Config::load`] — callers forward.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "consumed by client::anthropic::stream_message in the wire-body commit"
+        )
+    )]
+    pub effort: Option<Effort>,
 }
 
 impl Config {
@@ -74,10 +134,23 @@ impl Config {
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
 
+        let caps = crate::model::lookup(&model)
+            .map(|info| info.capabilities)
+            .unwrap_or_default();
+
+        let effort_pick = match env::string("ANTHROPIC_EFFORT") {
+            Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
+            None => client.effort,
+        };
+        let effort = match effort_pick {
+            Some(pick) => caps.clamp_effort(pick),
+            None => caps.default_effort(),
+        };
+
         let max_tokens = env::string("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
             .or(client.max_tokens)
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+            .unwrap_or_else(|| default_max_tokens(effort));
 
         // Adaptive thinking is always enabled — the model decides the budget.
         let thinking = Some(ThinkingConfig::Adaptive);
@@ -93,7 +166,20 @@ impl Config {
             max_tokens,
             thinking,
             show_thinking,
+            effort,
         })
+    }
+}
+
+/// Per-effort `max_tokens` default. Matches claude-code 2.1.119's
+/// observed values: 64 K for the top two tiers (xhigh / max), 32 K
+/// for high, the legacy 16 384 for everything else. Users override
+/// via `ANTHROPIC_MAX_TOKENS` / `[client].max_tokens`.
+fn default_max_tokens(effort: Option<Effort>) -> u32 {
+    match effort {
+        Some(Effort::Xhigh | Effort::Max) => 64_000,
+        Some(Effort::High) => 32_000,
+        _ => DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -114,6 +200,55 @@ mod tests {
         assert_eq!(json["type"], "adaptive");
     }
 
+    // ── Effort ──
+
+    #[test]
+    fn effort_serialize_matches_wire_tokens() {
+        for (variant, wire) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+            (Effort::Max, "max"),
+        ] {
+            assert_eq!(serde_json::to_value(variant).unwrap(), wire);
+            assert_eq!(variant.to_string(), wire);
+        }
+    }
+
+    #[test]
+    fn effort_parses_all_valid_tokens() {
+        for (token, expected) in [
+            ("low", Effort::Low),
+            ("medium", Effort::Medium),
+            ("high", Effort::High),
+            ("xhigh", Effort::Xhigh),
+            ("max", Effort::Max),
+        ] {
+            assert_eq!(token.parse::<Effort>().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn effort_rejects_unknown_tokens_with_actionable_error() {
+        let err = "extra-high".parse::<Effort>().expect_err("unknown token");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("extra-high"), "names the input: {msg}");
+        for token in ["low", "medium", "high", "xhigh", "max"] {
+            assert!(msg.contains(token), "lists {token}: {msg}");
+        }
+    }
+
+    #[test]
+    fn effort_round_trips_through_toml_deserialize() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            effort: Effort,
+        }
+        let wrap: Wrap = toml::from_str(r#"effort = "xhigh""#).unwrap();
+        assert_eq!(wrap.effort, Effort::Xhigh);
+    }
+
     // ── Config::load ──
 
     /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
@@ -125,6 +260,7 @@ mod tests {
         "ANTHROPIC_MODEL",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
+        "ANTHROPIC_EFFORT",
         "OX_SHOW_THINKING",
         "XDG_CONFIG_HOME",
     ];
@@ -176,13 +312,17 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
+        // Default model (Opus 4.7) supports `xhigh`, so both `effort`
+        // and `max_tokens` derive from that ceiling — matches the
+        // claude-code 2.1.119 packet capture.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(config.max_tokens, 64_000);
+        assert_eq!(config.effort, Some(Effort::Xhigh));
         assert!(!config.show_thinking);
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
     }
@@ -344,5 +484,128 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid config at"), "{msg}");
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+    }
+
+    // ── Config::load / effort resolution ──
+
+    #[tokio::test]
+    async fn load_effort_default_follows_model_ceiling() {
+        for (model, expected) in [
+            ("claude-opus-4-7", Some(Effort::Xhigh)),
+            ("claude-opus-4-6", Some(Effort::High)),
+            ("claude-sonnet-4-6", Some(Effort::High)),
+            ("claude-sonnet-4-5", None),
+            ("claude-haiku-4-5", None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MODEL", model)]);
+            let config = temp_env::async_with_vars(vars, Config::load())
+                .await
+                .unwrap();
+            assert_eq!(config.effort, expected, "model={model}");
+        }
+    }
+
+    #[tokio::test]
+    async fn load_effort_env_overrides_per_model_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7"),
+            env("ANTHROPIC_EFFORT", "low"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::Low));
+    }
+
+    #[tokio::test]
+    async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
+        // Sonnet 4.6 supports `effort` but not `xhigh` / `max` — the
+        // user's pick must clamp rather than 400 the gateway.
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            env("ANTHROPIC_EFFORT", "xhigh"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::High));
+    }
+
+    #[tokio::test]
+    async fn load_effort_clamps_to_none_on_non_effort_capable_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            env("ANTHROPIC_EFFORT", "max"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.effort, None);
+    }
+
+    #[tokio::test]
+    async fn load_effort_file_picks_up_when_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-opus-4-7"
+                effort = "medium"
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::Medium));
+    }
+
+    #[tokio::test]
+    async fn load_effort_env_beats_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-opus-4-7"
+                effort = "low"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "max")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.effort, Some(Effort::Max));
+    }
+
+    #[tokio::test]
+    async fn load_effort_invalid_env_surfaces_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_EFFORT", "insane")]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("invalid effort must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
+        assert!(msg.contains("insane"), "{msg}");
+    }
+
+    // ── default_max_tokens ──
+
+    #[test]
+    fn default_max_tokens_scales_with_effort() {
+        assert_eq!(default_max_tokens(Some(Effort::Max)), 64_000);
+        assert_eq!(default_max_tokens(Some(Effort::Xhigh)), 64_000);
+        assert_eq!(default_max_tokens(Some(Effort::High)), 32_000);
+        assert_eq!(default_max_tokens(Some(Effort::Medium)), DEFAULT_MAX_TOKENS);
+        assert_eq!(default_max_tokens(Some(Effort::Low)), DEFAULT_MAX_TOKENS);
+        assert_eq!(default_max_tokens(None), DEFAULT_MAX_TOKENS);
     }
 }

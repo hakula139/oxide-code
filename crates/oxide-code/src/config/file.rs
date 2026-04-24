@@ -40,6 +40,7 @@ pub(super) struct ClientConfig {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
+    pub effort: Option<super::Effort>,
 }
 
 /// Terminal UI settings (`[tui]` section).
@@ -68,6 +69,7 @@ impl ClientConfig {
             model: other.model.or(self.model),
             base_url: other.base_url.or(self.base_url),
             max_tokens: other.max_tokens.or(self.max_tokens),
+            effort: other.effort.or(self.effort),
         }
     }
 }
@@ -189,6 +191,7 @@ mod tests {
                 model: Some("base-model".to_owned()),
                 base_url: Some("https://base.example.com".to_owned()),
                 max_tokens: Some(1000),
+                effort: Some(super::super::Effort::Low),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
@@ -200,6 +203,7 @@ mod tests {
                 model: Some("other-model".to_owned()),
                 base_url: Some("https://other.example.com".to_owned()),
                 max_tokens: Some(2000),
+                effort: Some(super::super::Effort::Max),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -215,6 +219,7 @@ mod tests {
             Some("https://other.example.com")
         );
         assert_eq!(client.max_tokens, Some(2000));
+        assert_eq!(client.effort, Some(super::super::Effort::Max));
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
@@ -228,6 +233,7 @@ mod tests {
                 model: Some("model".to_owned()),
                 base_url: Some("https://example.com".to_owned()),
                 max_tokens: Some(4096),
+                effort: Some(super::super::Effort::High),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -240,6 +246,7 @@ mod tests {
         assert_eq!(client.model.as_deref(), Some("model"));
         assert_eq!(client.base_url.as_deref(), Some("https://example.com"));
         assert_eq!(client.max_tokens, Some(4096));
+        assert_eq!(client.effort, Some(super::super::Effort::High));
 
         let tui = merged.tui.expect("tui section should survive");
         assert_eq!(tui.show_thinking, Some(true));
