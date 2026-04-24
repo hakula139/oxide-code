@@ -622,6 +622,27 @@ mod tests {
 
     use super::*;
 
+    // ── read_context_label ──
+
+    #[test]
+    fn read_context_label_full_file_omits_total_suffix() {
+        let lines = vec![
+            ReadExcerptLine {
+                number: 1,
+                text: "alpha".to_owned(),
+            },
+            ReadExcerptLine {
+                number: 2,
+                text: "beta".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            read_context_label("/tmp/example.rs", &lines, 2),
+            "/tmp/example.rs:1-2"
+        );
+    }
+
     // ── split_diff_side ──
 
     #[test]

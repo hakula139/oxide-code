@@ -244,6 +244,8 @@ fn strip_bom(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::super::MAX_OUTPUT_BYTES;
     use super::*;
     // ── run ──
@@ -448,7 +450,11 @@ mod tests {
         let view = ReadTool
             .result_view(
                 &input,
-                "2\tbeta\n3\tgamma\n\n(Showing lines 2–3 of 5 total)",
+                indoc! { "\
+                    2\tbeta
+                    3\tgamma
+
+                    (Showing lines 2–3 of 5 total)" },
                 &ToolMetadata::default(),
             )
             .unwrap();
