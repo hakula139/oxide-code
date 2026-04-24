@@ -16,3 +16,4 @@
 .claude/agent-memory-local/
 .claude/plans/
 .claude/settings.local.json
+.claude/worktrees/
