@@ -374,7 +374,6 @@ where
         ));
 
         for (row_idx, row) in rows.iter().enumerate() {
-            // Data row (possibly multiple visual lines if cells wrap): │ cell │ cell │
             let cell_style = if row_idx < head_rows {
                 header_style
             } else {
@@ -628,15 +627,10 @@ fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<u
 
 /// Shrink column widths so the rendered table fits within `width_budget`.
 ///
-/// A rendered table row consumes `1 + sum(col_widths) + 3 * n` columns
-/// (1 left border + per-column: 2 padding spaces + 1 separator). When the
-/// natural widths already fit, they're returned unchanged. Otherwise a cap
-/// `C` is binary-searched so that `sum(min(w_i, C))` is as large as
-/// possible without exceeding the available content budget — this shrinks
-/// the widest columns first and leaves narrow columns intact. Non-empty
-/// columns always keep a minimum width of 1 so cell wrapping remains
-/// possible; this may cause marginal overflow on extremely narrow
-/// terminals, which is preferable to silently dropping content.
+/// Table overhead per row is `1 + 3 * n` columns (left border + 2 padding
+/// spaces and 1 separator per column). Non-empty columns are floored at 1
+/// so cell wrapping stays viable on narrow terminals, even if that causes
+/// marginal overflow — preferable to dropping content.
 fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
     let n = natural.len();
     if n == 0 {
@@ -688,13 +682,7 @@ fn build_horizontal_rule(
 }
 
 /// Word-wraps a cell's spans into sub-lines of at most `target_width` columns.
-///
-/// Each returned sub-line is a fresh `Vec<Span>` whose visual width is
-/// `≤ target_width`. Empty cells return a single empty sub-line so every
-/// row has at least one visual line to render. `target_width == 0` is
-/// only reachable for empty cells — `fit_column_widths` never returns 0
-/// for a column that contains content — so that case is folded into the
-/// empty-cell branch.
+/// Always returns at least one sub-line so every row has a visual line.
 fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'static>>> {
     if cell.is_empty() || target_width == 0 {
         return vec![cell.to_vec()];
@@ -706,10 +694,8 @@ fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'stati
 }
 
 /// Builds the visual lines for a data row, wrapping cells to column widths.
-///
-/// Returns one `Line` per visual row — a cell that wraps into N sub-lines
-/// causes the entire row to span N lines, with empty padding filling the
-/// remaining columns on trailing sub-lines.
+/// A wrapping cell produces multiple lines; other columns pad out on
+/// trailing sub-lines so column separators stay aligned.
 fn build_data_rows(
     row: &[Vec<Span<'static>>],
     col_widths: &[usize],
