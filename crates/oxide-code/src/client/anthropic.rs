@@ -39,8 +39,10 @@ const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
 const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
-/// Matches the installed Claude Code version.
-const CLAUDE_CLI_VERSION: &str = "2.1.101";
+/// Matches the installed Claude Code version. The rest of this PR is
+/// pinned against 2.1.119 packet captures; keep the wire
+/// `User-Agent` / `cc_version` claim aligned.
+const CLAUDE_CLI_VERSION: &str = "2.1.119";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
 /// models with OAuth tokens unless the system prompt starts with this exact
