@@ -86,6 +86,7 @@ ox                                          # Start an interactive session
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
 │   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget)
+│   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage

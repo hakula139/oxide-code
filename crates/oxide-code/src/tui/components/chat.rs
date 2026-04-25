@@ -1802,6 +1802,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn push_tool_result_view_grep_renders_path_header_and_numbered_match_rows() {
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![
+                crate::tool::GrepFileGroup {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![
+                        crate::tool::GrepMatchLine {
+                            number: 10,
+                            text: "fn main() {".to_owned(),
+                            is_match: true,
+                        },
+                        crate::tool::GrepMatchLine {
+                            number: 11,
+                            text: "    helper();".to_owned(),
+                            is_match: false,
+                        },
+                    ],
+                },
+                crate::tool::GrepFileGroup {
+                    path: "src/lib.rs".to_owned(),
+                    lines: vec![crate::tool::GrepMatchLine {
+                        number: 5,
+                        text: "fn lib_func()".to_owned(),
+                        is_match: true,
+                    }],
+                },
+            ],
+            truncated: false,
+        };
+        chat.push_tool_result_view("Grep(fn)", view, false);
+        let text = all_text(&chat);
+        // Width forced to 2 by 10/11; the lib.rs row pads to " 5 │ ...".
+        assert!(text.contains("src/main.rs"), "missing main.rs: {text}");
+        assert!(text.contains("src/lib.rs"), "missing lib.rs: {text}");
+        assert!(text.contains("10 │ fn main() {"), "missing match: {text}");
+        assert!(
+            text.contains("11 │     helper();"),
+            "missing context: {text}",
+        );
+        assert!(
+            text.contains(" 5 │ fn lib_func()"),
+            "padding mismatch: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_grep_truncates_body_with_hidden_line_count() {
+        // 1 path + 5 matches = 6 rows; the 5-row budget hides the last
+        // match behind a `+N lines` footer.
+        let mut chat = test_chat();
+        let lines = (1..=5)
+            .map(|number| crate::tool::GrepMatchLine {
+                number,
+                text: format!("hit {number}"),
+                is_match: true,
+            })
+            .collect();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![crate::tool::GrepFileGroup {
+                path: "src/main.rs".to_owned(),
+                lines,
+            }],
+            truncated: false,
+        };
+        chat.push_tool_result_view("Grep(hit)", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("4 │ hit 4"), "missing 4th row: {text}");
+        assert!(!text.contains("5 │ hit 5"), "5th row leaked: {text}");
+        assert!(text.contains("... +1 line"), "wrong footer: {text}");
+    }
+
+    #[test]
+    fn push_tool_result_view_grep_truncated_flag_emits_limit_reached_marker() {
+        // Body fits the budget but grep hit `head_limit` server-side;
+        // footer advertises the truncation without a hidden-row count.
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![crate::tool::GrepFileGroup {
+                path: "src/main.rs".to_owned(),
+                lines: vec![crate::tool::GrepMatchLine {
+                    number: 1,
+                    text: "hit".to_owned(),
+                    is_match: true,
+                }],
+            }],
+            truncated: true,
+        };
+        chat.push_tool_result_view("Grep(hit)", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("limit reached"), "missing footer: {text}");
+        assert!(!text.contains("+0"), "phantom hidden count: {text}");
+    }
+
     // ── push_error ──
 
     #[test]
