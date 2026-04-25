@@ -4,40 +4,44 @@
 //! the request (identity prefix, billing attestation for OAuth,
 //! static / dynamic system-block split for cache reuse), POSTs
 //! `/v1/messages` with SSE streaming, and forwards parsed
-//! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] covers
-//! non-streaming one-shots (title generation today, future
-//! classifiers) with optional JSON-schema-constrained output.
+//! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] (in
+//! [`completion`]) covers non-streaming one-shots.
 //!
 //! Per-request `anthropic-beta` headers are computed from the model's
-//! [`crate::model::Capabilities`] via [`compute_betas`], so gateways
-//! that reject unsupported betas (Haiku, subscriptions without 1M)
-//! don't 400 on spurious feature flags.
+//! [`crate::model::Capabilities`] via [`betas::compute_betas`], so
+//! gateways that reject unsupported betas don't 400 on spurious
+//! feature flags.
+
+mod betas;
+mod billing;
+mod completion;
+mod sse;
+pub(crate) mod wire;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use futures::StreamExt;
+use anyhow::{Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use super::billing;
-use crate::config::{Auth, Config, Effort, PromptCacheTtl, ThinkingConfig};
+use crate::config::{Auth, Config};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 
+use betas::{compute_betas, static_prefix_cache_control};
+use sse::stream_sse;
+use wire::{
+    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata,
+    StreamEvent, SystemBlock,
+};
+
 const API_VERSION: &str = "2023-06-01";
-const CLAUDE_CODE_BETA_HEADER: &str = "claude-code-20250219";
-const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
-const CONTEXT_MANAGEMENT_BETA_HEADER: &str = "context-management-2025-06-27";
-const EFFORT_BETA_HEADER: &str = "effort-2025-11-24";
-const INTERLEAVED_THINKING_BETA_HEADER: &str = "interleaved-thinking-2025-05-14";
-const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
-const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
-const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
 /// Matches the installed Claude Code version. The rest of this PR is
 /// pinned against 2.1.119 packet captures; keep the wire
@@ -49,305 +53,23 @@ const CLAUDE_CLI_VERSION: &str = "2.1.119";
 /// string in its own text block.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-// ── Request types ──
-
-#[derive(Serialize)]
-struct CreateMessageRequest<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    stream: bool,
-    metadata: RequestMetadata,
-    /// Serialized before `messages` so the billing header's `cch=00000`
-    /// placeholder appears first in the JSON, making [`billing::inject_cch`]'s
-    /// single-occurrence replacement safe even when tool results contain the
-    /// literal placeholder string.
-    system: Vec<SystemBlock<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<&'a [ToolDefinition]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<&'a ThinkingConfig>,
-    /// Carries both the `format` (JSON-schema-constrained output for
-    /// one-shot calls) and `effort` (agentic-path intelligence tier)
-    /// knobs. Wrapped in `Option` so an empty `OutputConfig` never
-    /// ships — callers build one via [`OutputConfig::new`] and pass
-    /// `None` when neither sub-field is set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output_config: Option<OutputConfig<'a>>,
-    /// `context_management.edits` — the client-side context-editing
-    /// directive that partners the `context-management-2025-06-27`
-    /// beta header. Populated on the streaming path for any model
-    /// with [`Capabilities::context_management`] set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context_management: Option<ContextManagement>,
-    messages: &'a [Message],
-}
-
-/// Shared wrapper for the `output_config` body field. Either field
-/// may be absent; when both are, [`Self::new`] returns `None` so the
-/// builder never ships an empty object.
-#[derive(Serialize)]
-struct OutputConfig<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<&'a OutputFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    effort: Option<Effort>,
-}
-
-impl<'a> OutputConfig<'a> {
-    /// Returns `None` when every field is empty so callers can avoid
-    /// shipping a bare `{}`. `Some(_)` otherwise.
-    fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
-        (format.is_some() || effort.is_some()).then_some(Self { format, effort })
-    }
-}
-
-/// `context_management.edits` body field. oxide-code mirrors
-/// claude-code 2.1.119's observed wire shape — a single
-/// `clear_thinking_20251015` edit with `keep = "all"` on every
-/// agentic request that also ships the matching beta header.
-#[derive(Serialize)]
-struct ContextManagement {
-    edits: [ContextEdit; 1],
-}
-
-impl ContextManagement {
-    /// Wire shape claude-code 2.1.119 sends on every 4.6+ request.
-    /// Single place to edit when Anthropic ships newer edit types or
-    /// we need to diverge from the default.
-    fn clear_thinking_keep_all() -> Self {
-        Self {
-            edits: [ContextEdit {
-                r#type: "clear_thinking_20251015",
-                keep: "all",
-            }],
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct ContextEdit {
-    r#type: &'static str,
-    keep: &'static str,
-}
-
-/// JSON-schema-constrained completion format. Constructed via
-/// [`OutputFormat::json_schema`]; callers typically build one per
-/// request shape (e.g., `{"title": string}`) and pass it by reference
-/// to [`Client::complete`].
-#[derive(Debug, Serialize)]
-pub(crate) struct OutputFormat {
-    r#type: &'static str,
-    schema: serde_json::Value,
-}
-
-impl OutputFormat {
-    /// Builds a `json_schema` output format from a precomputed schema
-    /// value. The schema must already match Anthropic's expectations
-    /// (`type: "object"`, `additionalProperties: false`, explicit
-    /// `required` array) — we don't validate here.
-    pub(crate) fn json_schema(schema: serde_json::Value) -> Self {
-        Self {
-            r#type: "json_schema",
-            schema,
-        }
-    }
-}
-
-/// Top-level `metadata` object on every outbound request.
-///
-/// `user_id` is a stringified JSON object containing `session_id` (and
-/// optionally `device_id` / `account_uuid`). The API receives it as a
-/// flat string, not a nested object.
-#[derive(Serialize)]
-struct RequestMetadata {
-    user_id: String,
-}
-
-/// A text block in the system prompt array. The Anthropic API accepts `system`
-/// as either a string or an array of these blocks. Using the array form lets
-/// the identity prefix occupy its own block, which is required for OAuth
-/// validation on non-Haiku models.
-#[derive(Serialize)]
-struct SystemBlock<'a> {
-    r#type: &'static str,
-    text: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<CacheControl>,
-}
-
-/// Prompt caching control. The `scope` field determines the cache sharing
-/// level: `"global"` for static content identical across sessions (1P only),
-/// `None` for the default org-scoped ephemeral cache (universally accepted).
-/// The `ttl` field overrides the server default (5 m as of 2026-03) —
-/// oxide-code defaults to `"1h"`, opt-out via `prompt_cache_ttl = "5m"`.
-///
-/// `scope: "global"` must be a true prefix of all preceding request content
-/// — the server rejects a global-scoped block preceded by a non-global
-/// block (including tool definitions, which render before `system`). See
-/// [`is_first_party_base_url`] for where the gating decision is made.
-#[derive(Serialize)]
-struct CacheControl {
-    r#type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ttl: Option<&'static str>,
-}
-
-// ── SSE response types ──
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields are populated by serde and used in downstream matching"
-    )
-)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum StreamEvent {
-    MessageStart {
-        message: MessageResponse,
-    },
-    ContentBlockStart {
-        index: usize,
-        content_block: ContentBlockInfo,
-    },
-    ContentBlockDelta {
-        index: usize,
-        delta: Delta,
-    },
-    ContentBlockStop {
-        index: usize,
-    },
-    MessageDelta {
-        delta: MessageDeltaBody,
-        usage: Option<Usage>,
-    },
-    MessageStop,
-    Ping,
-    Error {
-        error: ApiError,
-    },
-    /// Catch-all for unrecognized event types.
-    /// Silently skipped during stream processing.
-    #[serde(other)]
-    Unknown,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MessageResponse {
-    pub(crate) id: String,
-    pub(crate) model: String,
-    pub(crate) usage: Option<Usage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ContentBlockInfo {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-    },
-    ServerToolUse {
-        id: String,
-        name: String,
-    },
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
-    RedactedThinking {
-        data: String,
-    },
-    /// Catch-all for unrecognized block types.
-    /// Silently skipped during stream processing.
-    #[serde(other)]
-    Unknown,
-}
-
-#[expect(
-    clippy::enum_variant_names,
-    reason = "variant names mirror Anthropic API delta type values (text_delta, input_json_delta, etc.)"
-)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum Delta {
-    TextDelta {
-        text: String,
-    },
-    InputJsonDelta {
-        partial_json: String,
-    },
-    ThinkingDelta {
-        thinking: String,
-    },
-    /// Full signature value (overwrites, not appended).
-    SignatureDelta {
-        signature: String,
-    },
-    /// Catch-all for unrecognized delta types.
-    /// Silently skipped during stream processing.
-    #[serde(other)]
-    Unknown,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MessageDeltaBody {
-    pub(crate) stop_reason: Option<String>,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Usage {
-    #[serde(default)]
-    pub(crate) input_tokens: u32,
-    #[serde(default)]
-    pub(crate) output_tokens: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ApiError {
-    #[serde(rename = "type")]
-    pub(crate) error_type: String,
-    pub(crate) message: String,
-}
-
-// ── Client ──
-
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
+    /// Whether `config.base_url` points at the first-party Anthropic
+    /// API. Computed once at construction so per-request paths don't
+    /// re-parse the URL — the value gates the `prompt-caching-scope`
+    /// beta and `cache_control.scope: "global"`, which 3P gateways
+    /// reject.
+    is_first_party: bool,
 }
 
 impl Client {
     pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let is_first_party = betas::is_first_party_base_url(&config.base_url);
         let mut headers = HeaderMap::new();
 
         match &config.auth {
@@ -365,7 +87,7 @@ impl Client {
 
         // `anthropic-beta` is set per-request in `stream_message` /
         // `complete` because the accepted set varies by model and call
-        // type — see [`compute_betas`].
+        // type — see [`betas::compute_betas`].
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(
             "anthropic-dangerous-direct-browser-access",
@@ -409,6 +131,7 @@ impl Client {
             http,
             config,
             session_id,
+            is_first_party,
         })
     }
 
@@ -431,13 +154,9 @@ impl Client {
     /// is prepended as a synthetic user message (keeping dynamic content
     /// like CLAUDE.md out of the cacheable `system` parameter).
     ///
-    /// System-block assembly order (the boundary marker is filtered out):
-    ///
-    /// 1. Billing header (OAuth only; no `cache_control`).
-    /// 2. Identity prefix (no `cache_control`).
-    /// 3. Static sections joined (ephemeral cache; `scope=global` on 1P,
-    ///    default org-scoped on 3P).
-    /// 4. Dynamic sections joined (no `cache_control`).
+    /// System-block ordering is delegated to [`build_system_blocks`].
+    /// The static section is the only block carrying `cache_control` —
+    /// `scope=global` on 1P, default org-scoped on 3P.
     ///
     /// Returns an mpsc receiver of [`StreamEvent`]s.
     pub(crate) fn stream_message(
@@ -447,75 +166,44 @@ impl Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        let messages_with_context: Vec<Message>;
-        let effective_messages: &[Message] = if let Some(ctx) = user_context {
-            messages_with_context = std::iter::once(Message::user(ctx))
+        let effective_messages: Vec<Message> = match user_context {
+            Some(ctx) => std::iter::once(Message::user(ctx))
                 .chain(messages.iter().cloned())
-                .collect();
-            &messages_with_context
-        } else {
-            messages
+                .collect(),
+            None => messages.to_vec(),
         };
 
         let billing_header = matches!(self.config.auth, Auth::OAuth(_)).then(|| {
             let fingerprint = billing::compute_fingerprint(
-                first_user_text(effective_messages),
+                first_user_text(&effective_messages),
                 CLAUDE_CLI_VERSION,
             );
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
         });
 
-        // Global-scope prompt caching only fires on the official API —
-        // third-party gateways reject `scope: "global"` on a system block
-        // because tool definitions render first and taint the cache
-        // prefix. On 3P we fall back to the default (org-scoped)
-        // ephemeral cache, which every gateway accepts.
-        let is_first_party = is_first_party_base_url(&self.config.base_url);
-
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
 
-        let mut system_blocks = Vec::new();
-        if let Some(ref header) = billing_header {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: header,
-                cache_control: None,
-            });
-        }
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: SYSTEM_PROMPT_PREFIX,
-            cache_control: None,
-        });
-        if !static_joined.is_empty() {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: &static_joined,
-                cache_control: Some(static_prefix_cache_control(
-                    is_first_party,
-                    self.config.prompt_cache_ttl,
-                )),
-            });
-        }
-        if !dynamic_joined.is_empty() {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: &dynamic_joined,
-                cache_control: None,
-            });
-        }
+        let static_cache_control =
+            static_prefix_cache_control(self.is_first_party, self.config.prompt_cache_ttl);
+        let system_blocks = build_system_blocks(
+            billing_header.as_deref(),
+            [
+                (static_joined.as_str(), Some(static_cache_control)),
+                (dynamic_joined.as_str(), None),
+            ],
+        );
 
         let caps = crate::model::capabilities_for(&self.config.model);
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
             // `[1m]` is a client-side tag; strip before the wire.
-            model: api_model_id(&self.config.model),
+            model: betas::api_model_id(&self.config.model),
             max_tokens: self.config.max_tokens,
             stream: true,
-            metadata: self.build_metadata(),
+            metadata: build_metadata(&self.session_id),
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
@@ -527,12 +215,12 @@ impl Client {
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
-            messages: effective_messages,
+            messages: &effective_messages,
         })
         .context("failed to serialize request")?;
 
         if billing_header.is_some() {
-            body = billing::inject_cch(&body);
+            body = billing::inject_cch(&body)?;
         }
 
         debug!(body_len = body.len(), "sending API request");
@@ -544,7 +232,7 @@ impl Client {
             &self.config.auth,
             true,
             false,
-            is_first_party,
+            self.is_first_party,
         )
         .join(",");
 
@@ -557,315 +245,49 @@ impl Client {
 
         Ok(rx)
     }
-
-    /// Non-streaming completion, used for one-shot utility calls (AI
-    /// title generation, future classifiers). Returns the concatenated
-    /// text of the assistant's reply; non-text blocks are filtered out.
-    ///
-    /// `output_format` constrains the reply to a JSON schema via the
-    /// `structured-outputs-2025-12-15` beta. On models whose
-    /// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
-    /// is `false`, both the body field and the beta are silently
-    /// dropped — the caller must tolerate free-form text in that case.
-    pub(crate) async fn complete(
-        &self,
-        model: &str,
-        system: &str,
-        user: &str,
-        max_tokens: u32,
-        output_format: Option<&OutputFormat>,
-    ) -> Result<String> {
-        let effective_format = output_format.filter(|_| supports_structured_outputs(model));
-        let body = build_completion_body(
-            model,
-            system,
-            user,
-            max_tokens,
-            &self.config.auth,
-            &self.session_id,
-            effective_format,
-        )?;
-
-        let url = format!("{}/v1/messages?beta=true", self.config.base_url);
-        debug!(model, body_len = body.len(), "sending completion request");
-
-        // Non-agentic one-shot — 1P gating only affects the
-        // `prompt-caching-scope` beta, which `compute_betas` restricts
-        // to the agentic branch anyway. Still passed for signature
-        // symmetry with [`Self::stream_message`].
-        let is_first_party = is_first_party_base_url(&self.config.base_url);
-        let betas = compute_betas(
-            model,
-            &self.config.auth,
-            false,
-            effective_format.is_some(),
-            is_first_party,
-        )
-        .join(",");
-        let response = self
-            .http
-            .post(&url)
-            .header("anthropic-beta", betas)
-            .body(body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let body = response.text().await.unwrap_or_default();
-            bail!(
-                "{}",
-                format_api_error(status, retry_after.as_deref(), &body)
-            );
-        }
-
-        let CompletionResponse { content } = response
-            .json()
-            .await
-            .context("failed to parse completion response")?;
-        Ok(join_text_blocks(content))
-    }
-
-    /// Builds the `metadata.user_id` field as a stringified JSON object.
-    fn build_metadata(&self) -> RequestMetadata {
-        build_metadata(&self.session_id)
-    }
 }
 
-/// Shared `metadata.user_id` builder. Kept at file scope so
-/// [`build_completion_body`] can call it without pulling in `&Client`.
+/// Builds the `metadata.user_id` field as a stringified JSON object.
 fn build_metadata(session_id: &str) -> RequestMetadata {
     let user_id = serde_json::json!({ "session_id": session_id }).to_string();
     RequestMetadata { user_id }
 }
 
-/// Computes the `anthropic-beta` header value for a request. Each beta
-/// is gated on a [`Capabilities`][crate::model::Capabilities] flag, so
-/// adding or bumping a model only means editing the lookup table.
+/// Assembles the `system` block sequence shared by streaming and
+/// one-shot paths. Order is load-bearing: billing's `cch=00000`
+/// placeholder must serialize first so [`billing::inject_cch`]'s
+/// single-occurrence replacement is unambiguous, and the identity
+/// prefix must occupy its own block on non-Haiku OAuth.
 ///
-/// `is_agentic` gates agent-only betas on the streaming chat path
-/// (keeps one-shot calls like title generation minimal).
-/// `want_structured` is cross-checked against the model's capability
-/// flag so an unsupported `[OutputFormat]` silently drops back to
-/// free-form text instead of 400ing the gateway.
-/// `is_first_party` gates experimental betas that 3P proxies reject
-/// (currently: `prompt-caching-scope`, which is a no-op without the
-/// scope field it enables).
-fn compute_betas(
-    model: &str,
-    auth: &Auth,
-    is_agentic: bool,
-    want_structured: bool,
-    is_first_party: bool,
-) -> Vec<&'static str> {
-    let caps = crate::model::capabilities_for(model);
-    let is_haiku = model
-        .split('-')
-        .any(|tok| tok.eq_ignore_ascii_case("haiku"));
-
-    // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
-    // sets: identity / auth → universal agentic → capability-gated.
-    let mut out = Vec::with_capacity(8);
-
-    // Gateway tag: required for non-Haiku OAuth on 1P (429 without it).
-    // Non-agentic Haiku one-shots skip it; agentic Haiku re-adds it.
-    if !is_haiku || is_agentic {
-        out.push(CLAUDE_CODE_BETA_HEADER);
-    }
-    if matches!(auth, Auth::OAuth(_)) {
-        out.push(OAUTH_BETA_HEADER);
-    }
-
-    if is_agentic {
-        if caps.context_management {
-            out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
-        }
-        // Prompt-caching scope is the beta that enables `scope: "global"`
-        // on `cache_control`. Ship it only when we actually send the
-        // scope field — i.e., on the 1P API. 3P gateways reject the
-        // scope (tools taint the cache prefix) and the beta without
-        // scope is a no-op.
-        if is_first_party {
-            out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
-        }
-        if caps.interleaved_thinking {
-            out.push(INTERLEAVED_THINKING_BETA_HEADER);
-        }
-        if caps.effort {
-            out.push(EFFORT_BETA_HEADER);
-        }
-    }
-
-    // 1M context is explicit user opt-in via the `[1m]` model suffix.
-    // Family-based auto-enable would break subscriptions without 1M
-    // access, so we require the tag and cross-check the capability.
-    if has_1m_tag(model) && caps.context_1m {
-        out.push(CONTEXT_1M_BETA_HEADER);
-    }
-    // Structured outputs is one-shot only — streaming turns are free-form.
-    if want_structured && caps.structured_outputs {
-        out.push(STRUCTURED_OUTPUTS_BETA_HEADER);
-    }
-
-    out
-}
-
-/// Whether the target model accepts the `structured-outputs-2025-12-15`
-/// beta. Thin wrapper over the capability table for pre-checks.
-pub(crate) fn supports_structured_outputs(model: &str) -> bool {
-    crate::model::capabilities_for(model).structured_outputs
-}
-
-/// Whether `base_url` points at the first-party Anthropic API, gating
-/// features that strict 3P proxies reject (currently: global-scope
-/// prompt caching + its beta header).
-///
-/// An unparsable URL, a URL with no host, or any host other than the
-/// 1P list is treated as third-party; the safe fallback (drop scope +
-/// beta) preserves org-level ephemeral caching, which every gateway
-/// accepts.
-fn is_first_party_base_url(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| {
-            matches!(
-                h.as_str(),
-                "api.anthropic.com" | "api-staging.anthropic.com"
-            )
-        })
-}
-
-/// Cache-control for the static system-prompt prefix. On 1P, emit the
-/// global scope so the prefix is shared across sessions; on 3P, fall
-/// back to the default (org-scoped) ephemeral cache — 3P gateways
-/// reject `scope: "global"` because tool definitions render first and
-/// taint the cache prefix. `ttl` overrides the server default (5 m)
-/// when set via `config.prompt_cache_ttl`.
-fn static_prefix_cache_control(is_first_party: bool, ttl: PromptCacheTtl) -> CacheControl {
-    CacheControl {
-        r#type: "ephemeral",
-        scope: is_first_party.then_some("global"),
-        ttl: ttl.wire(),
-    }
-}
-
-/// Strips the `[1m]` tag from a caller-supplied model string. The tag
-/// is a client-side convention; the API rejects it on the wire.
-fn api_model_id(model: &str) -> &str {
-    tag_offset(model).map_or(model, |i| model[..i].trim_end())
-}
-
-/// Whether `model` carries the `[1m]` tag — an explicit user opt-in
-/// to the 1M-context window (auto-gating on family would 400 on
-/// subscriptions without 1M access).
-fn has_1m_tag(model: &str) -> bool {
-    tag_offset(model).is_some()
-}
-
-/// Byte offset of the `[1m]` tag, case-insensitive. Shared by
-/// [`has_1m_tag`] and [`api_model_id`] so the two agree on every
-/// accepted spelling. Model IDs are ASCII, so byte-window scanning
-/// lines up with character boundaries.
-fn tag_offset(model: &str) -> Option<usize> {
-    model
-        .as_bytes()
-        .windows(4)
-        .position(|w| w.eq_ignore_ascii_case(b"[1m]"))
-}
-
-/// Serializes the JSON request body for [`Client::complete`].
-///
-/// System block order matches [`Client::stream_message`]:
-///
-/// 1. Billing header (OAuth only; injected with `cch`).
-/// 2. Identity prefix (required for non-Haiku OAuth).
-/// 3. Caller-supplied system prompt (omitted when empty).
-///
-/// The caller is expected to have pre-gated `output_format` against
-/// [`supports_structured_outputs`].
-fn build_completion_body(
-    model: &str,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-    auth: &Auth,
-    session_id: &str,
-    output_format: Option<&OutputFormat>,
-) -> Result<String> {
-    let messages = [Message::user(user)];
-
-    let billing_header = matches!(auth, Auth::OAuth(_)).then(|| {
-        let fingerprint = billing::compute_fingerprint(user, CLAUDE_CLI_VERSION);
-        billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
-    });
-
-    let mut system_blocks = Vec::with_capacity(3);
-    if let Some(ref header) = billing_header {
-        system_blocks.push(SystemBlock {
+/// Empty `extras` entries are dropped so callers can hand in optional
+/// sections without `if !text.is_empty()` guards at every site.
+fn build_system_blocks<'a, const N: usize>(
+    billing_header: Option<&'a str>,
+    extras: [(&'a str, Option<CacheControl>); N],
+) -> Vec<SystemBlock<'a>> {
+    let mut blocks = Vec::with_capacity(2 + N);
+    if let Some(text) = billing_header {
+        blocks.push(SystemBlock {
             r#type: "text",
-            text: header,
+            text,
             cache_control: None,
         });
     }
-    system_blocks.push(SystemBlock {
+    blocks.push(SystemBlock {
         r#type: "text",
         text: SYSTEM_PROMPT_PREFIX,
         cache_control: None,
     });
-    if !system.is_empty() {
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: system,
-            cache_control: None,
-        });
+    for (text, cache_control) in extras {
+        if !text.is_empty() {
+            blocks.push(SystemBlock {
+                r#type: "text",
+                text,
+                cache_control,
+            });
+        }
     }
-
-    let mut body = serde_json::to_string(&CreateMessageRequest {
-        // `[1m]` is a client-side tag; strip before the wire.
-        model: api_model_id(model),
-        max_tokens,
-        stream: false,
-        metadata: build_metadata(session_id),
-        system: system_blocks,
-        tools: None,
-        thinking: None,
-        output_config: OutputConfig::new(output_format, None),
-        // One-shot completions never opt into context management —
-        // matches claude-code's one-shot path.
-        context_management: None,
-        messages: &messages,
-    })
-    .context("failed to serialize request")?;
-
-    if billing_header.is_some() {
-        body = billing::inject_cch(&body);
-    }
-    Ok(body)
-}
-
-/// Flattens a `messages.create` response's content array into the
-/// assistant's user-visible text (drops tool-use / thinking blocks).
-fn join_text_blocks(content: Vec<ContentBlock>) -> String {
-    content
-        .into_iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Shape we accept back from the non-streaming `/v1/messages` endpoint.
-/// The API sends many more fields (`id`, `role`, `model`, `stop_reason`,
-/// `usage`); we only care about the content blocks — serde ignores the rest.
-#[derive(Deserialize)]
-struct CompletionResponse {
-    content: Vec<ContentBlock>,
+    blocks
 }
 
 /// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
@@ -936,202 +358,20 @@ fn first_user_text(messages: &[Message]) -> &str {
         .unwrap_or("")
 }
 
-/// Hard cap on the unterminated SSE frame buffer. A misbehaving upstream that
-/// never emits `\n\n` would otherwise let `buf` grow without bound until OOM.
-const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-async fn stream_sse(
-    http: &reqwest::Client,
-    url: &str,
-    betas: String,
-    body: String,
-    tx: &mpsc::Sender<Result<StreamEvent>>,
-) -> Result<()> {
-    let response = http
-        .post(url)
-        .header("anthropic-beta", betas)
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "{}",
-            format_api_error(status, retry_after.as_deref(), &body)
-        );
-    }
-
-    let mut stream = response.bytes_stream();
-    // Byte buffer: reassembles UTF-8 sequences split across chunk boundaries
-    // intact (`from_utf8_lossy` would inject U+FFFD at the boundary).
-    let mut buf: Vec<u8> = Vec::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("error reading response stream")?;
-        buf.extend_from_slice(&chunk);
-
-        loop {
-            let Some(end) = buf.windows(2).position(|w| w == b"\n\n") else {
-                if buf.len() > MAX_SSE_FRAME_BYTES {
-                    bail!(
-                        "SSE frame buffer exceeded {MAX_SSE_FRAME_BYTES} bytes without \
-                         a terminating blank line; upstream may be misbehaving"
-                    );
-                }
-                break;
-            };
-            let frame_bytes: Vec<u8> = buf.drain(..end + 2).take(end).collect();
-
-            let frame = match std::str::from_utf8(&frame_bytes) {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("skipping invalid UTF-8 SSE frame: {e}");
-                    continue;
-                }
-            };
-
-            // A single malformed frame should not poison the whole turn.
-            match parse_sse_frame(frame) {
-                Ok(Some(event)) => {
-                    if tx.send(Ok(event)).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => debug!("skipping malformed SSE frame: {e:#}"),
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Builds an actionable error message for a non-2xx Anthropic API
-/// response. The raw body is always appended as `details: {body}` so
-/// debug context is preserved on every branch.
-fn format_api_error(status: reqwest::StatusCode, retry_after: Option<&str>, body: &str) -> String {
-    let prefix = match status.as_u16() {
-        401 => "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth.".to_owned(),
-        429 => match retry_after {
-            Some(after) => format!("Anthropic API rate limited (HTTP 429); retry after {after}."),
-            None => "Anthropic API rate limited (HTTP 429); retry after a short delay.".to_owned(),
-        },
-        529 => "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds.".to_owned(),
-        s if (500..600).contains(&s) => {
-            format!("Anthropic API server error (HTTP {status}). Usually transient; retry.")
-        }
-        _ => format!("API error (HTTP {status})"),
-    };
-    format!("{prefix} details: {body}")
-}
-
-/// Parses a single SSE frame into a [`StreamEvent`].
-///
-/// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
-/// Anthropic currently emits single-line data, but we follow the spec
-/// so a future multi-line payload doesn't silently lose everything
-/// but the last line.
-fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
-    let mut data_lines: Vec<&str> = Vec::new();
-
-    for line in frame.lines() {
-        if let Some(value) = line
-            .strip_prefix("data: ")
-            .or_else(|| line.strip_prefix("data:"))
-        {
-            data_lines.push(value);
-        }
-    }
-
-    let data: std::borrow::Cow<'_, str> = match data_lines.as_slice() {
-        [] => return Ok(None),
-        [one] => std::borrow::Cow::Borrowed(*one),
-        _ => std::borrow::Cow::Owned(data_lines.join("\n")),
-    };
-
-    let event: StreamEvent =
-        serde_json::from_str(&data).with_context(|| format!("failed to parse SSE data: {data}"))?;
-
-    Ok(Some(event))
-}
-
-// ── Test Fixtures ──
-//
-// Shared across `client::anthropic` tests, `session::title_generator`
-// tests, and the `agent::tests` wiremock integration — all three drive
-// a real `Client` against a mock server and need the same defaults
-// (ApiKey auth, session id, 128 max_tokens, no thinking config).
-
-/// Minimal [`Config`] suitable for unit and wiremock tests. Defaults
-/// match every existing call site: `max_tokens = 128`, `thinking = None`,
-/// `show_thinking = false`.
-#[cfg(test)]
-pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
-    Config {
-        auth,
-        base_url: base_url.into(),
-        model: model.to_owned(),
-        effort: None,
-        max_tokens: 128,
-        prompt_cache_ttl: PromptCacheTtl::OneHour,
-        thinking: None,
-        show_thinking: false,
-    }
-}
-
-/// [`Client`] on top of [`test_config`], with a fixed session id so the
-/// wire headers carry a deterministic `x-claude-code-session-id`.
-#[cfg(test)]
-pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
-    Client::new(test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
-}
-
-/// Non-streaming Messages-API response body with the given text content.
-/// Model is hardcoded; assertions in tests inspect request-side model
-/// selection, never response-side.
-#[cfg(test)]
-pub(crate) fn completion_body(text: &str) -> String {
-    serde_json::json!({
-        "id": "msg_1",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-haiku-4-5",
-        "stop_reason": "end_turn",
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": 5, "output_tokens": 3}
-    })
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use indoc::indoc;
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::testing::{Captured, api_key, captured, oauth, test_config};
+    use super::wire::{ContentBlockInfo, Delta};
     use super::*;
+    use crate::config::{Effort, ThinkingConfig};
 
     // ── Fixtures ──
 
     const OFFLINE_URL: &str = "https://example.invalid";
     const TEST_MODEL: &str = "claude-sonnet-4-6";
-
-    fn api_key() -> Auth {
-        Auth::ApiKey("k".to_owned())
-    }
-
-    fn oauth() -> Auth {
-        Auth::OAuth("t".to_owned())
-    }
 
     /// Builds an SSE response body from `(event, data)` pairs. Each
     /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
@@ -1183,199 +423,6 @@ mod tests {
             ),
             ("message_stop", r#"{"type":"message_stop"}"#),
         ])
-    }
-
-    /// Slot for the last request body captured by a wiremock responder.
-    type Captured<T> = Arc<Mutex<Option<T>>>;
-
-    fn captured<T>() -> Captured<T> {
-        Arc::new(Mutex::new(None))
-    }
-
-    // ── ContextManagement ──
-
-    #[test]
-    fn context_management_clear_thinking_keep_all_serializes_tagged_shape() {
-        let v = serde_json::to_value(ContextManagement::clear_thinking_keep_all()).unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!({
-                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}],
-            }),
-        );
-    }
-
-    // ── OutputFormat ──
-
-    #[test]
-    fn output_format_json_schema_serializes_with_type_and_schema() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"title": {"type": "string"}},
-            "required": ["title"],
-        });
-        let fmt = OutputFormat::json_schema(schema.clone());
-        let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"], schema);
-    }
-
-    // ── StreamEvent ──
-
-    #[test]
-    fn stream_event_content_block_start_text() {
-        let json =
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
-        let StreamEvent::ContentBlockStart {
-            index,
-            content_block,
-        } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected ContentBlockStart");
-        };
-        assert_eq!(index, 0);
-        assert!(matches!(content_block, ContentBlockInfo::Text { text } if text.is_empty()));
-    }
-
-    #[test]
-    fn stream_event_content_block_stop() {
-        let json = r#"{"type":"content_block_stop","index":2}"#;
-        let StreamEvent::ContentBlockStop { index } = serde_json::from_str(json).unwrap() else {
-            panic!("expected ContentBlockStop");
-        };
-        assert_eq!(index, 2);
-    }
-
-    #[test]
-    fn stream_event_message_delta_with_usage() {
-        let json = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
-        let StreamEvent::MessageDelta { delta, usage } = serde_json::from_str(json).unwrap() else {
-            panic!("expected MessageDelta");
-        };
-        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
-        let usage = usage.expect("expected usage");
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 42);
-    }
-
-    #[test]
-    fn stream_event_message_stop() {
-        let event: StreamEvent = serde_json::from_str(r#"{"type":"message_stop"}"#).unwrap();
-        assert!(matches!(event, StreamEvent::MessageStop));
-    }
-
-    // ── ContentBlockInfo ──
-
-    #[test]
-    fn content_block_info_text() {
-        let json = r#"{"type":"text","text":"Hello world"}"#;
-        let ContentBlockInfo::Text { text } = serde_json::from_str(json).unwrap() else {
-            panic!("expected Text");
-        };
-        assert_eq!(text, "Hello world");
-    }
-
-    #[test]
-    fn content_block_info_tool_use() {
-        let json = r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#;
-        let ContentBlockInfo::ToolUse { id, name } = serde_json::from_str(json).unwrap() else {
-            panic!("expected ToolUse");
-        };
-        assert_eq!(id, "toolu_01");
-        assert_eq!(name, "bash");
-    }
-
-    #[test]
-    fn content_block_info_server_tool_use() {
-        let json = r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#;
-        let ContentBlockInfo::ServerToolUse { id, name } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected ServerToolUse");
-        };
-        assert_eq!(id, "stu_01");
-        assert_eq!(name, "advisor");
-    }
-
-    #[test]
-    fn content_block_info_thinking() {
-        let json = r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#;
-        let ContentBlockInfo::Thinking {
-            thinking,
-            signature,
-        } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected Thinking");
-        };
-        assert_eq!(thinking, "Let me analyze this");
-        assert_eq!(signature, "sig_xyz");
-    }
-
-    #[test]
-    fn content_block_info_redacted_thinking() {
-        let json = r#"{"type":"redacted_thinking","data":"base64data=="}"#;
-        let ContentBlockInfo::RedactedThinking { data } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected RedactedThinking");
-        };
-        assert_eq!(data, "base64data==");
-    }
-
-    #[test]
-    fn content_block_info_unknown_type() {
-        let json = r#"{"type":"some_future_block","data":"opaque"}"#;
-        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-        assert!(matches!(info, ContentBlockInfo::Unknown));
-    }
-
-    // ── Delta ──
-
-    #[test]
-    fn delta_text() {
-        let Delta::TextDelta { text } =
-            serde_json::from_str(r#"{"type":"text_delta","text":"Hello"}"#).unwrap()
-        else {
-            panic!("expected TextDelta");
-        };
-        assert_eq!(text, "Hello");
-    }
-
-    #[test]
-    fn delta_input_json() {
-        let Delta::InputJsonDelta { partial_json } =
-            serde_json::from_str(r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#)
-                .unwrap()
-        else {
-            panic!("expected InputJsonDelta");
-        };
-        assert_eq!(partial_json, r#"{"key":"#);
-    }
-
-    #[test]
-    fn delta_thinking() {
-        let Delta::ThinkingDelta { thinking } =
-            serde_json::from_str(r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#)
-                .unwrap()
-        else {
-            panic!("expected ThinkingDelta");
-        };
-        assert_eq!(thinking, "partial reasoning");
-    }
-
-    #[test]
-    fn delta_signature() {
-        let Delta::SignatureDelta { signature } =
-            serde_json::from_str(r#"{"type":"signature_delta","signature":"sig_abc123"}"#).unwrap()
-        else {
-            panic!("expected SignatureDelta");
-        };
-        assert_eq!(signature, "sig_abc123");
-    }
-
-    #[test]
-    fn delta_unknown_type() {
-        let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
-        let delta: Delta = serde_json::from_str(json).unwrap();
-        assert!(matches!(delta, Delta::Unknown));
     }
 
     // ── Client::new / Client::model ──
@@ -1669,6 +716,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_message_429_threads_retry_after_header_into_error() {
+        // The streaming path's retry-after extraction lives in stream_sse,
+        // not format_api_error — pin that the header is read off the
+        // response *before* the body is consumed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "60")
+                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        let err = collect_events(rx).await.expect_err("expected 429");
+        assert!(
+            format!("{err:#}").contains("retry after 60"),
+            "retry-after threaded through stream_sse: {err:#}",
+        );
+    }
+
+    #[tokio::test]
     async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1901,7 +979,7 @@ mod tests {
 
         let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
         assert!(
-            !beta.contains(PROMPT_CACHING_SCOPE_BETA_HEADER),
+            !beta.contains("prompt-caching-scope-2026-01-05"),
             "prompt-caching-scope beta absent on 3P: {beta}",
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -2042,195 +1120,41 @@ mod tests {
         );
     }
 
-    // ── Client::complete ──
+    // ── build_system_blocks ──
 
-    #[tokio::test]
-    async fn complete_happy_path_returns_assistant_text() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(completion_body("Fix login bug")),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let text = client
-            .complete("claude-haiku-4-5", "sys", "user input", 40, None)
-            .await
-            .unwrap();
-        assert_eq!(text, "Fix login bug");
-    }
-
-    #[tokio::test]
-    async fn complete_http_error_propagates_status_and_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(r#"{"error":{"type":"invalid_request"}}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        let err = client
-            .complete("claude-haiku-4-5", "", "u", 40, None)
-            .await
-            .expect_err("expected error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("400"), "status surfaced: {msg}");
-        assert!(msg.contains("invalid_request"), "body surfaced: {msg}");
-    }
-
-    #[tokio::test]
-    async fn complete_structured_output_gated_by_model_capability() {
-        // Supported model → body carries output_config, header carries
-        // the beta tag. Unsupported model → both are silently dropped
-        // (mirrors the `[1m]` × `context_1m` cross-check).
-        let fmt = OutputFormat::json_schema(serde_json::json!({
-            "type": "object",
-            "properties": {"title": {"type": "string"}},
-            "required": ["title"],
-            "additionalProperties": false,
-        }));
-        for (model, expect_structured) in [("claude-haiku-4-5", true), ("claude-haiku-4", false)] {
-            let server = MockServer::start().await;
-            let sink: Captured<(String, String)> = captured();
-            let sink_clone = std::sync::Arc::clone(&sink);
-            Mock::given(method("POST"))
-                .and(path("/v1/messages"))
-                .respond_with(move |req: &Request| {
-                    let body = String::from_utf8_lossy(&req.body).into_owned();
-                    let beta = req
-                        .headers
-                        .get("anthropic-beta")
-                        .map(|v| v.to_str().unwrap().to_owned())
-                        .unwrap_or_default();
-                    *sink_clone.lock().unwrap() = Some((body, beta));
-                    ResponseTemplate::new(200).set_body_string(completion_body("ok"))
-                })
-                .mount(&server)
-                .await;
-
-            let client = Client::new(
-                test_config(server.uri(), api_key(), model),
-                Some("sid".to_owned()),
-            )
-            .unwrap();
-            _ = client
-                .complete(model, "sys", "prompt", 40, Some(&fmt))
-                .await
-                .unwrap();
-
-            let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(
-                beta.contains(STRUCTURED_OUTPUTS_BETA_HEADER),
-                expect_structured,
-                "beta tag on {model}: {beta}",
-            );
-            assert_eq!(
-                v.get("output_config").is_some(),
-                expect_structured,
-                "output_config on {model}: {body}",
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn complete_oauth_haiku_carries_billing_block_but_not_gateway_tag() {
-        // Non-agentic Haiku drops the `claude-code-20250219` gateway tag
-        // (1P / 3P both tolerate its absence for Haiku one-shots) while
-        // still carrying the OAuth billing attestation.
-        let server = MockServer::start().await;
-        let sink: Captured<(String, String)> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                let body = String::from_utf8_lossy(&req.body).into_owned();
-                let beta = req
-                    .headers
-                    .get("anthropic-beta")
-                    .map(|v| v.to_str().unwrap().to_owned())
-                    .unwrap_or_default();
-                *sink_clone.lock().unwrap() = Some((body, beta));
-                ResponseTemplate::new(200).set_body_string(completion_body("Fix"))
-            })
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(
-                server.uri(),
-                Auth::OAuth("tok".to_owned()),
-                "claude-haiku-4-5",
-            ),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        _ = client
-            .complete("claude-haiku-4-5", "", "hi", 40, None)
-            .await
-            .unwrap();
-
-        let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
-        assert!(beta.contains(OAUTH_BETA_HEADER), "OAuth tag: {beta}");
-        assert!(
-            !beta.contains(CLAUDE_CODE_BETA_HEADER),
-            "no gateway tag on Haiku one-shot: {beta}",
+    #[test]
+    fn build_system_blocks_orders_billing_then_identity_then_extras() {
+        let billing = "x-anthropic-billing-header: cc_version=2.1.119; cch=00000;";
+        let cache = CacheControl {
+            r#type: "ephemeral",
+            scope: Some("global"),
+            ttl: Some("1h"),
+        };
+        let blocks = build_system_blocks(
+            Some(billing),
+            [("static body", Some(cache)), ("dynamic body", None)],
         );
-        assert!(
-            body.contains("x-anthropic-billing-header:"),
-            "billing block present: {body}",
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].text, billing);
+        assert!(blocks[0].cache_control.is_none(), "billing has no cc");
+        assert_eq!(blocks[1].text, SYSTEM_PROMPT_PREFIX);
+        assert!(blocks[1].cache_control.is_none(), "identity has no cc");
+        assert_eq!(blocks[2].text, "static body");
+        assert_eq!(
+            blocks[2].cache_control.as_ref().and_then(|c| c.scope),
+            Some("global"),
         );
-        assert!(!body.contains("cch=00000"), "cch populated: {body}");
+        assert_eq!(blocks[3].text, "dynamic body");
+        assert!(blocks[3].cache_control.is_none(), "dynamic has no cc");
     }
 
-    #[tokio::test]
-    async fn complete_does_not_emit_context_management_edits() {
-        // `context_management.edits` is an agentic-path directive; it
-        // must stay off the one-shot `complete` path even on models
-        // that carry the capability flag (Haiku 4.5 here).
-        let server = MockServer::start().await;
-        let sink: Captured<String> = captured();
-        let sink_clone = std::sync::Arc::clone(&sink);
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(move |req: &Request| {
-                *sink_clone.lock().unwrap() = Some(String::from_utf8_lossy(&req.body).into_owned());
-                ResponseTemplate::new(200).set_body_string(completion_body("ok"))
-            })
-            .mount(&server)
-            .await;
-
-        let client = Client::new(
-            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
-            Some("sid".to_owned()),
-        )
-        .unwrap();
-        _ = client
-            .complete("claude-haiku-4-5", "sys", "hi", 40, None)
-            .await
-            .unwrap();
-
-        let body = sink.lock().unwrap().clone().expect("body captured");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(
-            v.get("context_management").is_none(),
-            "context_management absent on one-shot path: {body}",
-        );
+    #[test]
+    fn build_system_blocks_drops_empty_extras_and_omits_billing_when_absent() {
+        let blocks = build_system_blocks(None, [("", None), ("only-content", None)]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
+        assert_eq!(blocks[1].text, "only-content");
     }
 
     // ── build_metadata ──
@@ -2243,368 +1167,6 @@ mod tests {
         let meta = build_metadata("abc-123");
         let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
         assert_eq!(parsed["session_id"], "abc-123");
-    }
-
-    // ── compute_betas ──
-
-    #[test]
-    fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
-        // Plain model (no `[1m]` tag) must not auto-enable 1M context —
-        // a gateway without 1M access would 400.
-        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
-        assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&OAUTH_BETA_HEADER));
-        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_opus_4_6_with_1m_tag_adds_context_1m() {
-        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false, true);
-        assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_oauth_adds_oauth_header() {
-        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false, true);
-        assert!(betas.contains(&OAUTH_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_sonnet_4_5_has_thinking_but_not_effort() {
-        // Sonnet 4.5 supports interleaved thinking but not effort;
-        // plain (no `[1m]` tag) means no 1M beta either.
-        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false, true);
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_haiku_4_5_agentic_omits_1m_effort_and_thinking() {
-        // Haiku has a 200K window and no interleaved-thinking / effort
-        // support on 3P gateways; all three must be absent.
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false, true);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(!betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_haiku_4_5_with_1m_tag_silently_drops_1m() {
-        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false, true);
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_haiku_non_agentic_minimal() {
-        // Title-generator one-shot on API key → no agent tags, no gateway
-        // tag. OAuth one-shot → only the OAuth tag.
-        assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, false, true),
-            Vec::<&str>::new(),
-        );
-        assert_eq!(
-            compute_betas("claude-haiku-4-5", &oauth(), false, false, true),
-            vec![OAUTH_BETA_HEADER],
-        );
-    }
-
-    #[test]
-    fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
-        // OAuth on non-Haiku requires the gateway tag even for one-shots.
-        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false, true);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&OAUTH_BETA_HEADER));
-        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(!betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_opus_4_7_matches_opus_4_6_family() {
-        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false, true);
-        assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(plain.contains(&EFFORT_BETA_HEADER));
-        assert!(!plain.contains(&CONTEXT_1M_BETA_HEADER));
-
-        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false, true);
-        assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
-    }
-
-    #[test]
-    fn compute_betas_structured_outputs_gated_by_model_capability() {
-        // Haiku 4.5 supports it → emitted alone on non-agentic API key.
-        // Haiku 4 base predates the beta → silently dropped.
-        assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, true, true),
-            vec![STRUCTURED_OUTPUTS_BETA_HEADER],
-        );
-        assert!(
-            !compute_betas("claude-haiku-4", &api_key(), false, true, true)
-                .contains(&STRUCTURED_OUTPUTS_BETA_HEADER),
-        );
-    }
-
-    #[test]
-    fn compute_betas_third_party_base_url_drops_prompt_caching_scope() {
-        // 3P gateways reject `scope: "global"` because tool definitions
-        // render before system blocks and taint the cache prefix. Keep
-        // every other agentic beta — only the scope header goes.
-        let betas = compute_betas("claude-opus-4-7", &api_key(), true, false, false);
-        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
-    }
-
-    // ── supports_structured_outputs ──
-
-    #[test]
-    fn supports_structured_outputs_reflects_capability_table() {
-        assert!(supports_structured_outputs("claude-haiku-4-5"));
-        assert!(supports_structured_outputs("claude-opus-4-7"));
-        assert!(!supports_structured_outputs("claude-haiku-4"));
-        assert!(!supports_structured_outputs("claude-opus-5-0"));
-    }
-
-    // ── is_first_party_base_url ──
-
-    #[test]
-    fn is_first_party_base_url_accepts_official_hosts() {
-        assert!(is_first_party_base_url("https://api.anthropic.com"));
-        assert!(is_first_party_base_url("https://api.anthropic.com/"));
-        assert!(is_first_party_base_url("https://api-staging.anthropic.com"));
-        // Case-insensitive on the host (URL spec lowercases it).
-        assert!(is_first_party_base_url("https://API.ANTHROPIC.COM"));
-    }
-
-    #[test]
-    fn is_first_party_base_url_rejects_proxies_and_malformed_urls() {
-        // Proxies and self-hosted gateways → 3P. Also anything that
-        // doesn't parse as a URL falls through to the safe default.
-        assert!(!is_first_party_base_url("https://api.openai.com"));
-        assert!(!is_first_party_base_url("https://proxy.example.com"));
-        assert!(!is_first_party_base_url("https://anthropic.com.evil.io"));
-        assert!(!is_first_party_base_url("http://127.0.0.1:8080"));
-        assert!(!is_first_party_base_url(""));
-        assert!(!is_first_party_base_url("not-a-url"));
-    }
-
-    // ── static_prefix_cache_control ──
-
-    #[test]
-    fn static_prefix_cache_control_emits_global_scope_on_first_party_only() {
-        let first = static_prefix_cache_control(true, PromptCacheTtl::OneHour);
-        assert_eq!(first.r#type, "ephemeral");
-        assert_eq!(first.scope, Some("global"));
-
-        let third = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-        assert_eq!(third.r#type, "ephemeral");
-        assert_eq!(third.scope, None);
-    }
-
-    #[test]
-    fn static_prefix_cache_control_ttl_matches_config() {
-        // 1h → `ttl: "1h"` in the wire. 5m → field absent entirely
-        // (matches server default; keeps the pre-2026-03 wire shape).
-        let one_hour = static_prefix_cache_control(false, PromptCacheTtl::OneHour);
-        assert_eq!(
-            serde_json::to_string(&one_hour).unwrap(),
-            r#"{"type":"ephemeral","ttl":"1h"}"#,
-        );
-
-        let five_min = static_prefix_cache_control(false, PromptCacheTtl::FiveMin);
-        assert_eq!(
-            serde_json::to_string(&five_min).unwrap(),
-            r#"{"type":"ephemeral"}"#,
-        );
-    }
-
-    // ── api_model_id / has_1m_tag ──
-
-    #[test]
-    fn api_model_id_strips_1m_tag_case_insensitively() {
-        // Case-insensitive matching keeps `api_model_id` and `has_1m_tag`
-        // in sync — a leaked `[1M]` in the API model field would 400.
-        assert_eq!(api_model_id("claude-opus-4-7[1m]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7[1M]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
-        assert_eq!(api_model_id("claude-opus-4-7"), "claude-opus-4-7");
-    }
-
-    #[test]
-    fn has_1m_tag_is_case_insensitive() {
-        assert!(has_1m_tag("claude-opus-4-7[1m]"));
-        assert!(has_1m_tag("claude-opus-4-7[1M]"));
-        assert!(!has_1m_tag("claude-opus-4-7"));
-    }
-
-    // ── build_completion_body ──
-
-    fn parse_body(body: &str) -> serde_json::Value {
-        serde_json::from_str(body).expect("serialized body must be valid JSON")
-    }
-
-    #[test]
-    fn build_completion_body_omits_tools_thinking_and_output_config_by_default() {
-        let body =
-            build_completion_body("claude-haiku-4-5", "sys", "hi", 40, &api_key(), "sid", None)
-                .unwrap();
-        let v = parse_body(&body);
-        assert_eq!(v["model"], "claude-haiku-4-5");
-        assert_eq!(v["max_tokens"], 40);
-        assert_eq!(v["stream"], false);
-        assert!(v.get("tools").is_none(), "tools omitted: {v}");
-        assert!(v.get("thinking").is_none(), "thinking omitted: {v}");
-        assert!(
-            v.get("output_config").is_none(),
-            "output_config omitted: {v}"
-        );
-        assert_eq!(v["messages"][0]["role"], "user");
-        assert_eq!(v["messages"][0]["content"][0]["text"], "hi");
-    }
-
-    #[test]
-    fn build_completion_body_system_blocks_match_auth_mode() {
-        // API key: identity prefix + caller's system = 2 blocks, no
-        // billing attestation. OAuth: billing + identity + system = 3
-        // blocks, `cch=00000` placeholder replaced.
-        let api_body = build_completion_body(
-            "claude-haiku-4-5",
-            "sys-prompt",
-            "hi",
-            40,
-            &api_key(),
-            "sid",
-            None,
-        )
-        .unwrap();
-        let api = parse_body(&api_body);
-        let api_system = api["system"].as_array().unwrap();
-        assert_eq!(api_system.len(), 2);
-        assert_eq!(api_system[0]["text"], SYSTEM_PROMPT_PREFIX);
-        assert_eq!(api_system[1]["text"], "sys-prompt");
-        assert!(!api_body.contains("x-anthropic-billing-header:"));
-
-        let oauth_body = build_completion_body(
-            "claude-haiku-4-5",
-            "sys-prompt",
-            "Fix login",
-            40,
-            &oauth(),
-            "sid",
-            None,
-        )
-        .unwrap();
-        let oa = parse_body(&oauth_body);
-        let oa_system = oa["system"].as_array().unwrap();
-        assert_eq!(oa_system.len(), 3);
-        let first = oa_system[0]["text"].as_str().unwrap();
-        assert!(first.starts_with("x-anthropic-billing-header:"));
-        assert!(first.contains(&format!("cc_version={CLAUDE_CLI_VERSION}")));
-        assert_eq!(oa_system[1]["text"], SYSTEM_PROMPT_PREFIX);
-        assert_eq!(oa_system[2]["text"], "sys-prompt");
-        assert!(!oauth_body.contains("cch=00000"));
-    }
-
-    #[test]
-    fn build_completion_body_empty_system_keeps_identity_prefix_alone() {
-        // Identity prefix must survive even without a caller-supplied
-        // system prompt — non-Haiku OAuth requires it in block 0.
-        let body = build_completion_body("claude-haiku-4-5", "", "hi", 40, &api_key(), "sid", None)
-            .unwrap();
-        let v = parse_body(&body);
-        let system = v["system"].as_array().unwrap();
-        assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
-    }
-
-    #[test]
-    fn build_completion_body_with_output_format_emits_output_config() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {"title": {"type": "string"}},
-            "required": ["title"],
-            "additionalProperties": false,
-        });
-        let fmt = OutputFormat::json_schema(schema.clone());
-        let body = build_completion_body(
-            "claude-haiku-4-5",
-            "sys",
-            "hi",
-            40,
-            &api_key(),
-            "sid",
-            Some(&fmt),
-        )
-        .unwrap();
-        let v = parse_body(&body);
-        assert_eq!(v["output_config"]["format"]["type"], "json_schema");
-        assert_eq!(v["output_config"]["format"]["schema"], schema);
-    }
-
-    #[test]
-    fn build_completion_body_routes_session_id_into_metadata() {
-        let body = build_completion_body(
-            "claude-haiku-4-5",
-            "",
-            "hi",
-            40,
-            &api_key(),
-            "sid-789",
-            None,
-        )
-        .unwrap();
-        assert!(
-            body.contains("sid-789"),
-            "session_id threads into metadata.user_id: {body}",
-        );
-    }
-
-    // ── join_text_blocks / CompletionResponse ──
-
-    #[test]
-    fn join_text_blocks_concatenates_text_and_drops_non_text_blocks() {
-        // Round-trips through the real `CompletionResponse` deserializer
-        // to pin the live-like wire shape, not just `ContentBlock` shapes.
-        let body = r#"{
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-haiku-4-5",
-            "stop_reason": "end_turn",
-            "content": [
-                {"type":"thinking","thinking":"pondering","signature":"sig"},
-                {"type":"text","text":"Fix auth bug"},
-                {"type":"tool_use","id":"t1","name":"noop","input":{}},
-                {"type":"text","text":" and friends"}
-            ],
-            "usage": {"input_tokens":10,"output_tokens":5}
-        }"#;
-        let parsed: CompletionResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(join_text_blocks(parsed.content), "Fix auth bug and friends");
-    }
-
-    #[test]
-    fn join_text_blocks_returns_empty_for_tool_only_response() {
-        // Defensive: a tool_use-only reply must not surface as a title —
-        // the caller treats empty as "parse failure, keep fallback".
-        let blocks = vec![ContentBlock::ToolUse {
-            id: "t1".to_owned(),
-            name: "noop".to_owned(),
-            input: serde_json::Value::Null,
-        }];
-        assert_eq!(join_text_blocks(blocks), "");
     }
 
     // ── normalize_platform ──
@@ -2699,186 +1261,5 @@ mod tests {
             }],
         }];
         assert_eq!(first_user_text(&tool_only), "");
-    }
-
-    // ── format_api_error ──
-
-    #[test]
-    fn format_api_error_401_names_both_auth_paths() {
-        let msg = format_api_error(
-            reqwest::StatusCode::UNAUTHORIZED,
-            None,
-            r#"{"error":"invalid_api_key"}"#,
-        );
-        assert!(
-            msg.starts_with(
-                "Anthropic API rejected credentials (HTTP 401). Check ANTHROPIC_API_KEY, or run `claude` to refresh OAuth."
-            ),
-            "401 prefix: {msg}",
-        );
-        assert!(msg.contains(r#"details: {"error":"invalid_api_key"}"#));
-    }
-
-    #[test]
-    fn format_api_error_429_mentions_retry_after_when_present() {
-        let with = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, Some("42"), "rl");
-        assert!(
-            with.starts_with("Anthropic API rate limited (HTTP 429); retry after 42."),
-            "429 with retry-after: {with}",
-        );
-        let without = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, None, "rl");
-        assert!(
-            without
-                .starts_with("Anthropic API rate limited (HTTP 429); retry after a short delay."),
-            "429 without retry-after: {without}",
-        );
-        assert!(with.contains("details: rl"));
-        assert!(without.contains("details: rl"));
-    }
-
-    #[test]
-    fn format_api_error_529_flags_overload_as_transient() {
-        let status = reqwest::StatusCode::from_u16(529).unwrap();
-        let msg = format_api_error(status, None, "overloaded");
-        assert!(
-            msg.starts_with(
-                "Anthropic API overloaded (HTTP 529); this is transient — retry in a few seconds."
-            ),
-            "529 prefix: {msg}",
-        );
-        assert!(msg.contains("details: overloaded"));
-    }
-
-    #[test]
-    fn format_api_error_5xx_uses_generic_server_branch() {
-        let msg = format_api_error(reqwest::StatusCode::BAD_GATEWAY, None, "bad gw");
-        assert!(
-            msg.starts_with(
-                "Anthropic API server error (HTTP 502 Bad Gateway). Usually transient; retry."
-            ),
-            "5xx prefix: {msg}",
-        );
-        assert!(msg.contains("details: bad gw"));
-    }
-
-    #[test]
-    fn format_api_error_other_falls_back_to_generic_shape() {
-        let msg = format_api_error(reqwest::StatusCode::BAD_REQUEST, None, "invalid");
-        assert!(
-            msg.starts_with("API error (HTTP 400 Bad Request)"),
-            "generic prefix: {msg}",
-        );
-        assert!(msg.contains("details: invalid"));
-    }
-
-    // ── parse_sse_frame ──
-
-    #[test]
-    fn parse_sse_frame_text_delta() {
-        let frame = indoc! {r#"
-            event: content_block_delta
-            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
-        "#};
-        let StreamEvent::ContentBlockDelta { index, delta } =
-            parse_sse_frame(frame).unwrap().unwrap()
-        else {
-            panic!("expected ContentBlockDelta");
-        };
-        assert_eq!(index, 0);
-        let Delta::TextDelta { text } = delta else {
-            panic!("expected TextDelta");
-        };
-        assert_eq!(text, "Hello");
-    }
-
-    #[test]
-    fn parse_sse_frame_ping() {
-        let frame = indoc! {r#"
-            event: ping
-            data: {"type":"ping"}
-        "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
-    }
-
-    #[test]
-    fn parse_sse_frame_message_start() {
-        let frame = indoc! {r#"
-            event: message_start
-            data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
-        "#};
-        let StreamEvent::MessageStart { message } = parse_sse_frame(frame).unwrap().unwrap() else {
-            panic!("expected MessageStart");
-        };
-        assert_eq!(message.id, "msg_123");
-        assert_eq!(message.model, "claude-sonnet-4-6");
-        let usage = message.usage.expect("expected usage");
-        assert_eq!(usage.input_tokens, 25);
-        assert_eq!(usage.output_tokens, 1);
-    }
-
-    #[test]
-    fn parse_sse_frame_error_event() {
-        let frame = indoc! {r#"
-            event: error
-            data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
-        "#};
-        let StreamEvent::Error { error } = parse_sse_frame(frame).unwrap().unwrap() else {
-            panic!("expected Error");
-        };
-        assert_eq!(error.error_type, "rate_limit_error");
-        assert_eq!(error.message, "Too many requests");
-    }
-
-    #[test]
-    fn parse_sse_frame_unknown_event_type() {
-        let frame = indoc! {r#"
-            event: some_future_event
-            data: {"type":"some_future_event","payload":"data"}
-        "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Unknown,
-        ));
-    }
-
-    #[test]
-    fn parse_sse_frame_without_data_line_yields_none() {
-        assert!(parse_sse_frame("").unwrap().is_none());
-        assert!(parse_sse_frame(": comment line").unwrap().is_none());
-    }
-
-    #[test]
-    fn parse_sse_frame_invalid_json_errors() {
-        assert!(parse_sse_frame("data: {not valid json}").is_err());
-    }
-
-    #[test]
-    fn parse_sse_frame_concatenates_multiple_data_lines_with_newline() {
-        // Per the SSE spec, multiple data: lines join with \n. JSON
-        // treats \n as token whitespace, so this round-trips cleanly.
-        let frame = indoc! {r#"
-            event: ping
-            data: {"type":
-            data: "ping"}
-        "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
-    }
-
-    #[test]
-    fn parse_sse_frame_accepts_data_prefix_without_space() {
-        // Some gateways emit `data:payload` (no leading space).
-        let frame = indoc! {r#"
-            data:{"type":"ping"}
-        "#};
-        assert!(matches!(
-            parse_sse_frame(frame).unwrap().unwrap(),
-            StreamEvent::Ping,
-        ));
     }
 }

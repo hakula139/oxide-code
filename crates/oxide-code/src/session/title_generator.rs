@@ -22,7 +22,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::agent::event::{AgentEvent, AgentSink};
-use crate::client::anthropic::{Client, OutputFormat};
+use crate::client::anthropic::Client;
+use crate::client::anthropic::wire::OutputFormat;
 use crate::session::manager::SessionManager;
 use crate::session::writer::log_session_err;
 
@@ -220,7 +221,7 @@ mod tests {
 
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::{completion_body, test_client};
+    use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::Auth;
     use crate::message::Message;
     use crate::session::store::test_store;

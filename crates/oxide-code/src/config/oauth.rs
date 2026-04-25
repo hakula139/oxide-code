@@ -69,13 +69,22 @@ impl OAuthCredential {
 pub(super) async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
-    load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL).await
+    load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL, load_credentials).await
 }
 
-/// Inner implementation with configurable paths and refresh URL. Public
-/// `load_token` supplies the real defaults; tests override all three.
-async fn load_token_from(file_path: &Path, lock_path: &Path, refresh_url: &str) -> Result<String> {
-    let oauth = load_credentials(file_path)?.claude_ai_oauth;
+/// Inner implementation; tests override paths, URL, and loader.
+///
+/// `loader` is injected so tests can pass [`read_credentials`] (file
+/// only) and bypass the macOS Keychain — otherwise a leftover entry
+/// for the running `$USER` would shadow the synthetic temp-file
+/// fixture.
+async fn load_token_from(
+    file_path: &Path,
+    lock_path: &Path,
+    refresh_url: &str,
+    loader: fn(&Path) -> Result<CredentialsFile>,
+) -> Result<String> {
+    let oauth = loader(file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
 
     // Token is valid and not near-expiry.
@@ -95,7 +104,7 @@ async fn load_token_from(file_path: &Path, lock_path: &Path, refresh_url: &str) 
     // Acquire lock and re-read (another process may have refreshed).
     let _lock = acquire_lock(lock_path).await?;
 
-    let oauth = load_credentials(file_path)?.claude_ai_oauth;
+    let oauth = loader(file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
@@ -517,9 +526,14 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", Some("ref"), 9_999_999_999_999);
 
-        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &creds,
+            &lock,
+            "http://should-not-be-called",
+            read_credentials,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "tok");
     }
 
@@ -530,9 +544,14 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, now_millis().unwrap() + 60_000);
 
-        let token = load_token_from(&creds, &lock, "http://should-not-be-called")
-            .await
-            .unwrap();
+        let token = load_token_from(
+            &creds,
+            &lock,
+            "http://should-not-be-called",
+            read_credentials,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "tok");
     }
 
@@ -543,7 +562,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&creds, &lock, "http://unused")
+        let err = load_token_from(&creds, &lock, "http://unused", read_credentials)
             .await
             .expect_err("expired without refresh must bail");
         assert!(format!("{err:#}").contains("expired"));
@@ -573,7 +592,9 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
+        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+            .await
+            .unwrap();
         assert_eq!(token, "fresh-access");
 
         let content = std::fs::read_to_string(&creds).unwrap();
@@ -608,7 +629,9 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri()).await.unwrap();
+        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+            .await
+            .unwrap();
         assert_eq!(token, "stale");
     }
 
@@ -626,7 +649,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&creds, &lock, &server.uri())
+        let err = load_token_from(&creds, &lock, &server.uri(), read_credentials)
             .await
             .expect_err("expired + refresh down must bail");
         let msg = format!("{err:#}");

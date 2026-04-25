@@ -13,7 +13,8 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink};
-use crate::client::anthropic::{Client, ContentBlockInfo, Delta, StreamEvent};
+use crate::client::anthropic::Client;
+use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
 use crate::session::manager::SessionManager;
@@ -346,8 +347,9 @@ mod tests {
 
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::{
-        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage, test_client,
+    use crate::client::anthropic::testing::test_client;
+    use crate::client::anthropic::wire::{
+        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
     };
     use crate::config::Auth;
     use crate::message::Role;
