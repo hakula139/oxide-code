@@ -169,19 +169,16 @@ impl Client {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-        let messages_with_context: Vec<Message>;
-        let effective_messages: &[Message] = if let Some(ctx) = user_context {
-            messages_with_context = std::iter::once(Message::user(ctx))
+        let effective_messages: Vec<Message> = match user_context {
+            Some(ctx) => std::iter::once(Message::user(ctx))
                 .chain(messages.iter().cloned())
-                .collect();
-            &messages_with_context
-        } else {
-            messages
+                .collect(),
+            None => messages.to_vec(),
         };
 
         let billing_header = matches!(self.config.auth, Auth::OAuth(_)).then(|| {
             let fingerprint = billing::compute_fingerprint(
-                first_user_text(effective_messages),
+                first_user_text(&effective_messages),
                 CLAUDE_CLI_VERSION,
             );
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
@@ -221,7 +218,7 @@ impl Client {
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
-            messages: effective_messages,
+            messages: &effective_messages,
         })
         .context("failed to serialize request")?;
 
