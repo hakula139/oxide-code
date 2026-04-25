@@ -10,8 +10,8 @@ use tracing::debug;
 
 use super::betas::{api_model_id, compute_betas, supports_structured_outputs};
 use super::sse::format_api_error;
-use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, SystemBlock};
-use super::{CLAUDE_CLI_VERSION, Client, SYSTEM_PROMPT_PREFIX, billing, build_metadata};
+use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat};
+use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_blocks};
 use crate::config::Auth;
 use crate::message::{ContentBlock, Message};
 
@@ -113,26 +113,7 @@ fn build_completion_body(
         billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
     });
 
-    let mut system_blocks = Vec::with_capacity(3);
-    if let Some(ref header) = billing_header {
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: header,
-            cache_control: None,
-        });
-    }
-    system_blocks.push(SystemBlock {
-        r#type: "text",
-        text: SYSTEM_PROMPT_PREFIX,
-        cache_control: None,
-    });
-    if !system.is_empty() {
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: system,
-            cache_control: None,
-        });
-    }
+    let system_blocks = build_system_blocks(billing_header.as_deref(), [(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
         // `[1m]` is a client-side tag; strip before the wire.
@@ -188,7 +169,7 @@ mod tests {
         CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER, STRUCTURED_OUTPUTS_BETA_HEADER,
     };
     use super::*;
-    use crate::client::anthropic::{completion_body, test_config};
+    use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, completion_body, test_config};
 
     type Captured<T> = Arc<Mutex<Option<T>>>;
 

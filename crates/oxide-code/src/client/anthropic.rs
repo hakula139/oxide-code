@@ -33,7 +33,10 @@ use crate::tool::ToolDefinition;
 
 use betas::{compute_betas, static_prefix_cache_control};
 use sse::stream_sse;
-use wire::{ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata, SystemBlock};
+use wire::{
+    CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata,
+    SystemBlock,
+};
 
 pub(crate) use wire::{ContentBlockInfo, Delta, OutputFormat, StreamEvent};
 
@@ -154,13 +157,9 @@ impl Client {
     /// is prepended as a synthetic user message (keeping dynamic content
     /// like CLAUDE.md out of the cacheable `system` parameter).
     ///
-    /// System-block assembly order (the boundary marker is filtered out):
-    ///
-    /// 1. Billing header (OAuth only; no `cache_control`).
-    /// 2. Identity prefix (no `cache_control`).
-    /// 3. Static sections joined (ephemeral cache; `scope=global` on 1P,
-    ///    default org-scoped on 3P).
-    /// 4. Dynamic sections joined (no `cache_control`).
+    /// System-block ordering is delegated to [`build_system_blocks`].
+    /// The static section is the only block carrying `cache_control` —
+    /// `scope=global` on 1P, default org-scoped on 3P.
     ///
     /// Returns an mpsc receiver of [`StreamEvent`]s.
     pub(crate) fn stream_message(
@@ -192,36 +191,15 @@ impl Client {
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
 
-        let mut system_blocks = Vec::new();
-        if let Some(ref header) = billing_header {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: header,
-                cache_control: None,
-            });
-        }
-        system_blocks.push(SystemBlock {
-            r#type: "text",
-            text: SYSTEM_PROMPT_PREFIX,
-            cache_control: None,
-        });
-        if !static_joined.is_empty() {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: &static_joined,
-                cache_control: Some(static_prefix_cache_control(
-                    self.is_first_party,
-                    self.config.prompt_cache_ttl,
-                )),
-            });
-        }
-        if !dynamic_joined.is_empty() {
-            system_blocks.push(SystemBlock {
-                r#type: "text",
-                text: &dynamic_joined,
-                cache_control: None,
-            });
-        }
+        let static_cache_control =
+            static_prefix_cache_control(self.is_first_party, self.config.prompt_cache_ttl);
+        let system_blocks = build_system_blocks(
+            billing_header.as_deref(),
+            [
+                (static_joined.as_str(), Some(static_cache_control)),
+                (dynamic_joined.as_str(), None),
+            ],
+        );
 
         let caps = crate::model::capabilities_for(&self.config.model);
 
@@ -279,6 +257,43 @@ impl Client {
 fn build_metadata(session_id: &str) -> RequestMetadata {
     let user_id = serde_json::json!({ "session_id": session_id }).to_string();
     RequestMetadata { user_id }
+}
+
+/// Assembles the `system` block sequence shared by streaming and
+/// one-shot paths. Order is load-bearing: billing's `cch=00000`
+/// placeholder must serialize first so [`billing::inject_cch`]'s
+/// single-occurrence replacement is unambiguous, and the identity
+/// prefix must occupy its own block on non-Haiku OAuth.
+///
+/// Empty `extras` entries are dropped so callers can hand in optional
+/// sections without `if !text.is_empty()` guards at every site.
+fn build_system_blocks<'a, const N: usize>(
+    billing_header: Option<&'a str>,
+    extras: [(&'a str, Option<CacheControl>); N],
+) -> Vec<SystemBlock<'a>> {
+    let mut blocks = Vec::with_capacity(2 + N);
+    if let Some(text) = billing_header {
+        blocks.push(SystemBlock {
+            r#type: "text",
+            text,
+            cache_control: None,
+        });
+    }
+    blocks.push(SystemBlock {
+        r#type: "text",
+        text: SYSTEM_PROMPT_PREFIX,
+        cache_control: None,
+    });
+    for (text, cache_control) in extras {
+        if !text.is_empty() {
+            blocks.push(SystemBlock {
+                r#type: "text",
+                text,
+                cache_control,
+            });
+        }
+    }
+    blocks
 }
 
 /// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
@@ -1143,6 +1158,43 @@ mod tests {
             body["thinking"].get("display").is_none(),
             "display field absent: {body}",
         );
+    }
+
+    // ── build_system_blocks ──
+
+    #[test]
+    fn build_system_blocks_orders_billing_then_identity_then_extras() {
+        let billing = "x-anthropic-billing-header: cc_version=2.1.119; cch=00000;";
+        let cache = CacheControl {
+            r#type: "ephemeral",
+            scope: Some("global"),
+            ttl: Some("1h"),
+        };
+        let blocks = build_system_blocks(
+            Some(billing),
+            [("static body", Some(cache)), ("dynamic body", None)],
+        );
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].text, billing);
+        assert!(blocks[0].cache_control.is_none(), "billing has no cc");
+        assert_eq!(blocks[1].text, SYSTEM_PROMPT_PREFIX);
+        assert!(blocks[1].cache_control.is_none(), "identity has no cc");
+        assert_eq!(blocks[2].text, "static body");
+        assert_eq!(
+            blocks[2].cache_control.as_ref().and_then(|c| c.scope),
+            Some("global"),
+        );
+        assert_eq!(blocks[3].text, "dynamic body");
+        assert!(blocks[3].cache_control.is_none(), "dynamic has no cc");
+    }
+
+    #[test]
+    fn build_system_blocks_drops_empty_extras_and_omits_billing_when_absent() {
+        let blocks = build_system_blocks(None, [("", None), ("only-content", None)]);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
+        assert_eq!(blocks[1].text, "only-content");
     }
 
     // ── build_metadata ──
