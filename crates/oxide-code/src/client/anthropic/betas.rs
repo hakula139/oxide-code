@@ -172,16 +172,21 @@ mod tests {
     #[test]
     fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
         // Plain model (no `[1m]` tag) must not auto-enable 1M context —
-        // a gateway without 1M access would 400.
+        // a gateway without 1M access would 400. The exact-equality
+        // assertion locks beta order: `docs/research/anthropic-api.md`
+        // documents identity / auth -> universal agentic -> capability
+        // gates, and some 3P gateways inspect order, not just presence.
         let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
-        assert!(betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
-        assert!(!betas.contains(&OAUTH_BETA_HEADER));
-        assert!(!betas.contains(&STRUCTURED_OUTPUTS_BETA_HEADER));
+        assert_eq!(
+            betas,
+            vec![
+                CLAUDE_CODE_BETA_HEADER,
+                CONTEXT_MANAGEMENT_BETA_HEADER,
+                PROMPT_CACHING_SCOPE_BETA_HEADER,
+                INTERLEAVED_THINKING_BETA_HEADER,
+                EFFORT_BETA_HEADER,
+            ],
+        );
     }
 
     #[test]
