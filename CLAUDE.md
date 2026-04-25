@@ -35,6 +35,7 @@ ox     # Start an interactive session
 │       ├── billing.rs              # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
 │       ├── completion.rs           # Non-streaming `Client::complete` + body builder for one-shots
 │       ├── sse.rs                  # SSE pump, frame parsing, API-error formatting
+│       ├── testing.rs              # Cfg-test fixtures shared by client, agent, and title_generator tests
 │       └── wire.rs                 # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
 ├── config.rs                       # Configuration loading and layered merging
 ├── config/

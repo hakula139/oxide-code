@@ -160,30 +160,16 @@ struct CompletionResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::super::betas::{
         CLAUDE_CODE_BETA_HEADER, OAUTH_BETA_HEADER, STRUCTURED_OUTPUTS_BETA_HEADER,
     };
+    use super::super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::*;
-    use crate::client::anthropic::{SYSTEM_PROMPT_PREFIX, completion_body, test_config};
-
-    type Captured<T> = Arc<Mutex<Option<T>>>;
-
-    fn captured<T>() -> Captured<T> {
-        Arc::new(Mutex::new(None))
-    }
-
-    fn api_key() -> Auth {
-        Auth::ApiKey("k".to_owned())
-    }
-
-    fn oauth() -> Auth {
-        Auth::OAuth("t".to_owned())
-    }
+    use crate::client::anthropic::SYSTEM_PROMPT_PREFIX;
+    use crate::client::anthropic::testing::completion_body;
 
     fn parse_body(body: &str) -> serde_json::Value {
         serde_json::from_str(body).expect("serialized body must be valid JSON")

@@ -221,7 +221,7 @@ mod tests {
 
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::{completion_body, test_client};
+    use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::Auth;
     use crate::message::Message;
     use crate::session::store::test_store;

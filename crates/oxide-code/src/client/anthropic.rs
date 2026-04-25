@@ -18,6 +18,9 @@ mod completion;
 mod sse;
 pub(crate) mod wire;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -355,63 +358,12 @@ fn first_user_text(messages: &[Message]) -> &str {
         .unwrap_or("")
 }
 
-// ── Test Fixtures ──
-//
-// Shared across `client::anthropic` tests, `session::title_generator`
-// tests, and the `agent::tests` wiremock integration — all three drive
-// a real `Client` against a mock server and need the same defaults
-// (ApiKey auth, session id, 128 max_tokens, no thinking config).
-
-/// Minimal [`Config`] suitable for unit and wiremock tests. Defaults
-/// match every existing call site: `max_tokens = 128`, `thinking = None`,
-/// `show_thinking = false`.
-#[cfg(test)]
-pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) -> Config {
-    use crate::config::PromptCacheTtl;
-
-    Config {
-        auth,
-        base_url: base_url.into(),
-        model: model.to_owned(),
-        effort: None,
-        max_tokens: 128,
-        prompt_cache_ttl: PromptCacheTtl::OneHour,
-        thinking: None,
-        show_thinking: false,
-    }
-}
-
-/// [`Client`] on top of [`test_config`], with a fixed session id so the
-/// wire headers carry a deterministic `x-claude-code-session-id`.
-#[cfg(test)]
-pub(crate) fn test_client(base_url: impl Into<String>, auth: Auth, model: &str) -> Client {
-    Client::new(test_config(base_url, auth, model), Some("sid".to_owned())).unwrap()
-}
-
-/// Non-streaming Messages-API response body with the given text content.
-/// Model is hardcoded; assertions in tests inspect request-side model
-/// selection, never response-side.
-#[cfg(test)]
-pub(crate) fn completion_body(text: &str) -> String {
-    serde_json::json!({
-        "id": "msg_1",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-haiku-4-5",
-        "stop_reason": "end_turn",
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": 5, "output_tokens": 3}
-    })
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
     use crate::config::{Effort, ThinkingConfig};
@@ -420,14 +372,6 @@ mod tests {
 
     const OFFLINE_URL: &str = "https://example.invalid";
     const TEST_MODEL: &str = "claude-sonnet-4-6";
-
-    fn api_key() -> Auth {
-        Auth::ApiKey("k".to_owned())
-    }
-
-    fn oauth() -> Auth {
-        Auth::OAuth("t".to_owned())
-    }
 
     /// Builds an SSE response body from `(event, data)` pairs. Each
     /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
@@ -479,13 +423,6 @@ mod tests {
             ),
             ("message_stop", r#"{"type":"message_stop"}"#),
         ])
-    }
-
-    /// Slot for the last request body captured by a wiremock responder.
-    type Captured<T> = Arc<Mutex<Option<T>>>;
-
-    fn captured<T>() -> Captured<T> {
-        Arc::new(Mutex::new(None))
     }
 
     // ── Client::new / Client::model ──

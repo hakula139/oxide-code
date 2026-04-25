@@ -347,7 +347,7 @@ mod tests {
 
     use super::*;
     use crate::agent::event::CapturingSink;
-    use crate::client::anthropic::test_client;
+    use crate::client::anthropic::testing::test_client;
     use crate::client::anthropic::wire::{
         ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
     };
