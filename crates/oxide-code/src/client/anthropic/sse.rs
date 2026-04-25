@@ -9,7 +9,12 @@ use super::wire::StreamEvent;
 
 /// Hard cap on the unterminated SSE frame buffer. A misbehaving upstream that
 /// never emits `\n\n` would otherwise let `buf` grow without bound until OOM.
+#[cfg(not(test))]
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Tests use a smaller cap so the overflow path is exercised in
+/// milliseconds without allocating 8 MiB of mock body per run.
+#[cfg(test)]
+const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
@@ -212,6 +217,70 @@ mod tests {
             "generic prefix: {msg}",
         );
         assert!(msg.contains("details: invalid"));
+    }
+
+    // ── stream_sse ──
+
+    #[tokio::test]
+    async fn stream_sse_buffer_overflow_bails_when_frame_lacks_terminator() {
+        // An upstream that emits a long byte string with no `\n\n`
+        // separator would let the buffer grow unbounded; the cap turns
+        // it into an actionable error instead of an OOM.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = "a".repeat(MAX_SSE_FRAME_BYTES + 1024);
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(1);
+        let url = format!("{}/messages", server.uri());
+        let err = stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
+            .await
+            .expect_err("expected overflow error");
+        assert!(
+            format!("{err:#}").contains("exceeded"),
+            "overflow message: {err:#}",
+        );
+        // Drain pending events to silence any unused-receiver warnings.
+        rx.close();
+    }
+
+    #[tokio::test]
+    async fn stream_sse_returns_ok_when_receiver_drops_before_send() {
+        // Consumer cancellation closes the channel; the next tx.send
+        // call surfaces an Err which stream_sse must treat as graceful
+        // shutdown (Ok(())), not propagate as a stream failure.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = "event: ping\ndata: {\"type\":\"ping\"}\n\n".repeat(8);
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(1);
+        drop(rx);
+        let url = format!("{}/messages", server.uri());
+        let result = stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx).await;
+        assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
     }
 
     // ── parse_sse_frame ──

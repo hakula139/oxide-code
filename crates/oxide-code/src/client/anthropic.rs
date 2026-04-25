@@ -716,6 +716,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_message_429_threads_retry_after_header_into_error() {
+        // The streaming path's retry-after extraction lives in stream_sse,
+        // not format_api_error — pin that the header is read off the
+        // response *before* the body is consumed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "60")
+                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-sonnet-4-6"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let rx = client
+            .stream_message(&[Message::user("hi")], &[], None, &[])
+            .unwrap();
+        let err = collect_events(rx).await.expect_err("expected 429");
+        assert!(
+            format!("{err:#}").contains("retry after 60"),
+            "retry-after threaded through stream_sse: {err:#}",
+        );
+    }
+
+    #[tokio::test]
     async fn stream_message_receiver_dropped_mid_stream_does_not_deadlock() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
