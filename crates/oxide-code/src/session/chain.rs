@@ -1,19 +1,9 @@
 //! UUID-DAG message-chain reconstruction.
 //!
-//! Session files are append-only JSONL where each
-//! [`Entry::Message`](crate::session::entry::Entry) carries an optional
-//! `parent_uuid` pointing at its predecessor. Concurrent resumes form
-//! forks in the resulting DAG; this module reconstructs the newest
-//! non-sidechain linear chain by walking parent edges from the latest
-//! leaf back to the root.
-//!
-//! [`ChainBuilder`] is the loader-facing type: feed it one
-//! `(uuid, parent_uuid, message, timestamp)` tuple per
-//! [`Entry::Message`](crate::session::entry::Entry) as the file is read,
-//! then call [`ChainBuilder::resolve`] to get back the linear chain plus
-//! the UUID of its tip. Last-append-wins on duplicate UUIDs matches the
-//! retry / partial-write recovery semantics the UUID is supposed to
-//! dedupe on.
+//! Concurrent resumes append in parallel and form forks in the on-disk
+//! DAG. [`ChainBuilder`] reconstructs the newest non-sidechain linear
+//! chain: feed it every `Entry::Message` tuple as the file is read,
+//! then call [`ChainBuilder::resolve`] for the chain plus its tip.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,23 +13,13 @@ use uuid::Uuid;
 
 use crate::message::Message;
 
-/// Accumulator for [`Entry::Message`](crate::session::entry::Entry)
-/// records as a session file is read. After every message has been
-/// fed through [`Self::insert`], call [`Self::resolve`] to pick the
-/// newest leaf and walk its parent chain.
 pub(super) struct ChainBuilder {
-    /// All messages seen so far, keyed by UUID. Last-append-wins on
-    /// duplicates so a partial-write retry collapses to the latest
-    /// representation.
     nodes: HashMap<Uuid, ChainNode>,
-    /// UUIDs that some other message claims as its `parent_uuid`. The
-    /// leaves of the DAG are `nodes.keys() - referenced`; subtracting
-    /// the referenced set is what lets [`Self::resolve`] pick a tip
-    /// without reading every node twice.
+    /// UUIDs claimed as some other message's `parent_uuid`. The DAG
+    /// leaves are `nodes.keys() - referenced`.
     referenced: HashSet<Uuid>,
 }
 
-/// Internal node stored in [`ChainBuilder::nodes`].
 struct ChainNode {
     parent_uuid: Option<Uuid>,
     message: Message,
@@ -54,9 +34,8 @@ impl ChainBuilder {
         }
     }
 
-    /// Records one message entry. Last-append-wins on duplicate UUIDs —
-    /// a retry or partial-write recovery could replay an entry, and we
-    /// prefer the most recent representation.
+    /// Last-append-wins on duplicate UUIDs so a retry / partial-write
+    /// replay collapses to the most recent representation.
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
@@ -77,16 +56,10 @@ impl ChainBuilder {
         );
     }
 
-    /// Walks back from the newest leaf via `parent_uuid` to produce a
-    /// linear chain. Returns `(chain, Some(tip))` on success, or
-    /// `(vec![], None)` when no messages were inserted.
-    ///
-    /// A cycle (e.g., from on-disk corruption where a UUID points at
-    /// one of its descendants) is treated as a terminated chain: the
-    /// walker detects the repeat and stops, preserving the prefix it
-    /// has already collected rather than looping forever. A
-    /// `parent_uuid` missing from the inserted set (orphan) is also
-    /// treated as a chain terminator.
+    /// Picks the newest leaf and walks back via `parent_uuid`. Cycles
+    /// and orphan parents act as chain terminators (preserve the
+    /// prefix collected so far) so corrupted on-disk state cannot hang
+    /// the walker.
     pub(super) fn resolve(mut self) -> (Vec<Message>, Option<Uuid>) {
         let tip = self
             .nodes
@@ -107,16 +80,11 @@ impl ChainBuilder {
         let mut cursor = Some(tip_uuid);
         while let Some(uuid) = cursor {
             if !seen.insert(uuid) {
-                // Cycle or repeated visit — bail out with what we have.
-                warn!(
-                    "session chain walk hit a cycle at {uuid}; truncating to the prefix collected so far"
-                );
+                warn!("session chain walk hit a cycle at {uuid}; truncating");
                 break;
             }
             let Some(node) = self.nodes.remove(&uuid) else {
-                // Missing ancestor — chain reaches an orphan. Stop here;
-                // everything we collected so far stays in `chain`.
-                break;
+                break; // orphan parent
             };
             chain.push(node.message);
             cursor = node.parent_uuid;
@@ -137,10 +105,12 @@ mod tests {
         Message::user(text)
     }
 
-    fn text_of(message: &Message) -> &str {
-        match &message.content[0] {
-            ContentBlock::Text { text } => text.as_str(),
-            other => panic!("expected text block, got {other:?}"),
+    /// Asserts the chain holds single-Text messages with these texts,
+    /// in order. `matches!` returns `bool` — no panic arm to uncover.
+    fn assert_chain_texts(chain: &[Message], want: &[&str]) {
+        assert_eq!(chain.len(), want.len());
+        for (msg, want_text) in chain.iter().zip(want) {
+            assert!(matches!(&msg.content[0], ContentBlock::Text { text } if text == want_text));
         }
     }
 
@@ -167,7 +137,7 @@ mod tests {
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(u));
         assert_eq!(chain.len(), 1);
-        assert_eq!(text_of(&chain[0]), "solo");
+        assert_chain_texts(&chain, &["solo"]);
     }
 
     #[test]
@@ -197,13 +167,11 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(u3));
-        let texts: Vec<&str> = chain.iter().map(text_of).collect();
-        assert_eq!(texts, vec!["a", "b", "c"]);
+        assert_chain_texts(&chain, &["a", "b", "c"]);
     }
 
     #[test]
     fn resolve_fork_picks_newest_leaf() {
-        // Two children of the same root; the later one wins as tip.
         let mut b = ChainBuilder::new();
         let root = Uuid::new_v4();
         let older = Uuid::new_v4();
@@ -229,14 +197,11 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(newer), "tip should be the newer leaf");
-        let texts: Vec<&str> = chain.iter().map(text_of).collect();
-        assert_eq!(texts, vec!["root", "newer"]);
+        assert_chain_texts(&chain, &["root", "newer"]);
     }
 
     #[test]
     fn resolve_fork_breaks_timestamp_tie_by_uuid_order() {
-        // Two leaves at the same timestamp — uuid ordering breaks the
-        // tie deterministically so the chosen tip is reproducible.
         let mut b = ChainBuilder::new();
         let root = Uuid::new_v4();
         let lo = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
@@ -261,9 +226,6 @@ mod tests {
 
     #[test]
     fn resolve_orphan_parent_terminates_chain_at_dangling_node() {
-        // The single leaf points at a UUID we never inserted. The walk
-        // halts at that orphan rather than erroring; the leaf still
-        // appears in the returned chain.
         let mut b = ChainBuilder::new();
         let only = Uuid::new_v4();
         b.insert(
@@ -276,17 +238,14 @@ mod tests {
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(only));
         assert_eq!(chain.len(), 1);
-        assert_eq!(text_of(&chain[0]), "dangling");
+        assert_chain_texts(&chain, &["dangling"]);
     }
 
     #[test]
     fn resolve_walk_breaks_when_leaf_chain_re_enters_cycle() {
-        // Leaf → mid → tail → mid (cycle below the leaf). The leaf is
-        // its own non-referenced node so it survives as the tip; the
-        // walker visits leaf → mid → tail → mid again, where the
-        // seen-set check trips and the chain truncates with whatever
-        // it has so far. Exercises the cycle-break branch that the
-        // pure mutual-cycle case (no leaf at all) doesn't reach.
+        // leaf → mid → tail → mid: leaf survives as tip, walker
+        // re-enters mid and the seen-set trips. Covers the
+        // cycle-break branch the no-leaf case doesn't reach.
         let mut b = ChainBuilder::new();
         let leaf = Uuid::new_v4();
         let mid = Uuid::new_v4();
@@ -312,17 +271,13 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(leaf), "leaf is the only non-referenced node");
-        // Walker visits leaf, mid, tail, then mid again → break. The
-        // collected prefix is reversed before return.
-        let texts: Vec<&str> = chain.iter().map(text_of).collect();
-        assert_eq!(texts, vec!["tail", "mid", "leaf"]);
+        assert_chain_texts(&chain, &["tail", "mid", "leaf"]);
     }
 
     #[test]
     fn resolve_cycle_truncates_chain_without_looping() {
-        // a → b → a. Both nodes reference each other so neither is a
-        // leaf — `referenced` covers both, leaving no tip candidate
-        // and the chain comes back empty without spinning forever.
+        // Mutual cycle: every node is referenced, so no leaf and no
+        // tip — chain comes back empty without spinning forever.
         let mut b = ChainBuilder::new();
         let a = Uuid::new_v4();
         let bb = Uuid::new_v4();
@@ -346,9 +301,6 @@ mod tests {
 
     #[test]
     fn resolve_self_loop_breaks_at_repeat_visit() {
-        // A leaf that points at itself: it is its own `referenced` so
-        // it is excluded from the tip candidates. Same outcome as the
-        // mutual-cycle case — empty chain, no infinite loop.
         let mut b = ChainBuilder::new();
         let only = Uuid::new_v4();
         b.insert(
@@ -365,8 +317,6 @@ mod tests {
 
     #[test]
     fn resolve_duplicate_uuid_keeps_latest_insertion() {
-        // Same UUID inserted twice — the second wins, matching the
-        // retry / partial-write recovery semantics the loader documents.
         let mut b = ChainBuilder::new();
         let u = Uuid::new_v4();
         b.insert(
@@ -384,7 +334,6 @@ mod tests {
 
         let (chain, tip) = b.resolve();
         assert_eq!(tip, Some(u));
-        assert_eq!(chain.len(), 1);
-        assert_eq!(text_of(&chain[0]), "second", "latest duplicate should win");
+        assert_chain_texts(&chain, &["second"]);
     }
 }
