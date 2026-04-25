@@ -335,36 +335,34 @@ mod tests {
     fn stream_event_content_block_start_text() {
         let json =
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
-        let StreamEvent::ContentBlockStart {
-            index,
-            content_block,
-        } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected ContentBlockStart");
-        };
-        assert_eq!(index, 0);
-        assert!(matches!(content_block, ContentBlockInfo::Text { text } if text.is_empty()));
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text { text },
+            } if text.is_empty(),
+        ));
     }
 
     #[test]
     fn stream_event_content_block_stop() {
-        let json = r#"{"type":"content_block_stop","index":2}"#;
-        let StreamEvent::ContentBlockStop { index } = serde_json::from_str(json).unwrap() else {
-            panic!("expected ContentBlockStop");
-        };
-        assert_eq!(index, 2);
+        let event: StreamEvent =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":2}"#).unwrap();
+        assert!(matches!(event, StreamEvent::ContentBlockStop { index: 2 }));
     }
 
     #[test]
     fn stream_event_message_delta_with_usage() {
         let json = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
-        let StreamEvent::MessageDelta { delta, usage } = serde_json::from_str(json).unwrap() else {
-            panic!("expected MessageDelta");
-        };
-        assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
-        let usage = usage.expect("expected usage");
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 42);
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody { stop_reason: Some(ref reason) },
+                usage: Some(Usage { input_tokens: 0, output_tokens: 42 }),
+            } if reason == "end_turn",
+        ));
     }
 
     #[test]
@@ -377,56 +375,51 @@ mod tests {
 
     #[test]
     fn content_block_info_text() {
-        let json = r#"{"type":"text","text":"Hello world"}"#;
-        let ContentBlockInfo::Text { text } = serde_json::from_str(json).unwrap() else {
-            panic!("expected Text");
-        };
-        assert_eq!(text, "Hello world");
+        let info: ContentBlockInfo =
+            serde_json::from_str(r#"{"type":"text","text":"Hello world"}"#).unwrap();
+        assert!(matches!(info, ContentBlockInfo::Text { text } if text == "Hello world"));
     }
 
     #[test]
     fn content_block_info_tool_use() {
-        let json = r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#;
-        let ContentBlockInfo::ToolUse { id, name } = serde_json::from_str(json).unwrap() else {
-            panic!("expected ToolUse");
-        };
-        assert_eq!(id, "toolu_01");
-        assert_eq!(name, "bash");
+        let info: ContentBlockInfo =
+            serde_json::from_str(r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#).unwrap();
+        assert!(matches!(
+            info,
+            ContentBlockInfo::ToolUse { id, name } if id == "toolu_01" && name == "bash",
+        ));
     }
 
     #[test]
     fn content_block_info_server_tool_use() {
-        let json = r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#;
-        let ContentBlockInfo::ServerToolUse { id, name } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected ServerToolUse");
-        };
-        assert_eq!(id, "stu_01");
-        assert_eq!(name, "advisor");
+        let info: ContentBlockInfo =
+            serde_json::from_str(r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#)
+                .unwrap();
+        assert!(matches!(
+            info,
+            ContentBlockInfo::ServerToolUse { id, name } if id == "stu_01" && name == "advisor",
+        ));
     }
 
     #[test]
     fn content_block_info_thinking() {
         let json = r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#;
-        let ContentBlockInfo::Thinking {
-            thinking,
-            signature,
-        } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected Thinking");
-        };
-        assert_eq!(thinking, "Let me analyze this");
-        assert_eq!(signature, "sig_xyz");
+        let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            info,
+            ContentBlockInfo::Thinking { thinking, signature }
+                if thinking == "Let me analyze this" && signature == "sig_xyz",
+        ));
     }
 
     #[test]
     fn content_block_info_redacted_thinking() {
-        let json = r#"{"type":"redacted_thinking","data":"base64data=="}"#;
-        let ContentBlockInfo::RedactedThinking { data } = serde_json::from_str(json).unwrap()
-        else {
-            panic!("expected RedactedThinking");
-        };
-        assert_eq!(data, "base64data==");
+        let info: ContentBlockInfo =
+            serde_json::from_str(r#"{"type":"redacted_thinking","data":"base64data=="}"#).unwrap();
+        assert!(matches!(
+            info,
+            ContentBlockInfo::RedactedThinking { data } if data == "base64data==",
+        ));
     }
 
     #[test]
@@ -440,44 +433,40 @@ mod tests {
 
     #[test]
     fn delta_text() {
-        let Delta::TextDelta { text } =
-            serde_json::from_str(r#"{"type":"text_delta","text":"Hello"}"#).unwrap()
-        else {
-            panic!("expected TextDelta");
-        };
-        assert_eq!(text, "Hello");
+        let delta: Delta = serde_json::from_str(r#"{"type":"text_delta","text":"Hello"}"#).unwrap();
+        assert!(matches!(delta, Delta::TextDelta { text } if text == "Hello"));
     }
 
     #[test]
     fn delta_input_json() {
-        let Delta::InputJsonDelta { partial_json } =
+        let delta: Delta =
             serde_json::from_str(r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#)
-                .unwrap()
-        else {
-            panic!("expected InputJsonDelta");
-        };
-        assert_eq!(partial_json, r#"{"key":"#);
+                .unwrap();
+        assert!(matches!(
+            delta,
+            Delta::InputJsonDelta { partial_json } if partial_json == r#"{"key":"#,
+        ));
     }
 
     #[test]
     fn delta_thinking() {
-        let Delta::ThinkingDelta { thinking } =
+        let delta: Delta =
             serde_json::from_str(r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#)
-                .unwrap()
-        else {
-            panic!("expected ThinkingDelta");
-        };
-        assert_eq!(thinking, "partial reasoning");
+                .unwrap();
+        assert!(matches!(
+            delta,
+            Delta::ThinkingDelta { thinking } if thinking == "partial reasoning",
+        ));
     }
 
     #[test]
     fn delta_signature() {
-        let Delta::SignatureDelta { signature } =
-            serde_json::from_str(r#"{"type":"signature_delta","signature":"sig_abc123"}"#).unwrap()
-        else {
-            panic!("expected SignatureDelta");
-        };
-        assert_eq!(signature, "sig_abc123");
+        let delta: Delta =
+            serde_json::from_str(r#"{"type":"signature_delta","signature":"sig_abc123"}"#).unwrap();
+        assert!(matches!(
+            delta,
+            Delta::SignatureDelta { signature } if signature == "sig_abc123",
+        ));
     }
 
     #[test]

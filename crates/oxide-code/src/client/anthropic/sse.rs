@@ -222,16 +222,14 @@ mod tests {
             event: content_block_delta
             data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
         "#};
-        let StreamEvent::ContentBlockDelta { index, delta } =
-            parse_sse_frame(frame).unwrap().unwrap()
-        else {
-            panic!("expected ContentBlockDelta");
-        };
-        assert_eq!(index, 0);
-        let Delta::TextDelta { text } = delta else {
-            panic!("expected TextDelta");
-        };
-        assert_eq!(text, "Hello");
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(
+            event,
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text },
+            } if text == "Hello",
+        ));
     }
 
     #[test]
@@ -252,14 +250,20 @@ mod tests {
             event: message_start
             data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
         "#};
-        let StreamEvent::MessageStart { message } = parse_sse_frame(frame).unwrap().unwrap() else {
-            panic!("expected MessageStart");
-        };
-        assert_eq!(message.id, "msg_123");
-        assert_eq!(message.model, "claude-sonnet-4-6");
-        let usage = message.usage.expect("expected usage");
-        assert_eq!(usage.input_tokens, 25);
-        assert_eq!(usage.output_tokens, 1);
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(
+            event,
+            StreamEvent::MessageStart {
+                message: super::super::wire::MessageResponse {
+                    ref id,
+                    ref model,
+                    usage: Some(super::super::wire::Usage {
+                        input_tokens: 25,
+                        output_tokens: 1,
+                    }),
+                },
+            } if id == "msg_123" && model == "claude-sonnet-4-6",
+        ));
     }
 
     #[test]
@@ -268,11 +272,16 @@ mod tests {
             event: error
             data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
         "#};
-        let StreamEvent::Error { error } = parse_sse_frame(frame).unwrap().unwrap() else {
-            panic!("expected Error");
-        };
-        assert_eq!(error.error_type, "rate_limit_error");
-        assert_eq!(error.message, "Too many requests");
+        let event = parse_sse_frame(frame).unwrap().unwrap();
+        assert!(matches!(
+            event,
+            StreamEvent::Error {
+                error: super::super::wire::ApiError {
+                    ref error_type,
+                    ref message,
+                },
+            } if error_type == "rate_limit_error" && message == "Too many requests",
+        ));
     }
 
     #[test]
