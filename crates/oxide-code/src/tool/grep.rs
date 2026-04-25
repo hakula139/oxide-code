@@ -79,11 +79,8 @@ impl Tool for GrepTool {
         content: &str,
         _metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        // Only content mode (the default) parses into structured groups.
-        // `files_with_matches` and `count` already render cleanly through
-        // the default text body — their summary line carries the count
-        // and the rest is one path per line, which doesn't benefit from
-        // the line-numbered shape.
+        // Only content mode produces line-numbered rows; other modes
+        // fall through so their summary header stays visible.
         let mode = input
             .get("output_mode")
             .and_then(serde_json::Value::as_str)
@@ -541,18 +538,10 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
 
 // ── Result View ──
 
-/// Parses content-mode grep output into structured per-file groups.
-/// Returns `None` for any output the parser doesn't fully recognize so
-/// the rendered block falls through to the default text body — preferring
-/// "user sees raw output" over "user sees a partial structured render
-/// that silently drops information". Specifically:
-///
-/// - Skipped-large-file warnings live in a trailing block we don't
-///   model; their presence triggers the text fallback so the warning
-///   stays visible.
-/// - Any line that isn't a valid `path:NUM:text` / `path:NUM-text` row,
-///   `--` separator, blank, or `(Results limited to ...)` footer
-///   triggers the fallback rather than getting silently dropped.
+/// Parses content-mode grep output into per-file groups. Returns `None`
+/// for any unrecognised line — skipped-file warnings, malformed rows —
+/// so the block falls through to the text body and the reader sees raw
+/// output instead of a silently truncated render.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     if content.contains("\n\nSkipped (exceeds ") {
         return None;
@@ -590,11 +579,10 @@ fn parse_content_view(content: &str) -> Option<ToolResultView> {
     Some(ToolResultView::GrepMatches { groups, truncated })
 }
 
-/// Parses one row of grep content-mode output. `path:NUM:text` is a
-/// match (`is_match: true`); `path:NUM-text` is a context line. The
-/// scanner walks colons left-to-right and accepts the first one
-/// followed by digits and either separator — that lets it skip
-/// Windows-style `C:` prefixes that have no digits immediately after.
+/// Parses one row of content-mode grep output. `path:NUM:text` is a
+/// match; `path:NUM-text` is a context line. Scans colons left-to-right
+/// to skip path-internal `:` (e.g., Windows `C:foo`) without digits
+/// after.
 fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
     let mut search_start = 0;
     while let Some(off) = line[search_start..].find(':') {
@@ -1242,9 +1230,8 @@ mod tests {
 
     #[test]
     fn parse_content_view_groups_consecutive_lines_with_context_and_separator() {
-        // Combined coverage: groups by path, distinguishes match (`:`)
-        // from context (`-`), accepts the `--` range separator without
-        // splitting groups, and chains a second file into its own group.
+        // Groups by path, distinguishes match (`:`) from context (`-`),
+        // accepts `--` separators, chains a second file into its own group.
         let content = indoc! {"
             src/main.rs:10:fn main() {
             src/main.rs:11-    println!(\"hi\");
@@ -1252,41 +1239,42 @@ mod tests {
             src/main.rs:20:    helper();
             src/lib.rs:5:fn other()
         "};
-        let view = parse_content_view(content).unwrap();
-        let ToolResultView::GrepMatches { groups, truncated } = view else {
-            panic!("expected GrepMatches");
-        };
-        assert!(!truncated);
-        assert_eq!(groups.len(), 2);
-
-        let main = &groups[0];
-        assert_eq!(main.path, "src/main.rs");
         assert_eq!(
-            main.lines,
-            vec![
-                GrepMatchLine {
-                    number: 10,
-                    text: "fn main() {".to_owned(),
-                    is_match: true,
-                },
-                GrepMatchLine {
-                    number: 11,
-                    text: "    println!(\"hi\");".to_owned(),
-                    is_match: false,
-                },
-                GrepMatchLine {
-                    number: 20,
-                    text: "    helper();".to_owned(),
-                    is_match: true,
-                },
-            ],
+            parse_content_view(content),
+            Some(ToolResultView::GrepMatches {
+                groups: vec![
+                    GrepFileGroup {
+                        path: "src/main.rs".to_owned(),
+                        lines: vec![
+                            GrepMatchLine {
+                                number: 10,
+                                text: "fn main() {".to_owned(),
+                                is_match: true,
+                            },
+                            GrepMatchLine {
+                                number: 11,
+                                text: "    println!(\"hi\");".to_owned(),
+                                is_match: false,
+                            },
+                            GrepMatchLine {
+                                number: 20,
+                                text: "    helper();".to_owned(),
+                                is_match: true,
+                            },
+                        ],
+                    },
+                    GrepFileGroup {
+                        path: "src/lib.rs".to_owned(),
+                        lines: vec![GrepMatchLine {
+                            number: 5,
+                            text: "fn other()".to_owned(),
+                            is_match: true,
+                        }],
+                    },
+                ],
+                truncated: false,
+            }),
         );
-
-        let lib = &groups[1];
-        assert_eq!(lib.path, "src/lib.rs");
-        assert_eq!(lib.lines.len(), 1);
-        assert_eq!(lib.lines[0].number, 5);
-        assert!(lib.lines[0].is_match);
     }
 
     #[test]
@@ -1295,29 +1283,34 @@ mod tests {
             src/main.rs:1:hit
 
             (Results limited to 1 lines)"};
-        let view = parse_content_view(content).unwrap();
-        let ToolResultView::GrepMatches { groups, truncated } = view else {
-            panic!("expected GrepMatches");
-        };
-        assert!(truncated);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].lines[0].number, 1);
+        assert_eq!(
+            parse_content_view(content),
+            Some(ToolResultView::GrepMatches {
+                groups: vec![GrepFileGroup {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![GrepMatchLine {
+                        number: 1,
+                        text: "hit".to_owned(),
+                        is_match: true,
+                    }],
+                }],
+                truncated: true,
+            }),
+        );
     }
 
     #[test]
     fn parse_content_view_falls_back_when_skipped_warnings_present() {
-        // Skipped-large-file warnings carry information the structured
-        // shape doesn't model. Falling through to the text body keeps
-        // the warning visible instead of silently dropping it.
+        // Skipped-warning text isn't modelled by GrepMatches; fall back
+        // so the warning stays visible in the rendered text body.
         let content = "src/main.rs:1:hit\n\nSkipped (exceeds 1 MB size limit):\n  big.txt (5.0 MB)";
         assert!(parse_content_view(content).is_none());
     }
 
     #[test]
-    fn parse_content_view_falls_back_on_unparseable_line() {
-        // An unrecognised line means we'd partially render and silently
-        // drop the rest. Better to fall back so the reader sees
-        // everything verbatim.
+    fn parse_content_view_falls_back_on_invalid_line() {
+        // Any unrecognised row triggers full fallback rather than a
+        // partial render that silently drops information.
         assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
     }
 
@@ -1340,9 +1333,8 @@ mod tests {
 
     #[test]
     fn parse_match_line_skips_path_internal_colons_without_digit_separator() {
-        // The scanner walks colons left-to-right and only accepts one
-        // followed by digits + separator. A path-internal `:` with no
-        // digits after it (e.g., a Windows-ish `C:foo`) is skipped.
+        // Path-internal `:` without digits after (e.g., Windows `C:foo`)
+        // is skipped; the scanner accepts the next valid `:NUM` boundary.
         let (path, m) = parse_match_line("C:foo:42:body").unwrap();
         assert_eq!(path, "C:foo");
         assert_eq!(m.number, 42);

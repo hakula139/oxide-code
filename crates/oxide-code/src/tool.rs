@@ -143,11 +143,9 @@ pub(crate) enum ToolResultView {
         replace_all: bool,
         replacements: usize,
     },
-    /// Grep tool (content mode only) — renders as per-file groups with
-    /// line-numbered match rows. `truncated` mirrors the
-    /// "Results limited to N lines" footer in the model-facing output.
-    /// Other grep modes (files-with-matches, count) and any output with
-    /// trailing skipped-file warnings fall through to [`Text`].
+    /// Grep content-mode result. `truncated` mirrors grep's "Results
+    /// limited to N lines" footer. Other modes and outputs with skipped-
+    /// file warnings fall through to [`Text`].
     GrepMatches {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
@@ -161,19 +159,16 @@ pub(crate) struct ReadExcerptLine {
     pub(crate) text: String,
 }
 
-/// One file's contiguous match block in a structured grep result view.
-/// Lines may include both actual matches (`:` separator in grep
-/// output) and surrounding context lines (`-` separator) when the model
-/// requested context.
+/// One file's match block in a grep result view. Lines mix matches
+/// (`:` in grep output) and surrounding context (`-`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepFileGroup {
     pub(crate) path: String,
     pub(crate) lines: Vec<GrepMatchLine>,
 }
 
-/// One row in a [`GrepFileGroup`]. `is_match` distinguishes a real
-/// match from a surrounding context line so renderers can dim context
-/// without losing the line.
+/// One row in a [`GrepFileGroup`]. `is_match: false` flags context
+/// lines so renderers can dim them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepMatchLine {
     pub(crate) number: usize,
@@ -855,9 +850,6 @@ mod tests {
 
     #[test]
     fn result_view_delegates_grep_matches() {
-        // Pin the full GrepMatches structure so a mutation returning
-        // empty groups or flipping `is_match` doesn't sneak through
-        // the registry routing.
         let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
         let input = serde_json::json!({"pattern": "fn"});
         let metadata = ToolMetadata::default();

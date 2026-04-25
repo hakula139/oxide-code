@@ -1,7 +1,6 @@
-//! `grep` tool body (content mode) — per-file groups of matches with
-//! line-numbered rows under each file path header. Context lines (the
-//! `-` separator in grep's text output) render dim so readers can pick
-//! out the actual matches at a glance.
+//! `grep` tool body (content mode) — per-file groups of line-numbered
+//! match rows. Context lines (`-` separator in grep output) render dim
+//! to keep matches visually distinct.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -29,15 +28,12 @@ pub(super) fn render(
     let width = usize::from(ctx.width);
     let status_cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
 
-    // Budget covers both path headers and match rows so a result with
-    // many small files doesn't push every match off the visible block.
+    // Budget spans both path headers and match rows.
     let total_rows: usize = groups.iter().map(|g| 1 + g.lines.len()).sum();
     let visible_rows = total_rows.min(MAX_TOOL_OUTPUT_LINES);
     let hidden = total_rows.saturating_sub(visible_rows);
 
-    // Pad numbers to the widest line number across the whole result —
-    // a 4-digit line number doesn't shift the column under a 1-digit
-    // sibling group above it.
+    // Pad to the widest line number across all groups for column alignment.
     let line_number_width = groups
         .iter()
         .flat_map(|g| g.lines.iter())
@@ -100,11 +96,8 @@ pub(super) fn render(
     }
 }
 
-/// Builds the trailing footer line for the rendered body. Two
-/// independent reasons to abbreviate stack on the same line: the TUI
-/// hid rows past [`MAX_TOOL_OUTPUT_LINES`] (`hidden`) and grep itself
-/// hit `head_limit` server-side (`truncated`). Returns `None` when
-/// neither applies.
+/// Footer combining TUI-side row hiding (`hidden`) and grep's
+/// server-side `head_limit` (`truncated`). `None` when neither applies.
 fn footer_text(hidden: usize, truncated: bool) -> Option<String> {
     match (hidden, truncated) {
         (0, false) => None,
@@ -122,7 +115,66 @@ fn footer_text(hidden: usize, truncated: bool) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::tui::theme::Theme;
+
     use super::*;
+
+    fn collect_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|sp| sp.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    // ── render ──
+
+    #[test]
+    fn render_empty_groups_emits_nothing() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        // truncated=true is intentional: empty groups short-circuit
+        // before the footer, so even a `truncated` flag emits no body.
+        render(&mut out, &ctx, &[], true, false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn render_stops_when_budget_fills_at_path_boundary() {
+        // Six 0-line groups overflow the 5-row budget on path headers
+        // alone, exercising the outer-loop budget guard that the inner
+        // `break 'outer` doesn't reach when groups have no match rows.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        let groups: Vec<GrepFileGroup> = (0..6)
+            .map(|i| GrepFileGroup {
+                path: format!("f{i}.rs"),
+                lines: Vec::new(),
+            })
+            .collect();
+        render(&mut out, &ctx, &groups, false, false);
+        let body = collect_text(&out);
+        for i in 0..5 {
+            assert!(
+                body.contains(&format!("f{i}.rs")),
+                "first 5 path headers should render: {body}",
+            );
+        }
+        assert!(
+            !body.contains("f5.rs"),
+            "6th path header should be hidden by the budget guard: {body}",
+        );
+    }
 
     // ── footer_text ──
 

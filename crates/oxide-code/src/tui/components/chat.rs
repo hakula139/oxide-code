@@ -1835,33 +1835,24 @@ mod tests {
         };
         chat.push_tool_result_view("Grep(fn)", view, false);
         let text = all_text(&chat);
-        // Path headers both visible; line numbers padded to a uniform
-        // width across files (10/11 vs single-digit 5 forces width 2,
-        // so the lib.rs row reads " 5 │ ...").
-        assert!(
-            text.contains("src/main.rs"),
-            "missing main.rs header: {text}"
-        );
-        assert!(text.contains("src/lib.rs"), "missing lib.rs header: {text}");
-        assert!(
-            text.contains("10 │ fn main() {"),
-            "missing match row: {text}",
-        );
+        // Width forced to 2 by 10/11; the lib.rs row pads to " 5 │ ...".
+        assert!(text.contains("src/main.rs"), "missing main.rs: {text}");
+        assert!(text.contains("src/lib.rs"), "missing lib.rs: {text}");
+        assert!(text.contains("10 │ fn main() {"), "missing match: {text}");
         assert!(
             text.contains("11 │     helper();"),
-            "context row should still render: {text}",
+            "missing context: {text}",
         );
         assert!(
             text.contains(" 5 │ fn lib_func()"),
-            "second-group row should be padded to match column width: {text}",
+            "padding mismatch: {text}",
         );
     }
 
     #[test]
     fn push_tool_result_view_grep_truncates_body_with_hidden_line_count() {
-        // Six rows total (1 path header + 5 matches) overflows the
-        // 5-line tool-body budget, so the last match collapses behind
-        // a `+N lines` footer.
+        // 1 path + 5 matches = 6 rows; the 5-row budget hides the last
+        // match behind a `+N lines` footer.
         let mut chat = test_chat();
         let lines = (1..=5)
             .map(|number| crate::tool::GrepMatchLine {
@@ -1879,25 +1870,15 @@ mod tests {
         };
         chat.push_tool_result_view("Grep(hit)", view, false);
         let text = all_text(&chat);
-        assert!(
-            text.contains("4 │ hit 4"),
-            "fourth row should render: {text}"
-        );
-        assert!(
-            !text.contains("5 │ hit 5"),
-            "fifth row should be hidden by the line budget: {text}",
-        );
-        assert!(
-            text.contains("... +1 line"),
-            "hidden-row footer should name the singular count: {text}",
-        );
+        assert!(text.contains("4 │ hit 4"), "missing 4th row: {text}");
+        assert!(!text.contains("5 │ hit 5"), "5th row leaked: {text}");
+        assert!(text.contains("... +1 line"), "wrong footer: {text}");
     }
 
     #[test]
     fn push_tool_result_view_grep_truncated_flag_emits_limit_reached_marker() {
-        // No rows hidden by the body budget, but the grep run itself
-        // hit `head_limit` server-side. The footer should advertise
-        // that without a phantom hidden-row count.
+        // Body fits the budget but grep hit `head_limit` server-side;
+        // footer advertises the truncation without a hidden-row count.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::GrepMatches {
             groups: vec![crate::tool::GrepFileGroup {
@@ -1912,14 +1893,8 @@ mod tests {
         };
         chat.push_tool_result_view("Grep(hit)", view, false);
         let text = all_text(&chat);
-        assert!(
-            text.contains("limit reached"),
-            "truncated flag should surface in footer: {text}",
-        );
-        assert!(
-            !text.contains("+0"),
-            "no phantom hidden-row count when nothing is hidden: {text}",
-        );
+        assert!(text.contains("limit reached"), "missing footer: {text}");
+        assert!(!text.contains("+0"), "phantom hidden count: {text}");
     }
 
     // ── push_error ──
