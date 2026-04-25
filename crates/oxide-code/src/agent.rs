@@ -8,6 +8,8 @@
 pub(crate) mod event;
 pub(crate) mod pending_calls;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
@@ -69,7 +71,10 @@ pub(crate) async fn agent_turn(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        let blocks = stream_response(client, messages, &tool_defs, prompt, sink).await?;
+        let StreamOutcome {
+            blocks,
+            parse_errors,
+        } = stream_response(client, messages, &tool_defs, prompt, sink).await?;
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -101,13 +106,23 @@ pub(crate) async fn agent_turn(
                 input: input.clone(),
             });
 
-            let output = match tools.get(&name) {
-                Some(t) => t.run(input).await,
-                None => ToolOutput {
-                    content: format!("Unknown tool: {name}"),
+            let output = if let Some(err) = parse_errors.get(&id) {
+                ToolOutput {
+                    content: format!(
+                        "tool input JSON failed to parse: {err}; retry with a valid object",
+                    ),
                     is_error: true,
                     metadata: ToolMetadata::default(),
-                },
+                }
+            } else {
+                match tools.get(&name) {
+                    Some(t) => t.run(input).await,
+                    None => ToolOutput {
+                        content: format!("Unknown tool: {name}"),
+                        is_error: true,
+                        metadata: ToolMetadata::default(),
+                    },
+                }
             };
 
             _ = sink.send(AgentEvent::ToolCallEnd {
@@ -178,37 +193,70 @@ enum BlockAccumulator {
 }
 
 impl BlockAccumulator {
-    fn into_content_block(self) -> Option<ContentBlock> {
+    /// Lower the accumulated state into a [`ContentBlock`]. For tool-use
+    /// variants, also surface any JSON parse error against the tool's id
+    /// so the caller can inject a synthetic error result and tell the
+    /// model what actually went wrong (instead of running the tool with
+    /// an empty input and surfacing a misleading schema error).
+    fn into_content_block(self) -> (Option<ContentBlock>, Option<(String, String)>) {
         match self {
-            Self::Text(text) => Some(ContentBlock::Text { text }),
-            Self::ToolUse { id, name, json_buf } => Some(ContentBlock::ToolUse {
-                id,
-                name,
-                input: parse_tool_json(&json_buf),
-            }),
-            Self::ServerToolUse { id, name, json_buf } => Some(ContentBlock::ServerToolUse {
-                id,
-                name,
-                input: parse_tool_json(&json_buf),
-            }),
+            Self::Text(text) => (Some(ContentBlock::Text { text }), None),
+            Self::ToolUse { id, name, json_buf } => {
+                let (input, err) = parse_tool_json(&json_buf);
+                let parse_error = err.map(|e| (id.clone(), e));
+                (Some(ContentBlock::ToolUse { id, name, input }), parse_error)
+            }
+            Self::ServerToolUse { id, name, json_buf } => {
+                let (input, err) = parse_tool_json(&json_buf);
+                let parse_error = err.map(|e| (id.clone(), e));
+                (
+                    Some(ContentBlock::ServerToolUse { id, name, input }),
+                    parse_error,
+                )
+            }
             Self::Thinking {
                 thinking,
                 signature,
-            } => Some(ContentBlock::Thinking {
-                thinking,
-                signature,
-            }),
-            Self::RedactedThinking { data } => Some(ContentBlock::RedactedThinking { data }),
-            Self::Skipped => None,
+            } => (
+                Some(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                }),
+                None,
+            ),
+            Self::RedactedThinking { data } => {
+                (Some(ContentBlock::RedactedThinking { data }), None)
+            }
+            Self::Skipped => (None, None),
         }
     }
 }
 
-fn parse_tool_json(json_buf: &str) -> serde_json::Value {
-    serde_json::from_str(json_buf).unwrap_or_else(|e| {
-        warn!("malformed tool input JSON: {e}");
-        serde_json::Value::Object(serde_json::Map::new())
-    })
+/// Decode a tool's streamed `input_json_delta` buffer. On failure, fall
+/// back to an empty object so the [`ContentBlock::ToolUse`] round-trip
+/// to the model stays valid, but return the parse error too — callers
+/// short-circuit dispatch to a synthetic error tool result so the model
+/// learns its JSON was malformed instead of seeing a schema error.
+fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
+    match serde_json::from_str(json_buf) {
+        Ok(value) => (value, None),
+        Err(e) => {
+            warn!("malformed tool input JSON: {e}");
+            (
+                serde_json::Value::Object(serde_json::Map::new()),
+                Some(e.to_string()),
+            )
+        }
+    }
+}
+
+/// Outcome of one model streaming pass: the assembled content blocks
+/// plus a map of `tool_use_id` to JSON parse error message for any
+/// tool-use blocks whose `input_json_delta` stream did not decode.
+#[derive(Debug, Default)]
+struct StreamOutcome {
+    blocks: Vec<ContentBlock>,
+    parse_errors: HashMap<String, String>,
 }
 
 async fn stream_response(
@@ -217,7 +265,7 @@ async fn stream_response(
     tools: &[ToolDefinition],
     prompt: &PromptParts,
     sink: &dyn AgentSink,
-) -> Result<Vec<ContentBlock>> {
+) -> Result<StreamOutcome> {
     let section_refs: Vec<&str> = prompt.system_sections.iter().map(String::as_str).collect();
     let mut rx = client.stream_message(
         messages,
@@ -262,11 +310,13 @@ async fn stream_response(
         }
     }
 
-    Ok(blocks
-        .into_iter()
-        .flatten()
-        .filter_map(BlockAccumulator::into_content_block)
-        .collect())
+    let mut outcome = StreamOutcome::default();
+    for acc in blocks.into_iter().flatten() {
+        let (block, parse_error) = acc.into_content_block();
+        outcome.parse_errors.extend(parse_error);
+        outcome.blocks.extend(block);
+    }
+    Ok(outcome)
 }
 
 fn init_accumulator(content_block: ContentBlockInfo, index: usize) -> BlockAccumulator {
@@ -613,6 +663,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
+        // The model sometimes emits truncated / invalid JSON in
+        // `input_json_delta`. The tool MUST NOT run with empty input —
+        // instead the agent synthesizes an `is_error: true` tool result
+        // that names the parse failure so the model can self-correct.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", "{unclosed"),
+            text_turn("recovered"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        // ToolUse round-trips with the empty-object fallback so the
+        // assistant message stays well-formed.
+        assert!(matches!(
+            &messages[1].content[0],
+            ContentBlock::ToolUse { id, input, .. }
+                if id == "tool_1" && *input == json!({}),
+        ));
+
+        // Tool was NOT dispatched: result content is the synthetic
+        // parse-error message, not EchoTool's `{}` echo.
+        assert!(matches!(
+            &messages[2].content[0],
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error: true,
+            } if tool_use_id == "tool_1"
+                && content.contains("tool input JSON failed to parse")
+                && content.contains("retry with a valid object"),
+        ));
+
+        // Sink saw a ToolCallEnd with is_error so the UI also reflects
+        // the failure (instead of rendering an unparsed input label).
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCallEnd { id, is_error: true, content, .. }
+                if id == "tool_1" && content.contains("tool input JSON failed to parse"),
+        )));
+    }
+
+    #[tokio::test]
     async fn agent_turn_max_tool_rounds_bails_with_safety_cap_message() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -778,13 +886,14 @@ data: {"type":"message_stop"}
 
     #[test]
     fn into_content_block_text_yields_text_block() {
-        let block = BlockAccumulator::Text("hi".to_owned()).into_content_block();
+        let (block, err) = BlockAccumulator::Text("hi".to_owned()).into_content_block();
         assert!(matches!(block, Some(ContentBlock::Text { text }) if text == "hi"));
+        assert!(err.is_none());
     }
 
     #[test]
     fn into_content_block_tool_use_yields_tool_use_block() {
-        let block = BlockAccumulator::ToolUse {
+        let (block, err) = BlockAccumulator::ToolUse {
             id: "tool_1".to_owned(),
             name: "bash".to_owned(),
             json_buf: r#"{"command": "ls"}"#.to_owned(),
@@ -796,11 +905,48 @@ data: {"type":"message_stop"}
         assert_eq!(id, "tool_1");
         assert_eq!(name, "bash");
         assert_eq!(input, json!({"command": "ls"}));
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn into_content_block_tool_use_malformed_json_surfaces_parse_error() {
+        let (block, err) = BlockAccumulator::ToolUse {
+            id: "tool_1".to_owned(),
+            name: "bash".to_owned(),
+            json_buf: "{unclosed".to_owned(),
+        }
+        .into_content_block();
+        assert!(matches!(
+            &block,
+            Some(ContentBlock::ToolUse { id, input, .. })
+                if id == "tool_1" && *input == json!({}),
+        ));
+        let (err_id, err_msg) = err.expect("parse error surfaced");
+        assert_eq!(err_id, "tool_1");
+        assert!(!err_msg.is_empty(), "non-empty serde_json error: {err_msg}");
+    }
+
+    #[test]
+    fn into_content_block_server_tool_use_malformed_json_surfaces_parse_error() {
+        let (block, err) = BlockAccumulator::ServerToolUse {
+            id: "srv_1".to_owned(),
+            name: "web_search".to_owned(),
+            json_buf: "{unclosed".to_owned(),
+        }
+        .into_content_block();
+        assert!(matches!(
+            &block,
+            Some(ContentBlock::ServerToolUse { id, input, .. })
+                if id == "srv_1" && *input == json!({}),
+        ));
+        let (err_id, err_msg) = err.expect("parse error surfaced");
+        assert_eq!(err_id, "srv_1");
+        assert!(!err_msg.is_empty(), "non-empty serde_json error: {err_msg}");
     }
 
     #[test]
     fn into_content_block_server_tool_use_yields_server_tool_use_block() {
-        let block = BlockAccumulator::ServerToolUse {
+        let (block, err) = BlockAccumulator::ServerToolUse {
             id: "srv_1".to_owned(),
             name: "web_search".to_owned(),
             json_buf: r#"{"query": "rust"}"#.to_owned(),
@@ -812,11 +958,12 @@ data: {"type":"message_stop"}
         assert_eq!(id, "srv_1");
         assert_eq!(name, "web_search");
         assert_eq!(input, json!({"query": "rust"}));
+        assert!(err.is_none());
     }
 
     #[test]
     fn into_content_block_thinking_preserves_signature() {
-        let block = BlockAccumulator::Thinking {
+        let (block, err) = BlockAccumulator::Thinking {
             thinking: "step 1".to_owned(),
             signature: "sig_abc".to_owned(),
         }
@@ -830,36 +977,43 @@ data: {"type":"message_stop"}
         };
         assert_eq!(thinking, "step 1");
         assert_eq!(signature, "sig_abc");
+        assert!(err.is_none());
     }
 
     #[test]
     fn into_content_block_redacted_thinking_preserves_data() {
-        let block = BlockAccumulator::RedactedThinking {
+        let (block, err) = BlockAccumulator::RedactedThinking {
             data: "opaque-blob".to_owned(),
         }
         .into_content_block();
         assert!(
             matches!(block, Some(ContentBlock::RedactedThinking { data }) if data == "opaque-blob")
         );
+        assert!(err.is_none());
     }
 
     #[test]
     fn into_content_block_skipped_yields_none() {
-        assert!(BlockAccumulator::Skipped.into_content_block().is_none());
+        let (block, err) = BlockAccumulator::Skipped.into_content_block();
+        assert!(block.is_none());
+        assert!(err.is_none());
     }
 
     // ── parse_tool_json ──
 
     #[test]
     fn parse_tool_json_valid_object() {
-        let value = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
+        let (value, err) = parse_tool_json(r#"{"command": "ls", "n": 3}"#);
         assert_eq!(value, json!({"command": "ls", "n": 3}));
+        assert!(err.is_none());
     }
 
     #[test]
-    fn parse_tool_json_malformed() {
-        let value = parse_tool_json("{unclosed");
+    fn parse_tool_json_malformed_returns_empty_object_and_error() {
+        let (value, err) = parse_tool_json("{unclosed");
         assert_eq!(value, json!({}));
+        let err = err.expect("parse error surfaced");
+        assert!(!err.is_empty(), "non-empty serde_json error: {err}");
     }
 
     // ── init_accumulator ──
