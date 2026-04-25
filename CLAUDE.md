@@ -29,8 +29,13 @@ ox     # Start an interactive session
 │   └── pending_calls.rs            # PendingCall / PendingCalls correlation state shared by live streaming and transcript resume
 ├── client.rs                       # Client module root
 ├── client/
-│   ├── anthropic.rs                # Anthropic Messages API streaming client
-│   └── billing.rs                  # Billing attribution header (fingerprint, cch attestation)
+│   ├── anthropic.rs                # Anthropic Messages API client (Client struct + streaming)
+│   └── anthropic/
+│       ├── betas.rs                # Per-request `anthropic-beta` header computation, 1P / [1m] gating
+│       ├── billing.rs              # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
+│       ├── completion.rs           # Non-streaming `Client::complete` + body builder for one-shots
+│       ├── sse.rs                  # SSE pump, frame parsing, API-error formatting
+│       └── wire.rs                 # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
 ├── config.rs                       # Configuration loading and layered merging
 ├── config/
 │   ├── file.rs                     # TOML config file discovery, parsing, and merge (user + project)
