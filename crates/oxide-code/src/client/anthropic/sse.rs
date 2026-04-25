@@ -256,6 +256,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_sse_skips_invalid_utf8_frame_then_keeps_streaming() {
+        // A chunk with non-UTF-8 bytes between SSE separators must be
+        // skipped (not surfaced) so a single corrupted frame can't poison
+        // the stream — every other frame after it must still deliver.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 0xC3 0x28 is an invalid UTF-8 sequence (lone start byte).
+        // The valid follow-up frame must still parse to Ping.
+        let mut body: Vec<u8> = b"event: ping\ndata: \xc3\x28\n\n".to_vec();
+        body.extend_from_slice(
+            indoc! {r#"
+                event: ping
+                data: {"type":"ping"}
+
+            "#}
+            .as_bytes(),
+        );
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(8);
+        let url = format!("{}/messages", server.uri());
+        stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event.unwrap());
+        }
+        assert_eq!(events.len(), 1, "only the valid frame surfaced: {events:?}");
+        assert!(matches!(events[0], StreamEvent::Ping));
+    }
+
+    #[tokio::test]
+    async fn stream_sse_handles_data_less_frames_without_emitting_event() {
+        // A frame with only an `event:` (or comment) line and no `data:`
+        // line parses to `Ok(None)`; the loop must consume it silently
+        // and continue — Anthropic occasionally emits comment heartbeats.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = indoc! {r#"
+            : heartbeat comment
+
+            event: ping
+            data: {"type":"ping"}
+
+        "#};
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(8);
+        let url = format!("{}/messages", server.uri());
+        stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event.unwrap());
+        }
+        assert_eq!(events.len(), 1, "comment skipped, ping kept: {events:?}");
+        assert!(matches!(events[0], StreamEvent::Ping));
+    }
+
+    #[tokio::test]
     async fn stream_sse_returns_ok_when_receiver_drops_before_send() {
         // Consumer cancellation closes the channel; the next tx.send
         // call surfaces an Err which stream_sse must treat as graceful
@@ -264,7 +352,12 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let body = "event: ping\ndata: {\"type\":\"ping\"}\n\n".repeat(8);
+        let body = indoc! {r#"
+            event: ping
+            data: {"type":"ping"}
+
+        "#}
+        .repeat(8);
         Mock::given(method("POST"))
             .and(path("/messages"))
             .respond_with(
