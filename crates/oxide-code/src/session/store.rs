@@ -10,7 +10,7 @@
 //! where they sit — titles buried behind multi-KB tool-result lines
 //! are a real shape on long sessions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use super::chain::ChainBuilder;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
@@ -278,8 +279,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut nodes: HashMap<Uuid, ChainNode> = HashMap::new();
-    let mut referenced: HashSet<Uuid> = HashSet::new();
+    let mut chain = ChainBuilder::new();
     let mut latest_title: Option<TitleInfo> = None;
     let mut tool_result_metadata: HashMap<String, ToolMetadata> = HashMap::new();
     let mut buf = Vec::new();
@@ -331,20 +331,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
                 message,
                 timestamp,
             } => {
-                if let Some(p) = parent_uuid {
-                    referenced.insert(p);
-                }
-                // Last-append-wins on duplicate UUIDs — a retry or
-                // partial-write recovery could replay an entry, and we
-                // prefer the most recent representation.
-                nodes.insert(
-                    uuid,
-                    ChainNode {
-                        parent_uuid,
-                        message,
-                        timestamp,
-                    },
-                );
+                chain.insert(uuid, parent_uuid, message, timestamp);
             }
             // Track the newest title so the TUI's status bar and any
             // future surface can display it on resume without a second
@@ -373,7 +360,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
         }
     }
 
-    let (messages, last_uuid) = resolve_chain(nodes, &referenced);
+    let (messages, last_uuid) = chain.resolve();
     Ok(SessionData {
         messages,
         last_uuid,
@@ -570,64 +557,6 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
         options.mode(0o600);
     }
     options.open(path)
-}
-
-/// Internal node used by [`resolve_chain`] to walk the UUID DAG.
-struct ChainNode {
-    parent_uuid: Option<Uuid>,
-    message: Message,
-    timestamp: OffsetDateTime,
-}
-
-/// Turn a UUID-indexed message map into a linear chain ending at the
-/// newest leaf. `referenced` is the set of UUIDs mentioned by some
-/// message as its `parent_uuid`; the leaves are `nodes.keys() - referenced`.
-///
-/// Returns `(chain, Some(tip))` on success, or `(vec![], None)` when
-/// the file contains no messages. A cycle (e.g., from on-disk
-/// corruption where a UUID points at one of its descendants) is
-/// treated as a terminated chain: the walker detects the repeat and
-/// stops, preserving the prefix it has already collected rather than
-/// looping forever. A `parent_uuid` missing from `nodes` (orphan) is
-/// also treated as a chain terminator.
-fn resolve_chain(
-    mut nodes: HashMap<Uuid, ChainNode>,
-    referenced: &HashSet<Uuid>,
-) -> (Vec<Message>, Option<Uuid>) {
-    let tip = nodes
-        .iter()
-        .filter(|(uuid, _)| !referenced.contains(uuid))
-        .max_by(|(a_uuid, a), (b_uuid, b)| {
-            a.timestamp
-                .cmp(&b.timestamp)
-                .then_with(|| a_uuid.cmp(b_uuid))
-        })
-        .map(|(uuid, _)| *uuid);
-    let Some(tip_uuid) = tip else {
-        return (Vec::new(), None);
-    };
-
-    let mut chain: Vec<Message> = Vec::new();
-    let mut seen: HashSet<Uuid> = HashSet::new();
-    let mut cursor = Some(tip_uuid);
-    while let Some(uuid) = cursor {
-        if !seen.insert(uuid) {
-            // Cycle or repeated visit — bail out with what we have.
-            warn!(
-                "session chain walk hit a cycle at {uuid}; truncating to the prefix collected so far"
-            );
-            break;
-        }
-        let Some(node) = nodes.remove(&uuid) else {
-            // Missing ancestor — chain reaches an orphan. Stop here;
-            // everything we collected so far stays in `chain`.
-            break;
-        };
-        chain.push(node.message);
-        cursor = node.parent_uuid;
-    }
-    chain.reverse();
-    (chain, Some(tip_uuid))
 }
 
 // ── Session Info Extraction ──
