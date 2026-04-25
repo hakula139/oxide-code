@@ -1802,6 +1802,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn push_tool_result_view_grep_renders_path_header_and_numbered_match_rows() {
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![
+                crate::tool::GrepFileGroup {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![
+                        crate::tool::GrepMatchLine {
+                            number: 10,
+                            text: "fn main() {".to_owned(),
+                            is_match: true,
+                        },
+                        crate::tool::GrepMatchLine {
+                            number: 11,
+                            text: "    helper();".to_owned(),
+                            is_match: false,
+                        },
+                    ],
+                },
+                crate::tool::GrepFileGroup {
+                    path: "src/lib.rs".to_owned(),
+                    lines: vec![crate::tool::GrepMatchLine {
+                        number: 5,
+                        text: "fn lib_func()".to_owned(),
+                        is_match: true,
+                    }],
+                },
+            ],
+            truncated: false,
+        };
+        chat.push_tool_result_view("Grep(fn)", view, false);
+        let text = all_text(&chat);
+        // Path headers both visible; line numbers padded to a uniform
+        // width across files (10/11 vs single-digit 5 forces width 2,
+        // so the lib.rs row reads " 5 │ ...").
+        assert!(
+            text.contains("src/main.rs"),
+            "missing main.rs header: {text}"
+        );
+        assert!(text.contains("src/lib.rs"), "missing lib.rs header: {text}");
+        assert!(
+            text.contains("10 │ fn main() {"),
+            "missing match row: {text}",
+        );
+        assert!(
+            text.contains("11 │     helper();"),
+            "context row should still render: {text}",
+        );
+        assert!(
+            text.contains(" 5 │ fn lib_func()"),
+            "second-group row should be padded to match column width: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_grep_truncates_body_with_hidden_line_count() {
+        // Six rows total (1 path header + 5 matches) overflows the
+        // 5-line tool-body budget, so the last match collapses behind
+        // a `+N lines` footer.
+        let mut chat = test_chat();
+        let lines = (1..=5)
+            .map(|number| crate::tool::GrepMatchLine {
+                number,
+                text: format!("hit {number}"),
+                is_match: true,
+            })
+            .collect();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![crate::tool::GrepFileGroup {
+                path: "src/main.rs".to_owned(),
+                lines,
+            }],
+            truncated: false,
+        };
+        chat.push_tool_result_view("Grep(hit)", view, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("4 │ hit 4"),
+            "fourth row should render: {text}"
+        );
+        assert!(
+            !text.contains("5 │ hit 5"),
+            "fifth row should be hidden by the line budget: {text}",
+        );
+        assert!(
+            text.contains("... +1 line"),
+            "hidden-row footer should name the singular count: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_view_grep_truncated_flag_emits_limit_reached_marker() {
+        // No rows hidden by the body budget, but the grep run itself
+        // hit `head_limit` server-side. The footer should advertise
+        // that without a phantom hidden-row count.
+        let mut chat = test_chat();
+        let view = crate::tool::ToolResultView::GrepMatches {
+            groups: vec![crate::tool::GrepFileGroup {
+                path: "src/main.rs".to_owned(),
+                lines: vec![crate::tool::GrepMatchLine {
+                    number: 1,
+                    text: "hit".to_owned(),
+                    is_match: true,
+                }],
+            }],
+            truncated: true,
+        };
+        chat.push_tool_result_view("Grep(hit)", view, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("limit reached"),
+            "truncated flag should surface in footer: {text}",
+        );
+        assert!(
+            !text.contains("+0"),
+            "no phantom hidden-row count when nothing is hidden: {text}",
+        );
+    }
+
     // ── push_error ──
 
     #[test]

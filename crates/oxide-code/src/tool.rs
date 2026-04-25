@@ -119,8 +119,8 @@ impl ToolOutput {
 /// [`Tool::result_view`] and rendered by the TUI's tool-result block.
 ///
 /// This enum lives here — not in the TUI layer — so per-tool parsing
-/// (Edit's diff extraction, Read's line-numbered excerpts, future
-/// Grep/Glob shapes) stays in the module that owns each tool's
+/// (Edit's diff extraction, Read's line-numbered excerpts, Grep's
+/// per-file matches) stays in the module that owns each tool's
 /// input/output contract. The TUI still owns rendering; this is pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolResultView {
@@ -143,6 +143,15 @@ pub(crate) enum ToolResultView {
         replace_all: bool,
         replacements: usize,
     },
+    /// Grep tool (content mode only) — renders as per-file groups with
+    /// line-numbered match rows. `truncated` mirrors the
+    /// "Results limited to N lines" footer in the model-facing output.
+    /// Other grep modes (files-with-matches, count) and any output with
+    /// trailing skipped-file warnings fall through to [`Text`].
+    GrepMatches {
+        groups: Vec<GrepFileGroup>,
+        truncated: bool,
+    },
 }
 
 /// One line in a structured `read` result view.
@@ -150,6 +159,26 @@ pub(crate) enum ToolResultView {
 pub(crate) struct ReadExcerptLine {
     pub(crate) number: usize,
     pub(crate) text: String,
+}
+
+/// One file's contiguous match block in a structured grep result view.
+/// Lines may include both actual matches (`:` separator in grep
+/// output) and surrounding context lines (`-` separator) when the model
+/// requested context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GrepFileGroup {
+    pub(crate) path: String,
+    pub(crate) lines: Vec<GrepMatchLine>,
+}
+
+/// One row in a [`GrepFileGroup`]. `is_match` distinguishes a real
+/// match from a surrounding context line so renderers can dim context
+/// without losing the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GrepMatchLine {
+    pub(crate) number: usize,
+    pub(crate) text: String,
+    pub(crate) is_match: bool,
 }
 
 // ── Tool Trait ──
@@ -820,6 +849,32 @@ mod tests {
                 new: "b".to_owned(),
                 replace_all: false,
                 replacements: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_delegates_grep_matches() {
+        // Pin the full GrepMatches structure so a mutation returning
+        // empty groups or flipping `is_match` doesn't sneak through
+        // the registry routing.
+        let registry = ToolRegistry::new(vec![Box::new(GrepTool)]);
+        let input = serde_json::json!({"pattern": "fn"});
+        let metadata = ToolMetadata::default();
+        let view =
+            registry.result_view("grep", &input, "src/main.rs:10:fn main()", &metadata, false);
+        assert_eq!(
+            view,
+            ToolResultView::GrepMatches {
+                groups: vec![GrepFileGroup {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![GrepMatchLine {
+                        number: 10,
+                        text: "fn main()".to_owned(),
+                        is_match: true,
+                    }],
+                }],
+                truncated: false,
             },
         );
     }

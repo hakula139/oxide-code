@@ -9,13 +9,14 @@
 //!
 //! Result rendering is per-variant via [`ToolResultView`]: the default
 //! is a truncated text body; tools with structured output (Edit diffs,
-//! Read excerpts today; Grep / Glob later) produce richer variants via
-//! [`Tool::result_view`](crate::tool::Tool::result_view). The
-//! variant-specific bodies live in sibling modules under [`tool`]; this
-//! file owns block types, central dispatch, and the shared border
+//! Read excerpts, Grep matches today; Glob later) produce richer
+//! variants via [`Tool::result_view`](crate::tool::Tool::result_view).
+//! The variant-specific bodies live in sibling modules under [`tool`];
+//! this file owns block types, central dispatch, and the shared border
 //! helpers child renderers reuse.
 
 mod diff;
+mod grep;
 mod read_excerpt;
 mod text;
 
@@ -142,6 +143,9 @@ impl ChatBlock for ToolResultBlock {
                     *replacements,
                     self.is_error,
                 );
+            }
+            ToolResultView::GrepMatches { groups, truncated } => {
+                grep::render(&mut out, ctx, groups, *truncated, self.is_error);
             }
         }
         out
