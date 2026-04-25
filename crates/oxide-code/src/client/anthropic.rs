@@ -31,7 +31,7 @@ use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
 
-use betas::{compute_betas, is_first_party_base_url, static_prefix_cache_control};
+use betas::{compute_betas, static_prefix_cache_control};
 use sse::stream_sse;
 use wire::{ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata, SystemBlock};
 
@@ -58,11 +58,18 @@ pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
+    /// Whether `config.base_url` points at the first-party Anthropic
+    /// API. Computed once at construction so per-request paths don't
+    /// re-parse the URL — the value gates the `prompt-caching-scope`
+    /// beta and `cache_control.scope: "global"`, which 3P gateways
+    /// reject.
+    is_first_party: bool,
 }
 
 impl Client {
     pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let is_first_party = betas::is_first_party_base_url(&config.base_url);
         let mut headers = HeaderMap::new();
 
         match &config.auth {
@@ -124,6 +131,7 @@ impl Client {
             http,
             config,
             session_id,
+            is_first_party,
         })
     }
 
@@ -180,13 +188,6 @@ impl Client {
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
         });
 
-        // Global-scope prompt caching only fires on the official API —
-        // third-party gateways reject `scope: "global"` on a system block
-        // because tool definitions render first and taint the cache
-        // prefix. On 3P we fall back to the default (org-scoped)
-        // ephemeral cache, which every gateway accepts.
-        let is_first_party = is_first_party_base_url(&self.config.base_url);
-
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
         let dynamic_joined = dynamic_sections.join("\n\n");
@@ -209,7 +210,7 @@ impl Client {
                 r#type: "text",
                 text: &static_joined,
                 cache_control: Some(static_prefix_cache_control(
-                    is_first_party,
+                    self.is_first_party,
                     self.config.prompt_cache_ttl,
                 )),
             });
@@ -259,7 +260,7 @@ impl Client {
             &self.config.auth,
             true,
             false,
-            is_first_party,
+            self.is_first_party,
         )
         .join(",");
 

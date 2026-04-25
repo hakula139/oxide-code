@@ -8,9 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tracing::debug;
 
-use super::betas::{
-    api_model_id, compute_betas, is_first_party_base_url, supports_structured_outputs,
-};
+use super::betas::{api_model_id, compute_betas, supports_structured_outputs};
 use super::sse::format_api_error;
 use super::wire::{CreateMessageRequest, OutputConfig, OutputFormat, SystemBlock};
 use super::{CLAUDE_CLI_VERSION, Client, SYSTEM_PROMPT_PREFIX, billing, build_metadata};
@@ -49,17 +47,15 @@ impl Client {
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        // Non-agentic one-shot — 1P gating only affects the
-        // `prompt-caching-scope` beta, which `compute_betas` restricts
-        // to the agentic branch anyway. Still passed for signature
-        // symmetry with [`Self::stream_message`].
-        let is_first_party = is_first_party_base_url(&self.config.base_url);
+        // is_first_party threaded for signature symmetry with stream_message;
+        // one-shots are unaffected because compute_betas only consults the flag
+        // on the agentic branch.
         let betas = compute_betas(
             model,
             &self.config.auth,
             false,
             effective_format.is_some(),
-            is_first_party,
+            self.is_first_party,
         )
         .join(",");
         let response = self
