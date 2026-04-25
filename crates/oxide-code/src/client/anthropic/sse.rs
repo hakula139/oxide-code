@@ -1,11 +1,4 @@
-//! SSE streaming and frame parsing for the Anthropic Messages API.
-//!
-//! [`stream_sse`] is the per-request pump: opens the POST, validates
-//! the response, and drains `bytes_stream()` into [`StreamEvent`]s on
-//! the caller's mpsc channel. [`parse_sse_frame`] decodes one
-//! `event: ...\ndata: ...\n\n` frame; [`format_api_error`] formats
-//! actionable error prefixes for non-2xx responses (used by both this
-//! file and [`super::completion`]).
+//! SSE streaming pump and frame parser for the Anthropic Messages API.
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;

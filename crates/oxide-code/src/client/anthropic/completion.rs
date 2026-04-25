@@ -1,10 +1,8 @@
 //! Non-streaming `/v1/messages` one-shot path.
 //!
-//! [`Client::complete`] is the entry point for utility calls (AI title
-//! generation today, future classifiers). It mirrors the streaming
-//! request shape ([identity prefix][crate::prompt], optional billing
-//! attestation, optional schema-constrained output) but returns the
-//! flattened assistant text instead of an event stream.
+//! Mirrors the streaming request shape (identity prefix, optional
+//! billing attestation, optional schema-constrained output) but
+//! returns flattened assistant text instead of an event stream.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;

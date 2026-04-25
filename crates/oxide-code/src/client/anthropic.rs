@@ -5,14 +5,12 @@
 //! static / dynamic system-block split for cache reuse), POSTs
 //! `/v1/messages` with SSE streaming, and forwards parsed
 //! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] (in
-//! [`completion`]) covers non-streaming one-shots (title generation
-//! today, future classifiers) with optional JSON-schema-constrained
-//! output.
+//! [`completion`]) covers non-streaming one-shots.
 //!
 //! Per-request `anthropic-beta` headers are computed from the model's
 //! [`crate::model::Capabilities`] via [`betas::compute_betas`], so
-//! gateways that reject unsupported betas (Haiku, subscriptions
-//! without 1M) don't 400 on spurious feature flags.
+//! gateways that reject unsupported betas don't 400 on spurious
+//! feature flags.
 
 mod betas;
 mod billing;
@@ -39,9 +37,7 @@ use wire::{ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadat
 
 pub(crate) use wire::{ContentBlockInfo, Delta, OutputFormat, StreamEvent};
 
-// Re-exports needed only by external test modules (`agent::tests`'
-// wiremock integration). Gated to avoid a `cargo build` warning when
-// the crate is built without the test cfg.
+// Cfg-gated to keep `cargo build` quiet when no production code uses them.
 #[cfg(test)]
 pub(crate) use wire::{ApiError, MessageResponse, Usage};
 
@@ -279,8 +275,6 @@ impl Client {
 }
 
 /// Builds the `metadata.user_id` field as a stringified JSON object.
-/// Free-standing so [`completion::build_completion_body`][completion]
-/// can call it without pulling in `&Client`.
 fn build_metadata(session_id: &str) -> RequestMetadata {
     let user_id = serde_json::json!({ "session_id": session_id }).to_string();
     RequestMetadata { user_id }

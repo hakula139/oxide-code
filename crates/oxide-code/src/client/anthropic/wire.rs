@@ -1,13 +1,5 @@
-//! Anthropic Messages API wire types.
-//!
-//! Request-side: [`CreateMessageRequest`] is the body shape both the
-//! streaming and non-streaming paths serialize. Response-side:
-//! [`StreamEvent`] is the per-frame SSE payload, plus the supporting
-//! enums ([`ContentBlockInfo`], [`Delta`]) and meta structs
-//! ([`MessageResponse`], [`MessageDeltaBody`], [`Usage`], [`ApiError`]).
-//!
-//! Pure data with no logic — every helper that builds or interprets
-//! these types lives in a sibling module.
+//! Anthropic Messages API wire types — pure data; helpers that build
+//! or interpret these types live in sibling modules.
 
 use serde::{Deserialize, Serialize};
 

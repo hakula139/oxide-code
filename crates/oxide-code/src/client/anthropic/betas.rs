@@ -1,17 +1,8 @@
-//! Per-request `anthropic-beta` header computation and the wire-level
-//! decisions that travel with it.
+//! Per-request `anthropic-beta` header computation.
 //!
-//! [`compute_betas`] is the single source of truth for which beta tags
-//! ship on a given request — gated on [`crate::model::Capabilities`]
-//! flags so adding or bumping a model only means editing the lookup
-//! table. [`is_first_party_base_url`] partners with it: the
+//! [`compute_betas`] partners with [`is_first_party_base_url`] so the
 //! `prompt-caching-scope` beta and the `cache_control.scope: "global"`
-//! field stay in sync (both 1P-only) so 3P proxies never see one
-//! without the other.
-//!
-//! Also home to the `[1m]` model-tag helpers and the
-//! [`static_prefix_cache_control`] builder, since both are downstream
-//! consequences of the same per-request capability lookup.
+//! field stay in sync — 3P proxies see neither, 1P sees both.
 
 use crate::config::{Auth, PromptCacheTtl};
 

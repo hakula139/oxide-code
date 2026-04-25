@@ -72,16 +72,12 @@ pub(super) async fn load_token() -> Result<String> {
     load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL, load_credentials).await
 }
 
-/// Inner implementation with configurable paths, refresh URL, and
-/// credential loader. Public [`load_token`] supplies the real defaults;
-/// tests override all four.
+/// Inner implementation; tests override paths, URL, and loader.
 ///
-/// `loader` is injected (rather than always calling [`load_credentials`])
-/// so tests can pass [`read_credentials`] — a file-only loader — and
-/// bypass the macOS Keychain. With the Keychain in the path, any leftover
-/// entry under `KEYCHAIN_SERVICE` for the running `$USER` would shadow
-/// the synthetic temp-file fixture and the test would silently exercise
-/// the user's real (likely near-expired) token.
+/// `loader` is injected so tests can pass [`read_credentials`] (file
+/// only) and bypass the macOS Keychain — otherwise a leftover entry
+/// for the running `$USER` would shadow the synthetic temp-file
+/// fixture.
 async fn load_token_from(
     file_path: &Path,
     lock_path: &Path,
