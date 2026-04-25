@@ -24,7 +24,7 @@ pub(super) const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025
 /// `is_agentic` gates agent-only betas on the streaming chat path
 /// (keeps one-shot calls like title generation minimal).
 /// `want_structured` is cross-checked against the model's capability
-/// flag so an unsupported [`crate::client::anthropic::OutputFormat`]
+/// flag so an unsupported [`crate::client::anthropic::wire::OutputFormat`]
 /// silently drops back to free-form text instead of 400ing the
 /// gateway. `is_first_party` gates experimental betas that 3P proxies
 /// reject (currently: `prompt-caching-scope`, which is a no-op without

@@ -16,7 +16,7 @@ mod betas;
 mod billing;
 mod completion;
 mod sse;
-mod wire;
+pub(crate) mod wire;
 
 use std::time::Duration;
 
@@ -35,14 +35,8 @@ use betas::{compute_betas, static_prefix_cache_control};
 use sse::stream_sse;
 use wire::{
     CacheControl, ContextManagement, CreateMessageRequest, OutputConfig, RequestMetadata,
-    SystemBlock,
+    StreamEvent, SystemBlock,
 };
-
-pub(crate) use wire::{ContentBlockInfo, Delta, OutputFormat, StreamEvent};
-
-// Cfg-gated to keep `cargo build` quiet when no production code uses them.
-#[cfg(test)]
-pub(crate) use wire::{ApiError, MessageResponse, Usage};
 
 const API_VERSION: &str = "2023-06-01";
 
@@ -418,6 +412,7 @@ mod tests {
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::wire::{ContentBlockInfo, Delta};
     use super::*;
     use crate::config::{Effort, ThinkingConfig};
 

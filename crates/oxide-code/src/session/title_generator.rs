@@ -22,7 +22,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::agent::event::{AgentEvent, AgentSink};
-use crate::client::anthropic::{Client, OutputFormat};
+use crate::client::anthropic::Client;
+use crate::client::anthropic::wire::OutputFormat;
 use crate::session::manager::SessionManager;
 use crate::session::writer::log_session_err;
 
