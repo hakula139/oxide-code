@@ -81,7 +81,11 @@ ox     # Start an interactive session
 │   │   │       ├── assistant.rs    # AssistantText + AssistantThinking
 │   │   │       ├── error.rs        # ErrorBlock
 │   │   │       ├── streaming.rs    # StreamingAssistant (in-flight buffer + render cache)
-│   │   │       ├── tool.rs         # ToolCallBlock + ToolResultBlock (owns the left-bar border machinery)
+│   │   │       ├── tool.rs         # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
+│   │   │       ├── tool/
+│   │   │       │   ├── diff.rs        # Edit-tool unified diff body (boundary trim + per-side budget)
+│   │   │       │   ├── read_excerpt.rs # Read-tool line-numbered excerpt body + path / range header
+│   │   │       │   └── text.rs        # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs         # UserMessage
 │   │   ├── input.rs                # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs               # Status bar (model, spinner, status, working directory)
