@@ -227,6 +227,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_429_surfaces_retry_after_header_in_error() {
+        // The `Retry-After` header from a 429 must thread into the
+        // error message so callers (and humans reading logs) know how
+        // long to back off — `format_api_error` interpolates it inline.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "42")
+                    .set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let err = client
+            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .await
+            .expect_err("expected 429 error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("retry after 42"),
+            "retry-after threaded: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_malformed_response_body_errors_with_parse_context() {
+        // A 200 with a non-JSON body must surface the parse-failure
+        // context, not panic — the agent loop relies on a clean Err
+        // for fallback to a default title.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<not json>"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            Some("sid".to_owned()),
+        )
+        .unwrap();
+        let err = client
+            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .await
+            .expect_err("expected parse error");
+        assert!(
+            format!("{err:#}").contains("failed to parse completion response"),
+            "parse context: {err:#}",
+        );
+    }
+
+    #[tokio::test]
     async fn complete_structured_output_gated_by_model_capability() {
         // Supported model → body carries output_config, header carries
         // the beta tag. Unsupported model → both are silently dropped
