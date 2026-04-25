@@ -8,11 +8,11 @@
 //! assistant / tool-result message, and
 //! [`finish`][SessionManager::finish] writes the exit summary.
 //!
-//! [`sanitize_resumed_messages`] is the core repair pass — it turns
-//! a mid-turn crash or partial JSONL write into a transcript the API
+//! Resume-time transcript repair lives in
+//! [`super::sanitize::sanitize_resumed_messages`] — that module turns a
+//! mid-turn crash or partial JSONL write into a transcript the API
 //! will accept as the prefix of a new turn.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -21,11 +21,12 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
+use super::sanitize::sanitize_resumed_messages;
 use super::store::{
     SessionData, SessionStore, SessionWriter, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
-use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
+use crate::message::{ContentBlock, Message, Role};
 use crate::tool::ToolMetadata;
 
 /// Data handed back by [`SessionManager::resume`] +
@@ -46,18 +47,6 @@ pub(crate) struct ResumedSession {
 /// Msgs(6) Title`, so ~80 chars of title space on a 120-col terminal
 /// and still truncates cleanly (`...`) on narrower ones.
 const MAX_TITLE_LEN: usize = 80;
-
-/// Synthetic assistant content injected when resume detects a trailing
-/// user turn with only `tool_results` (i.e., the previous run crashed
-/// between writing the `tool_result` message and the next assistant
-/// response). Keeps role alternation valid for the next API call.
-const RESUME_CONTINUATION_SENTINEL: &str = "[Previous turn was interrupted; continuing.]";
-
-/// Synthetic user content injected when resume leaves an assistant as
-/// the first message. Happens when sanitization drops a leading user
-/// turn whose only blocks were orphan `tool_results`; the API rejects
-/// transcripts that start with assistant, so we prepend a stub.
-const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
 
 // ── SessionManager ──
 
@@ -436,131 +425,9 @@ fn truncate_title(s: &str, max_len: usize) -> String {
     }
 }
 
-// ── Resume Sanitization ──
-
-/// Normalizes a loaded conversation to a state the API will accept as
-/// the prefix of a new turn.
-///
-/// Fixes common crash-induced inconsistencies:
-///
-/// 1. Drops trailing `thinking` / `redacted_thinking` blocks (API
-///    rejects assistant messages that end with thinking).
-/// 2. Drops unresolved `tool_use` blocks — assistant tool calls that
-///    never received a matching `tool_result`. Happens when the
-///    process crashed between `tool_use` stream end and tool execution
-///    (or between tool execution and `tool_result` write).
-/// 3. Drops orphan `tool_result` blocks — user `tool_result`s whose
-///    `tool_use_id` does not match any surviving assistant `tool_use`.
-///    Happens when a corrupted JSONL line drops a `tool_use` during
-///    load (or when step 2 removes one), leaving its paired
-///    `tool_result` pointing at nothing. The API rejects orphan
-///    `tool_result`s, so the symmetric filter keeps the transcript
-///    valid.
-/// 4. Drops messages that became empty after (2) or (3).
-/// 5. Collapses adjacent same-role messages left over after (4). The
-///    API requires strict user / assistant alternation; dropping an
-///    assistant turn with only unresolved `tool_use`, or a user turn
-///    with only orphan `tool_result`, can leave two same-role turns
-///    adjacent. Merging their content preserves every block while
-///    restoring alternation.
-/// 6. Prepends a synthetic user sentinel if the first remaining
-///    message is an assistant turn (reached when a leading user turn
-///    had only orphan `tool_result` blocks and was dropped in step 3).
-///    The API rejects transcripts that start with assistant, so a
-///    user stub is injected to keep alternation valid.
-/// 7. Appends a synthetic assistant sentinel when the last remaining
-///    message is a user turn containing only `tool_result` blocks — the
-///    crash window between writing `tool_results` and the next assistant
-///    response. Prevents two-user-turns-in-a-row on the next API call.
-fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
-    strip_trailing_thinking(messages);
-
-    // tool_use_ids for which any tool_result exists somewhere in the log.
-    let resolved_ids: HashSet<String> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-            _ => None,
-        })
-        .collect();
-
-    for msg in &mut *messages {
-        if msg.role == Role::Assistant {
-            msg.content.retain(|b| match b {
-                ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
-                    resolved_ids.contains(id)
-                }
-                _ => true,
-            });
-        }
-    }
-
-    // Symmetric pass: collect the tool_use ids that actually survived
-    // the assistant filter above, then drop user tool_results whose id
-    // isn't in that set. An orphan tool_result would fail API validation.
-    let surviving_tool_use_ids: HashSet<String> = messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
-                Some(id.clone())
-            }
-            _ => None,
-        })
-        .collect();
-
-    for msg in &mut *messages {
-        if msg.role == Role::User {
-            msg.content.retain(|b| match b {
-                ContentBlock::ToolResult { tool_use_id, .. } => {
-                    surviving_tool_use_ids.contains(tool_use_id)
-                }
-                _ => true,
-            });
-        }
-    }
-
-    messages.retain(|m| !m.content.is_empty());
-    collapse_consecutive_same_role(messages);
-
-    if let Some(first) = messages.first()
-        && first.role == Role::Assistant
-    {
-        messages.insert(0, Message::user(RESUME_HEAD_SENTINEL));
-    }
-
-    if let Some(last) = messages.last()
-        && last.role == Role::User
-        && last
-            .content
-            .iter()
-            .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
-    {
-        messages.push(Message::assistant(RESUME_CONTINUATION_SENTINEL));
-    }
-
-    strip_trailing_thinking(messages);
-}
-
-/// Merges every pair of consecutive same-role messages by extending the
-/// earlier message's content with the later one's and dropping the
-/// later one. Called after filtering / drop passes so that sanitization
-/// can never leave the transcript with two user or two assistant
-/// messages in a row.
-fn collapse_consecutive_same_role(messages: &mut Vec<Message>) {
-    messages.dedup_by(|next, prev| {
-        if prev.role == next.role {
-            prev.content.append(&mut next.content);
-            true
-        } else {
-            false
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::sanitize::RESUME_CONTINUATION_SENTINEL;
     use super::super::store::{test_project_dir, test_session_file, test_store};
     use super::*;
 
@@ -1436,281 +1303,5 @@ mod tests {
     #[test]
     fn truncate_title_trims_whitespace() {
         assert_eq!(truncate_title("  padded  ", 60), "padded");
-    }
-
-    // ── sanitize_resumed_messages ──
-
-    #[test]
-    fn sanitize_noop_for_clean_transcript() {
-        let mut messages = vec![
-            Message::user("hello"),
-            Message::assistant("hi"),
-            Message::user("bye"),
-        ];
-        let before = messages.len();
-        sanitize_resumed_messages(&mut messages);
-        assert_eq!(messages.len(), before);
-    }
-
-    #[test]
-    fn sanitize_pairs_tool_use_with_result() {
-        let mut messages = vec![
-            Message::user("do X"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "checking".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t2".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "ok".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        // Assistant has text + t1 (resolved), t2 dropped.
-        let assistant_blocks = &messages[1].content;
-        assert_eq!(assistant_blocks.len(), 2);
-        assert!(matches!(&assistant_blocks[0], ContentBlock::Text { .. }));
-        assert!(matches!(&assistant_blocks[1], ContentBlock::ToolUse { id, .. } if id == "t1"));
-        // Last message is still user with tool_result → sentinel appended.
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[3].role, Role::Assistant);
-    }
-
-    #[test]
-    fn sanitize_drops_orphan_tool_result_block_and_keeps_siblings() {
-        // User turn has one tool_result with no matching tool_use (the
-        // preceding assistant only produced text). The orphan block
-        // should be dropped; the sibling text should survive.
-        let mut messages = vec![
-            Message::user("do X"),
-            Message::assistant("done, no tool needed"),
-            Message {
-                role: Role::User,
-                content: vec![
-                    ContentBlock::ToolResult {
-                        tool_use_id: "orphan".to_owned(),
-                        content: "ghost".to_owned(),
-                        is_error: false,
-                    },
-                    ContentBlock::Text {
-                        text: "follow-up".to_owned(),
-                    },
-                ],
-            },
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 3);
-        let last = &messages[2];
-        assert_eq!(last.role, Role::User);
-        assert_eq!(last.content.len(), 1);
-        assert!(matches!(&last.content[0], ContentBlock::Text { text } if text == "follow-up"));
-    }
-
-    #[test]
-    fn sanitize_drops_user_message_with_only_orphan_tool_result() {
-        // The user turn contains nothing but an orphan tool_result;
-        // once the orphan is dropped, the message is empty and the
-        // whole turn is removed.
-        let mut messages = vec![
-            Message::user("do X"),
-            Message::assistant("all clear"),
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "ghost".to_owned(),
-                    content: "nobody asked".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Assistant);
-    }
-
-    #[test]
-    fn sanitize_collapses_adjacent_users_after_empty_assistant_drop() {
-        // Unresolved tool_use is the assistant's only content, so the
-        // assistant message is dropped; the two surrounding user turns
-        // would then be adjacent and invalid without the collapse pass.
-        let mut messages = vec![
-            Message::user("do X"),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "unresolved".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::Value::Null,
-                }],
-            },
-            Message::user("and now Y"),
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].content.len(), 2);
-        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "do X"));
-        assert!(
-            matches!(&messages[0].content[1], ContentBlock::Text { text } if text == "and now Y")
-        );
-    }
-
-    #[test]
-    fn sanitize_collapses_adjacent_assistants_after_orphan_user_drop() {
-        // User turn is an orphan tool_result surrounded by two
-        // assistant text turns. The orphan filter empties the user;
-        // retain drops it; without collapse we'd have two adjacent
-        // assistants.
-        let mut messages = vec![
-            Message::user("do X"),
-            Message::assistant("first answer"),
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "ghost".to_owned(),
-                    content: "stale".to_owned(),
-                    is_error: false,
-                }],
-            },
-            Message::assistant("second answer"),
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Assistant);
-        let answer = &messages[1].content;
-        assert_eq!(answer.len(), 2);
-        assert!(matches!(&answer[0], ContentBlock::Text { text } if text == "first answer"));
-        assert!(matches!(&answer[1], ContentBlock::Text { text } if text == "second answer"));
-    }
-
-    #[test]
-    fn sanitize_drops_orphan_when_assistant_tool_use_was_dropped() {
-        // Mismatched IDs: the user tool_result references "t2", but the
-        // assistant never had "t2". Step 2 drops the assistant's "t1"
-        // (unresolved), leaving no surviving tool_use ids; step 3 then
-        // drops the user's "t2" tool_result as orphan. Text sibling on
-        // the assistant survives so both turns remain.
-        let mut messages = vec![
-            Message::user("do X"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "checking".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "bash".to_owned(),
-                        input: serde_json::Value::Null,
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t2".to_owned(),
-                    content: "stale".to_owned(),
-                    is_error: false,
-                }],
-            },
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Assistant);
-        // Assistant text survives, tool_use "t1" dropped.
-        let assistant = &messages[1].content;
-        assert_eq!(assistant.len(), 1);
-        assert!(matches!(&assistant[0], ContentBlock::Text { text } if text == "checking"));
-    }
-
-    #[test]
-    fn sanitize_prepends_head_sentinel_when_leading_user_is_dropped() {
-        // Leading user turn has only an orphan tool_result — step 3
-        // drops it, step 4 removes the now-empty user, leaving the
-        // assistant as the first message. API rejects that, so a
-        // synthetic user turn is prepended.
-        let mut messages = vec![
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "ghost".to_owned(),
-                    content: "stale".to_owned(),
-                    is_error: false,
-                }],
-            },
-            Message::assistant("carrying on"),
-            Message::user("next question"),
-        ];
-        sanitize_resumed_messages(&mut messages);
-
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, Role::User);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == RESUME_HEAD_SENTINEL)
-        );
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert_eq!(messages[2].role, Role::User);
-    }
-
-    // ── collapse_consecutive_same_role ──
-
-    #[test]
-    fn collapse_consecutive_same_role_merges_runs_and_preserves_alternation() {
-        // Mixed input: a run of three assistants, then a lone user,
-        // then a run of two users. The helper should leave exactly
-        // assistant → user after merging both runs.
-        let mut messages = vec![
-            Message::assistant("a1"),
-            Message::assistant("a2"),
-            Message::assistant("a3"),
-            Message::user("u1"),
-            Message::user("u2"),
-        ];
-        collapse_consecutive_same_role(&mut messages);
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::Assistant);
-        assert_eq!(messages[0].content.len(), 3);
-        assert_eq!(messages[1].role, Role::User);
-        assert_eq!(messages[1].content.len(), 2);
-    }
-
-    #[test]
-    fn collapse_consecutive_same_role_noop_on_alternating_transcript() {
-        let mut messages = vec![
-            Message::user("u"),
-            Message::assistant("a"),
-            Message::user("u2"),
-        ];
-        collapse_consecutive_same_role(&mut messages);
-
-        assert_eq!(messages.len(), 3);
     }
 }
