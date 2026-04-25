@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64;
 
@@ -48,17 +49,21 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
 /// The hash is computed over the body *with* the placeholder in place,
 /// then the placeholder is replaced with the 5-char hex result. Only the
 /// first occurrence is replaced — field ordering in
-/// [`super::anthropic::CreateMessageRequest`] ensures `system` is serialized
+/// [`super::wire::CreateMessageRequest`] ensures `system` is serialized
 /// before `messages`, so the billing header's placeholder comes first.
-pub(super) fn inject_cch(body: &str) -> String {
-    debug_assert!(
-        body.contains(CCH_PLACEHOLDER),
-        "cch placeholder not found in request body"
-    );
+///
+/// Errors out if the placeholder is missing — a release build that
+/// silently shipped `cch=00000` would still pass the gateway's signature
+/// shape check and only fail later at billing reconciliation, far from
+/// the buggy call site.
+pub(super) fn inject_cch(body: &str) -> Result<String> {
+    if !body.contains(CCH_PLACEHOLDER) {
+        bail!("billing header placeholder `{CCH_PLACEHOLDER}` missing from request body");
+    }
 
     let hash = xxh64::xxh64(body.as_bytes(), CCH_SEED);
     let cch = format!("{:05x}", hash & 0xFFFFF);
-    body.replacen(CCH_PLACEHOLDER, &format!("cch={cch}"), 1)
+    Ok(body.replacen(CCH_PLACEHOLDER, &format!("cch={cch}"), 1))
 }
 
 #[cfg(test)]
@@ -123,7 +128,7 @@ mod tests {
     #[test]
     fn inject_cch_replaces_placeholder() {
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-        let result = inject_cch(body);
+        let result = inject_cch(body).unwrap();
 
         assert!(
             !result.contains(CCH_PLACEHOLDER),
@@ -141,13 +146,13 @@ mod tests {
     #[test]
     fn inject_cch_deterministic() {
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[]}"#;
-        assert_eq!(inject_cch(body), inject_cch(body));
+        assert_eq!(inject_cch(body).unwrap(), inject_cch(body).unwrap());
     }
 
     #[test]
     fn inject_cch_produces_five_hex_chars() {
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}]}"#;
-        let result = inject_cch(body);
+        let result = inject_cch(body).unwrap();
 
         let cch_start = result.find("cch=").expect("cch= not found") + 4;
         let cch_value = &result[cch_start..cch_start + 5];
@@ -161,12 +166,21 @@ mod tests {
     fn inject_cch_replaces_only_first_occurrence() {
         // system (with placeholder) is before messages — matches our struct field order.
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
-        let result = inject_cch(body);
+        let result = inject_cch(body).unwrap();
 
         assert_eq!(
             result.matches("cch=00000").count(),
             1,
             "only the second occurrence (in messages) should remain"
+        );
+    }
+
+    #[test]
+    fn inject_cch_errors_when_placeholder_missing() {
+        let err = inject_cch(r#"{"system":[],"messages":[]}"#).expect_err("must error");
+        assert!(
+            format!("{err:#}").contains(CCH_PLACEHOLDER),
+            "error names placeholder: {err:#}",
         );
     }
 }

@@ -247,7 +247,7 @@ impl Client {
         .context("failed to serialize request")?;
 
         if billing_header.is_some() {
-            body = billing::inject_cch(&body);
+            body = billing::inject_cch(&body)?;
         }
 
         debug!(body_len = body.len(), "sending API request");

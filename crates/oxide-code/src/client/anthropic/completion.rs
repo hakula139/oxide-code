@@ -156,7 +156,7 @@ fn build_completion_body(
     .context("failed to serialize request")?;
 
     if billing_header.is_some() {
-        body = billing::inject_cch(&body);
+        body = billing::inject_cch(&body)?;
     }
     Ok(body)
 }
