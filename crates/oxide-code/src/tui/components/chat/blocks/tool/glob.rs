@@ -20,13 +20,21 @@ pub(super) fn render(
     total: usize,
     is_error: bool,
 ) {
-    if files.is_empty() {
-        return;
-    }
-
     let border_style = border_style_for(ctx.theme, is_error);
     let width = usize::from(ctx.width);
     let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+
+    if files.is_empty() {
+        // Surface the empty state under the bar so the block doesn't look
+        // like a stalled or broken render — every other tool variant emits
+        // at least one body row, and the status header alone is easy to
+        // miss when the chat is dense.
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled("No files found", ctx.theme.dim()),
+        ]));
+        return;
+    }
 
     let visible = files.len().min(MAX_TOOL_OUTPUT_LINES);
     let hidden = files.len() - visible;
@@ -62,7 +70,7 @@ fn footer_text(hidden: usize, total: usize, truncated_by_tool: bool) -> Option<S
     let noun = |n: usize| if n == 1 { "file" } else { "files" };
     match (hidden, truncated_by_tool) {
         (0, false) => None,
-        (0, true) => Some(format!("... {total} matches total")),
+        (0, true) => Some(format!("... {total} files total")),
         (n, false) => Some(format!("... +{n} {}", noun(n))),
         (n, true) => Some(format!("... +{n} {} of {total} total", noun(n))),
     }
@@ -85,7 +93,10 @@ mod tests {
     // ── render ──
 
     #[test]
-    fn render_empty_files_emits_nothing() {
+    fn render_empty_files_shows_no_files_found_row() {
+        // Empty result must render an explicit body row so the block has
+        // a left bar and the user doesn't mistake "no matches" for a
+        // half-rendered or stalled tool call.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -94,7 +105,10 @@ mod tests {
         };
         let mut out = Vec::new();
         render(&mut out, &ctx, &[], 0, false);
-        assert!(out.is_empty());
+
+        assert_eq!(out.len(), 1);
+        let body = collect_text(&out);
+        assert!(body.contains("No files found"), "body: {body}");
     }
 
     #[test]
@@ -144,6 +158,31 @@ mod tests {
     }
 
     #[test]
+    fn render_error_flag_swaps_border_style() {
+        // Pins that `is_error` flows into `border_style_for` rather than
+        // being dropped on the floor — a regression here would render
+        // failed glob calls with the success-color bar.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let files = vec!["a.rs".to_owned()];
+
+        let mut ok = Vec::new();
+        render(&mut ok, &ctx, &files, 1, false);
+        let mut err = Vec::new();
+        render(&mut err, &ctx, &files, 1, true);
+
+        assert_eq!(ok.len(), err.len());
+        assert_ne!(
+            ok[0].spans[0].style, err[0].spans[0].style,
+            "is_error should swap the bar style",
+        );
+    }
+
+    #[test]
     fn render_tool_truncation_surfaces_total_in_footer() {
         let theme = Theme::default();
         let ctx = RenderCtx {
@@ -185,7 +224,7 @@ mod tests {
         // arm; in practice MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
         assert_eq!(
             footer_text(0, 200, true),
-            Some("... 200 matches total".to_owned()),
+            Some("... 200 files total".to_owned()),
         );
     }
 
