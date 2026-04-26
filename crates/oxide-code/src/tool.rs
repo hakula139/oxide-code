@@ -86,6 +86,14 @@ pub(crate) struct ToolMetadata {
     /// inside [`crate::tool::edit::EditTool::result_view`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
+    /// Unbounded match count when a tool capped its returned rows
+    /// (currently glob's `MAX_RESULTS`; reserved for a future grep
+    /// total). Lets the result-view renderer surface "X of N total"
+    /// without re-parsing the tool's prose footer. `None` when no
+    /// truncation occurred. Resumed sessions whose JSONL predates the
+    /// field fall back to `files.len()` as the total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncated_total: Option<usize>,
 }
 
 impl ToolOutput {
@@ -127,6 +135,15 @@ impl ToolOutput {
     /// modified) file at render time.
     pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
+        self
+    }
+
+    /// Fluent helper to record the unbounded match count when a tool
+    /// truncated its returned rows. Read by the renderer to surface
+    /// "X of N total" without re-parsing the prose footer that the
+    /// tool also bakes into [`Self::content`] for the model.
+    pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
+        self.metadata.truncated_total = Some(total);
         self
     }
 }
