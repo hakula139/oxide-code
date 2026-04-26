@@ -78,6 +78,14 @@ pub(crate) struct ToolMetadata {
     /// parsed from prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replacements: Option<usize>,
+    /// Per-match diff hunks with real file line numbers, present only
+    /// for the edit tool. Consumed by [`ToolResultView::Diff`] so the
+    /// renderer can show line-numbered, location-aware diffs instead
+    /// of a placeholder pair of strings. Resumed sessions whose JSONL
+    /// predates this field fall back to a synthesized single chunk
+    /// inside [`crate::tool::edit::EditTool::result_view`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
 }
 
 impl ToolOutput {
@@ -111,6 +119,16 @@ impl ToolOutput {
         self.metadata.replacements = Some(count);
         self
     }
+
+    /// Fluent helper to attach the per-match diff hunks; only
+    /// meaningful for the edit tool's success path. The chunks carry
+    /// the real file line numbers so the diff renderer can show where
+    /// each match landed without re-reading the (possibly already
+    /// modified) file at render time.
+    pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
+        self.metadata.diff_chunks = Some(chunks);
+        self
+    }
 }
 
 // ── Tool Result View ──
@@ -134,12 +152,16 @@ pub(crate) enum ToolResultView {
         lines: Vec<ReadExcerptLine>,
         total_lines: usize,
     },
-    /// Edit tool — renders as a `-` old / `+` new unified diff.
-    /// `replacements` is the number of matches actually replaced
-    /// (> 1 only when `replace_all` succeeded on multiple matches).
+    /// Edit tool — renders as a `-` old / `+` new unified diff with
+    /// real file line numbers. `chunks` carries one entry per matched
+    /// location: a single edit is a one-element vector; a successful
+    /// `replace_all` carries one chunk per matched site, all sharing
+    /// the same trimmed content but at different line numbers.
+    /// `replacements` is the total match count (= `chunks.len()` on
+    /// the live path, kept distinct so resumed sessions whose JSONL
+    /// predates structured chunks can still drive the count footer).
     Diff {
-        old: String,
-        new: String,
+        chunks: Vec<DiffChunk>,
         replace_all: bool,
         replacements: usize,
     },
@@ -157,6 +179,24 @@ pub(crate) enum ToolResultView {
 pub(crate) struct ReadExcerptLine {
     pub(crate) number: usize,
     pub(crate) text: String,
+}
+
+/// One numbered line on either side of a structured `edit` diff.
+/// Persisted in [`ToolMetadata::diff_chunks`] so resumed sessions
+/// keep real file line numbers — not a render-only view type.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DiffLine {
+    pub(crate) number: usize,
+    pub(crate) text: String,
+}
+
+/// A single matched edit hunk — the raw `-` and `+` line spans for
+/// one file location. For non-`replace_all` calls the producer emits
+/// exactly one chunk; for `replace_all` it emits one per match site.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DiffChunk {
+    pub(crate) old: Vec<DiffLine>,
+    pub(crate) new: Vec<DiffLine>,
 }
 
 /// One file's match block in a grep result view. Lines mix matches
@@ -840,8 +880,16 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
+                chunks: vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 1,
+                        text: "a".to_owned()
+                    }],
+                    new: vec![DiffLine {
+                        number: 1,
+                        text: "b".to_owned()
+                    }],
+                }],
                 replace_all: false,
                 replacements: 1,
             },

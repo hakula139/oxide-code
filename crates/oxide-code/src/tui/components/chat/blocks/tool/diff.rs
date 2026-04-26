@@ -1,5 +1,8 @@
-//! `edit` tool body — `-` old / `+` new unified diff with boundary
-//! trimming and per-side budget truncation.
+//! `edit` tool body — `-` old / `+` new unified diff. Operates on the
+//! pre-trimmed [`DiffChunk`]s the producer emits in
+//! `crate::tool::edit`, so this module is concerned only with layout
+//! (entry stream, budget split, location footer) — not with finding
+//! match positions or trimming common anchor lines.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -10,6 +13,7 @@ use super::{
     MAX_TOOL_OUTPUT_LINE_BYTES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
     truncate_to_bytes,
 };
+use crate::tool::{DiffChunk, DiffLine};
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
 /// Maximum lines of diff body (combined `-` + `+`) shown before
@@ -21,6 +25,18 @@ use crate::tui::wrap::{expand_tabs, wrap_line};
 /// without hiding the change's middle behind an ellipsis.
 const MAX_DIFF_BODY_LINES: usize = 20;
 
+/// Lower bound on the per-chunk budget when distributing
+/// [`MAX_DIFF_BODY_LINES`] across many independent chunks. Keeps every
+/// chunk able to show at least one line on each side rather than
+/// degenerating to a stack of bare ellipses.
+const MIN_CHUNK_BUDGET: usize = 2;
+
+/// Maximum line numbers listed inline in the "applied at lines …"
+/// footer for a deduplicated multi-chunk render. Beyond this, the
+/// list collapses to "…and N more locations" so a 50-hit
+/// `replace_all` doesn't produce a 50-number footer.
+const MAX_LOCATIONS_DISPLAYED: usize = 8;
+
 /// Continuation prefix for wrapped diff-body lines. Hangs under the
 /// text column of a `- ` / `+ ` line (col 6) — two columns right of
 /// [`STATUS_LINE_CONT`] — so wrapped content keeps reading as a
@@ -28,44 +44,46 @@ const MAX_DIFF_BODY_LINES: usize = 20;
 /// the outer body indent.
 const DIFF_LINE_CONT: &str = "▎     ";
 
-/// Renders a unified-diff-style body: every line of `old` prefixed with
-/// `- ` in red, followed by every line of `new` prefixed with `+ ` in
-/// green.
+/// Renders the body of an edit-tool diff result.
 ///
-/// Lines that are identical at the leading or trailing boundary are
-/// dropped — a pure tail insertion like `fn foo()` → `fn foo()\n  42`
-/// renders as a single `+ 42`, not as `- fn foo()` / `+ fn foo()` /
-/// `+ 42`. Empty strings on either side — a pure deletion or insertion
-/// — render only the non-empty half. Trailing blank lines (a common
-/// artefact of line-ended old/new strings) are stripped so the
-/// rendered body matches what the user sees when they open the file.
+/// Each [`DiffChunk`] becomes a unified-style block: every line of
+/// `chunk.old` prefixed with `- ` in red, every line of `chunk.new`
+/// prefixed with `+ ` in green. Pure deletions and pure insertions
+/// (one side empty after producer-side trim) render only the
+/// non-empty half.
 ///
-/// Long diffs are truncated per side (`MAX_DIFF_BODY_LINES` split
-/// between `old` and `new`) with a head + ellipsis + tail shape so the
-/// first and last lines of each side stay visible.
+/// **Single chunk** — the unique-match case — renders without
+/// decoration, matching the pre-multi-chunk shape.
+///
+/// **Multiple chunks with identical trimmed content** — the common
+/// `replace_all` case — renders one body plus an "applied at lines
+/// X, Y, …" footer that names every match location. The body is
+/// shown once because the diff is identical at every site.
+///
+/// **Multiple chunks with differing content** — currently
+/// unreachable in the live path, supported for future producers
+/// (e.g., a context-aware diff source) — renders each chunk under
+/// the same border, separated by `--`, with the body budget
+/// distributed across chunks.
+///
+/// Long bodies are truncated per side (each chunk's budget split
+/// between `old` and `new`) with a head + ellipsis + tail shape so
+/// the first and last lines of each side stay visible.
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
-    old: &str,
-    new: &str,
+    chunks: &[DiffChunk],
     replace_all: bool,
     replacements: usize,
     is_error: bool,
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
-    let diff_cont_prefix = border_continuation_prefix(DIFF_LINE_CONT, border_style);
-    let width = usize::from(ctx.width);
 
-    let old_lines = split_side(old);
-    let new_lines = split_side(new);
-    let (old_lines, new_lines) = trim_common_boundaries(&old_lines, &new_lines);
-    if old_lines.is_empty() && new_lines.is_empty() {
-        // Both sides collapsed to empty — `old == new` entirely.
-        // `edit_file` rejects no-op edits live, but a resumed
-        // transcript (or a malformed input) can reach this branch.
-        // Emit a single dim marker so the result row doesn't render
-        // as a bare success header with no body, which reads as
-        // \"edit applied, diff scrolled off\" instead of \"no change\".
+    // No-change guard: producer rejects no-op edits, but a resumed
+    // transcript or malformed input can yield empty / all-empty
+    // chunks. Emit a dim marker so the row doesn't read as
+    // "edit applied, diff scrolled off."
+    if !any_chunk_has_content(chunks) {
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
             Span::styled("(no change)", ctx.theme.dim()),
@@ -73,10 +91,57 @@ pub(super) fn render(
         return;
     }
 
+    if chunks.len() > 1 && all_chunks_share_content(chunks) {
+        render_chunk_body(out, ctx, &chunks[0], border_style, MAX_DIFF_BODY_LINES);
+        let locations: Vec<usize> = chunks.iter().filter_map(chunk_anchor_line).collect();
+        render_locations_footer(out, ctx, &locations, border_style);
+        return;
+    }
+
+    let per_chunk_budget = (MAX_DIFF_BODY_LINES / chunks.len().max(1)).max(MIN_CHUNK_BUDGET);
+    for (i, chunk) in chunks.iter().enumerate() {
+        if i > 0 {
+            render_separator(out, ctx, border_style);
+        }
+        render_chunk_body(out, ctx, chunk, border_style, per_chunk_budget);
+    }
+
+    // Single-chunk + replace_all + replacements > 1 is the resume
+    // fallback path: JSONL didn't carry structured chunks, so the
+    // producer-equivalent reconstruction yielded only one chunk.
+    // Preserve the legacy "{N} occurrences replaced" footer there
+    // so the count stays visible without inventing a fake location
+    // list. Multi-chunk render already shows count via separators
+    // (or the locations footer in the dedup branch).
+    if chunks.len() == 1 && replace_all && replacements > 1 {
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(
+                format!("{replacements} occurrences replaced"),
+                ctx.theme.dim(),
+            ),
+        ]));
+    }
+}
+
+/// Renders a single chunk's `- ` / `+ ` entries under `border_style`,
+/// using `budget` to cap combined line count. Pulls in the existing
+/// per-side head + ellipsis + tail collapse via [`entries`].
+fn render_chunk_body(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    chunk: &DiffChunk,
+    border_style: Style,
+    budget: usize,
+) {
+    let diff_cont_prefix = border_continuation_prefix(DIFF_LINE_CONT, border_style);
+    let width = usize::from(ctx.width);
+    let old_text: Vec<&str> = chunk.old.iter().map(|l| l.text.as_str()).collect();
+    let new_text: Vec<&str> = chunk.new.iter().map(|l| l.text.as_str()).collect();
     let entries = entries(
-        old_lines,
-        new_lines,
-        MAX_DIFF_BODY_LINES,
+        &old_text,
+        &new_text,
+        budget,
         ctx.theme.error(),
         ctx.theme.success(),
     );
@@ -111,54 +176,93 @@ pub(super) fn render(
             }
         }
     }
-
-    if replace_all && replacements > 1 {
-        out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            // Mirror the model-facing "Replaced N occurrences in ..."
-            // wording rather than inventing a new shape. Past tense
-            // matches the ✓/✗ indicator in the status row above.
-            Span::styled(
-                format!("{replacements} occurrences replaced"),
-                ctx.theme.dim(),
-            ),
-        ]));
-    }
 }
 
-/// Splits one side of a diff into displayable lines. A trailing
-/// newline is dropped so `"a\nb\n"` renders as two lines, not three
-/// with a blank tail — common when `old_string` / `new_string` span
-/// whole lines. Empty input yields an empty `Vec`, which the caller
-/// treats as "render nothing for this side".
-fn split_side(side: &str) -> Vec<&str> {
-    side.lines().collect()
+/// Renders a `--` separator row between adjacent chunks.
+fn render_separator(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border_style: Style) {
+    out.push(Line::from(vec![
+        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled("--", ctx.theme.dim()),
+    ]));
 }
 
-/// Drops lines that are identical at the leading or trailing boundary
-/// of `old` and `new`. Single-line edits are unaffected — line 0 of
-/// each side differs — but pure tail insertions like
-/// `fn foo()` → `fn foo()\n    return 42;` collapse the anchor line
-/// so only the real delta renders. Returns borrowed slice views into
-/// the input; the callers already own the `Vec`s.
-fn trim_common_boundaries<'a, 'b>(
-    old: &'a [&'b str],
-    new: &'a [&'b str],
-) -> (&'a [&'b str], &'a [&'b str]) {
-    let max_prefix = old.len().min(new.len());
-    let mut prefix = 0;
-    while prefix < max_prefix && old[prefix] == new[prefix] {
-        prefix += 1;
+/// Renders the deduplicated multi-chunk footer naming every location.
+/// `locations` carries one anchor line per chunk (old-side first line,
+/// falling back to new-side for pure insertions). Caps at
+/// [`MAX_LOCATIONS_DISPLAYED`] with a "…and N more locations" suffix.
+fn render_locations_footer(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    locations: &[usize],
+    border_style: Style,
+) {
+    if locations.is_empty() {
+        return;
     }
-    let max_suffix = old.len().min(new.len()) - prefix;
-    let mut suffix = 0;
-    while suffix < max_suffix && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix] {
-        suffix += 1;
-    }
-    (
-        &old[prefix..old.len() - suffix],
-        &new[prefix..new.len() - suffix],
-    )
+    let shown = locations.len().min(MAX_LOCATIONS_DISPLAYED);
+    let list = locations[..shown]
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if locations.len() > MAX_LOCATIONS_DISPLAYED {
+        format!(" and {} more", locations.len() - MAX_LOCATIONS_DISPLAYED)
+    } else {
+        String::new()
+    };
+    let label = if locations.len() == 1 {
+        "line"
+    } else {
+        "lines"
+    };
+    out.push(Line::from(vec![
+        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(
+            format!("applied at {label} {list}{suffix}"),
+            ctx.theme.dim(),
+        ),
+    ]));
+}
+
+/// Returns true if any chunk has a non-empty `old` or `new` side.
+/// Used as the empty-render guard so chunks where both sides trimmed
+/// to nothing (no-op edits) still surface a `(no change)` marker.
+fn any_chunk_has_content(chunks: &[DiffChunk]) -> bool {
+    chunks
+        .iter()
+        .any(|c| !c.old.is_empty() || !c.new.is_empty())
+}
+
+/// Returns true if every chunk has identical text content on both
+/// sides (line numbers may differ). The dedup path renders only the
+/// first chunk plus a locations footer when this holds.
+fn all_chunks_share_content(chunks: &[DiffChunk]) -> bool {
+    chunks.windows(2).all(|w| chunk_text_eq(&w[0], &w[1]))
+}
+
+/// Compares two chunks by `old` and `new` text content alone, ignoring
+/// line numbers — the comparison the dedup branch needs since
+/// `replace_all` chunks share text but vary in position.
+fn chunk_text_eq(a: &DiffChunk, b: &DiffChunk) -> bool {
+    diff_lines_text_eq(&a.old, &b.old) && diff_lines_text_eq(&a.new, &b.new)
+}
+
+fn diff_lines_text_eq(a: &[DiffLine], b: &[DiffLine]) -> bool {
+    a.iter()
+        .map(|l| l.text.as_str())
+        .eq(b.iter().map(|l| l.text.as_str()))
+}
+
+/// Anchor line number for a chunk in the original file — old-side
+/// first line, falling back to new-side first line for pure
+/// insertions (no `-` content). Used by the locations footer to
+/// describe where each `replace_all` match landed.
+fn chunk_anchor_line(chunk: &DiffChunk) -> Option<usize> {
+    chunk
+        .old
+        .first()
+        .or_else(|| chunk.new.first())
+        .map(|l| l.number)
 }
 
 /// A single rendered entry in a diff body.
@@ -267,83 +371,277 @@ fn emit_side<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::tui::theme::Theme;
+
     use super::*;
 
-    // ── split_side ──
+    /// Helper: build a single-chunk diff body with line numbers
+    /// starting at 1, mirroring how `synthesize_chunk` shapes resume-
+    /// fallback chunks. Tests reach for this rather than constructing
+    /// `DiffChunk` literals to keep focus on the chunk-level logic
+    /// under test.
+    fn line_numbered(side: &[&str]) -> Vec<DiffLine> {
+        side.iter()
+            .enumerate()
+            .map(|(i, t)| DiffLine {
+                number: i + 1,
+                text: (*t).to_owned(),
+            })
+            .collect()
+    }
+
+    fn chunk_of(old: &[&str], new: &[&str]) -> DiffChunk {
+        DiffChunk {
+            old: line_numbered(old),
+            new: line_numbered(new),
+        }
+    }
+
+    // ── any_chunk_has_content ──
 
     #[test]
-    fn split_side_empty_yields_empty_slice() {
-        assert!(split_side("").is_empty());
+    fn any_chunk_has_content_empty_chunks_returns_false() {
+        // No-change guard input: every chunk has both sides empty
+        // (e.g., a malformed transcript reaching the renderer).
+        // Used to short-circuit to the "(no change)" marker.
+        let chunks = vec![chunk_of(&[], &[])];
+        assert!(!any_chunk_has_content(&chunks));
     }
 
     #[test]
-    fn split_side_drops_trailing_newline() {
-        // `"a\nb\n"` → two displayable lines, not three with a blank
-        // tail. Needed because `old_string` / `new_string` often end
-        // in newlines when the edit spans full lines.
-        assert_eq!(split_side("a\nb\n"), vec!["a", "b"]);
-    }
-
-    // ── trim_common_boundaries ──
-
-    #[test]
-    fn trim_common_boundaries_drops_matching_prefix_and_suffix() {
-        let old = vec!["a", "b", "c", "d"];
-        let new = vec!["a", "X", "Y", "d"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert_eq!(o, &["b", "c"]);
-        assert_eq!(n, &["X", "Y"]);
+    fn any_chunk_has_content_one_side_filled_returns_true() {
+        let chunks = vec![chunk_of(&["a"], &[])];
+        assert!(any_chunk_has_content(&chunks));
+        let chunks = vec![chunk_of(&[], &["b"])];
+        assert!(any_chunk_has_content(&chunks));
     }
 
     #[test]
-    fn trim_common_boundaries_pure_tail_insertion_strips_anchor() {
-        // The canonical Edit case: `old` is an anchor line,
-        // `new` is the anchor plus added lines below. The diff
-        // should show only the added lines, not `- anchor / + anchor`.
-        let old = vec!["fn foo()"];
-        let new = vec!["fn foo()", "    return 42;"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty(), "anchor line dropped on old side");
-        assert_eq!(n, &["    return 42;"]);
+    fn any_chunk_has_content_empty_vec_returns_false() {
+        // No chunks at all — cannot happen in the live path but the
+        // renderer must still degrade gracefully.
+        assert!(!any_chunk_has_content(&[]));
+    }
+
+    // ── all_chunks_share_content ──
+
+    #[test]
+    fn all_chunks_share_content_identical_text_different_line_numbers() {
+        // The dedup case: `replace_all` emits one chunk per location,
+        // each carries the same `old`/`new` strings but at different
+        // file positions. Line numbers must NOT defeat dedup.
+        let chunk_a = DiffChunk {
+            old: vec![DiffLine {
+                number: 12,
+                text: "a".to_owned(),
+            }],
+            new: vec![DiffLine {
+                number: 12,
+                text: "b".to_owned(),
+            }],
+        };
+        let chunk_b = DiffChunk {
+            old: vec![DiffLine {
+                number: 47,
+                text: "a".to_owned(),
+            }],
+            new: vec![DiffLine {
+                number: 47,
+                text: "b".to_owned(),
+            }],
+        };
+        assert!(all_chunks_share_content(&[chunk_a, chunk_b]));
     }
 
     #[test]
-    fn trim_common_boundaries_pure_head_insertion_strips_anchor() {
-        let old = vec!["fn foo()"];
-        let new = vec!["// new doc", "fn foo()"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty());
-        assert_eq!(n, &["// new doc"]);
+    fn all_chunks_share_content_differing_text_returns_false() {
+        let a = chunk_of(&["a"], &["b"]);
+        let b = chunk_of(&["c"], &["d"]);
+        assert!(!all_chunks_share_content(&[a, b]));
     }
 
     #[test]
-    fn trim_common_boundaries_single_line_edit_is_untouched() {
-        // Line 0 differs on both sides — no boundary to trim. This
-        // preserves the snapshot for single-line word changes.
-        let old = vec!["fn foo() {}"];
-        let new = vec!["fn bar() {}"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert_eq!(o, &["fn foo() {}"]);
-        assert_eq!(n, &["fn bar() {}"]);
+    fn all_chunks_share_content_single_chunk_is_trivially_true() {
+        // A one-element vector trivially satisfies the all-pairs
+        // predicate. `windows(2)` on len 1 yields nothing — but the
+        // single-chunk branch never reaches dedup anyway, so this is
+        // pure defense-in-depth.
+        assert!(all_chunks_share_content(&[chunk_of(&["a"], &["b"])]));
+    }
+
+    // ── chunk_anchor_line ──
+
+    #[test]
+    fn chunk_anchor_line_uses_old_side_first_line() {
+        let chunk = DiffChunk {
+            old: vec![
+                DiffLine {
+                    number: 47,
+                    text: "a".to_owned(),
+                },
+                DiffLine {
+                    number: 48,
+                    text: "b".to_owned(),
+                },
+            ],
+            new: vec![DiffLine {
+                number: 47,
+                text: "X".to_owned(),
+            }],
+        };
+        assert_eq!(chunk_anchor_line(&chunk), Some(47));
     }
 
     #[test]
-    fn trim_common_boundaries_fully_identical_yields_empty_slices() {
-        // Not reachable via EditTool (no-op edits are rejected), but
-        // the helper must still terminate and return empty slices.
-        let old = vec!["a", "b"];
-        let new = vec!["a", "b"];
-        let (o, n) = trim_common_boundaries(&old, &new);
-        assert!(o.is_empty());
-        assert!(n.is_empty());
+    fn chunk_anchor_line_falls_back_to_new_side_for_pure_insertions() {
+        // Pure tail insertion: producer trim collapsed the old anchor.
+        // Anchor line falls back to the new side so the locations
+        // footer still names a meaningful position.
+        let chunk = DiffChunk {
+            old: vec![],
+            new: vec![DiffLine {
+                number: 99,
+                text: "added".to_owned(),
+            }],
+        };
+        assert_eq!(chunk_anchor_line(&chunk), Some(99));
     }
 
     #[test]
-    fn trim_common_boundaries_empty_input_is_idempotent() {
-        let empty: Vec<&str> = Vec::new();
-        let (o, n) = trim_common_boundaries(&empty, &empty);
-        assert!(o.is_empty());
-        assert!(n.is_empty());
+    fn chunk_anchor_line_returns_none_when_both_sides_empty() {
+        let chunk = chunk_of(&[], &[]);
+        assert_eq!(chunk_anchor_line(&chunk), None);
+    }
+
+    // ── render_separator ──
+
+    #[test]
+    fn render_separator_emits_dim_dashes_under_bar() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_separator(&mut out, &ctx, theme.tool_border());
+        let row = out.first().expect("renders one line");
+        let texts: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, vec![STATUS_LINE_CONT, "--"]);
+    }
+
+    // ── render_locations_footer ──
+
+    #[test]
+    fn render_locations_footer_lists_each_line_number() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[12, 47, 200], theme.tool_border());
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at lines 12, 47, 200"),
+            "footer text mismatch: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_caps_with_and_more_suffix_past_max() {
+        // Past `MAX_LOCATIONS_DISPLAYED` (8), the footer truncates and
+        // adds "and N more" so a 50-hit `replace_all` doesn't sprawl.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let locations: Vec<usize> = (1..=10).collect();
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &locations, theme.tool_border());
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more"),
+            "footer should cap and append remainder: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_singular_label_for_one_location() {
+        // The singular branch is unreachable in production (the dedup
+        // path needs `chunks.len() > 1`), but the helper must produce
+        // the right grammar if a future caller ever passes a single
+        // location.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[42], theme.tool_border());
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at line 42") && !text.contains("lines"),
+            "singular label expected: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_empty_emits_nothing() {
+        // Defensive guard: if every chunk lacked an anchor line (both
+        // sides empty after trim), the footer must skip rather than
+        // emit a malformed "applied at lines " row.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[], theme.tool_border());
+        assert!(out.is_empty());
+    }
+
+    // ── render (multi-chunk varying-content path) ──
+
+    #[test]
+    fn render_separates_varying_content_chunks_with_dashes() {
+        // Non-dedup multi-chunk branch: chunks with differing content
+        // each render their own body, separated by a `--` row. Today
+        // unreachable from the live producer (every replace_all chunk
+        // shares content), but pinned so a future context-aware
+        // producer's renderer behavior is fixed.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let chunks = vec![chunk_of(&["a"], &["b"]), chunk_of(&["c"], &["d"])];
+        let mut out = Vec::new();
+        render(&mut out, &ctx, &chunks, false, 2, false);
+        let texts: Vec<String> = out
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Expected order: chunk0 - then +, separator, chunk1 - then +.
+        assert!(texts.iter().any(|t| t.contains("- a")));
+        assert!(texts.iter().any(|t| t.contains("+ b")));
+        assert!(
+            texts.iter().any(|t| t.ends_with("--")),
+            "missing separator: {texts:?}",
+        );
+        assert!(texts.iter().any(|t| t.contains("- c")));
+        assert!(texts.iter().any(|t| t.contains("+ d")));
     }
 
     // ── entries ──
