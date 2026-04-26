@@ -17,6 +17,7 @@
 
 mod diff;
 mod grep;
+mod numbered_row;
 mod read_excerpt;
 mod text;
 

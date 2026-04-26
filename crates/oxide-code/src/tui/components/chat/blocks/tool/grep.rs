@@ -6,12 +6,12 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
+use super::numbered_row;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT,
-    border_continuation_prefix, border_style_for, truncate_to_bytes,
+    MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
 };
 use crate::tool::GrepFileGroup;
-use crate::tui::wrap::{expand_tabs, wrap_line};
+use crate::tui::wrap::wrap_line;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -40,8 +40,7 @@ pub(super) fn render(
         .map(|l| l.number.to_string().width())
         .max()
         .unwrap_or(1);
-    let line_cont_prefix = format!("{STATUS_LINE_CONT}{}   ", " ".repeat(line_number_width));
-    let line_cont_spans = border_continuation_prefix(&line_cont_prefix, border_style);
+    let rows = numbered_row::Renderer::new(ctx, border_style, line_number_width);
 
     let mut emitted: usize = 0;
     'outer: for group in groups {
@@ -64,26 +63,12 @@ pub(super) fn render(
             if emitted >= visible_rows {
                 break 'outer;
             }
-            let expanded = expand_tabs(&line.text);
-            let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
-            let line_number = format!("{:>width$}", line.number, width = line_number_width);
             let text_style = if line.is_match {
                 ctx.theme.text()
             } else {
                 ctx.theme.dim()
             };
-            let rendered = Line::from(vec![
-                Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-                Span::styled(line_number, ctx.theme.muted()),
-                Span::styled(" │ ", ctx.theme.dim()),
-                Span::styled(display_text, text_style),
-            ]);
-            out.extend(wrap_line(
-                rendered,
-                width,
-                line_cont_prefix.width(),
-                Some(&line_cont_spans),
-            ));
+            rows.render(out, line.number, &line.text, text_style);
             emitted += 1;
         }
     }
