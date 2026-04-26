@@ -1069,13 +1069,12 @@ mod tests {
             .expect("inline code span missing inside list item");
         assert_eq!(
             code_span.style.fg,
-            Some(t.code),
-            "inline code keeps teal fg inside list items"
+            Some(t.user),
+            "inline code keeps peach fg inside list items"
         );
         assert_eq!(
-            code_span.style.bg,
-            Some(t.surface),
-            "inline code keeps surface bg inside list items"
+            code_span.style.bg, None,
+            "inline code is fg-only inside list items"
         );
     }
 
@@ -1102,8 +1101,7 @@ mod tests {
     fn fenced_code_block_plain_has_no_background() {
         // Plain fenced blocks (no language) use the `code_block_fallback`
         // style, which omits the bg fill so wrapping / width variance
-        // across lines doesn't leave ragged highlight edges. The inline
-        // code bg (surface) must not leak into fenced blocks.
+        // across lines doesn't leave ragged highlight edges.
         //
         // The fallback path builds each line via `Line::styled(..)`, so
         // the style lands on the Line, not the inner spans. Walk both
@@ -1305,13 +1303,12 @@ mod tests {
             .expect("inline code span missing inside table cell");
         assert_eq!(
             code_span.style.fg,
-            Some(t.code),
-            "inline code keeps teal fg inside table cells"
+            Some(t.user),
+            "inline code keeps peach fg inside table cells"
         );
         assert_eq!(
-            code_span.style.bg,
-            Some(t.surface),
-            "inline code keeps surface bg inside table cells"
+            code_span.style.bg, None,
+            "inline code is fg-only inside table cells"
         );
     }
 
@@ -1609,11 +1606,10 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("foo()"))
             .unwrap();
-        assert_eq!(span.style.fg, Some(t.code));
+        assert_eq!(span.style.fg, Some(t.user));
         assert_eq!(
-            span.style.bg,
-            Some(t.surface),
-            "inline code should have a surface background fill to stand out"
+            span.style.bg, None,
+            "inline code is fg-only — no background fill"
         );
     }
 
@@ -1628,14 +1624,10 @@ mod tests {
             .expect("code span not found");
         assert_eq!(
             span.style.fg,
-            Some(t.code),
+            Some(t.user),
             "code span keeps its distinctive fg"
         );
-        assert_eq!(
-            span.style.bg,
-            Some(t.surface),
-            "code span keeps its surface fill"
-        );
+        assert_eq!(span.style.bg, None, "code span stays fg-only");
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
             "code span inside **bold** should inherit BOLD modifier"
@@ -1651,8 +1643,8 @@ mod tests {
             .iter()
             .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
             .expect("code span not found in heading");
-        assert_eq!(span.style.fg, Some(t.code));
-        assert_eq!(span.style.bg, Some(t.surface));
+        assert_eq!(span.style.fg, Some(t.user));
+        assert_eq!(span.style.bg, None);
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
             "code inside an H1 should inherit the heading's BOLD"

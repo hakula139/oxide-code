@@ -22,7 +22,7 @@ pub(crate) struct Theme {
     pub(crate) fg_dim: Color,
 
     // Surfaces
-    /// Elevated surfaces, tool call backgrounds, inline code fill
+    /// Elevated surfaces (reserved; no live consumer)
     pub(crate) surface: Color,
 
     // Semantic accents (UI roles)
@@ -207,10 +207,10 @@ impl Theme {
         Style::default().fg(self.fg).add_modifier(Modifier::ITALIC)
     }
 
-    /// Inline code (`` `code` ``) — teal on a subtle surface fill so it
-    /// reads as a highlighted token against body text and bold headings.
+    /// Inline code (`` `code` ``) — peach fg, no fill. A surface bg
+    /// reads as a heavy block on transparent terminals.
     pub(crate) fn inline_code(&self) -> Style {
-        Style::default().fg(self.code).bg(self.surface)
+        Style::default().fg(self.user)
     }
 
     /// Fallback style for fenced code blocks with unknown languages.
@@ -294,8 +294,8 @@ mod tests {
         assert_eq!(t.success().fg, Some(t.success));
         assert_eq!(t.warning().fg, Some(t.warning));
         assert_eq!(t.error().fg, Some(t.error));
-        assert_eq!(t.inline_code().fg, Some(t.code));
-        assert_eq!(t.inline_code().bg, Some(t.surface));
+        assert_eq!(t.inline_code().fg, Some(t.user));
+        assert_eq!(t.inline_code().bg, None);
         assert_eq!(t.code_block_fallback().fg, Some(t.code));
         assert_eq!(t.code_block_fallback().bg, None);
     }
