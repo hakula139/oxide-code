@@ -15,6 +15,7 @@
 //! this file owns block types, central dispatch, and the shared border
 //! helpers child renderers reuse.
 
+mod bordered_row;
 mod diff;
 mod glob;
 mod grep;
@@ -151,8 +152,12 @@ impl ChatBlock for ToolResultBlock {
             ToolResultView::GrepMatches { groups, truncated } => {
                 grep::render(&mut out, ctx, groups, *truncated, self.is_error);
             }
-            ToolResultView::GlobFiles { files, total } => {
-                glob::render(&mut out, ctx, files, *total, self.is_error);
+            ToolResultView::GlobFiles {
+                pattern,
+                files,
+                total,
+            } => {
+                glob::render(&mut out, ctx, pattern, files, *total, self.is_error);
             }
         }
         out

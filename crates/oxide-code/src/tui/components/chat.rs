@@ -1995,14 +1995,20 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
-        // 7 returned out of 1234 total: TUI shows the first 5, footer
-        // combines hidden-row count with the unbounded total disclosed
-        // by the tool's truncation footer.
+        // 7 returned out of 1234 total: TUI shows the first 5.
         let mut chat = test_chat();
         let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
-        let view = crate::tool::ToolResultView::GlobFiles { files, total: 1234 };
+        let view = crate::tool::ToolResultView::GlobFiles {
+            pattern: "**/*.rs".to_owned(),
+            files,
+            total: 1234,
+        };
         chat.push_tool_result_view("Glob(**/*.rs)", view, false);
         let text = all_text(&chat);
+        assert!(
+            text.contains("**/*.rs (5 of 1234)"),
+            "header missing: {text}",
+        );
         assert!(text.contains("src/f0.rs"), "first row missing: {text}");
         assert!(text.contains("src/f4.rs"), "5th row missing: {text}");
         assert!(
@@ -2010,7 +2016,7 @@ mod tests {
             "6th row leaked past cap: {text}"
         );
         assert!(
-            text.contains("... +2 files of 1234 total"),
+            text.contains("... +2 files (limit reached)"),
             "footer text wrong: {text}",
         );
     }

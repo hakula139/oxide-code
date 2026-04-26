@@ -86,6 +86,10 @@ pub(crate) struct ToolMetadata {
     /// inside [`crate::tool::edit::EditTool::result_view`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
+    /// Unbounded match count when a tool capped returned rows; lets
+    /// the renderer show "X of N" without re-parsing prose footers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncated_total: Option<usize>,
 }
 
 impl ToolOutput {
@@ -129,6 +133,13 @@ impl ToolOutput {
         self.metadata.diff_chunks = Some(chunks);
         self
     }
+
+    /// Fluent helper to record the unbounded match count for a
+    /// truncated tool result.
+    pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
+        self.metadata.truncated_total = Some(total);
+        self
+    }
 }
 
 // ── Tool Result View ──
@@ -170,11 +181,17 @@ pub(crate) enum ToolResultView {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
     },
-    /// Glob result — flat list of cwd-relative paths. `total` preserves
-    /// the unbounded match count from glob's `MAX_RESULTS` cap so the
+    /// Glob result — flat list of cwd-relative paths. `pattern` is the
+    /// input glob echoed back so the body can stay self-describing
+    /// after the status header scrolls away. `total` preserves the
+    /// unbounded match count from glob's `MAX_RESULTS` cap so the
     /// renderer can show "X more matched" when the tool itself
     /// truncated; equals `files.len()` otherwise.
-    GlobFiles { files: Vec<String>, total: usize },
+    GlobFiles {
+        pattern: String,
+        files: Vec<String>,
+        total: usize,
+    },
 }
 
 /// One line in a structured `read` result view.
@@ -955,6 +972,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
                 total: 2,
             },

@@ -28,6 +28,7 @@ indoc
 insta
 isatty
 killpg
+misparse
 mpsc
 mtimes
 nonewline

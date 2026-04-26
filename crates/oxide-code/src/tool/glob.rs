@@ -46,11 +46,11 @@ impl Tool for GlobTool {
 
     fn result_view(
         &self,
-        _input: &serde_json::Value,
+        input: &serde_json::Value,
         content: &str,
-        _metadata: &ToolMetadata,
+        metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        parse_files_view(content)
+        build_files_view(input, content, metadata)
     }
 
     fn run(
@@ -82,8 +82,13 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
 
     match tokio::task::spawn_blocking(move || glob_files(&pattern, path.as_deref())).await {
         Ok(result) => {
-            let title = glob_title(result.as_deref().ok());
-            ToolOutput::from_result(result).with_title(title)
+            let title = glob_title(result.as_ref().ok().map(|r| r.content.as_str()));
+            let truncated_total = result.as_ref().ok().and_then(|r| r.truncated_total);
+            let mut output = ToolOutput::from_result(result.map(|r| r.content)).with_title(title);
+            if let Some(total) = truncated_total {
+                output = output.with_truncated_total(total);
+            }
+            output
         }
         Err(e) => ToolOutput {
             content: format!("Internal error: {e}"),
@@ -104,7 +109,15 @@ fn glob_title(output: Option<&str>) -> String {
     }
 }
 
-fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String> {
+/// `glob_files` return: model-facing prose plus the unbounded match
+/// count when the result was capped at [`MAX_RESULTS`].
+#[derive(Debug)]
+struct GlobOutput {
+    content: String,
+    truncated_total: Option<usize>,
+}
+
+fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, String> {
     let base = super::resolve_base_dir(search_path)?;
     if !base.is_dir() {
         return Err(format!("Directory does not exist: {}", base.display()));
@@ -128,75 +141,103 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
     matches.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     if matches.is_empty() {
-        return Ok("No files found".into());
+        return Ok(GlobOutput {
+            content: "No files found".into(),
+            truncated_total: None,
+        });
     }
 
-    let truncated = matches.len() > MAX_RESULTS;
     let total = matches.len();
+    let truncated = total > MAX_RESULTS;
     matches.truncate(MAX_RESULTS);
 
-    let mut output = String::new();
+    let mut content = String::new();
     for (i, (p, _)) in matches.iter().enumerate() {
         if i > 0 {
-            output.push('\n');
+            content.push('\n');
         }
-        output.push_str(p);
+        content.push_str(p);
     }
 
     if truncated {
         _ = write!(
-            output,
+            content,
             "\n\n(Showing {MAX_RESULTS} of {total} matches. Use a more specific pattern.)"
         );
     }
 
-    Ok(output)
+    Ok(GlobOutput {
+        content,
+        truncated_total: truncated.then_some(total),
+    })
 }
 
 // ── Result View ──
 
-/// Parses glob output into a [`ToolResultView::GlobFiles`]. Output
-/// shape: a `\n`-joined list of paths optionally followed by
-/// `\n\n(Showing 100 of N matches. Use a more specific pattern.)`.
-/// Returns `None` for any line that can't be classified so malformed
-/// output falls through to the raw text body instead of silently
-/// dropping rows.
-fn parse_files_view(content: &str) -> Option<ToolResultView> {
+/// Builds a [`ToolResultView::GlobFiles`] from `glob_files` output.
+/// Returns `None` for malformed shapes so they fall through to the
+/// raw text body instead of silently dropping rows. The unbounded
+/// match count prefers `metadata.truncated_total`; for sessions
+/// whose JSONL predates that field, the count is recovered from the
+/// `(Showing X of Y matches. ...)` prose still baked into `content`.
+fn build_files_view(
+    input: &serde_json::Value,
+    content: &str,
+    metadata: &ToolMetadata,
+) -> Option<ToolResultView> {
+    let pattern = extract_input_field(input, "pattern")?.to_owned();
     let trimmed = content.trim_end();
     if trimmed == "No files found" {
         return Some(ToolResultView::GlobFiles {
+            pattern,
             files: Vec::new(),
             total: 0,
         });
     }
 
-    let (body, total) = match trimmed.rsplit_once("\n\n") {
-        Some((body, footer)) => (body, Some(parse_truncation_footer(footer)?)),
+    let (body, footer_total) = match trimmed.rsplit_once("\n\n") {
+        Some((body, footer)) if is_truncation_footer(footer) => {
+            (body, parse_total_from_footer(footer))
+        }
+        // Unknown trailing prose: fall through rather than absorb it as a path.
+        Some(_) => return None,
         None => (trimmed, None),
     };
 
     let files: Vec<String> = body.lines().map(str::to_owned).collect();
-    // Empty body protects against shapes like `\n\n(Showing 0 of 0 matches.)`
-    // where everything is footer — fall through to text rather than render
-    // a structured view with zero rows but a non-zero total.
     if files.is_empty() {
         return None;
     }
-    let total = total.unwrap_or(files.len());
+    let total = metadata
+        .truncated_total
+        .or(footer_total)
+        .unwrap_or(files.len());
     if total < files.len() {
         return None;
     }
-    Some(ToolResultView::GlobFiles { files, total })
+    Some(ToolResultView::GlobFiles {
+        pattern,
+        files,
+        total,
+    })
 }
 
-/// Parses glob's `(Showing X of Y matches. ...)` footer and returns the
-/// total. `None` flags a footer that we couldn't classify so the caller
-/// falls back to the raw text body instead of dropping the line.
-fn parse_truncation_footer(footer: &str) -> Option<usize> {
-    let footer = footer.trim();
-    let inner = footer.strip_prefix("(Showing ")?.strip_suffix(')')?;
-    let (_, rest) = inner.split_once(" of ")?;
-    rest.split_whitespace().next()?.parse().ok()
+/// Matches the `(Showing X of Y matches. ...)` footer emitted by
+/// [`glob_files`] — gates trailing prose so unknown shapes fall
+/// through instead of getting absorbed as a path.
+fn is_truncation_footer(footer: &str) -> bool {
+    footer.starts_with("(Showing ")
+}
+
+/// Extracts `Y` from `(Showing X of Y matches. ...)`. Caller must
+/// have already gated the shape via [`is_truncation_footer`].
+fn parse_total_from_footer(footer: &str) -> Option<usize> {
+    footer
+        .strip_prefix('(')?
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -222,6 +263,7 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.contains("a.txt"));
         assert!(!output.content.contains("b.rs"));
+        assert!(output.metadata.truncated_total.is_none());
     }
 
     #[tokio::test]
@@ -229,6 +271,24 @@ mod tests {
         let output = run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_truncated_attaches_total_to_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let total = MAX_RESULTS + 10;
+        for i in 0..total {
+            std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
+        }
+
+        let output = run(serde_json::json!({
+            "pattern": "*.txt",
+            "path": dir.path().to_str().unwrap(),
+        }))
+        .await;
+
+        assert!(!output.is_error);
+        assert_eq!(output.metadata.truncated_total, Some(total));
     }
 
     // ── glob_files ──
@@ -241,9 +301,10 @@ mod tests {
         std::fs::write(dir.path().join("baz.rs"), "").unwrap();
 
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.contains("foo.txt"));
-        assert!(result.contains("bar.txt"));
-        assert!(!result.contains("baz.rs"));
+        assert!(result.content.contains("foo.txt"));
+        assert!(result.content.contains("bar.txt"));
+        assert!(!result.content.contains("baz.rs"));
+        assert!(result.truncated_total.is_none());
     }
 
     #[test]
@@ -255,8 +316,8 @@ mod tests {
         std::fs::write(sub.join("nested.rs"), "").unwrap();
 
         let result = glob_files("**/*.rs", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.contains("top.rs"));
-        assert!(result.contains("nested.rs"));
+        assert!(result.content.contains("top.rs"));
+        assert!(result.content.contains("nested.rs"));
     }
 
     #[test]
@@ -268,7 +329,7 @@ mod tests {
         std::fs::write(dir.path().join("new.txt"), "new").unwrap();
 
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        let lines: Vec<&str> = result.lines().collect();
+        let lines: Vec<&str> = result.content.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("new.txt"));
         assert!(lines[1].contains("old.txt"));
@@ -280,7 +341,8 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
 
         let result = glob_files("*.rs", Some(dir.path().to_str().unwrap())).unwrap();
-        assert_eq!(result, "No files found");
+        assert_eq!(result.content, "No files found");
+        assert!(result.truncated_total.is_none());
     }
 
     #[test]
@@ -304,9 +366,18 @@ mod tests {
         }
 
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        let file_count = result.lines().filter(|l| l.contains(".txt")).count();
+        let file_count = result
+            .content
+            .lines()
+            .filter(|l| l.contains(".txt"))
+            .count();
         assert_eq!(file_count, MAX_RESULTS);
-        assert!(result.contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10)));
+        assert!(
+            result
+                .content
+                .contains(&format!("Showing {MAX_RESULTS} of {}", MAX_RESULTS + 10))
+        );
+        assert_eq!(result.truncated_total, Some(MAX_RESULTS + 10));
     }
 
     #[test]
@@ -318,8 +389,8 @@ mod tests {
         std::fs::write(dir.path().join("visible.txt"), "").unwrap();
 
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.contains("visible.txt"));
-        assert!(!result.contains(".hidden"));
+        assert!(result.content.contains("visible.txt"));
+        assert!(!result.content.contains(".hidden"));
     }
 
     #[test]
@@ -331,8 +402,8 @@ mod tests {
         std::fs::write(dir.path().join("tracked.txt"), "").unwrap();
 
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
-        assert!(result.contains("tracked.txt"));
-        assert!(!result.contains("ignored.txt"));
+        assert!(result.content.contains("tracked.txt"));
+        assert!(!result.content.contains("ignored.txt"));
     }
 
     // ── result_view ──
@@ -353,6 +424,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
                 total: 2,
             },
@@ -360,9 +432,44 @@ mod tests {
     }
 
     #[test]
-    fn result_view_preserves_total_from_truncation_footer() {
-        // Files vector reflects the tool's MAX_RESULTS cap; total
-        // preserves the unbounded count so the renderer can surface it.
+    fn result_view_pulls_total_from_metadata_and_drops_prose_footer() {
+        // Trailing `(Showing ...)` prose is dropped from the file
+        // list; metadata wins over the prose count when both are
+        // present (the live path).
+        let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
+        let body = files.join("\n");
+        let content = formatdoc! {"
+            {body}
+
+            (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
+        };
+        let metadata = ToolMetadata {
+            truncated_total: Some(1234),
+            ..ToolMetadata::default()
+        };
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "**/*.rs"}),
+                &content,
+                &metadata,
+            )
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                pattern: "**/*.rs".to_owned(),
+                files,
+                total: 1234,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_recovers_total_from_prose_footer_for_legacy_sessions() {
+        // Sessions recorded before `truncated_total` landed in metadata
+        // still carry the count in the prose footer. Recovering it
+        // keeps the rendered "X of Y" honest after resume.
         let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
         let body = files.join("\n");
         let content = formatdoc! {"
@@ -378,7 +485,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(view, ToolResultView::GlobFiles { files, total: 1234 });
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                pattern: "**/*.rs".to_owned(),
+                files,
+                total: 1234,
+            },
+        );
     }
 
     #[test]
@@ -394,6 +508,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.nope".to_owned(),
                 files: Vec::new(),
                 total: 0,
             },
@@ -413,6 +528,18 @@ mod tests {
     }
 
     #[test]
+    fn result_view_falls_back_when_input_has_no_pattern() {
+        // Defensive: missing pattern falls through to text rather
+        // than rendering an empty header.
+        let view = GlobTool.result_view(
+            &serde_json::json!({}),
+            "src/main.rs",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
     fn result_view_single_file_no_footer() {
         // Off-by-one guard for the `files.is_empty()` boundary. Also
         // pins `total` to derived `files.len()` when no footer present.
@@ -426,6 +553,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/only.rs".to_owned()],
                 total: 1,
             },
@@ -447,6 +575,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
                 total: 2,
             },
@@ -454,25 +583,25 @@ mod tests {
     }
 
     #[test]
-    fn result_view_footer_total_equal_to_file_count_succeeds() {
+    fn result_view_metadata_total_equal_to_file_count_succeeds() {
         // Boundary of the `total < files.len()` guard. Pinning equality
         // here keeps the comparator from drifting to `<=` or `==` —
         // mutants that would otherwise pass every other test.
+        let metadata = ToolMetadata {
+            truncated_total: Some(2),
+            ..ToolMetadata::default()
+        };
         let view = GlobTool
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
-                indoc! {"
-                    a.rs
-                    b.rs
-
-                    (Showing 2 of 2 matches. Use a more specific pattern.)"
-                },
-                &ToolMetadata::default(),
+                "a.rs\nb.rs",
+                &metadata,
             )
             .unwrap();
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
                 total: 2,
             },
@@ -483,36 +612,39 @@ mod tests {
     fn result_view_path_with_embedded_blank_line_falls_back() {
         // Unix paths can technically contain `\n`; back-to-back newlines
         // would let the parser mistake the rest of the body for a
-        // truncation footer. `rsplit_once` anchors the footer at the end,
-        // and a body section that doesn't parse as a footer triggers
-        // text-fallback instead of dropping rows.
-        let view = parse_files_view("weird\n\nname.rs\nnext.rs");
-        assert!(view.is_none());
-    }
-
-    #[test]
-    fn result_view_falls_back_when_footer_total_under_visible_files() {
-        // Inconsistent footer — claims fewer total matches than the
-        // visible body. Render-time math depends on `total >= files.len()`,
-        // so reject up front.
-        let view = GlobTool.result_view(
+        // truncation footer. The `is_truncation_footer` gate rejects
+        // anything that doesn't start with `(Showing ` so we fall
+        // through to text instead of dropping rows.
+        let view = build_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
-            indoc! {"
-                a.rs
-                b.rs
-
-                (Showing 100 of 1 matches. Use a more specific pattern.)"
-            },
+            "weird\n\nname.rs\nnext.rs",
             &ToolMetadata::default(),
         );
         assert!(view.is_none());
     }
 
     #[test]
-    fn result_view_falls_back_for_malformed_footer() {
-        // Footer present but unparsable — fall through to the text body
-        // rather than absorb the line as a "path" and render misleading
-        // structure.
+    fn result_view_falls_back_when_metadata_total_under_visible_files() {
+        // Inconsistent metadata — claims fewer total matches than the
+        // visible body. Render-time math depends on `total >= files.len()`,
+        // so reject up front.
+        let metadata = ToolMetadata {
+            truncated_total: Some(1),
+            ..ToolMetadata::default()
+        };
+        let view = GlobTool.result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            "a.rs\nb.rs",
+            &metadata,
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
+    fn result_view_falls_back_for_unrecognised_trailing_prose() {
+        // `\n\n` separator present but the trailing chunk doesn't match
+        // the truncation-footer shape — fall through to text rather
+        // than absorb the rest as paths.
         let view = GlobTool.result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
@@ -525,30 +657,45 @@ mod tests {
         assert!(view.is_none());
     }
 
-    // ── parse_truncation_footer ──
+    // ── is_truncation_footer ──
 
     #[test]
-    fn parse_truncation_footer_extracts_total() {
+    fn is_truncation_footer_accepts_glob_files_shape() {
+        assert!(is_truncation_footer(
+            "(Showing 100 of 250 matches. Use a more specific pattern.)"
+        ));
+    }
+
+    #[test]
+    fn is_truncation_footer_rejects_unknown_prose() {
+        assert!(!is_truncation_footer("(Some footer)"));
+        assert!(!is_truncation_footer("Showing 100 of 250"));
+        assert!(!is_truncation_footer(""));
+    }
+
+    // ── parse_total_from_footer ──
+
+    #[test]
+    fn parse_total_from_footer_extracts_y_from_glob_files_shape() {
         assert_eq!(
-            parse_truncation_footer("(Showing 100 of 250 matches. Use a more specific pattern.)"),
-            Some(250),
+            parse_total_from_footer("(Showing 100 of 1234 matches. Use a more specific pattern.)"),
+            Some(1234),
         );
     }
 
     #[test]
-    fn parse_truncation_footer_rejects_unrecognised_input() {
-        assert!(parse_truncation_footer("(Some footer)").is_none());
-        assert!(parse_truncation_footer("(Showing 100 of NaN matches.)").is_none());
-    }
-
-    #[test]
-    fn parse_truncation_footer_ignores_trailing_prose() {
-        // The prose after the count can change without breaking the
-        // parser — only the leading `(Showing X of Y` shape carries the
-        // contract.
+    fn parse_total_from_footer_returns_none_for_malformed_input() {
+        // Drop the leading `(` → missing strip.
         assert_eq!(
-            parse_truncation_footer("(Showing 100 of 250 matches. Try a tighter glob.)"),
-            Some(250),
+            parse_total_from_footer("Showing 100 of 1234 matches."),
+            None,
         );
+        // Token at idx 3 is non-numeric.
+        assert_eq!(
+            parse_total_from_footer("(Showing 100 of many matches.)"),
+            None
+        );
+        // Fewer than four whitespace-separated tokens.
+        assert_eq!(parse_total_from_footer("(Showing 100 of)"), None);
     }
 }
