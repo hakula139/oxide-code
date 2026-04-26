@@ -1447,9 +1447,8 @@ mod tests {
             "expected one blank separator between groups: {lines:?}",
         );
         assert!(
-            !separators[0].contains('▎'),
-            "spacer must be borderless: {:?}",
-            separators[0],
+            separators.iter().all(|s| !s.contains('▎')),
+            "spacer must be borderless: {separators:?}",
         );
     }
 
