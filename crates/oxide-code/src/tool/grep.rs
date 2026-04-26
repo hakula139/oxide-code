@@ -174,13 +174,16 @@ fn grep_title(output: Option<&str>) -> String {
     match output {
         Some("No matches found" | "No files found") | None => "No matches found".into(),
         Some(text) => {
-            // Count mode has a "Found N total occurrence(s)" summary line.
+            // Count / files-with-matches modes lead with "Found N ...".
             if let Some(line) = text.lines().find(|l| l.starts_with("Found ")) {
                 return line.trim_end_matches('.').to_owned();
             }
+            // Content mode: count matches only — context lines have the
+            // same `path:NUM` prefix but `is_match == false`.
             let match_count = text
                 .lines()
-                .filter(|l| !l.starts_with('(') && l.contains(':'))
+                .filter_map(parse_match_line)
+                .filter(|(_, m)| m.is_match)
                 .count();
             let word = if match_count == 1 { "match" } else { "matches" };
             format!("{match_count} {word}")
@@ -510,17 +513,10 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
     let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
-    let mut output = String::new();
-    for (i, (p, c)) in counts.iter().enumerate() {
-        if i > 0 {
-            output.push('\n');
-        }
-        _ = write!(output, "{p}:{c}");
-    }
-
-    _ = write!(
-        output,
-        "\n\nFound {total_matches} total {} across {total_files} {}.",
+    // Summary first — the renderer's title-strip pass consumes it,
+    // leaving a clean `paths` body. Mirrors `format_files_with_matches`.
+    let mut output = format!(
+        "Found {total_matches} total {} across {total_files} {}",
         if total_matches == 1 {
             "occurrence"
         } else {
@@ -528,9 +524,11 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
         },
         if total_files == 1 { "file" } else { "files" },
     );
-
+    for (p, c) in &counts {
+        _ = write!(output, "\n{p}:{c}");
+    }
     if truncated {
-        _ = write!(output, " (Results limited to {head_limit} files)");
+        _ = write!(output, "\n\n(Results limited to {head_limit} files)");
     }
 
     output
@@ -1018,6 +1016,32 @@ mod tests {
         assert!(result.contains("large.txt"));
     }
 
+    // ── grep_title ──
+
+    #[test]
+    fn grep_title_with_context_counts_matches_only() {
+        // Context lines share the `path:NUM` prefix but `is_match == false`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            indoc! {"
+                a
+                MATCH
+                b
+                c
+                MATCH
+                d
+            "},
+        )
+        .unwrap();
+
+        let mut p = params("MATCH");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.context = 1;
+        let result = grep_files(&p).unwrap();
+        assert_eq!(grep_title(Some(&result)), "2 matches");
+    }
+
     // ── grep_files (files_with_matches mode) ──
 
     #[test]
@@ -1119,9 +1143,26 @@ mod tests {
         p.search_path = Some(dir.path().to_str().unwrap());
         p.output_mode = OutputMode::Count;
         let result = grep_files(&p).unwrap();
-        assert!(result.contains("1 total occurrence across 1 file."));
+        assert!(result.contains("1 total occurrence across 1 file"));
         assert!(!result.contains("occurrences"));
-        assert!(!result.contains("files."));
+        assert!(!result.contains(" files"));
+    }
+
+    #[test]
+    fn grep_files_count_mode_summary_first() {
+        // Summary heads the body so the renderer's title-strip removes it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "match\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "match\n").unwrap();
+
+        let mut p = params("match");
+        p.search_path = Some(dir.path().to_str().unwrap());
+        p.output_mode = OutputMode::Count;
+        let result = grep_files(&p).unwrap();
+        assert!(
+            result.starts_with("Found 2 total occurrences across 2 files\n"),
+            "summary must lead the body: {result:?}",
+        );
     }
 
     // ── grep_files (head_limit) ──
