@@ -257,6 +257,9 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.contains("a.txt"));
         assert!(!output.content.contains("b.rs"));
+        // No truncation — metadata.truncated_total stays None so resumed
+        // sessions don't synthesise a phantom "X of Y" footer.
+        assert!(output.metadata.truncated_total.is_none());
     }
 
     #[tokio::test]
@@ -264,6 +267,29 @@ mod tests {
         let output = run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_truncated_attaches_total_to_metadata() {
+        // End-to-end pin for the producer-side `with_truncated_total`
+        // wiring: when `glob_files` caps at MAX_RESULTS, `run` must
+        // attach the unbounded count to `ToolMetadata::truncated_total`
+        // so the renderer can surface "X of Y" without reparsing the
+        // prose footer.
+        let dir = tempfile::tempdir().unwrap();
+        let total = MAX_RESULTS + 7;
+        for i in 0..total {
+            std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
+        }
+
+        let output = run(serde_json::json!({
+            "pattern": "*.txt",
+            "path": dir.path().to_str().unwrap(),
+        }))
+        .await;
+
+        assert!(!output.is_error);
+        assert_eq!(output.metadata.truncated_total, Some(total));
     }
 
     // ── glob_files ──
@@ -469,6 +495,20 @@ mod tests {
         let view = GlobTool.result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             "",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
+    fn result_view_falls_back_when_input_has_no_pattern() {
+        // Defensive arm: tool input is shaped by the API schema and
+        // always carries `pattern`, but a malformed call (or replayed
+        // legacy entry) without it falls through to text rather than
+        // rendering a structured view with an empty header.
+        let view = GlobTool.result_view(
+            &serde_json::json!({}),
+            "src/main.rs",
             &ToolMetadata::default(),
         );
         assert!(view.is_none());
