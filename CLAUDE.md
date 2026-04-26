@@ -85,8 +85,9 @@ ox                                          # Start an interactive session
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
+│   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows (text, grep paths, glob list, footers)
 │   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget + line-number gutter + Catppuccin row-bg tint)
-│   │   │       │   ├── glob.rs             # Glob-tool flat path list with combined TUI-hidden / tool-truncated footer
+│   │   │       │   ├── glob.rs             # Glob-tool body — `pattern (visible of total)` header + flat path list + parenthetical TUI-hidden / tool-truncated footer
 │   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
 │   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [separator] [text]` row renderer — pipe separator for read / grep, sign separator + row bg for diff sides
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
