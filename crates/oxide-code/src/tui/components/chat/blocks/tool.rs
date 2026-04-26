@@ -134,16 +134,14 @@ impl ChatBlock for ToolResultBlock {
                 read_excerpt::render(&mut out, ctx, path, lines, *total_lines, self.is_error);
             }
             ToolResultView::Diff {
-                old,
-                new,
+                chunks,
                 replace_all,
                 replacements,
             } => {
                 diff::render(
                     &mut out,
                     ctx,
-                    old,
-                    new,
+                    chunks,
                     *replace_all,
                     *replacements,
                     self.is_error,

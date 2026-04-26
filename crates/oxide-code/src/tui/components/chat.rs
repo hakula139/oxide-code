@@ -1778,8 +1778,7 @@ mod tests {
         // for the new side, not the default 5-line truncation body.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
-            old: "fn foo()".to_owned(),
-            new: "fn bar()".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk("fn foo()", "fn bar()")],
             replace_all: false,
             replacements: 1,
         };
@@ -1804,10 +1803,12 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_edit_replace_all_shows_match_count() {
+        // Resume-fallback shape: a single chunk + replacements > 1
+        // preserves the legacy "{N} occurrences replaced" footer for
+        // sessions whose JSONL predates structured chunks.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
-            old: "a".to_owned(),
-            new: "b".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
             replace_all: true,
             replacements: 3,
         };
@@ -1820,23 +1821,65 @@ mod tests {
     }
 
     #[test]
+    fn push_tool_result_view_edit_replace_all_multi_chunk_shows_locations_footer() {
+        // Live-path shape for `replace_all`: producer emits one chunk
+        // per matched site. The renderer dedupes identical content
+        // and prints "applied at lines 12, 47, 200" so the user sees
+        // the diff once plus every location.
+        let mut chat = test_chat();
+        let chunks = [12, 47, 200]
+            .into_iter()
+            .map(|line| crate::tool::DiffChunk {
+                old: vec![crate::tool::DiffLine {
+                    number: line,
+                    text: "old".to_owned(),
+                }],
+                new: vec![crate::tool::DiffLine {
+                    number: line,
+                    text: "new".to_owned(),
+                }],
+            })
+            .collect();
+        let view = crate::tool::ToolResultView::Diff {
+            chunks,
+            replace_all: true,
+            replacements: 3,
+        };
+        chat.push_tool_result_view("Edited file.rs", view, false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains("applied at lines 12, 47, 200"),
+            "locations footer missing: {text}",
+        );
+        // The legacy "{N} occurrences replaced" is subsumed by the
+        // locations footer here — must not appear alongside it.
+        assert!(
+            !text.contains("3 occurrences replaced"),
+            "legacy count footer must not duplicate the locations footer: {text}",
+        );
+    }
+
+    #[test]
     fn push_tool_result_view_edit_single_replacement_hides_count_footer() {
-        // The `applied to N matches` footer only makes sense when the
-        // edit actually multiplied. A single replacement (either
+        // The location / count footer only makes sense when the edit
+        // actually multiplied. A single replacement (either
         // replace_all=false or replace_all=true with one match) should
-        // render a clean diff with no count footer.
+        // render a clean diff with no footer.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
-            old: "a".to_owned(),
-            new: "b".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
             replace_all: true,
             replacements: 1,
         };
         chat.push_tool_result_view("Edited file.rs", view, false);
         let text = all_text(&chat);
         assert!(
-            !text.contains("applied to"),
-            "single-replacement footer should be suppressed: {text}",
+            !text.contains("occurrences replaced"),
+            "single-replacement count footer should be suppressed: {text}",
+        );
+        assert!(
+            !text.contains("applied at"),
+            "single-replacement locations footer should be suppressed: {text}",
         );
     }
 
@@ -2172,8 +2215,10 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
-            old: "fn foo() {}".to_owned(),
-            new: "fn foo() -> i32 { 42 }".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk(
+                "fn foo() {}",
+                "fn foo() -> i32 { 42 }",
+            )],
             replace_all: false,
             replacements: 1,
         };
@@ -2202,8 +2247,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let view = crate::tool::ToolResultView::Diff {
-            old,
-            new,
+            chunks: vec![crate::tool::edit::synthesize_chunk(&old, &new)],
             replace_all: false,
             replacements: 1,
         };
@@ -2222,8 +2266,10 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
-            old: "fn foo() {}".to_owned(),
-            new: "fn foo() -> i32 { 42 }".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk(
+                "fn foo() {}",
+                "fn foo() -> i32 { 42 }",
+            )],
             replace_all: false,
             replacements: 1,
         };
@@ -2243,8 +2289,10 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
-            old: "unchanged".to_owned(),
-            new: "unchanged".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk(
+                "unchanged",
+                "unchanged",
+            )],
             replace_all: false,
             replacements: 1,
         };
@@ -2256,14 +2304,17 @@ mod tests {
     fn render_tool_call_with_edit_diff_trims_identical_boundary_lines() {
         // Pure tail insertion: the anchor line (`fn foo()`) is
         // identical on both sides and must NOT render as
-        // `- fn foo()` / `+ fn foo()`. Pinned as a snapshot so the
-        // trim regression would surface at the rendered-layout level,
-        // not just in the unit test on `trim_common_boundaries`.
+        // `- fn foo()` / `+ fn foo()`. Pinned as a snapshot so a trim
+        // regression in the producer surfaces at the rendered-layout
+        // level, not only in `synthesize_chunk` / `trim_chunk` unit
+        // tests.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
-            old: "fn foo()".to_owned(),
-            new: "fn foo()\n    return 42;".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk(
+                "fn foo()",
+                "fn foo()\n    return 42;",
+            )],
             replace_all: false,
             replacements: 1,
         };
@@ -2279,8 +2330,10 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
-            old: "short".to_owned(),
-            new: "an intentionally quite long replacement line that forces wrapping".to_owned(),
+            chunks: vec![crate::tool::edit::synthesize_chunk(
+                "short",
+                "an intentionally quite long replacement line that forces wrapping",
+            )],
             replace_all: false,
             replacements: 1,
         };

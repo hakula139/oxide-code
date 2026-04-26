@@ -5,7 +5,8 @@ use std::pin::Pin;
 use serde::Deserialize;
 
 use super::{
-    Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field, summarize_path_call,
+    DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
+    summarize_path_call,
 };
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
@@ -67,23 +68,29 @@ impl Tool for EditTool {
         content: &str,
         metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        let old = input.get("old_string")?.as_str()?.to_owned();
-        let new = input.get("new_string")?.as_str()?.to_owned();
+        let old = input.get("old_string")?.as_str()?;
+        let new = input.get("new_string")?.as_str()?;
         let replace_all = input
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // Live path: `run` sets `metadata.replacements` structurally.
-        // Resume path (future commit): the session JSONL will persist
-        // this too. Until then, the replay path falls back to parsing
-        // the free-form success message.
-        let replacements = metadata
-            .replacements
+        // Live path uses `metadata.diff_chunks` for real line numbers.
+        // Resume path falls back to an input-derived synthesized chunk
+        // (line 1) and recovers the count from `metadata.replacements`
+        // or, for the oldest sessions, the success-message prose.
+        // Empty `Some(vec![])` is treated as absent so a zero-chunks
+        // regression doesn't surface as `(no change)`.
+        let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
+        let chunks = live_chunks
+            .cloned()
+            .unwrap_or_else(|| vec![synthesize_chunk(old, new)]);
+        let replacements = live_chunks
+            .map(Vec::len)
+            .or(metadata.replacements)
             .or_else(|| parse_replacement_count(content))
             .unwrap_or(1);
         Some(ToolResultView::Diff {
-            old,
-            new,
+            chunks,
             replace_all,
             replacements,
         })
@@ -103,7 +110,8 @@ impl Tool for EditTool {
 /// by [`edit_file`] when `replace_all` hits multiple matches — a
 /// `"Replaced N occurrences in <path>."` string. Returns `None` for
 /// the single-match shape (`"Successfully edited ..."`), in which case
-/// the caller defaults to 1.
+/// the caller defaults to 1. Used only as a final fallback for resumed
+/// sessions whose JSONL predates structured metadata.
 ///
 /// The content-format contract this parser relies on is pinned by
 /// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
@@ -116,6 +124,23 @@ fn parse_replacement_count(content: &str) -> Option<usize> {
         .next()?
         .parse()
         .ok()
+}
+
+/// Builds a single best-effort chunk from raw input strings.
+///
+/// Used by [`EditTool::result_view`] when the resumed session JSONL
+/// carries no structured `diff_chunks`. Line numbers start at 1 —
+/// they're the best we have without re-reading the (possibly already
+/// mutated) file. Exposed `pub(crate)` so TUI snapshot tests can
+/// build the same shape as the production resume path without
+/// duplicating the trim policy.
+pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+    let mut chunk = DiffChunk {
+        old: split_into_diff_lines(old, 1),
+        new: split_into_diff_lines(new, 1),
+    };
+    trim_chunk(&mut chunk);
+    chunk
 }
 
 // ── Input ──
@@ -146,9 +171,10 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
     )
     .await
     {
-        Ok((content, replacements)) => ToolOutput::from_result(Ok(content))
+        Ok((content, replacements, chunks)) => ToolOutput::from_result(Ok(content))
             .with_title(format!("Edited {name}"))
-            .with_replacements(replacements),
+            .with_replacements(replacements)
+            .with_diff_chunks(chunks),
         // Error path: leave `title` unset so the TUI falls back to
         // the neutral tool-call label — `✗ Edited {name}` would
         // read as a successful edit, contradicting the ✗ indicator.
@@ -161,7 +187,7 @@ async fn edit_file(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
     }
@@ -208,6 +234,18 @@ async fn edit_file(
         ));
     }
 
+    // Diff chunks computed BEFORE the file write so we capture the
+    // pre-edit positions while the original content is still in scope.
+    // For non-`replace_all` we cap to the first match to mirror the
+    // single-replacement semantics of `replacen`.
+    let chunks_take = if replace_all { usize::MAX } else { 1 };
+    let chunks = build_diff_chunks(
+        &content,
+        old_string.as_ref(),
+        new_string.as_ref(),
+        chunks_take,
+    );
+
     let updated = if replace_all {
         content.replace(old_string.as_ref(), new_string.as_ref())
     } else {
@@ -224,7 +262,131 @@ async fn edit_file(
     } else {
         format!("Successfully edited {path}.")
     };
-    Ok((message, match_count))
+    Ok((message, match_count, chunks))
+}
+
+// ── Diff Production ──
+
+/// Builds the per-match diff chunks from a successful edit.
+/// `original`, `old_string`, and `new_string` are all post EOL
+/// normalization. `take` is `usize::MAX` for `replace_all`, 1
+/// otherwise. Each chunk carries real file line numbers (post-edit
+/// positions on the `+` side) with common anchors trimmed.
+///
+/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts at < 2^24, so
+/// the running shift fits in `isize` and the post-edit line stays
+/// positive. The `checked_*` calls below surface any overflow as a
+/// panic — a wrong-but-plausible line number would be worse.
+fn build_diff_chunks(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+    take: usize,
+) -> Vec<DiffChunk> {
+    let positions = match_positions(original, old_string, take);
+    // Newline-count delta — even pure "\n" → "" rewrites (no
+    // displayable lines on either side) still need to shift later
+    // matches.
+    let shift_per_match = new_string.matches('\n').count().cast_signed()
+        - old_string.matches('\n').count().cast_signed();
+
+    positions
+        .into_iter()
+        .enumerate()
+        .map(|(idx, byte_pos)| {
+            let original_line = line_at_byte(original, byte_pos);
+            let cumulative_shift = idx
+                .cast_signed()
+                .checked_mul(shift_per_match)
+                .expect("cumulative line-shift fits in isize for sub-MAX_EDIT_FILE_SIZE inputs");
+            let new_line = original_line
+                .checked_add_signed(cumulative_shift)
+                .expect("post-edit line number stays positive for real match positions");
+            let mut chunk = DiffChunk {
+                old: split_into_diff_lines(old_string, original_line),
+                new: split_into_diff_lines(new_string, new_line),
+            };
+            trim_chunk(&mut chunk);
+            chunk
+        })
+        .collect()
+}
+
+/// Returns up to `take` non-overlapping byte offsets where `pattern`
+/// occurs in `haystack`. Mirrors what `String::replacen(.., take)` /
+/// `String::replace` actually rewrite, so post-edit line numbers
+/// computed from these offsets stay consistent with the file's new
+/// state.
+fn match_positions(haystack: &str, pattern: &str, take: usize) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while positions.len() < take {
+        let Some(rel) = haystack[start..].find(pattern) else {
+            break;
+        };
+        let abs = start + rel;
+        positions.push(abs);
+        // `pattern.len().max(1)` guards against pathological zero-byte
+        // patterns that would loop forever; `edit_file` already rejects
+        // empty `old_string` upstream, so this is defense-in-depth.
+        start = abs + pattern.len().max(1);
+    }
+    positions
+}
+
+/// 1-based line number of the byte at `offset` in `content`. Counts
+/// `\n` separators in the prefix; offsets at end-of-file map to the
+/// line after the final newline.
+fn line_at_byte(content: &str, offset: usize) -> usize {
+    1 + content[..offset].matches('\n').count()
+}
+
+/// Splits `s` into numbered diff lines starting at `start_line`. A
+/// trailing newline is dropped so `"a\nb\n"` yields two entries — the
+/// Edit-tool convention is line-ended `old_string`/`new_string` args,
+/// and the renderer doesn't want a phantom blank tail row.
+fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<DiffLine> {
+    s.lines()
+        .enumerate()
+        .map(|(i, text)| DiffLine {
+            number: start_line + i,
+            text: text.to_owned(),
+        })
+        .collect()
+}
+
+/// Drops common leading and trailing lines from `chunk.old` /
+/// `chunk.new` in-place. Pure tail insertions like
+/// `"fn foo()"` → `"fn foo()\n  body"` collapse the anchor on the old
+/// side so only the real delta survives. Line numbers on surviving
+/// entries are preserved — slicing keeps each `DiffLine` intact.
+fn trim_chunk(chunk: &mut DiffChunk) {
+    let (prefix, suffix) = {
+        let old_text: Vec<&str> = chunk.old.iter().map(|l| l.text.as_str()).collect();
+        let new_text: Vec<&str> = chunk.new.iter().map(|l| l.text.as_str()).collect();
+        common_boundaries(&old_text, &new_text)
+    };
+    chunk.old.truncate(chunk.old.len() - suffix);
+    chunk.new.truncate(chunk.new.len() - suffix);
+    chunk.old.drain(..prefix);
+    chunk.new.drain(..prefix);
+}
+
+/// Returns `(prefix, suffix)` — the count of leading and trailing
+/// elements that compare equal on both sides. Used by [`trim_chunk`]
+/// to strip identical anchors from a diff.
+fn common_boundaries<T: Eq>(old: &[T], new: &[T]) -> (usize, usize) {
+    let max_prefix = old.len().min(new.len());
+    let mut prefix = 0;
+    while prefix < max_prefix && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let max_suffix = old.len().min(new.len()) - prefix;
+    let mut suffix = 0;
+    while suffix < max_suffix && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    (prefix, suffix)
 }
 
 // ── Line Endings ──
@@ -263,7 +425,64 @@ mod tests {
     // ── result_view ──
 
     #[test]
-    fn result_view_extracts_diff_from_structured_inputs() {
+    fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
+        // Live path: `run` attaches `metadata.diff_chunks` via
+        // `with_diff_chunks`, so the renderer gets real file line
+        // numbers. The chunks must win over input-based synthesis,
+        // and `replacements` is derived from `chunks.len()` so a stale
+        // legacy `metadata.replacements` cannot disagree with the
+        // structural source of truth.
+        let input = serde_json::json!({
+            "file_path": "/tmp/f.rs",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let chunks = vec![
+            DiffChunk {
+                old: vec![DiffLine {
+                    number: 12,
+                    text: "a".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 12,
+                    text: "b".to_owned(),
+                }],
+            },
+            DiffChunk {
+                old: vec![DiffLine {
+                    number: 47,
+                    text: "a".to_owned(),
+                }],
+                new: vec![DiffLine {
+                    number: 47,
+                    text: "b".to_owned(),
+                }],
+            },
+        ];
+        let metadata = ToolMetadata {
+            diff_chunks: Some(chunks.clone()),
+            // Stale value — must lose to chunks.len().
+            replacements: Some(99),
+            ..ToolMetadata::default()
+        };
+        let view = EditTool.result_view(&input, "Replaced 2 occurrences in /tmp/f.rs.", &metadata);
+        assert_eq!(
+            view,
+            Some(ToolResultView::Diff {
+                chunks,
+                replace_all: true,
+                replacements: 2,
+            }),
+        );
+    }
+
+    #[test]
+    fn result_view_synthesizes_chunk_when_metadata_lacks_diff_chunks() {
+        // Resume path: session JSONL written before structured chunks
+        // existed only carries `metadata.replacements` (or nothing).
+        // The renderer still needs a chunk to draw, so we synthesize
+        // one from the raw inputs starting at line 1.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "fn foo()",
@@ -277,8 +496,16 @@ mod tests {
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
-                old: "fn foo()".to_owned(),
-                new: "fn bar()".to_owned(),
+                chunks: vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 1,
+                        text: "fn foo()".to_owned()
+                    }],
+                    new: vec![DiffLine {
+                        number: 1,
+                        text: "fn bar()".to_owned()
+                    }],
+                }],
                 replace_all: false,
                 replacements: 1,
             }),
@@ -286,39 +513,11 @@ mod tests {
     }
 
     #[test]
-    fn result_view_reads_replacements_from_metadata_on_live_path() {
-        // Live path: `run` attaches `metadata.replacements` via
-        // `with_replacements`, so the renderer does NOT need to
-        // re-parse prose. Pin the structural source of truth.
-        let input = serde_json::json!({
-            "file_path": "/tmp/f.rs",
-            "old_string": "a",
-            "new_string": "b",
-            "replace_all": true,
-        });
-        let metadata = ToolMetadata {
-            replacements: Some(7),
-            ..ToolMetadata::default()
-        };
-        // Content deliberately inconsistent with metadata — metadata
-        // wins. This locks in the "structured over parsed" priority.
-        let view = EditTool.result_view(&input, "Successfully edited /tmp/f.rs.", &metadata);
-        assert_eq!(
-            view,
-            Some(ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
-                replace_all: true,
-                replacements: 7,
-            }),
-        );
-    }
-
-    #[test]
-    fn result_view_falls_back_to_parsing_content_when_metadata_lacks_replacements() {
-        // Resume path: session transcripts don't yet persist
-        // metadata, so the TUI re-parses the success message. This
-        // is the only remaining use of `parse_replacement_count`.
+    fn result_view_falls_back_to_parsing_content_when_metadata_is_empty() {
+        // Very-old-session fallback: neither `diff_chunks` nor
+        // `replacements` were recorded. The success message is the
+        // last remaining source of the count, so `parse_replacement_count`
+        // still pulls it out — synthesized chunk pairs with parsed N.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -333,8 +532,16 @@ mod tests {
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
+                chunks: vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 1,
+                        text: "a".to_owned()
+                    }],
+                    new: vec![DiffLine {
+                        number: 1,
+                        text: "b".to_owned()
+                    }],
+                }],
                 replace_all: true,
                 replacements: 7,
             }),
@@ -359,8 +566,16 @@ mod tests {
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
-                old: "a".to_owned(),
-                new: "b".to_owned(),
+                chunks: vec![DiffChunk {
+                    old: vec![DiffLine {
+                        number: 1,
+                        text: "a".to_owned()
+                    }],
+                    new: vec![DiffLine {
+                        number: 1,
+                        text: "b".to_owned()
+                    }],
+                }],
                 replace_all: true,
                 replacements: 1,
             }),
@@ -533,12 +748,13 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let (msg, replacements) = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
+        let (msg, replacements, chunks) = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
             .await
             .unwrap();
 
         assert!(msg.contains("2 occurrences"));
         assert_eq!(replacements, 2);
+        assert_eq!(chunks.len(), 2, "replace_all emits one chunk per match");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ccc bbb ccc");
     }
 
@@ -553,7 +769,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
-        let (msg, replacements) = edit_file(path.to_str().unwrap(), "a", "b", true)
+        let (msg, replacements, _chunks) = edit_file(path.to_str().unwrap(), "a", "b", true)
             .await
             .unwrap();
         assert_eq!(
@@ -569,15 +785,17 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let (msg, replacements) = edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
-            .await
-            .unwrap();
+        let (msg, replacements, chunks) =
+            edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
+                .await
+                .unwrap();
 
         assert!(msg.contains("Successfully edited"));
         assert_eq!(
             replacements, 1,
             "single-match replace_all still replaces once"
         );
+        assert_eq!(chunks.len(), 1);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
@@ -729,6 +947,451 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("Failed to write"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_chunks_carry_real_file_line_numbers_for_replace_all() {
+        // Pins the structural payload of `replace_all`: file with
+        // 4 lines, "B" at lines 2 and 4, replaced with "X". The two
+        // emitted chunks must carry their actual file positions —
+        // not an off-by-one shift, not relative-to-snippet line 1.
+        // Anchors the live-path producer end-to-end so a regression
+        // in `match_positions` or `line_at_byte` surfaces here.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+
+        let (_, replacements, chunks) = edit_file(path.to_str().unwrap(), "B", "X", true)
+            .await
+            .unwrap();
+
+        assert_eq!(replacements, 2);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].old,
+            vec![DiffLine {
+                number: 2,
+                text: "B".to_owned()
+            }]
+        );
+        assert_eq!(
+            chunks[0].new,
+            vec![DiffLine {
+                number: 2,
+                text: "X".to_owned()
+            }]
+        );
+        assert_eq!(
+            chunks[1].old,
+            vec![DiffLine {
+                number: 4,
+                text: "B".to_owned()
+            }]
+        );
+        assert_eq!(
+            chunks[1].new,
+            vec![DiffLine {
+                number: 4,
+                text: "X".to_owned()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_chunks_shift_new_side_for_growing_replace_all() {
+        // Replace_all with a multi-line `new_string` shifts the file's
+        // line count after each match. The post-edit `+` numbering on
+        // the second chunk must reflect that shift — pin the exact
+        // numbers so a missing `idx * shift_per_match` term in
+        // `build_diff_chunks` regresses visibly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grow.txt");
+        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+
+        // "B" → "X\nY" adds one line per replacement.
+        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "B", "X\nY", true)
+            .await
+            .unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        // Match 0: original line 2 unaffected by prior shifts.
+        assert_eq!(chunks[0].old[0].number, 2);
+        assert_eq!(
+            chunks[0].new,
+            vec![
+                DiffLine {
+                    number: 2,
+                    text: "X".to_owned()
+                },
+                DiffLine {
+                    number: 3,
+                    text: "Y".to_owned()
+                },
+            ],
+        );
+        // Match 1: original line 4, but match 0 added one line, so
+        // the post-edit position is line 5.
+        assert_eq!(chunks[1].old[0].number, 4);
+        assert_eq!(
+            chunks[1].new,
+            vec![
+                DiffLine {
+                    number: 5,
+                    text: "X".to_owned()
+                },
+                DiffLine {
+                    number: 6,
+                    text: "Y".to_owned()
+                },
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_chunks_shift_new_side_for_shrinking_replace_all() {
+        // Inverse of `..._growing_replace_all`: a multi-line `old`
+        // collapsing to single-line `new` produces a negative shift.
+        // The post-edit `+` numbering on later matches must reflect
+        // each prior match having shrunk the file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shrink.txt");
+        std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
+
+        // "X\nY" → "Z" drops one line per replacement.
+        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "X\nY", "Z", true)
+            .await
+            .unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].old[0].number, 1);
+        assert_eq!(chunks[0].new[0].number, 1);
+        assert_eq!(chunks[1].old[0].number, 4);
+        // Match 1: original line 4, shifted by -1 from match 0 → 3.
+        assert_eq!(chunks[1].new[0].number, 3);
+        assert_eq!(chunks[2].old[0].number, 7);
+        // Match 2: original line 7, shifted by -2 → 5.
+        assert_eq!(chunks[2].new[0].number, 5);
+    }
+
+    // ── build_diff_chunks ──
+
+    #[test]
+    fn build_diff_chunks_single_match_carries_real_position() {
+        // Producer-level check separate from the integration test:
+        // exercises `build_diff_chunks` directly to pin the line-number
+        // contract independent of file-IO plumbing.
+        let chunks = build_diff_chunks("A\nB\nC\n", "B", "X", 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].old,
+            vec![DiffLine {
+                number: 2,
+                text: "B".to_owned()
+            }]
+        );
+        assert_eq!(
+            chunks[0].new,
+            vec![DiffLine {
+                number: 2,
+                text: "X".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn build_diff_chunks_take_one_caps_at_first_match() {
+        // Non-`replace_all` calls pass `take = 1`; the producer must
+        // not walk past the first match even when more exist. Mirrors
+        // `replacen(.., 1)` semantics.
+        let chunks = build_diff_chunks("B\nB\nB\n", "B", "X", 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].old[0].number, 1);
+    }
+
+    #[test]
+    fn build_diff_chunks_applies_per_chunk_trim() {
+        // Pure tail insertion at file line 5: anchor on old side
+        // collapses, leaving only the inserted line on the new side.
+        // Line numbers on the surviving entry are preserved.
+        let chunks = build_diff_chunks(
+            "x\nx\nx\nx\nfn foo()\n",
+            "fn foo()",
+            "fn foo()\n    return 42;",
+            1,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].old.is_empty(), "anchor trimmed on old side");
+        // New side starts at line 6 — line below the old anchor at 5.
+        assert_eq!(
+            chunks[0].new,
+            vec![DiffLine {
+                number: 6,
+                text: "    return 42;".to_owned()
+            }],
+        );
+    }
+
+    // ── match_positions ──
+
+    #[test]
+    fn match_positions_finds_non_overlapping_offsets() {
+        assert_eq!(match_positions("aXbXcXd", "X", usize::MAX), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn match_positions_take_limits_count() {
+        assert_eq!(match_positions("aXbXcX", "X", 2), vec![1, 3]);
+    }
+
+    #[test]
+    fn match_positions_advances_past_pattern_to_avoid_overlap() {
+        // "aaaa" with pattern "aa" must NOT yield positions 0,1,2 —
+        // that's overlapping. Real `replace` rewrites left-to-right
+        // non-overlapping, and the offsets must mirror that.
+        assert_eq!(match_positions("aaaa", "aa", usize::MAX), vec![0, 2]);
+    }
+
+    #[test]
+    fn match_positions_no_match_returns_empty() {
+        assert!(match_positions("hello", "xyz", usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn match_positions_take_zero_returns_empty() {
+        // `take == 0` short-circuits before the first search — pin
+        // this so a regression to `<=` in the loop predicate would
+        // surface as a single-result mismatch.
+        assert!(match_positions("aXbXcX", "X", 0).is_empty());
+    }
+
+    // ── line_at_byte ──
+
+    #[test]
+    fn line_at_byte_first_line_is_one() {
+        assert_eq!(line_at_byte("A\nB\n", 0), 1);
+    }
+
+    #[test]
+    fn line_at_byte_after_newline_increments() {
+        // Byte 2 sits at "B" — the third line under 1-based numbering
+        // should still report line 2 (count of newlines before the
+        // byte plus 1). The "2 newlines but third line" interpretation
+        // would only kick in past the second newline.
+        assert_eq!(line_at_byte("A\nB\nC\n", 2), 2);
+        assert_eq!(line_at_byte("A\nB\nC\n", 4), 3);
+    }
+
+    #[test]
+    fn line_at_byte_end_of_file_after_trailing_newline() {
+        // Offset just past the final newline maps to the implicit
+        // line after the last `\n` — used when an edit appends to
+        // EOF. Pin the off-by-one so a "+ 1" mutation surfaces.
+        assert_eq!(line_at_byte("A\n", 2), 2);
+    }
+
+    #[test]
+    fn line_at_byte_end_of_file_without_trailing_newline() {
+        // Files without a final newline: offset == content.len() must
+        // still report the last line's number, not one past it. Tests
+        // the slice's upper bound separately from the trailing-newline
+        // case above.
+        assert_eq!(line_at_byte("AB", 2), 1);
+        assert_eq!(line_at_byte("A\nB", 3), 2);
+    }
+
+    // ── split_into_diff_lines ──
+
+    #[test]
+    fn split_into_diff_lines_numbers_from_start_line() {
+        assert_eq!(
+            split_into_diff_lines("a\nb", 47),
+            vec![
+                DiffLine {
+                    number: 47,
+                    text: "a".to_owned()
+                },
+                DiffLine {
+                    number: 48,
+                    text: "b".to_owned()
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn split_into_diff_lines_drops_trailing_newline() {
+        // "a\nb\n" is two displayable lines, not three. Matches the
+        // Edit-tool convention of line-ended `old_string`/`new_string`.
+        assert_eq!(
+            split_into_diff_lines("a\nb\n", 1),
+            vec![
+                DiffLine {
+                    number: 1,
+                    text: "a".to_owned()
+                },
+                DiffLine {
+                    number: 2,
+                    text: "b".to_owned()
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn split_into_diff_lines_empty_yields_empty() {
+        assert!(split_into_diff_lines("", 1).is_empty());
+    }
+
+    // ── trim_chunk ──
+
+    #[test]
+    fn trim_chunk_drops_matching_prefix_and_suffix_preserving_numbers() {
+        let mut chunk = DiffChunk {
+            old: vec![
+                DiffLine {
+                    number: 10,
+                    text: "anchor".to_owned(),
+                },
+                DiffLine {
+                    number: 11,
+                    text: "old".to_owned(),
+                },
+                DiffLine {
+                    number: 12,
+                    text: "tail".to_owned(),
+                },
+            ],
+            new: vec![
+                DiffLine {
+                    number: 10,
+                    text: "anchor".to_owned(),
+                },
+                DiffLine {
+                    number: 11,
+                    text: "new".to_owned(),
+                },
+                DiffLine {
+                    number: 12,
+                    text: "tail".to_owned(),
+                },
+            ],
+        };
+        trim_chunk(&mut chunk);
+        assert_eq!(
+            chunk.old,
+            vec![DiffLine {
+                number: 11,
+                text: "old".to_owned()
+            }]
+        );
+        assert_eq!(
+            chunk.new,
+            vec![DiffLine {
+                number: 11,
+                text: "new".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn trim_chunk_pure_tail_insertion_strips_anchor() {
+        let mut chunk = DiffChunk {
+            old: vec![DiffLine {
+                number: 5,
+                text: "fn foo()".to_owned(),
+            }],
+            new: vec![
+                DiffLine {
+                    number: 5,
+                    text: "fn foo()".to_owned(),
+                },
+                DiffLine {
+                    number: 6,
+                    text: "    return 42;".to_owned(),
+                },
+            ],
+        };
+        trim_chunk(&mut chunk);
+        assert!(chunk.old.is_empty());
+        assert_eq!(
+            chunk.new,
+            vec![DiffLine {
+                number: 6,
+                text: "    return 42;".to_owned()
+            }],
+        );
+    }
+
+    #[test]
+    fn trim_chunk_fully_identical_collapses_both_sides() {
+        // Not reachable via `edit_file` (no-op edits rejected), but the
+        // helper must terminate cleanly. The renderer's "(no change)"
+        // branch covers the resulting empty chunk.
+        let mut chunk = DiffChunk {
+            old: vec![DiffLine {
+                number: 1,
+                text: "a".to_owned(),
+            }],
+            new: vec![DiffLine {
+                number: 1,
+                text: "a".to_owned(),
+            }],
+        };
+        trim_chunk(&mut chunk);
+        assert!(chunk.old.is_empty());
+        assert!(chunk.new.is_empty());
+    }
+
+    // ── common_boundaries ──
+
+    #[test]
+    fn common_boundaries_returns_prefix_and_suffix_counts() {
+        let old = ["a", "b", "c", "d"];
+        let new = ["a", "X", "Y", "d"];
+        assert_eq!(common_boundaries(&old, &new), (1, 1));
+    }
+
+    #[test]
+    fn common_boundaries_disjoint_returns_zero() {
+        assert_eq!(common_boundaries(&["a"], &["b"]), (0, 0));
+    }
+
+    #[test]
+    fn common_boundaries_empty_inputs_return_zero() {
+        let empty: [&str; 0] = [];
+        assert_eq!(common_boundaries(&empty, &empty), (0, 0));
+    }
+
+    #[test]
+    fn common_boundaries_asymmetric_lengths_capped_by_shorter_side() {
+        // `max_suffix = min(old.len(), new.len()) - prefix` —
+        // dropping the `- prefix` term would let suffix overlap the
+        // already-counted prefix. Pin the cap with a non-zero prefix
+        // and asymmetric lengths.
+        assert_eq!(common_boundaries(&["a", "b", "a"], &["a", "X"]), (1, 0));
+        assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
+    }
+
+    // ── synthesize_chunk ──
+
+    #[test]
+    fn synthesize_chunk_starts_numbering_at_one() {
+        // Resume-fallback shape: line 1 is the best the renderer has
+        // when JSONL didn't carry real positions.
+        let chunk = synthesize_chunk("a\nb", "x\ny");
+        assert_eq!(chunk.old[0].number, 1);
+        assert_eq!(chunk.new[0].number, 1);
+    }
+
+    #[test]
+    fn synthesize_chunk_applies_trim() {
+        // Mirrors live-path producer trim so the rendered output for
+        // a resumed transcript matches what the live renderer would
+        // produce — pure tail insertion still drops the anchor.
+        let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
+        assert!(chunk.old.is_empty());
+        assert_eq!(chunk.new.len(), 1);
+        assert_eq!(chunk.new[0].text, "    body");
     }
 
     // ── dominant_eol ──
