@@ -109,11 +109,8 @@ fn glob_title(output: Option<&str>) -> String {
     }
 }
 
-/// Return shape from [`glob_files`]: model-facing prose plus the
-/// unbounded match count when the result was capped at [`MAX_RESULTS`].
-/// `truncated_total` flows through [`ToolMetadata::truncated_total`] so
-/// the renderer can surface "X of N total" without re-parsing the
-/// trailing `(Showing ...)` line.
+/// `glob_files` return: model-facing prose plus the unbounded match
+/// count when the result was capped at [`MAX_RESULTS`].
 #[derive(Debug)]
 struct GlobOutput {
     content: String,
@@ -202,6 +199,7 @@ fn build_files_view(
         Some((body, footer)) if is_truncation_footer(footer) => {
             (body, parse_total_from_footer(footer))
         }
+        // Unknown trailing prose: fall through rather than absorb it as a path.
         Some(_) => return None,
         None => (trimmed, None),
     };
@@ -265,8 +263,6 @@ mod tests {
         assert!(!output.is_error);
         assert!(output.content.contains("a.txt"));
         assert!(!output.content.contains("b.rs"));
-        // No truncation — metadata.truncated_total stays None so resumed
-        // sessions don't synthesise a phantom "X of Y" footer.
         assert!(output.metadata.truncated_total.is_none());
     }
 
@@ -279,11 +275,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_truncated_attaches_total_to_metadata() {
-        // End-to-end pin for the producer-side `with_truncated_total`
-        // wiring: when `glob_files` caps at MAX_RESULTS, `run` must
-        // attach the unbounded count to `ToolMetadata::truncated_total`
-        // so the renderer can surface "X of Y" without reparsing the
-        // prose footer.
         let dir = tempfile::tempdir().unwrap();
         let total = MAX_RESULTS + 10;
         for i in 0..total {
@@ -442,11 +433,9 @@ mod tests {
 
     #[test]
     fn result_view_pulls_total_from_metadata_and_drops_prose_footer() {
-        // Files vector reflects the tool's MAX_RESULTS cap; the
-        // unbounded count comes from `metadata.truncated_total` so the
-        // renderer can surface it. The trailing `(Showing ...)` prose
-        // is recognised as a truncation footer and dropped from the
-        // file list — re-parsing the count is no longer needed.
+        // Trailing `(Showing ...)` prose is dropped from the file
+        // list; metadata wins over the prose count when both are
+        // present (the live path).
         let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
         let body = files.join("\n");
         let content = formatdoc! {"
@@ -540,10 +529,8 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_when_input_has_no_pattern() {
-        // Defensive arm: tool input is shaped by the API schema and
-        // always carries `pattern`, but a malformed call (or replayed
-        // legacy entry) without it falls through to text rather than
-        // rendering a structured view with an empty header.
+        // Defensive: missing pattern falls through to text rather
+        // than rendering an empty header.
         let view = GlobTool.result_view(
             &serde_json::json!({}),
             "src/main.rs",

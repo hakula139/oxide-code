@@ -1,9 +1,5 @@
-//! `glob` tool body — flat list of cwd-relative paths under a dim
-//! `pattern (visible of total)` header. The header keeps the block
-//! self-describing once the status line scrolls out of view; the
-//! footer combines TUI-side row hiding (`MAX_TOOL_OUTPUT_LINES`) with
-//! the tool's own `MAX_RESULTS` cap into one parenthetical so users
-//! see a single source of truth for "what's hidden".
+//! `glob` body — `pattern (visible of total)` header + flat path
+//! list. Footer flags the producer's `MAX_RESULTS` cap when hit.
 
 use ratatui::text::Line;
 
@@ -24,11 +20,7 @@ pub(super) fn render(
     let border_style = border_style_for(ctx.theme, is_error);
 
     if files.is_empty() {
-        // Surface the empty state under the bar so the block doesn't look
-        // like a stalled or broken render — every other tool variant emits
-        // at least one body row, and the status header alone is easy to
-        // miss when the chat is dense. The pattern header is suppressed
-        // here — the empty-state row already labels the result.
+        // Skip the header — "No files found" already labels the result.
         bordered_row::render(out, ctx, border_style, "No files found", ctx.theme.dim());
         return;
     }
@@ -86,10 +78,7 @@ mod tests {
 
     #[test]
     fn render_empty_files_shows_no_files_found_row() {
-        // Empty result must render an explicit body row so the block has
-        // a left bar and the user doesn't mistake "no matches" for a
-        // half-rendered or stalled tool call. The pattern header is
-        // intentionally suppressed when there's nothing to label.
+        // Empty result still emits a body row; pattern header is suppressed.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -165,9 +154,7 @@ mod tests {
 
     #[test]
     fn render_error_flag_swaps_border_style() {
-        // Pins that `is_error` flows into `border_style_for` rather than
-        // being dropped on the floor — a regression here would render
-        // failed glob calls with the success-color bar.
+        // Pins `is_error` flowing into `border_style_for`.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -227,8 +214,8 @@ mod tests {
 
     #[test]
     fn footer_text_tool_truncated_with_no_tui_hidden_names_limit() {
-        // Exotic shape — tool cap hit but TUI fits everything. In practice
-        // MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
+        // Defensive arm: in practice MAX_RESULTS (100) is well above
+        // MAX_TOOL_OUTPUT_LINES (5), so this combination is unreachable.
         assert_eq!(footer_text(0, true), Some("... limit reached".to_owned()));
     }
 

@@ -1,12 +1,5 @@
-//! Shared row primitive for tool result bodies that render an
-//! unnumbered `[bar] [text]` row under the left-edge bar. Used by the
-//! default text body, glob's path list and `pattern (X of Y)` header,
-//! and grep's per-file path headers and combined footer.
-//!
-//! Numbered tool rows (read excerpts, grep matches, diff sides) use
-//! the sibling [`super::numbered_row`] primitive instead; the column
-//! shape is different enough that one renderer for both modes would
-//! dilute each contract.
+//! Shared `[bar] [text]` row primitive for unnumbered tool body
+//! rows. Numbered rows use the sibling [`super::numbered_row`].
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -16,10 +9,7 @@ use super::super::RenderCtx;
 use super::{STATUS_LINE_CONT, border_continuation_prefix};
 use crate::tui::wrap::wrap_line;
 
-/// Emits a single bar-prefixed row with `text` styled by `text_style`,
-/// wrapping to `ctx.width` with a bar-aligned continuation prefix.
-/// `wrap_line` is a no-op when the row fits, so single-line footers
-/// pay no extra cost while long content still wraps under the bar.
+/// Emits a bar-prefixed row, wrapping under the bar at `ctx.width`.
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -70,9 +60,8 @@ mod tests {
 
     #[test]
     fn render_wraps_long_text_under_bar() {
-        // Width forces the row to wrap. Continuation lines should keep
-        // the `▎` bar aligned via `border_continuation_prefix`, so the
-        // bar style on a continuation row matches the leading row.
+        // Continuation lines must keep the bar aligned via
+        // `border_continuation_prefix`.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 12,
@@ -98,9 +87,8 @@ mod tests {
 
     #[test]
     fn render_carries_text_style_through_wrap() {
-        // Pin that the text style is applied across wrapped fragments —
-        // a regression that styled only the first row would dim the
-        // first line and leave continuations un-styled.
+        // Text style must apply across all wrapped fragments, not
+        // just the first.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 12,

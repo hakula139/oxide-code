@@ -1995,8 +1995,7 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
-        // 7 returned out of 1234 total: TUI shows the first 5, header
-        // anchors the body to the input pattern, footer flags the cap.
+        // 7 returned out of 1234 total: TUI shows the first 5.
         let mut chat = test_chat();
         let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
         let view = crate::tool::ToolResultView::GlobFiles {
