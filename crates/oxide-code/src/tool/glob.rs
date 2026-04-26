@@ -177,17 +177,12 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
 
 // ── Result View ──
 
-/// Parses glob output into a [`ToolResultView::GlobFiles`]. Output
-/// shape: a `\n`-joined list of paths optionally followed by
-/// `\n\n(Showing 100 of N matches. Use a more specific pattern.)`.
-/// Returns `None` when the trailing prose isn't a recognised footer or
-/// when the body is empty so malformed shapes fall through to the raw
-/// text body instead of silently dropping rows.
-///
-/// The unbounded match count comes from
-/// [`ToolMetadata::truncated_total`] on live runs; resumed sessions
-/// whose JSONL predates that field fall back to `files.len()` (loses
-/// the "X of N total" hint but renders the visible rows correctly).
+/// Builds a [`ToolResultView::GlobFiles`] from `glob_files` output.
+/// Returns `None` for malformed shapes so they fall through to the
+/// raw text body instead of silently dropping rows. The unbounded
+/// match count prefers `metadata.truncated_total`; for sessions
+/// whose JSONL predates that field, the count is recovered from the
+/// `(Showing X of Y matches. ...)` prose still baked into `content`.
 fn build_files_view(
     input: &serde_json::Value,
     content: &str,
@@ -203,20 +198,22 @@ fn build_files_view(
         });
     }
 
-    let body = match trimmed.rsplit_once("\n\n") {
-        // Recognised truncation footer — discard the prose, keep the body.
-        Some((body, footer)) if is_truncation_footer(footer) => body,
-        // Unrecognised trailing prose — fall through to text rather than
-        // misparse it as a single-file result with garbage paths.
+    let (body, footer_total) = match trimmed.rsplit_once("\n\n") {
+        Some((body, footer)) if is_truncation_footer(footer) => {
+            (body, parse_total_from_footer(footer))
+        }
         Some(_) => return None,
-        None => trimmed,
+        None => (trimmed, None),
     };
 
     let files: Vec<String> = body.lines().map(str::to_owned).collect();
     if files.is_empty() {
         return None;
     }
-    let total = metadata.truncated_total.unwrap_or(files.len());
+    let total = metadata
+        .truncated_total
+        .or(footer_total)
+        .unwrap_or(files.len());
     if total < files.len() {
         return None;
     }
@@ -232,6 +229,17 @@ fn build_files_view(
 /// through instead of getting absorbed as a path.
 fn is_truncation_footer(footer: &str) -> bool {
     footer.starts_with("(Showing ")
+}
+
+/// Extracts `Y` from `(Showing X of Y matches. ...)`. Caller must
+/// have already gated the shape via [`is_truncation_footer`].
+fn parse_total_from_footer(footer: &str) -> Option<usize> {
+    footer
+        .strip_prefix('(')?
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -469,6 +477,36 @@ mod tests {
     }
 
     #[test]
+    fn result_view_recovers_total_from_prose_footer_for_legacy_sessions() {
+        // Sessions recorded before `truncated_total` landed in metadata
+        // still carry the count in the prose footer. Recovering it
+        // keeps the rendered "X of Y" honest after resume.
+        let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
+        let body = files.join("\n");
+        let content = formatdoc! {"
+            {body}
+
+            (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
+        };
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "**/*.rs"}),
+                &content,
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                pattern: "**/*.rs".to_owned(),
+                files,
+                total: 1234,
+            },
+        );
+    }
+
+    #[test]
     fn result_view_handles_no_files_found() {
         let view = GlobTool
             .result_view(
@@ -646,5 +684,31 @@ mod tests {
         assert!(!is_truncation_footer("(Some footer)"));
         assert!(!is_truncation_footer("Showing 100 of 250"));
         assert!(!is_truncation_footer(""));
+    }
+
+    // ── parse_total_from_footer ──
+
+    #[test]
+    fn parse_total_from_footer_extracts_y_from_glob_files_shape() {
+        assert_eq!(
+            parse_total_from_footer("(Showing 100 of 1234 matches. Use a more specific pattern.)"),
+            Some(1234),
+        );
+    }
+
+    #[test]
+    fn parse_total_from_footer_returns_none_for_malformed_input() {
+        // Drop the leading `(` → missing strip.
+        assert_eq!(
+            parse_total_from_footer("Showing 100 of 1234 matches."),
+            None,
+        );
+        // Token at idx 3 is non-numeric.
+        assert_eq!(
+            parse_total_from_footer("(Showing 100 of many matches.)"),
+            None
+        );
+        // Fewer than four whitespace-separated tokens.
+        assert_eq!(parse_total_from_footer("(Showing 100 of)"), None);
     }
 }
