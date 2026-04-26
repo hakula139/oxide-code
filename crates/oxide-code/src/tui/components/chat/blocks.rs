@@ -43,6 +43,15 @@ pub(super) struct RenderCtx<'a> {
     pub(super) show_thinking: bool,
 }
 
+/// Tool-grouping role of a block. Used by the chat stacker to break
+/// distinct tool groups apart while keeping `Call → Result` tight.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockKind {
+    Call,
+    Result,
+    Other,
+}
+
 /// A single renderable unit in the chat history.
 pub(super) trait ChatBlock {
     /// Render this block's lines for the given context.
@@ -56,6 +65,11 @@ pub(super) trait ChatBlock {
     /// exactly one blank between them.
     fn standalone(&self) -> bool {
         true
+    }
+
+    /// Tool-group role for inter-block spacing. Tool blocks override.
+    fn block_kind(&self) -> BlockKind {
+        BlockKind::Other
     }
 
     /// Whether the block is visible in the current context. Thinking

@@ -24,7 +24,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{BAR, ChatBlock, RenderCtx};
+use super::{BAR, BlockKind, ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
@@ -90,6 +90,10 @@ impl ChatBlock for ToolCallBlock {
     fn standalone(&self) -> bool {
         false
     }
+
+    fn block_kind(&self) -> BlockKind {
+        BlockKind::Call
+    }
 }
 
 // ── Tool Result ──
@@ -153,6 +157,10 @@ impl ChatBlock for ToolResultBlock {
 
     fn standalone(&self) -> bool {
         false
+    }
+
+    fn block_kind(&self) -> BlockKind {
+        BlockKind::Result
     }
 }
 

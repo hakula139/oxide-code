@@ -23,8 +23,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, ChatBlock, ErrorBlock, RenderCtx, StreamingAssistant,
-    ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
+    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, RenderCtx,
+    StreamingAssistant, ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
@@ -393,18 +393,27 @@ impl ChatView {
             return Text::from(lines);
         }
 
-        // Committed blocks.
+        // Committed blocks. A blank-before goes in when the prior block
+        // had width AND the current block wants breathing room — either
+        // it's standalone, or it's the start of a new tool group
+        // (prev was a Result).
+        let mut prev_kind: Option<BlockKind> = None;
         for block in &self.blocks {
             if !block.visible(&ctx) {
                 continue;
             }
-            if block.standalone() && !lines.is_empty() && last_has_width(&lines) {
+            let kind = block.block_kind();
+            let needs_blank_before = !lines.is_empty()
+                && last_has_width(&lines)
+                && (block.standalone() || prev_kind == Some(BlockKind::Result));
+            if needs_blank_before {
                 lines.push(Line::raw(""));
             }
             lines.extend(block.render(&ctx));
             if block.standalone() {
                 lines.push(Line::raw(""));
             }
+            prev_kind = Some(kind);
         }
 
         // Live thinking (transient — not stored in blocks). Visibility
@@ -1411,6 +1420,36 @@ mod tests {
         assert!(
             (assistant + 1..tool).any(|i| lines[i].trim().is_empty()),
             "expected blank separator between assistant text and tool call"
+        );
+    }
+
+    #[test]
+    fn tool_result_followed_by_new_tool_call_has_borderless_spacer() {
+        // Without the `Result → non-Result` spacer the `▎` bar runs
+        // unbroken across consecutive tool groups.
+        let mut chat = test_chat();
+        chat.push_tool_call("$", "ls");
+        chat.push_tool_result("ran ls", "output one", false);
+        chat.push_tool_call("$", "pwd");
+        chat.push_tool_result("ran pwd", "output two", false);
+        let text = all_text(&chat);
+        let lines: Vec<&str> = text.lines().collect();
+        let first_result = lines.iter().position(|l| l.contains("output one")).unwrap();
+        let next_call = lines.iter().position(|l| l.contains("pwd")).unwrap();
+        let separators: Vec<&str> = lines[first_result + 1..next_call]
+            .iter()
+            .filter(|l| l.trim().is_empty())
+            .copied()
+            .collect();
+        assert_eq!(
+            separators.len(),
+            1,
+            "expected one blank separator between groups: {lines:?}",
+        );
+        assert!(
+            !separators[0].contains('▎'),
+            "spacer must be borderless: {:?}",
+            separators[0],
         );
     }
 
