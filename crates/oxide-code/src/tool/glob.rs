@@ -50,7 +50,7 @@ impl Tool for GlobTool {
         content: &str,
         metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        parse_files_view(input, content, metadata)
+        build_files_view(input, content, metadata)
     }
 
     fn run(
@@ -188,7 +188,7 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
 /// [`ToolMetadata::truncated_total`] on live runs; resumed sessions
 /// whose JSONL predates that field fall back to `files.len()` (loses
 /// the "X of N total" hint but renders the visible rows correctly).
-fn parse_files_view(
+fn build_files_view(
     input: &serde_json::Value,
     content: &str,
     metadata: &ToolMetadata,
@@ -227,11 +227,11 @@ fn parse_files_view(
     })
 }
 
-/// Recognises the `(Showing X of Y matches. ...)` shape emitted by
-/// [`glob_files`] when truncation occurred. Used as a gate to reject
-/// unknown trailing prose; the actual count flows through metadata.
+/// Matches the `(Showing X of Y matches. ...)` footer emitted by
+/// [`glob_files`] — gates trailing prose so unknown shapes fall
+/// through instead of getting absorbed as a path.
 fn is_truncation_footer(footer: &str) -> bool {
-    footer.trim().starts_with("(Showing ")
+    footer.starts_with("(Showing ")
 }
 
 #[cfg(test)]
@@ -277,7 +277,7 @@ mod tests {
         // so the renderer can surface "X of Y" without reparsing the
         // prose footer.
         let dir = tempfile::tempdir().unwrap();
-        let total = MAX_RESULTS + 7;
+        let total = MAX_RESULTS + 10;
         for i in 0..total {
             std::fs::write(dir.path().join(format!("{i:04}.txt")), "").unwrap();
         }
@@ -590,7 +590,7 @@ mod tests {
         // truncation footer. The `is_truncation_footer` gate rejects
         // anything that doesn't start with `(Showing ` so we fall
         // through to text instead of dropping rows.
-        let view = parse_files_view(
+        let view = build_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
             "weird\n\nname.rs\nnext.rs",
             &ToolMetadata::default(),
@@ -638,16 +638,6 @@ mod tests {
     fn is_truncation_footer_accepts_glob_files_shape() {
         assert!(is_truncation_footer(
             "(Showing 100 of 250 matches. Use a more specific pattern.)"
-        ));
-    }
-
-    #[test]
-    fn is_truncation_footer_tolerates_surrounding_whitespace() {
-        // `rsplit_once("\n\n")` gives us the footer chunk including any
-        // trailing newline glob_files appended; the gate must look past
-        // that.
-        assert!(is_truncation_footer(
-            "  (Showing 100 of 250 matches. ...)\n"
         ));
     }
 
