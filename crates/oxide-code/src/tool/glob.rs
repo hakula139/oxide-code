@@ -170,12 +170,15 @@ fn parse_files_view(content: &str) -> Option<ToolResultView> {
         });
     }
 
-    let (body, total) = match trimmed.split_once("\n\n") {
+    let (body, total) = match trimmed.rsplit_once("\n\n") {
         Some((body, footer)) => (body, Some(parse_truncation_footer(footer)?)),
         None => (trimmed, None),
     };
 
     let files: Vec<String> = body.lines().map(str::to_owned).collect();
+    // Empty body protects against shapes like `\n\n(Showing 0 of 0 matches.)`
+    // where everything is footer — fall through to text rather than render
+    // a structured view with zero rows but a non-zero total.
     if files.is_empty() {
         return None;
     }
@@ -193,8 +196,7 @@ fn parse_truncation_footer(footer: &str) -> Option<usize> {
     let footer = footer.trim();
     let inner = footer.strip_prefix("(Showing ")?.strip_suffix(')')?;
     let (_, rest) = inner.split_once(" of ")?;
-    let (total, _) = rest.split_once(" matches.")?;
-    total.parse().ok()
+    rest.split_whitespace().next()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -411,6 +413,84 @@ mod tests {
     }
 
     #[test]
+    fn result_view_single_file_no_footer() {
+        // Off-by-one guard for the `files.is_empty()` boundary. Also
+        // pins `total` to derived `files.len()` when no footer present.
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "*.rs"}),
+                "src/only.rs",
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: vec!["src/only.rs".to_owned()],
+                total: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_normalises_trailing_newline() {
+        // glob_files never emits a trailing newline today, but `trim_end`
+        // means we tolerate one — pin the contract so a future producer
+        // change doesn't shift this silently.
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "*.rs"}),
+                "a.rs\nb.rs\n",
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
+                total: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_footer_total_equal_to_file_count_succeeds() {
+        // Boundary of the `total < files.len()` guard. Pinning equality
+        // here keeps the comparator from drifting to `<=` or `==` —
+        // mutants that would otherwise pass every other test.
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "*.rs"}),
+                indoc! {"
+                    a.rs
+                    b.rs
+
+                    (Showing 2 of 2 matches. Use a more specific pattern.)"
+                },
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
+                total: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_path_with_embedded_blank_line_falls_back() {
+        // Unix paths can technically contain `\n`; back-to-back newlines
+        // would let the parser mistake the rest of the body for a
+        // truncation footer. `rsplit_once` anchors the footer at the end,
+        // and a body section that doesn't parse as a footer triggers
+        // text-fallback instead of dropping rows.
+        let view = parse_files_view("weird\n\nname.rs\nnext.rs");
+        assert!(view.is_none());
+    }
+
+    #[test]
     fn result_view_falls_back_when_footer_total_under_visible_files() {
         // Inconsistent footer — claims fewer total matches than the
         // visible body. Render-time math depends on `total >= files.len()`,
@@ -456,8 +536,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_truncation_footer_unrecognised_returns_none() {
+    fn parse_truncation_footer_rejects_unrecognised_input() {
         assert!(parse_truncation_footer("(Some footer)").is_none());
         assert!(parse_truncation_footer("(Showing 100 of NaN matches.)").is_none());
+    }
+
+    #[test]
+    fn parse_truncation_footer_ignores_trailing_prose() {
+        // The prose after the count can change without breaking the
+        // parser — only the leading `(Showing X of Y` shape carries the
+        // contract.
+        assert_eq!(
+            parse_truncation_footer("(Showing 100 of 250 matches. Try a tighter glob.)"),
+            Some(250),
+        );
     }
 }
