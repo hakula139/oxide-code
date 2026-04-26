@@ -46,11 +46,11 @@ impl Tool for GlobTool {
 
     fn result_view(
         &self,
-        _input: &serde_json::Value,
+        input: &serde_json::Value,
         content: &str,
         metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        parse_files_view(content, metadata)
+        parse_files_view(input, content, metadata)
     }
 
     fn run(
@@ -188,10 +188,16 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
 /// [`ToolMetadata::truncated_total`] on live runs; resumed sessions
 /// whose JSONL predates that field fall back to `files.len()` (loses
 /// the "X of N total" hint but renders the visible rows correctly).
-fn parse_files_view(content: &str, metadata: &ToolMetadata) -> Option<ToolResultView> {
+fn parse_files_view(
+    input: &serde_json::Value,
+    content: &str,
+    metadata: &ToolMetadata,
+) -> Option<ToolResultView> {
+    let pattern = extract_input_field(input, "pattern")?.to_owned();
     let trimmed = content.trim_end();
     if trimmed == "No files found" {
         return Some(ToolResultView::GlobFiles {
+            pattern,
             files: Vec::new(),
             total: 0,
         });
@@ -214,7 +220,11 @@ fn parse_files_view(content: &str, metadata: &ToolMetadata) -> Option<ToolResult
     if total < files.len() {
         return None;
     }
-    Some(ToolResultView::GlobFiles { files, total })
+    Some(ToolResultView::GlobFiles {
+        pattern,
+        files,
+        total,
+    })
 }
 
 /// Recognises the `(Showing X of Y matches. ...)` shape emitted by
@@ -389,6 +399,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
                 total: 2,
             },
@@ -421,7 +432,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(view, ToolResultView::GlobFiles { files, total: 1234 });
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                pattern: "**/*.rs".to_owned(),
+                files,
+                total: 1234,
+            },
+        );
     }
 
     #[test]
@@ -437,6 +455,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.nope".to_owned(),
                 files: Vec::new(),
                 total: 0,
             },
@@ -469,6 +488,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/only.rs".to_owned()],
                 total: 1,
             },
@@ -490,6 +510,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
                 total: 2,
             },
@@ -515,6 +536,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["a.rs".to_owned(), "b.rs".to_owned()],
                 total: 2,
             },
@@ -528,7 +550,11 @@ mod tests {
         // truncation footer. The `is_truncation_footer` gate rejects
         // anything that doesn't start with `(Showing ` so we fall
         // through to text instead of dropping rows.
-        let view = parse_files_view("weird\n\nname.rs\nnext.rs", &ToolMetadata::default());
+        let view = parse_files_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            "weird\n\nname.rs\nnext.rs",
+            &ToolMetadata::default(),
+        );
         assert!(view.is_none());
     }
 

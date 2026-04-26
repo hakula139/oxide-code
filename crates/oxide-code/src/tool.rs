@@ -187,11 +187,17 @@ pub(crate) enum ToolResultView {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
     },
-    /// Glob result — flat list of cwd-relative paths. `total` preserves
-    /// the unbounded match count from glob's `MAX_RESULTS` cap so the
+    /// Glob result — flat list of cwd-relative paths. `pattern` is the
+    /// input glob echoed back so the body can stay self-describing
+    /// after the status header scrolls away. `total` preserves the
+    /// unbounded match count from glob's `MAX_RESULTS` cap so the
     /// renderer can show "X more matched" when the tool itself
     /// truncated; equals `files.len()` otherwise.
-    GlobFiles { files: Vec<String>, total: usize },
+    GlobFiles {
+        pattern: String,
+        files: Vec<String>,
+        total: usize,
+    },
 }
 
 /// One line in a structured `read` result view.
@@ -972,6 +978,7 @@ mod tests {
         assert_eq!(
             view,
             ToolResultView::GlobFiles {
+                pattern: "*.rs".to_owned(),
                 files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
                 total: 2,
             },

@@ -1,7 +1,9 @@
-//! `glob` tool body — flat list of cwd-relative paths under the bar.
-//! Combines TUI-side row hiding (`MAX_TOOL_OUTPUT_LINES`) with the
-//! tool's own `MAX_RESULTS` cap into one footer so users see a single
-//! source of truth for "what's hidden".
+//! `glob` tool body — flat list of cwd-relative paths under a dim
+//! `pattern (visible of total)` header. The header keeps the block
+//! self-describing once the status line scrolls out of view; the
+//! footer combines TUI-side row hiding (`MAX_TOOL_OUTPUT_LINES`) with
+//! the tool's own `MAX_RESULTS` cap into one parenthetical so users
+//! see a single source of truth for "what's hidden".
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -16,6 +18,7 @@ use crate::tui::wrap::wrap_line;
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
+    pattern: &str,
     files: &[String],
     total: usize,
     is_error: bool,
@@ -28,7 +31,8 @@ pub(super) fn render(
         // Surface the empty state under the bar so the block doesn't look
         // like a stalled or broken render — every other tool variant emits
         // at least one body row, and the status header alone is easy to
-        // miss when the chat is dense.
+        // miss when the chat is dense. The pattern header is suppressed
+        // here — the empty-state row already labels the result.
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
             Span::styled("No files found", ctx.theme.dim()),
@@ -39,6 +43,18 @@ pub(super) fn render(
     let visible = files.len().min(MAX_TOOL_OUTPUT_LINES);
     let hidden = files.len() - visible;
     let truncated_by_tool = total > files.len();
+
+    let header = format!("{pattern} ({visible} of {total})");
+    let header_line = Line::from(vec![
+        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(header, ctx.theme.dim()),
+    ]);
+    out.extend(wrap_line(
+        header_line,
+        width,
+        STATUS_LINE_CONT.width(),
+        Some(&cont_prefix),
+    ));
 
     for path in &files[..visible] {
         let display = truncate_to_bytes(path, MAX_TOOL_OUTPUT_LINE_BYTES);
@@ -96,7 +112,8 @@ mod tests {
     fn render_empty_files_shows_no_files_found_row() {
         // Empty result must render an explicit body row so the block has
         // a left bar and the user doesn't mistake "no matches" for a
-        // half-rendered or stalled tool call.
+        // half-rendered or stalled tool call. The pattern header is
+        // intentionally suppressed when there's nothing to label.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -104,15 +121,16 @@ mod tests {
             show_thinking: true,
         };
         let mut out = Vec::new();
-        render(&mut out, &ctx, &[], 0, false);
+        render(&mut out, &ctx, "**/*.rs", &[], 0, false);
 
         assert_eq!(out.len(), 1);
         let body = collect_text(&out);
         assert!(body.contains("No files found"), "body: {body}");
+        assert!(!body.contains("**/*.rs"), "no header on empty: {body}");
     }
 
     #[test]
-    fn render_short_list_emits_no_footer() {
+    fn render_short_list_emits_header_and_no_footer() {
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -121,10 +139,15 @@ mod tests {
         };
         let mut out = Vec::new();
         let files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
-        render(&mut out, &ctx, &files, 2, false);
+        render(&mut out, &ctx, "**/*.rs", &files, 2, false);
 
-        assert_eq!(out.len(), 2, "expected two body lines, no footer: {out:#?}");
+        assert_eq!(
+            out.len(),
+            3,
+            "expected header + two path rows, no footer: {out:#?}",
+        );
         let body = collect_text(&out);
+        assert!(body.contains("**/*.rs (2 of 2)"), "header text: {body}");
         assert!(body.contains("src/main.rs"));
         assert!(body.contains("src/lib.rs"));
         assert!(!body.contains("..."));
@@ -142,11 +165,18 @@ mod tests {
         let files: Vec<String> = (0..MAX_TOOL_OUTPUT_LINES + 3)
             .map(|i| format!("f{i}.rs"))
             .collect();
-        render(&mut out, &ctx, &files, files.len(), false);
+        render(&mut out, &ctx, "**/*.rs", &files, files.len(), false);
 
-        // MAX_TOOL_OUTPUT_LINES body rows + one footer row.
-        assert_eq!(out.len(), MAX_TOOL_OUTPUT_LINES + 1);
+        // Header + MAX_TOOL_OUTPUT_LINES body rows + one footer row.
+        assert_eq!(out.len(), MAX_TOOL_OUTPUT_LINES + 2);
         let body = collect_text(&out);
+        assert!(
+            body.contains(&format!(
+                "**/*.rs ({MAX_TOOL_OUTPUT_LINES} of {})",
+                MAX_TOOL_OUTPUT_LINES + 3
+            )),
+            "header should report visible / total: {body}",
+        );
         for i in 0..MAX_TOOL_OUTPUT_LINES {
             assert!(body.contains(&format!("f{i}.rs")), "row {i} hidden: {body}");
         }
@@ -171,9 +201,9 @@ mod tests {
         let files = vec!["a.rs".to_owned()];
 
         let mut ok = Vec::new();
-        render(&mut ok, &ctx, &files, 1, false);
+        render(&mut ok, &ctx, "**/*.rs", &files, 1, false);
         let mut err = Vec::new();
-        render(&mut err, &ctx, &files, 1, true);
+        render(&mut err, &ctx, "**/*.rs", &files, 1, true);
 
         assert_eq!(ok.len(), err.len());
         assert_ne!(
@@ -196,9 +226,13 @@ mod tests {
         // both how many returned rows it hid AND the unbounded total.
         let returned = MAX_TOOL_OUTPUT_LINES + 5;
         let files: Vec<String> = (0..returned).map(|i| format!("f{i}.rs")).collect();
-        render(&mut out, &ctx, &files, 1234, false);
+        render(&mut out, &ctx, "**/*.rs", &files, 1234, false);
 
         let body = collect_text(&out);
+        assert!(
+            body.contains(&format!("**/*.rs ({MAX_TOOL_OUTPUT_LINES} of 1234)")),
+            "header should anchor the body to the input pattern: {body}",
+        );
         assert!(
             body.contains("... +5 files of 1234 total"),
             "footer: {body}"

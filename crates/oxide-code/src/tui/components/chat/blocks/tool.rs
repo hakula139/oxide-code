@@ -151,8 +151,12 @@ impl ChatBlock for ToolResultBlock {
             ToolResultView::GrepMatches { groups, truncated } => {
                 grep::render(&mut out, ctx, groups, *truncated, self.is_error);
             }
-            ToolResultView::GlobFiles { files, total } => {
-                glob::render(&mut out, ctx, files, *total, self.is_error);
+            ToolResultView::GlobFiles {
+                pattern,
+                files,
+                total,
+            } => {
+                glob::render(&mut out, ctx, pattern, files, *total, self.is_error);
             }
         }
         out
