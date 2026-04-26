@@ -1592,7 +1592,15 @@ mod tests {
         // duplicates it on screen; skip the first body line when it
         // matches the label verbatim.
         let mut chat = test_chat();
-        chat.push_tool_result("Found 2 files", "Found 2 files\na.rs\nb.rs", false);
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files
+                a.rs
+                b.rs"
+            },
+            false,
+        );
         let text = all_text(&chat);
         // Only the status line carries "Found 2 files" — the body
         // starts at the file list.
@@ -1612,7 +1620,14 @@ mod tests {
         // vs "Found 2 files in cache") must render both — the label
         // is a distinct header.
         let mut chat = test_chat();
-        chat.push_tool_result("Found 2 files", "Found 2 files in cache\na.rs", false);
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files in cache
+                a.rs"
+            },
+            false,
+        );
         let text = all_text(&chat);
         assert!(
             text.contains("Found 2 files in cache"),
@@ -1976,6 +1991,28 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("limit reached"), "missing footer: {text}");
         assert!(!text.contains("+0"), "phantom hidden count: {text}");
+    }
+
+    #[test]
+    fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
+        // 7 returned out of 1234 total: TUI shows the first 5, footer
+        // combines hidden-row count with the unbounded total disclosed
+        // by the tool's truncation footer.
+        let mut chat = test_chat();
+        let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
+        let view = crate::tool::ToolResultView::GlobFiles { files, total: 1234 };
+        chat.push_tool_result_view("Glob(**/*.rs)", view, false);
+        let text = all_text(&chat);
+        assert!(text.contains("src/f0.rs"), "first row missing: {text}");
+        assert!(text.contains("src/f4.rs"), "5th row missing: {text}");
+        assert!(
+            !text.contains("src/f5.rs"),
+            "6th row leaked past cap: {text}"
+        );
+        assert!(
+            text.contains("... +2 files of 1234 total"),
+            "footer text wrong: {text}",
+        );
     }
 
     // ── push_error ──

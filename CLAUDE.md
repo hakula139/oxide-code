@@ -86,6 +86,7 @@ ox                                          # Start an interactive session
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
 │   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget + line-number gutter + Catppuccin row-bg tint)
+│   │   │       │   ├── glob.rs             # Glob-tool flat path list with combined TUI-hidden / tool-truncated footer
 │   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
 │   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [separator] [text]` row renderer — pipe separator for read / grep, sign separator + row bg for diff sides
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header

@@ -170,6 +170,11 @@ pub(crate) enum ToolResultView {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
     },
+    /// Glob result — flat list of cwd-relative paths. `total` preserves
+    /// the unbounded match count from glob's `MAX_RESULTS` cap so the
+    /// renderer can show "X more matched" when the tool itself
+    /// truncated; equals `files.len()` otherwise.
+    GlobFiles { files: Vec<String>, total: usize },
 }
 
 /// One line in a structured `read` result view.
@@ -936,6 +941,22 @@ mod tests {
                     text: "mod foo;".to_owned(),
                 }],
                 total_lines: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_delegates_glob_files() {
+        let registry = ToolRegistry::new(vec![Box::new(GlobTool)]);
+        let input = serde_json::json!({"pattern": "*.rs"});
+        let metadata = ToolMetadata::default();
+        let view =
+            registry.result_view("glob", &input, "src/main.rs\nsrc/lib.rs", &metadata, false);
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
+                total: 2,
             },
         );
     }

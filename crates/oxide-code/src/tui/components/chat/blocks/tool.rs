@@ -16,6 +16,7 @@
 //! helpers child renderers reuse.
 
 mod diff;
+mod glob;
 mod grep;
 mod numbered_row;
 mod read_excerpt;
@@ -149,6 +150,9 @@ impl ChatBlock for ToolResultBlock {
             }
             ToolResultView::GrepMatches { groups, truncated } => {
                 grep::render(&mut out, ctx, groups, *truncated, self.is_error);
+            }
+            ToolResultView::GlobFiles { files, total } => {
+                glob::render(&mut out, ctx, files, *total, self.is_error);
             }
         }
         out
