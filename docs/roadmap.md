@@ -41,7 +41,13 @@ The direction is simple:
 ### Terminal UI
 
 - Streaming display with markdown rendering and syntax-highlighted code blocks.
-- Catppuccin Mocha theme, tool-call blocks with per-tool icons and success / error indicators, GitHub-style Edit diffs with line-number gutters, styled Read excerpts, grouped Grep results, structured Glob file lists, multi-line input, and a status bar with model, working directory, and streaming spinner.
+- Catppuccin Mocha theme with per-tool result views:
+  - Tool-call blocks with per-tool icons and success / error indicators.
+  - GitHub-style Edit diffs with line-number gutters and red / green row tints.
+  - Styled Read excerpts with line-numbered bodies and path / range headers.
+  - Grouped Grep results — per-file blocks of line-numbered matches with dim context.
+  - Structured Glob file lists with combined TUI / tool truncation footers.
+  - Multi-line input area and a status bar with model, working directory, and streaming spinner.
 - Works in TUI, bare REPL (`--no-tui`), and headless (`-p`) modes, with panic-safe terminal restore.
 
 ### Session Persistence
