@@ -1,15 +1,14 @@
 //! Default tool-result body — truncated monospace text with a
 //! `+N lines` footer when output overflows.
 
-use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use ratatui::text::Line;
 
 use super::super::RenderCtx;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT,
-    border_continuation_prefix, border_style_for, truncate_to_bytes,
+    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row,
+    truncate_to_bytes,
 };
-use crate::tui::wrap::{expand_tabs, wrap_line};
+use crate::tui::wrap::expand_tabs;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -24,8 +23,6 @@ pub(super) fn render(
 
     let border_style = border_style_for(ctx.theme, is_error);
     let text_style = ctx.theme.dim();
-    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
-    let width = usize::from(ctx.width);
 
     // Preserve per-line leading whitespace — some tools (e.g., `git
     // diff --stat`) indent every line with a meaningful space that
@@ -65,24 +62,18 @@ pub(super) fn render(
     for text_line in visible {
         let expanded = expand_tabs(text_line);
         let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
-        let line = Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(display_text, text_style),
-        ]);
-        out.extend(wrap_line(
-            line,
-            width,
-            STATUS_LINE_CONT.width(),
-            Some(&cont_prefix),
-        ));
+        bordered_row::render(out, ctx, border_style, display_text, text_style);
     }
 
     if truncated {
         let n = output_lines.len() - MAX_TOOL_OUTPUT_LINES;
         let label = if n == 1 { "line" } else { "lines" };
-        out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(format!("... +{n} {label}"), ctx.theme.dim()),
-        ]));
+        bordered_row::render(
+            out,
+            ctx,
+            border_style,
+            format!("... +{n} {label}"),
+            ctx.theme.dim(),
+        );
     }
 }

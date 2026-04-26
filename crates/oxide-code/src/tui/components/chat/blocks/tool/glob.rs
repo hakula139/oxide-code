@@ -5,15 +5,13 @@
 //! the tool's own `MAX_RESULTS` cap into one parenthetical so users
 //! see a single source of truth for "what's hidden".
 
-use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use ratatui::text::Line;
 
 use super::super::RenderCtx;
 use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT,
-    border_continuation_prefix, border_style_for, truncate_to_bytes,
+    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row,
+    truncate_to_bytes,
 };
-use crate::tui::wrap::wrap_line;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -24,8 +22,6 @@ pub(super) fn render(
     is_error: bool,
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
-    let width = usize::from(ctx.width);
-    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
 
     if files.is_empty() {
         // Surface the empty state under the bar so the block doesn't look
@@ -33,10 +29,7 @@ pub(super) fn render(
         // at least one body row, and the status header alone is easy to
         // miss when the chat is dense. The pattern header is suppressed
         // here — the empty-state row already labels the result.
-        out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled("No files found", ctx.theme.dim()),
-        ]));
+        bordered_row::render(out, ctx, border_style, "No files found", ctx.theme.dim());
         return;
     }
 
@@ -44,37 +37,21 @@ pub(super) fn render(
     let hidden = files.len() - visible;
     let truncated_by_tool = total > files.len();
 
-    let header = format!("{pattern} ({visible} of {total})");
-    let header_line = Line::from(vec![
-        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-        Span::styled(header, ctx.theme.dim()),
-    ]);
-    out.extend(wrap_line(
-        header_line,
-        width,
-        STATUS_LINE_CONT.width(),
-        Some(&cont_prefix),
-    ));
+    bordered_row::render(
+        out,
+        ctx,
+        border_style,
+        format!("{pattern} ({visible} of {total})"),
+        ctx.theme.dim(),
+    );
 
     for path in &files[..visible] {
         let display = truncate_to_bytes(path, MAX_TOOL_OUTPUT_LINE_BYTES);
-        let line = Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(display, ctx.theme.text()),
-        ]);
-        out.extend(wrap_line(
-            line,
-            width,
-            STATUS_LINE_CONT.width(),
-            Some(&cont_prefix),
-        ));
+        bordered_row::render(out, ctx, border_style, display, ctx.theme.text());
     }
 
     if let Some(text) = footer_text(hidden, total, truncated_by_tool) {
-        out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(text, ctx.theme.dim()),
-        ]));
+        bordered_row::render(out, ctx, border_style, text, ctx.theme.dim());
     }
 }
 

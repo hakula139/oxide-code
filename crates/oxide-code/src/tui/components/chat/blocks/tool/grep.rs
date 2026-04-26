@@ -2,16 +2,12 @@
 //! match rows. Context lines (`-` separator in grep output) render dim
 //! to keep matches visually distinct.
 
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
-use super::numbered_row;
-use super::{
-    MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
-};
+use super::{MAX_TOOL_OUTPUT_LINES, border_style_for, bordered_row, numbered_row};
 use crate::tool::GrepFileGroup;
-use crate::tui::wrap::wrap_line;
 
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -25,8 +21,6 @@ pub(super) fn render(
     }
 
     let border_style = border_style_for(ctx.theme, is_error);
-    let width = usize::from(ctx.width);
-    let status_cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
 
     // Budget spans both path headers and match rows.
     let total_rows: usize = groups.iter().map(|g| 1 + g.lines.len()).sum();
@@ -47,16 +41,13 @@ pub(super) fn render(
         if emitted >= visible_rows {
             break;
         }
-        let path_line = Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(group.path.clone(), ctx.theme.muted()),
-        ]);
-        out.extend(wrap_line(
-            path_line,
-            width,
-            STATUS_LINE_CONT.width(),
-            Some(&status_cont_prefix),
-        ));
+        bordered_row::render(
+            out,
+            ctx,
+            border_style,
+            group.path.clone(),
+            ctx.theme.muted(),
+        );
         emitted += 1;
 
         for line in &group.lines {
@@ -74,10 +65,7 @@ pub(super) fn render(
     }
 
     if let Some(text) = footer_text(hidden, truncated) {
-        out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled(text, ctx.theme.dim()),
-        ]));
+        bordered_row::render(out, ctx, border_style, text, ctx.theme.dim());
     }
 }
 
