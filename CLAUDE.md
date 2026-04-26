@@ -87,6 +87,7 @@ ox                                          # Start an interactive session
 │   │   │       ├── tool/
 │   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget)
 │   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
+│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] │ [text]` row renderer used by read / grep (and future diff)
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
