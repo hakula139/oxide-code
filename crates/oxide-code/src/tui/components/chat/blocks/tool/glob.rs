@@ -50,28 +50,21 @@ pub(super) fn render(
         bordered_row::render(out, ctx, border_style, display, ctx.theme.text());
     }
 
-    if let Some(text) = footer_text(hidden, total, truncated_by_tool) {
+    if let Some(text) = footer_text(hidden, truncated_by_tool) {
         bordered_row::render(out, ctx, border_style, text, ctx.theme.dim());
     }
 }
 
-/// Footer combining TUI-side hidden rows (`hidden`) with the tool's
-/// own `MAX_RESULTS` truncation. Mirrors grep's `(limit reached)`
-/// parenthetical: lead with what's elided, follow with a paren
-/// disclosing the cap context. `total` is the unbounded match count
-/// — more useful than a bare "limit reached" since glob can disclose
-/// it.
-fn footer_text(hidden: usize, total: usize, truncated_by_tool: bool) -> Option<String> {
+/// Footer combining TUI-side hiding (`hidden`) with the tool's
+/// `MAX_RESULTS` cap. Header carries the actual counts; footer just
+/// flags the cap with grep's `(limit reached)` token.
+fn footer_text(hidden: usize, truncated_by_tool: bool) -> Option<String> {
     let noun = |n: usize| if n == 1 { "file" } else { "files" };
-    let visible = total.saturating_sub(hidden);
     match (hidden, truncated_by_tool) {
         (0, false) => None,
-        (0, true) => Some(format!("... showing {visible} of {total}")),
+        (0, true) => Some("... limit reached".to_owned()),
         (n, false) => Some(format!("... +{n} {}", noun(n))),
-        (n, true) => Some(format!(
-            "... +{n} {} (showing {visible} of {total})",
-            noun(n),
-        )),
+        (n, true) => Some(format!("... +{n} {} (limit reached)", noun(n))),
     }
 }
 
@@ -204,9 +197,6 @@ mod tests {
             show_thinking: true,
         };
         let mut out = Vec::new();
-        // Simulate the tool returning MAX_TOOL_OUTPUT_LINES + 5 entries
-        // out of a wider universe of 1234 — the renderer should report
-        // both how many returned rows it hid AND the unbounded total.
         let returned = MAX_TOOL_OUTPUT_LINES + 5;
         let files: Vec<String> = (0..returned).map(|i| format!("f{i}.rs")).collect();
         render(&mut out, &ctx, "**/*.rs", &files, 1234, false);
@@ -217,7 +207,7 @@ mod tests {
             "header should anchor the body to the input pattern: {body}",
         );
         assert!(
-            body.contains("... +5 files (showing 1229 of 1234)"),
+            body.contains("... +5 files (limit reached)"),
             "footer: {body}",
         );
     }
@@ -226,35 +216,27 @@ mod tests {
 
     #[test]
     fn footer_text_no_hidden_no_truncation_returns_none() {
-        assert_eq!(footer_text(0, 5, false), None);
+        assert_eq!(footer_text(0, false), None);
     }
 
     #[test]
     fn footer_text_hidden_uses_singular_or_plural() {
-        assert_eq!(footer_text(1, 6, false), Some("... +1 file".to_owned()));
-        assert_eq!(footer_text(3, 8, false), Some("... +3 files".to_owned()));
+        assert_eq!(footer_text(1, false), Some("... +1 file".to_owned()));
+        assert_eq!(footer_text(3, false), Some("... +3 files".to_owned()));
     }
 
     #[test]
-    fn footer_text_tool_truncated_with_no_tui_hidden_reports_visible_of_total() {
-        // Exotic shape — tool cap hit but TUI fits everything. Defensive
-        // arm; in practice MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
-        // Wording mirrors grep's `... limit reached` parenthetical: a
-        // single descriptor of the cap context, no `+N` to qualify.
-        assert_eq!(
-            footer_text(0, 200, true),
-            Some("... showing 200 of 200".to_owned()),
-        );
+    fn footer_text_tool_truncated_with_no_tui_hidden_names_limit() {
+        // Exotic shape — tool cap hit but TUI fits everything. In practice
+        // MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
+        assert_eq!(footer_text(0, true), Some("... limit reached".to_owned()));
     }
 
     #[test]
-    fn footer_text_combines_hidden_and_total_when_tool_truncated() {
-        // Combined case: `+N files` describes what's elided in the TUI,
-        // the parenthetical anchors that elision against the
-        // tool-disclosed total.
+    fn footer_text_combines_hidden_count_with_limit_token_when_tool_truncated() {
         assert_eq!(
-            footer_text(95, 1234, true),
-            Some("... +95 files (showing 1139 of 1234)".to_owned()),
+            footer_text(95, true),
+            Some("... +95 files (limit reached)".to_owned()),
         );
     }
 }

@@ -1996,9 +1996,7 @@ mod tests {
     #[test]
     fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
         // 7 returned out of 1234 total: TUI shows the first 5, header
-        // anchors the body to the input pattern, footer combines
-        // hidden-row count with the unbounded total disclosed by the
-        // tool's truncation footer.
+        // anchors the body to the input pattern, footer flags the cap.
         let mut chat = test_chat();
         let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
         let view = crate::tool::ToolResultView::GlobFiles {
@@ -2019,7 +2017,7 @@ mod tests {
             "6th row leaked past cap: {text}"
         );
         assert!(
-            text.contains("... +2 files (showing 1232 of 1234)"),
+            text.contains("... +2 files (limit reached)"),
             "footer text wrong: {text}",
         );
     }
