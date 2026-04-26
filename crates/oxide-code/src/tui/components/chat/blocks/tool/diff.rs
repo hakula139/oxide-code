@@ -13,7 +13,7 @@ use super::{
     MAX_TOOL_OUTPUT_LINE_BYTES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
     truncate_to_bytes,
 };
-use crate::tool::{DiffChunk, DiffLine};
+use crate::tool::DiffChunk;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
 /// Maximum lines of diff body (combined `-` + `+`) shown before
@@ -24,12 +24,6 @@ use crate::tui::wrap::{expand_tabs, wrap_line};
 /// combined lines. 20 covers roughly the 95th-percentile edit
 /// without hiding the change's middle behind an ellipsis.
 const MAX_DIFF_BODY_LINES: usize = 20;
-
-/// Lower bound on the per-chunk budget when distributing
-/// [`MAX_DIFF_BODY_LINES`] across many independent chunks. Keeps every
-/// chunk able to show at least one line on each side rather than
-/// degenerating to a stack of bare ellipses.
-const MIN_CHUNK_BUDGET: usize = 2;
 
 /// Maximum line numbers listed inline in the "applied at lines …"
 /// footer for a deduplicated multi-chunk render. Beyond this, the
@@ -46,29 +40,17 @@ const DIFF_LINE_CONT: &str = "▎     ";
 
 /// Renders the body of an edit-tool diff result.
 ///
-/// Each [`DiffChunk`] becomes a unified-style block: every line of
-/// `chunk.old` prefixed with `- ` in red, every line of `chunk.new`
-/// prefixed with `+ ` in green. Pure deletions and pure insertions
-/// (one side empty after producer-side trim) render only the
-/// non-empty half.
+/// Each [`DiffChunk`] is shown as `- ` (red) old lines and `+ ` (green)
+/// new lines; pure insertions / deletions render only the non-empty
+/// half. Long bodies are head + ellipsis + tail truncated per side.
 ///
-/// **Single chunk** — the unique-match case — renders without
-/// decoration, matching the pre-multi-chunk shape.
+/// Live producer always emits chunks of identical trimmed content, so:
 ///
-/// **Multiple chunks with identical trimmed content** — the common
-/// `replace_all` case — renders one body plus an "applied at lines
-/// X, Y, …" footer that names every match location. The body is
-/// shown once because the diff is identical at every site.
-///
-/// **Multiple chunks with differing content** — currently
-/// unreachable in the live path, supported for future producers
-/// (e.g., a context-aware diff source) — renders each chunk under
-/// the same border, separated by `--`, with the body budget
-/// distributed across chunks.
-///
-/// Long bodies are truncated per side (each chunk's budget split
-/// between `old` and `new`) with a head + ellipsis + tail shape so
-/// the first and last lines of each side stay visible.
+/// - Single chunk → body alone, with a legacy
+///   `{N} occurrences replaced` footer when a resumed transcript has
+///   `replace_all` and N > 1 but no structured chunks.
+/// - Multi-chunk → body shown once, plus an "applied at lines X, Y, …"
+///   footer naming each site.
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -79,10 +61,9 @@ pub(super) fn render(
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
 
-    // No-change guard: producer rejects no-op edits, but a resumed
-    // transcript or malformed input can yield empty / all-empty
-    // chunks. Emit a dim marker so the row doesn't read as
-    // "edit applied, diff scrolled off."
+    // Defends corrupt resumed transcripts — the live producer rejects
+    // no-op edits, so empty chunks only reach the renderer via bad
+    // JSONL.
     if !any_chunk_has_content(chunks) {
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
@@ -91,29 +72,18 @@ pub(super) fn render(
         return;
     }
 
-    if chunks.len() > 1 && all_chunks_share_content(chunks) {
-        render_chunk_body(out, ctx, &chunks[0], border_style, MAX_DIFF_BODY_LINES);
+    render_chunk_body(out, ctx, &chunks[0], border_style, MAX_DIFF_BODY_LINES);
+
+    if chunks.len() > 1 {
         let locations: Vec<usize> = chunks.iter().filter_map(chunk_anchor_line).collect();
         render_locations_footer(out, ctx, &locations, border_style);
         return;
     }
 
-    let per_chunk_budget = (MAX_DIFF_BODY_LINES / chunks.len().max(1)).max(MIN_CHUNK_BUDGET);
-    for (i, chunk) in chunks.iter().enumerate() {
-        if i > 0 {
-            render_separator(out, ctx, border_style);
-        }
-        render_chunk_body(out, ctx, chunk, border_style, per_chunk_budget);
-    }
-
-    // Single-chunk + replace_all + replacements > 1 is the resume
-    // fallback path: JSONL didn't carry structured chunks, so the
-    // producer-equivalent reconstruction yielded only one chunk.
-    // Preserve the legacy "{N} occurrences replaced" footer there
-    // so the count stays visible without inventing a fake location
-    // list. Multi-chunk render already shows count via separators
-    // (or the locations footer in the dedup branch).
-    if chunks.len() == 1 && replace_all && replacements > 1 {
+    // Resume fallback: single synthesized chunk with N>1 replacements
+    // — keep the legacy footer so the count stays visible without
+    // inventing fake locations.
+    if replace_all && replacements > 1 {
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
             Span::styled(
@@ -178,14 +148,6 @@ fn render_chunk_body(
     }
 }
 
-/// Renders a `--` separator row between adjacent chunks.
-fn render_separator(out: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>, border_style: Style) {
-    out.push(Line::from(vec![
-        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-        Span::styled("--", ctx.theme.dim()),
-    ]));
-}
-
 /// Renders the deduplicated multi-chunk footer naming every location.
 /// `locations` carries one anchor line per chunk (old-side first line,
 /// falling back to new-side for pure insertions). Caps at
@@ -231,26 +193,6 @@ fn any_chunk_has_content(chunks: &[DiffChunk]) -> bool {
     chunks
         .iter()
         .any(|c| !c.old.is_empty() || !c.new.is_empty())
-}
-
-/// Returns true if every chunk has identical text content on both
-/// sides (line numbers may differ). The dedup path renders only the
-/// first chunk plus a locations footer when this holds.
-fn all_chunks_share_content(chunks: &[DiffChunk]) -> bool {
-    chunks.windows(2).all(|w| chunk_text_eq(&w[0], &w[1]))
-}
-
-/// Compares two chunks by `old` and `new` text content alone, ignoring
-/// line numbers — the comparison the dedup branch needs since
-/// `replace_all` chunks share text but vary in position.
-fn chunk_text_eq(a: &DiffChunk, b: &DiffChunk) -> bool {
-    diff_lines_text_eq(&a.old, &b.old) && diff_lines_text_eq(&a.new, &b.new)
-}
-
-fn diff_lines_text_eq(a: &[DiffLine], b: &[DiffLine]) -> bool {
-    a.iter()
-        .map(|l| l.text.as_str())
-        .eq(b.iter().map(|l| l.text.as_str()))
 }
 
 /// Anchor line number for a chunk in the original file — old-side
@@ -371,6 +313,7 @@ fn emit_side<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::tool::DiffLine;
     use crate::tui::theme::Theme;
 
     use super::*;
@@ -423,52 +366,6 @@ mod tests {
         assert!(!any_chunk_has_content(&[]));
     }
 
-    // ── all_chunks_share_content ──
-
-    #[test]
-    fn all_chunks_share_content_identical_text_different_line_numbers() {
-        // The dedup case: `replace_all` emits one chunk per location,
-        // each carries the same `old`/`new` strings but at different
-        // file positions. Line numbers must NOT defeat dedup.
-        let chunk_a = DiffChunk {
-            old: vec![DiffLine {
-                number: 12,
-                text: "a".to_owned(),
-            }],
-            new: vec![DiffLine {
-                number: 12,
-                text: "b".to_owned(),
-            }],
-        };
-        let chunk_b = DiffChunk {
-            old: vec![DiffLine {
-                number: 47,
-                text: "a".to_owned(),
-            }],
-            new: vec![DiffLine {
-                number: 47,
-                text: "b".to_owned(),
-            }],
-        };
-        assert!(all_chunks_share_content(&[chunk_a, chunk_b]));
-    }
-
-    #[test]
-    fn all_chunks_share_content_differing_text_returns_false() {
-        let a = chunk_of(&["a"], &["b"]);
-        let b = chunk_of(&["c"], &["d"]);
-        assert!(!all_chunks_share_content(&[a, b]));
-    }
-
-    #[test]
-    fn all_chunks_share_content_single_chunk_is_trivially_true() {
-        // A one-element vector trivially satisfies the all-pairs
-        // predicate. `windows(2)` on len 1 yields nothing — but the
-        // single-chunk branch never reaches dedup anyway, so this is
-        // pure defense-in-depth.
-        assert!(all_chunks_share_content(&[chunk_of(&["a"], &["b"])]));
-    }
-
     // ── chunk_anchor_line ──
 
     #[test]
@@ -513,23 +410,6 @@ mod tests {
         assert_eq!(chunk_anchor_line(&chunk), None);
     }
 
-    // ── render_separator ──
-
-    #[test]
-    fn render_separator_emits_dim_dashes_under_bar() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render_separator(&mut out, &ctx, theme.tool_border());
-        let row = out.first().expect("renders one line");
-        let texts: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(texts, vec![STATUS_LINE_CONT, "--"]);
-    }
-
     // ── render_locations_footer ──
 
     #[test]
@@ -542,6 +422,9 @@ mod tests {
         };
         let mut out = Vec::new();
         render_locations_footer(&mut out, &ctx, &[12, 47, 200], theme.tool_border());
+        // Exactly one row — a regression that double-emitted would
+        // pass a `contains` check.
+        assert_eq!(out.len(), 1);
         let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             text.contains("applied at lines 12, 47, 200"),
@@ -606,42 +489,140 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // ── render (multi-chunk varying-content path) ──
+    // ── render ──
 
-    #[test]
-    fn render_separates_varying_content_chunks_with_dashes() {
-        // Non-dedup multi-chunk branch: chunks with differing content
-        // each render their own body, separated by a `--` row. Today
-        // unreachable from the live producer (every replace_all chunk
-        // shares content), but pinned so a future context-aware
-        // producer's renderer behavior is fixed.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
+    fn ctx(theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
             width: 80,
-            theme: &theme,
+            theme,
             show_thinking: true,
-        };
-        let chunks = vec![chunk_of(&["a"], &["b"]), chunk_of(&["c"], &["d"])];
-        let mut out = Vec::new();
-        render(&mut out, &ctx, &chunks, false, 2, false);
-        let texts: Vec<String> = out
-            .iter()
+        }
+    }
+
+    fn rendered_texts(out: &[Line<'static>]) -> Vec<String> {
+        out.iter()
             .map(|line| {
                 line.spans
                     .iter()
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
             })
-            .collect();
-        // Expected order: chunk0 - then +, separator, chunk1 - then +.
-        assert!(texts.iter().any(|t| t.contains("- a")));
-        assert!(texts.iter().any(|t| t.contains("+ b")));
-        assert!(
-            texts.iter().any(|t| t.ends_with("--")),
-            "missing separator: {texts:?}",
+            .collect()
+    }
+
+    #[test]
+    fn render_no_change_marker_when_all_chunks_empty_after_trim() {
+        // Resume / corrupt-input guard: a chunk list that trims to
+        // nothing on every entry surfaces as a dim "(no change)" row,
+        // not an empty body the user would read as a missing render.
+        let theme = Theme::default();
+        let mut out = Vec::new();
+        render(
+            &mut out,
+            &ctx(&theme),
+            &[chunk_of(&[], &[])],
+            false,
+            0,
+            false,
         );
-        assert!(texts.iter().any(|t| t.contains("- c")));
-        assert!(texts.iter().any(|t| t.contains("+ d")));
+        assert_eq!(out.len(), 1);
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("(no change)"), "unexpected body: {text:?}");
+    }
+
+    #[test]
+    fn render_single_chunk_emits_body_without_locations_footer() {
+        // Live single-edit case: one chunk, no `replace_all` count
+        // footer. The body alone reaches the user.
+        let theme = Theme::default();
+        let mut out = Vec::new();
+        render(
+            &mut out,
+            &ctx(&theme),
+            &[chunk_of(&["foo"], &["bar"])],
+            false,
+            1,
+            false,
+        );
+        let texts = rendered_texts(&out);
+        assert!(texts.iter().any(|t| t.contains("- foo")));
+        assert!(texts.iter().any(|t| t.contains("+ bar")));
+        assert!(
+            !texts.iter().any(|t| t.contains("applied at")),
+            "single-chunk render must not emit a locations footer: {texts:?}",
+        );
+    }
+
+    #[test]
+    fn render_multi_chunk_emits_one_body_plus_locations_footer() {
+        // Live `replace_all` case: N chunks of identical trimmed
+        // content collapse into one body (rendered once) plus an
+        // "applied at lines …" footer naming each match site.
+        let theme = Theme::default();
+        let chunk_a = DiffChunk {
+            old: vec![DiffLine {
+                number: 12,
+                text: "foo".to_owned(),
+            }],
+            new: vec![DiffLine {
+                number: 12,
+                text: "bar".to_owned(),
+            }],
+        };
+        let chunk_b = DiffChunk {
+            old: vec![DiffLine {
+                number: 47,
+                text: "foo".to_owned(),
+            }],
+            new: vec![DiffLine {
+                number: 47,
+                text: "bar".to_owned(),
+            }],
+        };
+        let mut out = Vec::new();
+        render(&mut out, &ctx(&theme), &[chunk_a, chunk_b], true, 2, false);
+        let texts = rendered_texts(&out);
+        // Body rendered once, not duplicated per chunk.
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("- foo")).count(),
+            1,
+            "body must appear once, not per chunk: {texts:?}",
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("+ bar")).count(),
+            1,
+            "body must appear once, not per chunk: {texts:?}",
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("applied at lines 12, 47")),
+            "missing locations footer: {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("occurrences replaced")),
+            "multi-chunk render replaces the legacy count footer: {texts:?}",
+        );
+    }
+
+    #[test]
+    fn render_single_chunk_replace_all_keeps_legacy_count_footer() {
+        // Resume fallback: JSONL pre-`diff_chunks` recorded a
+        // single-chunk synthesized view with `replacements > 1`. The
+        // count footer is the only signal of the multi-match nature.
+        let theme = Theme::default();
+        let mut out = Vec::new();
+        render(
+            &mut out,
+            &ctx(&theme),
+            &[chunk_of(&["a"], &["b"])],
+            true,
+            7,
+            false,
+        );
+        let texts = rendered_texts(&out);
+        assert!(
+            texts.iter().any(|t| t.contains("7 occurrences replaced")),
+            "missing legacy count footer: {texts:?}",
+        );
     }
 
     // ── entries ──

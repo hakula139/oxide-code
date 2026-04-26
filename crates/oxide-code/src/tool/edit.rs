@@ -74,21 +74,17 @@ impl Tool for EditTool {
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // Live path: `run` attaches structured chunks via
-        // `with_diff_chunks`, so the renderer gets real file line
-        // numbers. Resume path: session JSONL written before this
-        // field existed only carries `metadata.replacements` (or
-        // nothing) — synthesize a single chunk from the input strings
-        // starting at line 1 so the renderer still has something to
-        // show. Free-form prose parsing is the final fallback for
-        // the very oldest sessions.
-        let chunks = metadata
-            .diff_chunks
-            .clone()
+        // Live path uses `metadata.diff_chunks` for real line numbers.
+        // Resume path falls back to an input-derived synthesized chunk
+        // (line 1) and recovers the count from `metadata.replacements`
+        // or, for the oldest sessions, the success-message prose.
+        // Empty `Some(vec![])` is treated as absent so a zero-chunks
+        // regression doesn't surface as `(no change)`.
+        let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
+        let chunks = live_chunks
+            .cloned()
             .unwrap_or_else(|| vec![synthesize_chunk(old, new)]);
-        let replacements = metadata
-            .diff_chunks
-            .as_ref()
+        let replacements = live_chunks
             .map(Vec::len)
             .or(metadata.replacements)
             .or_else(|| parse_replacement_count(content))
@@ -271,12 +267,16 @@ async fn edit_file(
 
 // ── Diff Production ──
 
-/// Builds the per-match diff chunks from a successful edit. `original`
-/// is the pre-edit file content (post EOL normalization); `old_string`
-/// and `new_string` are likewise post-normalization. Emits up to `take`
-/// chunks — `usize::MAX` for `replace_all`, `1` for unique-match mode.
-/// Each chunk carries real file line numbers (post-edit positions for
-/// the `+` side) and has common leading / trailing anchors trimmed.
+/// Builds the per-match diff chunks from a successful edit.
+/// `original`, `old_string`, and `new_string` are all post EOL
+/// normalization. `take` is `usize::MAX` for `replace_all`, 1
+/// otherwise. Each chunk carries real file line numbers (post-edit
+/// positions on the `+` side) with common anchors trimmed.
+///
+/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts at < 2^24, so
+/// the running shift fits in `isize` and the post-edit line stays
+/// positive. The `checked_*` calls below surface any overflow as a
+/// panic — a wrong-but-plausible line number would be worse.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
@@ -284,9 +284,9 @@ fn build_diff_chunks(
     take: usize,
 ) -> Vec<DiffChunk> {
     let positions = match_positions(original, old_string, take);
-    // Shift uses physical newline counts so a "\n" → "" rewrite (which
-    // collapses lines without producing displayable lines on either
-    // side) still propagates the right offset to subsequent matches.
+    // Newline-count delta — even pure "\n" → "" rewrites (no
+    // displayable lines on either side) still need to shift later
+    // matches.
     let shift_per_match = new_string.matches('\n').count().cast_signed()
         - old_string.matches('\n').count().cast_signed();
 
@@ -295,9 +295,13 @@ fn build_diff_chunks(
         .enumerate()
         .map(|(idx, byte_pos)| {
             let original_line = line_at_byte(original, byte_pos);
+            let cumulative_shift = idx
+                .cast_signed()
+                .checked_mul(shift_per_match)
+                .expect("cumulative line-shift fits in isize for sub-MAX_EDIT_FILE_SIZE inputs");
             let new_line = original_line
-                .checked_add_signed(idx.cast_signed() * shift_per_match)
-                .unwrap_or(original_line);
+                .checked_add_signed(cumulative_shift)
+                .expect("post-edit line number stays positive for real match positions");
             let mut chunk = DiffChunk {
                 old: split_into_diff_lines(old_string, original_line),
                 new: split_into_diff_lines(new_string, new_line),
@@ -1043,6 +1047,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn edit_file_chunks_shift_new_side_for_shrinking_replace_all() {
+        // Inverse of `..._growing_replace_all`: a multi-line `old`
+        // collapsing to single-line `new` produces a negative shift.
+        // The post-edit `+` numbering on later matches must reflect
+        // each prior match having shrunk the file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shrink.txt");
+        std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
+
+        // "X\nY" → "Z" drops one line per replacement.
+        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "X\nY", "Z", true)
+            .await
+            .unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].old[0].number, 1);
+        assert_eq!(chunks[0].new[0].number, 1);
+        assert_eq!(chunks[1].old[0].number, 4);
+        // Match 1: original line 4, shifted by -1 from match 0 → 3.
+        assert_eq!(chunks[1].new[0].number, 3);
+        assert_eq!(chunks[2].old[0].number, 7);
+        // Match 2: original line 7, shifted by -2 → 5.
+        assert_eq!(chunks[2].new[0].number, 5);
+    }
+
     // ── build_diff_chunks ──
 
     #[test]
@@ -1126,6 +1156,14 @@ mod tests {
         assert!(match_positions("hello", "xyz", usize::MAX).is_empty());
     }
 
+    #[test]
+    fn match_positions_take_zero_returns_empty() {
+        // `take == 0` short-circuits before the first search — pin
+        // this so a regression to `<=` in the loop predicate would
+        // surface as a single-result mismatch.
+        assert!(match_positions("aXbXcX", "X", 0).is_empty());
+    }
+
     // ── line_at_byte ──
 
     #[test]
@@ -1149,6 +1187,16 @@ mod tests {
         // line after the last `\n` — used when an edit appends to
         // EOF. Pin the off-by-one so a "+ 1" mutation surfaces.
         assert_eq!(line_at_byte("A\n", 2), 2);
+    }
+
+    #[test]
+    fn line_at_byte_end_of_file_without_trailing_newline() {
+        // Files without a final newline: offset == content.len() must
+        // still report the last line's number, not one past it. Tests
+        // the slice's upper bound separately from the trailing-newline
+        // case above.
+        assert_eq!(line_at_byte("AB", 2), 1);
+        assert_eq!(line_at_byte("A\nB", 3), 2);
     }
 
     // ── split_into_diff_lines ──
@@ -1312,6 +1360,16 @@ mod tests {
     fn common_boundaries_empty_inputs_return_zero() {
         let empty: [&str; 0] = [];
         assert_eq!(common_boundaries(&empty, &empty), (0, 0));
+    }
+
+    #[test]
+    fn common_boundaries_asymmetric_lengths_capped_by_shorter_side() {
+        // `max_suffix = min(old.len(), new.len()) - prefix` —
+        // dropping the `- prefix` term would let suffix overlap the
+        // already-counted prefix. Pin the cap with a non-zero prefix
+        // and asymmetric lengths.
+        assert_eq!(common_boundaries(&["a", "b", "a"], &["a", "X"]), (1, 0));
+        assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
     }
 
     // ── synthesize_chunk ──

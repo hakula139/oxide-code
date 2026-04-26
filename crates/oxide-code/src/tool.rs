@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 // ── Tool Definition ──
 
@@ -61,7 +61,7 @@ pub(crate) struct ToolOutput {
 /// so resumed sessions see the same rendered shape as live — without
 /// polluting the API-facing [`ContentBlock::ToolResult`](crate::message::ContentBlock)
 /// wire format with TUI-only fields.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ToolMetadata {
     /// Short label for TUI display (5–15 words).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,14 +152,12 @@ pub(crate) enum ToolResultView {
         lines: Vec<ReadExcerptLine>,
         total_lines: usize,
     },
-    /// Edit tool — renders as a `-` old / `+` new unified diff with
-    /// real file line numbers. `chunks` carries one entry per matched
-    /// location: a single edit is a one-element vector; a successful
-    /// `replace_all` carries one chunk per matched site, all sharing
-    /// the same trimmed content but at different line numbers.
-    /// `replacements` is the total match count (= `chunks.len()` on
-    /// the live path, kept distinct so resumed sessions whose JSONL
-    /// predates structured chunks can still drive the count footer).
+    /// Edit tool — `-` old / `+` new unified diff with real file
+    /// line numbers. Live invariant: chunks share trimmed content
+    /// (one chunk for a single edit, one per match for `replace_all`).
+    /// `replacements` matches `chunks.len()` on the live path; resumed
+    /// sessions predating structured chunks may carry a count larger
+    /// than 1 against a single synthesized chunk.
     Diff {
         chunks: Vec<DiffChunk>,
         replace_all: bool,
@@ -184,16 +182,20 @@ pub(crate) struct ReadExcerptLine {
 /// One numbered line on either side of a structured `edit` diff.
 /// Persisted in [`ToolMetadata::diff_chunks`] so resumed sessions
 /// keep real file line numbers — not a render-only view type.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DiffLine {
     pub(crate) number: usize,
     pub(crate) text: String,
 }
 
-/// A single matched edit hunk — the raw `-` and `+` line spans for
-/// one file location. For non-`replace_all` calls the producer emits
-/// exactly one chunk; for `replace_all` it emits one per match site.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// A single matched edit hunk — `-` and `+` line spans for one file
+/// location. Producer emits one chunk per match site (always one for
+/// non-`replace_all`).
+///
+/// Chunks are emitted boundary-trimmed by
+/// `crate::tool::edit::trim_chunk`: surviving entries are the
+/// user-visible delta. Consumers must not re-trim.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DiffChunk {
     pub(crate) old: Vec<DiffLine>,
     pub(crate) new: Vec<DiffLine>,
