@@ -1,0 +1,199 @@
+//! `glob` tool body — flat list of cwd-relative paths under the bar.
+//! Combines TUI-side row hiding (`MAX_TOOL_OUTPUT_LINES`) with the
+//! tool's own `MAX_RESULTS` cap into one footer so users see a single
+//! source of truth for "what's hidden".
+
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
+
+use super::super::RenderCtx;
+use super::{
+    MAX_TOOL_OUTPUT_LINE_BYTES, MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT,
+    border_continuation_prefix, border_style_for, truncate_to_bytes,
+};
+use crate::tui::wrap::wrap_line;
+
+pub(super) fn render(
+    out: &mut Vec<Line<'static>>,
+    ctx: &RenderCtx<'_>,
+    files: &[String],
+    total: usize,
+    is_error: bool,
+) {
+    if files.is_empty() {
+        return;
+    }
+
+    let border_style = border_style_for(ctx.theme, is_error);
+    let width = usize::from(ctx.width);
+    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+
+    let visible = files.len().min(MAX_TOOL_OUTPUT_LINES);
+    let hidden = files.len() - visible;
+    let truncated_by_tool = total > files.len();
+
+    for path in &files[..visible] {
+        let display = truncate_to_bytes(path, MAX_TOOL_OUTPUT_LINE_BYTES);
+        let line = Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(display, ctx.theme.text()),
+        ]);
+        out.extend(wrap_line(
+            line,
+            width,
+            STATUS_LINE_CONT.width(),
+            Some(&cont_prefix),
+        ));
+    }
+
+    if let Some(text) = footer_text(hidden, total, truncated_by_tool) {
+        out.push(Line::from(vec![
+            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(text, ctx.theme.dim()),
+        ]));
+    }
+}
+
+/// Footer combining TUI-side hidden rows (`hidden`) with the tool's
+/// own `MAX_RESULTS` truncation. Reports the total when the tool
+/// capped — `total` is the unbounded match count, more useful than a
+/// bare "limit reached" since glob can disclose it.
+fn footer_text(hidden: usize, total: usize, truncated_by_tool: bool) -> Option<String> {
+    let noun = |n: usize| if n == 1 { "file" } else { "files" };
+    match (hidden, truncated_by_tool) {
+        (0, false) => None,
+        (0, true) => Some(format!("... {total} matches total")),
+        (n, false) => Some(format!("... +{n} {}", noun(n))),
+        (n, true) => Some(format!("... +{n} {} of {total} total", noun(n))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tui::theme::Theme;
+
+    use super::*;
+
+    fn collect_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|sp| sp.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    // ── render ──
+
+    #[test]
+    fn render_empty_files_emits_nothing() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render(&mut out, &ctx, &[], 0, false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn render_short_list_emits_no_footer() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        let files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
+        render(&mut out, &ctx, &files, 2, false);
+
+        assert_eq!(out.len(), 2, "expected two body lines, no footer: {out:#?}");
+        let body = collect_text(&out);
+        assert!(body.contains("src/main.rs"));
+        assert!(body.contains("src/lib.rs"));
+        assert!(!body.contains("..."));
+    }
+
+    #[test]
+    fn render_caps_at_max_output_lines_with_hidden_footer() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        let files: Vec<String> = (0..MAX_TOOL_OUTPUT_LINES + 3)
+            .map(|i| format!("f{i}.rs"))
+            .collect();
+        render(&mut out, &ctx, &files, files.len(), false);
+
+        // MAX_TOOL_OUTPUT_LINES body rows + one footer row.
+        assert_eq!(out.len(), MAX_TOOL_OUTPUT_LINES + 1);
+        let body = collect_text(&out);
+        for i in 0..MAX_TOOL_OUTPUT_LINES {
+            assert!(body.contains(&format!("f{i}.rs")), "row {i} hidden: {body}");
+        }
+        assert!(
+            !body.contains(&format!("f{MAX_TOOL_OUTPUT_LINES}.rs")),
+            "row past cap should be hidden: {body}",
+        );
+        assert!(body.contains("... +3 files"), "footer text: {body}");
+    }
+
+    #[test]
+    fn render_tool_truncation_surfaces_total_in_footer() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        // Simulate the tool returning MAX_TOOL_OUTPUT_LINES + 5 entries
+        // out of a wider universe of 1234 — the renderer should report
+        // both how many returned rows it hid AND the unbounded total.
+        let returned = MAX_TOOL_OUTPUT_LINES + 5;
+        let files: Vec<String> = (0..returned).map(|i| format!("f{i}.rs")).collect();
+        render(&mut out, &ctx, &files, 1234, false);
+
+        let body = collect_text(&out);
+        assert!(
+            body.contains("... +5 files of 1234 total"),
+            "footer: {body}"
+        );
+    }
+
+    // ── footer_text ──
+
+    #[test]
+    fn footer_text_no_hidden_no_truncation_returns_none() {
+        assert_eq!(footer_text(0, 5, false), None);
+    }
+
+    #[test]
+    fn footer_text_hidden_uses_singular_or_plural() {
+        assert_eq!(footer_text(1, 6, false), Some("... +1 file".to_owned()));
+        assert_eq!(footer_text(3, 8, false), Some("... +3 files".to_owned()));
+    }
+
+    #[test]
+    fn footer_text_tool_truncated_with_no_tui_hidden_reports_total() {
+        // Exotic shape — tool cap hit but TUI fits everything. Defensive
+        // arm; in practice MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
+        assert_eq!(
+            footer_text(0, 200, true),
+            Some("... 200 matches total".to_owned()),
+        );
+    }
+
+    #[test]
+    fn footer_text_combines_hidden_and_total_when_tool_truncated() {
+        assert_eq!(
+            footer_text(95, 1234, true),
+            Some("... +95 files of 1234 total".to_owned()),
+        );
+    }
+}

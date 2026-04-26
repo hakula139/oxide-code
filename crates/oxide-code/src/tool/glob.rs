@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use super::{Tool, ToolOutput, extract_input_field};
+use super::{Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field};
 
 const MAX_RESULTS: usize = 100;
 
@@ -42,6 +42,15 @@ impl Tool for GlobTool {
 
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         extract_input_field(input, "pattern")
+    }
+
+    fn result_view(
+        &self,
+        _input: &serde_json::Value,
+        content: &str,
+        _metadata: &ToolMetadata,
+    ) -> Option<ToolResultView> {
+        parse_files_view(content)
     }
 
     fn run(
@@ -142,6 +151,50 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<String, String
     }
 
     Ok(output)
+}
+
+// ── Result View ──
+
+/// Parses glob output into a [`ToolResultView::GlobFiles`]. Output
+/// shape: a `\n`-joined list of paths optionally followed by
+/// `\n\n(Showing 100 of N matches. Use a more specific pattern.)`.
+/// Returns `None` for any line that can't be classified so malformed
+/// output falls through to the raw text body instead of silently
+/// dropping rows.
+fn parse_files_view(content: &str) -> Option<ToolResultView> {
+    let trimmed = content.trim_end();
+    if trimmed == "No files found" {
+        return Some(ToolResultView::GlobFiles {
+            files: Vec::new(),
+            total: 0,
+        });
+    }
+
+    let (body, total) = match trimmed.split_once("\n\n") {
+        Some((body, footer)) => (body, Some(parse_truncation_footer(footer)?)),
+        None => (trimmed, None),
+    };
+
+    let files: Vec<String> = body.lines().map(str::to_owned).collect();
+    if files.is_empty() {
+        return None;
+    }
+    let total = total.unwrap_or(files.len());
+    if total < files.len() {
+        return None;
+    }
+    Some(ToolResultView::GlobFiles { files, total })
+}
+
+/// Parses glob's `(Showing X of Y matches. ...)` footer and returns the
+/// total. `None` flags a footer that we couldn't classify so the caller
+/// falls back to the raw text body instead of dropping the line.
+fn parse_truncation_footer(footer: &str) -> Option<usize> {
+    let footer = footer.trim();
+    let inner = footer.strip_prefix("(Showing ")?.strip_suffix(')')?;
+    let (_, rest) = inner.split_once(" of ")?;
+    let (total, _) = rest.split_once(" matches.")?;
+    total.parse().ok()
 }
 
 #[cfg(test)]
@@ -276,5 +329,105 @@ mod tests {
         let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
         assert!(result.contains("tracked.txt"));
         assert!(!result.contains("ignored.txt"));
+    }
+
+    // ── result_view ──
+
+    #[test]
+    fn result_view_builds_glob_files() {
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "*.rs"}),
+                "src/main.rs\nsrc/lib.rs",
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
+                total: 2,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_preserves_total_from_truncation_footer() {
+        let body = (0..MAX_RESULTS)
+            .map(|i| format!("f{i:03}.rs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!(
+            "{body}\n\n(Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
+        );
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "**/*.rs"}),
+                &content,
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+
+        // Files vector reflects the tool's MAX_RESULTS cap; total
+        // preserves the unbounded count so the renderer can surface it.
+        let ToolResultView::GlobFiles { files, total } = view else {
+            panic!("expected GlobFiles variant");
+        };
+        assert_eq!(files.len(), MAX_RESULTS);
+        assert_eq!(files[0], "f000.rs");
+        assert_eq!(
+            files[MAX_RESULTS - 1],
+            format!("f{:03}.rs", MAX_RESULTS - 1)
+        );
+        assert_eq!(total, 1234);
+    }
+
+    #[test]
+    fn result_view_handles_no_files_found() {
+        let view = GlobTool
+            .result_view(
+                &serde_json::json!({"pattern": "*.nope"}),
+                "No files found",
+                &ToolMetadata::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            view,
+            ToolResultView::GlobFiles {
+                files: Vec::new(),
+                total: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn result_view_falls_back_for_malformed_footer() {
+        // Footer present but unparseable — fall through to the text body
+        // rather than absorb the line as a "path" and render misleading
+        // structure.
+        let view = GlobTool.result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            "src/main.rs\n\n(Some other footer we don't recognise)",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    // ── parse_truncation_footer ──
+
+    #[test]
+    fn parse_truncation_footer_extracts_total() {
+        assert_eq!(
+            parse_truncation_footer("(Showing 100 of 250 matches. Use a more specific pattern.)"),
+            Some(250),
+        );
+    }
+
+    #[test]
+    fn parse_truncation_footer_unrecognised_returns_none() {
+        assert!(parse_truncation_footer("(Some footer)").is_none());
+        assert!(parse_truncation_footer("(Showing 100 of NaN matches.)").is_none());
     }
 }
