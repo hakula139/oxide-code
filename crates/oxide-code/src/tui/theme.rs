@@ -39,6 +39,12 @@ pub(crate) struct Theme {
     /// Code block background (reserved for future theming; currently unused)
     pub(crate) code_bg: Color,
 
+    // Diff
+    /// Background fill for added diff rows (Catppuccin Mocha plus-style)
+    pub(crate) diff_add_bg: Color,
+    /// Background fill for deleted diff rows (Catppuccin Mocha minus-style)
+    pub(crate) diff_del_bg: Color,
+
     // Status indicators (ascending severity)
     /// Informational highlights (reserved for future theming; currently unused)
     pub(crate) info: Color,
@@ -54,19 +60,21 @@ impl Default for Theme {
     /// Catppuccin Mocha palette with transparent terminal background.
     fn default() -> Self {
         Self {
-            fg: Color::from_u32(0x00cd_d6f4),        // Text
-            fg_muted: Color::from_u32(0x006c_7086),  // Overlay0
-            fg_dim: Color::from_u32(0x0058_5b70),    // Surface2
-            surface: Color::from_u32(0x0031_3244),   // Surface0
-            accent: Color::from_u32(0x0089_b4fa),    // Blue
-            user: Color::from_u32(0x00fa_b387),      // Peach
-            secondary: Color::from_u32(0x00b4_befe), // Lavender
-            code: Color::from_u32(0x0094_e2d5),      // Teal
-            code_bg: Color::from_u32(0x001e_1e2e),   // Base
-            info: Color::from_u32(0x0089_dceb),      // Sky
-            success: Color::from_u32(0x00a6_e3a1),   // Green
-            warning: Color::from_u32(0x00f9_e2af),   // Yellow
-            error: Color::from_u32(0x00f3_8ba8),     // Red
+            fg: Color::from_u32(0x00cd_d6f4),          // Text
+            fg_muted: Color::from_u32(0x006c_7086),    // Overlay0
+            fg_dim: Color::from_u32(0x0058_5b70),      // Surface2
+            surface: Color::from_u32(0x0031_3244),     // Surface0
+            accent: Color::from_u32(0x0089_b4fa),      // Blue
+            user: Color::from_u32(0x00fa_b387),        // Peach
+            secondary: Color::from_u32(0x00b4_befe),   // Lavender
+            code: Color::from_u32(0x0094_e2d5),        // Teal
+            code_bg: Color::from_u32(0x001e_1e2e),     // Base
+            diff_add_bg: Color::from_u32(0x002a_3a37), // catppuccin/delta plus-style
+            diff_del_bg: Color::from_u32(0x0038_2c34), // catppuccin/delta minus-style
+            info: Color::from_u32(0x0089_dceb),        // Sky
+            success: Color::from_u32(0x00a6_e3a1),     // Green
+            warning: Color::from_u32(0x00f9_e2af),     // Yellow
+            error: Color::from_u32(0x00f3_8ba8),       // Red
         }
     }
 }
@@ -134,6 +142,22 @@ impl Theme {
     /// Error indicator
     pub(crate) fn error(&self) -> Style {
         Style::default().fg(self.error)
+    }
+
+    // Diff row backgrounds
+
+    /// Bg-only style for added diff rows. Patched onto each span of a
+    /// `+` row so the green tint extends across the row, including the
+    /// trailing pad-to-width filler.
+    pub(crate) fn diff_add_row(&self) -> Style {
+        Style::default().bg(self.diff_add_bg)
+    }
+
+    /// Bg-only style for deleted diff rows. Mirror of [`diff_add_row`].
+    ///
+    /// [`diff_add_row`]: Self::diff_add_row
+    pub(crate) fn diff_del_row(&self) -> Style {
+        Style::default().bg(self.diff_del_bg)
     }
 
     // Composite helpers
@@ -277,6 +301,7 @@ mod tests {
         assert_ne!(t.accent, t.secondary);
         assert_ne!(t.user, t.secondary);
         assert_ne!(t.success, t.error);
+        assert_ne!(t.diff_add_bg, t.diff_del_bg);
     }
 
     // ── Style helpers ──
@@ -298,6 +323,22 @@ mod tests {
         assert_eq!(t.inline_code().bg, None);
         assert_eq!(t.code_block_fallback().fg, Some(t.code));
         assert_eq!(t.code_block_fallback().bg, None);
+    }
+
+    #[test]
+    fn diff_row_helpers_set_only_background() {
+        // Bg-only is load-bearing: the helpers are patched onto each
+        // span of a diff row, so setting fg here would override the
+        // success / error / muted fg the row composes from.
+        let t = Theme::default();
+
+        let add = t.diff_add_row();
+        assert_eq!(add.bg, Some(t.diff_add_bg));
+        assert_eq!(add.fg, None);
+
+        let del = t.diff_del_row();
+        assert_eq!(del.bg, Some(t.diff_del_bg));
+        assert_eq!(del.fg, None);
     }
 
     #[test]

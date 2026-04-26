@@ -3,18 +3,19 @@
 //! `crate::tool::edit`, so this module is concerned only with layout
 //! (entry stream, budget split, location footer) — not with finding
 //! match positions or trimming common anchor lines.
+//!
+//! Diff rows ride the shared [`numbered_row::Renderer`] with the `- `
+//! / `+ ` sign as separator and a Catppuccin red / green row bg, so the
+//! line-number column aligns with `read` / `grep` while the bg tint
+//! reads as a contiguous GitHub-style block per row.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
-use super::{
-    MAX_TOOL_OUTPUT_LINE_BYTES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
-    truncate_to_bytes,
-};
-use crate::tool::DiffChunk;
-use crate::tui::wrap::{expand_tabs, wrap_line};
+use super::numbered_row;
+use super::{STATUS_LINE_CONT, border_style_for};
+use crate::tool::{DiffChunk, DiffLine};
 
 /// Maximum lines of diff body (combined `-` + `+`) shown before
 /// truncation. Set higher than text output because diffs pair every
@@ -30,13 +31,6 @@ const MAX_DIFF_BODY_LINES: usize = 20;
 /// list collapses to "…and N more locations" so a 50-hit
 /// `replace_all` doesn't produce a 50-number footer.
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
-
-/// Continuation prefix for wrapped diff-body lines. Hangs under the
-/// text column of a `- ` / `+ ` line (col 6) — two columns right of
-/// [`STATUS_LINE_CONT`] — so wrapped content keeps reading as a
-/// continuation of the same diff line rather than dropping back to
-/// the outer body indent.
-const DIFF_LINE_CONT: &str = "▎     ";
 
 /// Renders the body of an edit-tool diff result.
 ///
@@ -95,8 +89,9 @@ pub(super) fn render(
 }
 
 /// Renders a single chunk's `- ` / `+ ` entries under `border_style`,
-/// using `budget` to cap combined line count. Pulls in the existing
-/// per-side head + ellipsis + tail collapse via [`entries`].
+/// using `budget` to cap combined line count. Each side gets its own
+/// [`numbered_row::Renderer`] preconfigured with the matching sign and
+/// row bg; ellipsis rows render neutrally (no number, no bg).
 fn render_chunk_body(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -104,34 +99,41 @@ fn render_chunk_body(
     border_style: Style,
     budget: usize,
 ) {
-    let diff_cont_prefix = border_continuation_prefix(DIFF_LINE_CONT, border_style);
-    let width = usize::from(ctx.width);
-    let old_text: Vec<&str> = chunk.old.iter().map(|l| l.text.as_str()).collect();
-    let new_text: Vec<&str> = chunk.new.iter().map(|l| l.text.as_str()).collect();
-    let entries = entries(
-        &old_text,
-        &new_text,
-        budget,
+    let number_width = number_column_width(chunk);
+    // Separator width matches read / grep's `" │ "` (3 cols) so the
+    // text column lands at the same offset across every tool body.
+    // The leading space gives the number column breathing room — `1 -`
+    // reads more naturally than `1-` for single-digit line numbers.
+    let del_renderer = numbered_row::Renderer::with_style(
+        ctx,
+        border_style,
+        number_width,
+        " - ",
         ctx.theme.error(),
-        ctx.theme.success(),
+        Some(ctx.theme.diff_del_row()),
     );
-    for entry in entries {
+    let add_renderer = numbered_row::Renderer::with_style(
+        ctx,
+        border_style,
+        number_width,
+        " + ",
+        ctx.theme.success(),
+        Some(ctx.theme.diff_add_row()),
+    );
+    // White text on the muted bg keeps content readable; the saturated
+    // sign in the separator slot still carries the side semantic.
+    let text_style = ctx.theme.text();
+
+    for entry in entries(&chunk.old, &chunk.new, budget) {
         match entry {
-            Entry::Line { sign, text, style } => {
-                let expanded = expand_tabs(text);
-                let display_text = truncate_to_bytes(&expanded, MAX_TOOL_OUTPUT_LINE_BYTES);
-                let line = Line::from(vec![
-                    Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-                    Span::styled(format!("{sign} "), style),
-                    Span::styled(display_text, style),
-                ]);
-                out.extend(wrap_line(
-                    line,
-                    width,
-                    DIFF_LINE_CONT.width(),
-                    Some(&diff_cont_prefix),
-                ));
-            }
+            Entry::Line {
+                side: Side::Del,
+                line,
+            } => del_renderer.render(out, line.number, &line.text, text_style),
+            Entry::Line {
+                side: Side::Add,
+                line,
+            } => add_renderer.render(out, line.number, &line.text, text_style),
             Entry::Ellipsis { hidden } => {
                 let noun = if hidden == 1 { "line" } else { "lines" };
                 out.push(Line::from(vec![
@@ -146,6 +148,16 @@ fn render_chunk_body(
             }
         }
     }
+}
+
+/// Width of the line-number column for a chunk — the widest line
+/// number across both sides, with a minimum of 1 so the column never
+/// collapses to zero (which would push the separator flush against
+/// the bar prefix).
+fn number_column_width(chunk: &DiffChunk) -> usize {
+    let max_old = chunk.old.iter().map(|l| l.number).max().unwrap_or(0);
+    let max_new = chunk.new.iter().map(|l| l.number).max().unwrap_or(0);
+    max_old.max(max_new).to_string().len().max(1)
 }
 
 /// Renders the deduplicated multi-chunk footer naming every location.
@@ -207,16 +219,19 @@ fn chunk_anchor_line(chunk: &DiffChunk) -> Option<usize> {
         .map(|l| l.number)
 }
 
+/// Which side of the diff a [`Entry::Line`] belongs to. Drives
+/// renderer dispatch (sign, color, bg) without burdening every entry
+/// with a copy of the per-side style state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Side {
+    Del,
+    Add,
+}
+
 /// A single rendered entry in a diff body.
 enum Entry<'a> {
-    Line {
-        sign: char,
-        text: &'a str,
-        style: Style,
-    },
-    Ellipsis {
-        hidden: usize,
-    },
+    Line { side: Side, line: &'a DiffLine },
+    Ellipsis { hidden: usize },
 }
 
 /// Builds the ordered entry stream for a diff body, capping the total
@@ -225,16 +240,14 @@ enum Entry<'a> {
 /// the first and last line of the side while collapsing the middle
 /// into a single `Ellipsis`.
 fn entries<'a>(
-    old_lines: &[&'a str],
-    new_lines: &[&'a str],
+    old_lines: &'a [DiffLine],
+    new_lines: &'a [DiffLine],
     budget: usize,
-    del_style: Style,
-    add_style: Style,
 ) -> Vec<Entry<'a>> {
     let (old_budget, new_budget) = split_budget(old_lines.len(), new_lines.len(), budget);
     let mut out = Vec::with_capacity(old_lines.len() + new_lines.len() + 2);
-    emit_side(&mut out, '-', old_lines, old_budget, del_style);
-    emit_side(&mut out, '+', new_lines, new_budget, add_style);
+    emit_side(&mut out, Side::Del, old_lines, old_budget);
+    emit_side(&mut out, Side::Add, new_lines, new_budget);
     out
 }
 
@@ -257,29 +270,19 @@ fn split_budget(old_len: usize, new_len: usize, budget: usize) -> (usize, usize)
     (half, budget - half)
 }
 
-/// Emits `lines` entries under `sign`, capped at `budget`. Over
+/// Emits `lines` entries under `side`, capped at `budget`. Over
 /// budget, shows the first `budget - 1` lines, a single `Ellipsis` for
 /// the collapsed middle, then the final line — so both the leading
 /// and trailing shape stay visible. `budget == 0` collapses the entire
 /// side into one `Ellipsis`. `Ellipsis { hidden: 0 }` is never emitted
 /// — a bare `... +0 lines` footer would be a contradiction.
-fn emit_side<'a>(
-    out: &mut Vec<Entry<'a>>,
-    sign: char,
-    lines: &[&'a str],
-    budget: usize,
-    style: Style,
-) {
+fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [DiffLine], budget: usize) {
     if lines.is_empty() {
         return;
     }
     if lines.len() <= budget {
         for line in lines {
-            out.push(Entry::Line {
-                sign,
-                text: line,
-                style,
-            });
+            out.push(Entry::Line { side, line });
         }
         return;
     }
@@ -293,21 +296,13 @@ fn emit_side<'a>(
     let tail = 1;
     let hidden = lines.len() - head - tail;
     for line in &lines[..head] {
-        out.push(Entry::Line {
-            sign,
-            text: line,
-            style,
-        });
+        out.push(Entry::Line { side, line });
     }
     if hidden > 0 {
         out.push(Entry::Ellipsis { hidden });
     }
     for line in &lines[lines.len() - tail..] {
-        out.push(Entry::Line {
-            sign,
-            text: line,
-            style,
-        });
+        out.push(Entry::Line { side, line });
     }
 }
 
@@ -545,8 +540,16 @@ mod tests {
             false,
         );
         let texts = rendered_texts(&out);
-        assert!(texts.iter().any(|t| t.contains("- foo")));
-        assert!(texts.iter().any(|t| t.contains("+ bar")));
+        // Require the number column too — `contains("- foo")` alone
+        // would still pass if a regression dropped the gutter.
+        assert!(
+            texts.iter().any(|t| t.contains("1 - foo")),
+            "missing del line with number column: {texts:?}",
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("1 + bar")),
+            "missing add line with number column: {texts:?}",
+        );
         assert!(
             !texts.iter().any(|t| t.contains("applied at")),
             "single-chunk render must not emit a locations footer: {texts:?}",
@@ -582,16 +585,23 @@ mod tests {
         let mut out = Vec::new();
         render(&mut out, &ctx(&theme), &[chunk_a, chunk_b], true, 2, false);
         let texts = rendered_texts(&out);
-        // Body rendered once, not duplicated per chunk.
+        // Body rendered once at the *first* chunk's line number — the
+        // other chunks contribute only to the locations footer. A
+        // regression that re-rendered every chunk would emit two `12 -`
+        // rows or one `12 -` and one `47 -`.
         assert_eq!(
-            texts.iter().filter(|t| t.contains("- foo")).count(),
+            texts.iter().filter(|t| t.contains("12 - foo")).count(),
             1,
-            "body must appear once, not per chunk: {texts:?}",
+            "body must appear once at the first chunk's line: {texts:?}",
         );
         assert_eq!(
-            texts.iter().filter(|t| t.contains("+ bar")).count(),
+            texts.iter().filter(|t| t.contains("12 + bar")).count(),
             1,
-            "body must appear once, not per chunk: {texts:?}",
+            "body must appear once at the first chunk's line: {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("47 - foo")),
+            "second chunk's body must not render: {texts:?}",
         );
         assert!(
             texts.iter().any(|t| t.contains("applied at lines 12, 47")),
@@ -633,7 +643,13 @@ mod tests {
         entries
             .iter()
             .map(|e| match e {
-                Entry::Line { sign, text, .. } => format!("{sign} {text}"),
+                Entry::Line { side, line } => {
+                    let sign = match side {
+                        Side::Del => '-',
+                        Side::Add => '+',
+                    };
+                    format!("{sign} {}", line.text)
+                }
                 Entry::Ellipsis { hidden } => format!("... +{hidden}"),
             })
             .collect()
@@ -641,9 +657,9 @@ mod tests {
 
     #[test]
     fn entries_under_budget_shows_all_lines() {
-        let old = vec!["foo", "bar"];
-        let new = vec!["baz"];
-        let entries = entries(&old, &new, 10, Style::default(), Style::default());
+        let old = line_numbered(&["foo", "bar"]);
+        let new = line_numbered(&["baz"]);
+        let entries = entries(&old, &new, 10);
         assert_eq!(render_entries(&entries), vec!["- foo", "- bar", "+ baz"]);
     }
 
@@ -654,9 +670,9 @@ mod tests {
         // Here old (2) fits entirely, so its surplus shifts to new (5
         // lines under a budget of 5 - 2 = 3: 2 head + tail? no —
         // head = budget - 1 = 2, tail = 1, hidden = 5 - 3 = 2).
-        let old = vec!["a", "b"];
-        let new = vec!["c", "d", "e", "f", "g"];
-        let entries = entries(&old, &new, 5, Style::default(), Style::default());
+        let old = line_numbered(&["a", "b"]);
+        let new = line_numbered(&["c", "d", "e", "f", "g"]);
+        let entries = entries(&old, &new, 5);
         assert_eq!(
             render_entries(&entries),
             vec!["- a", "- b", "+ c", "+ d", "... +2", "+ g"],
@@ -670,9 +686,9 @@ mod tests {
         // pure deletion rendered 20 `-` lines followed by a bogus
         // `... +0 lines` footer. Now old is budgeted like any side
         // and the zero-hidden Ellipsis is suppressed.
-        let old = vec!["a", "b", "c", "d", "e", "f", "g"];
-        let new: Vec<&str> = Vec::new();
-        let entries = entries(&old, &new, 5, Style::default(), Style::default());
+        let old = line_numbered(&["a", "b", "c", "d", "e", "f", "g"]);
+        let new: Vec<DiffLine> = Vec::new();
+        let entries = entries(&old, &new, 5);
         assert_eq!(
             render_entries(&entries),
             vec!["- a", "- b", "- c", "- d", "... +2", "- g"],
@@ -690,9 +706,9 @@ mod tests {
     fn entries_at_budget_boundary_shows_every_line() {
         // old.len() + new.len() == budget: both sides render in full,
         // no ellipsis — the off-by-one guard against a spurious footer.
-        let old = vec!["a", "b", "c"];
-        let new = vec!["x", "y"];
-        let entries = entries(&old, &new, 5, Style::default(), Style::default());
+        let old = line_numbered(&["a", "b", "c"]);
+        let new = line_numbered(&["x", "y"]);
+        let entries = entries(&old, &new, 5);
         assert_eq!(
             render_entries(&entries),
             vec!["- a", "- b", "- c", "+ x", "+ y"],
@@ -704,9 +720,9 @@ mod tests {
     fn entries_both_sides_overflow_split_evenly() {
         // When neither side fits in an even split, each gets half the
         // budget — head-ellipsis-tail on both. Odd leftover goes to old.
-        let old = vec!["a0", "a1", "a2", "a3", "a4"];
-        let new = vec!["b0", "b1", "b2", "b3", "b4"];
-        let entries = entries(&old, &new, 5, Style::default(), Style::default());
+        let old = line_numbered(&["a0", "a1", "a2", "a3", "a4"]);
+        let new = line_numbered(&["b0", "b1", "b2", "b3", "b4"]);
+        let entries = entries(&old, &new, 5);
         assert_eq!(
             render_entries(&entries),
             // old budget 3 (half of 5 rounded up): head 2, tail 1,
@@ -720,9 +736,9 @@ mod tests {
         // Pathological budget == 0 must still terminate cleanly — each
         // non-empty side emits a single Ellipsis rather than panicking
         // on an underflowed head / tail split.
-        let old = vec!["a", "b"];
-        let new = vec!["x"];
-        let entries = entries(&old, &new, 0, Style::default(), Style::default());
+        let old = line_numbered(&["a", "b"]);
+        let new = line_numbered(&["x"]);
+        let entries = entries(&old, &new, 0);
         assert_eq!(render_entries(&entries), vec!["... +2", "... +1"]);
     }
 
@@ -733,9 +749,9 @@ mod tests {
         // via `entries`. Head = 0, Ellipsis{hidden: n-1}, tail.
         // Regresses if a mutation flips `head = budget - 1` to
         // `head = budget` (then the ellipsis would vanish).
-        let old = vec!["a", "b", "c"];
-        let new = vec!["x", "y", "z"];
-        let entries = entries(&old, &new, 2, Style::default(), Style::default());
+        let old = line_numbered(&["a", "b", "c"]);
+        let new = line_numbered(&["x", "y", "z"]);
+        let entries = entries(&old, &new, 2);
         assert_eq!(
             render_entries(&entries),
             vec!["... +2", "- c", "... +2", "+ z"],

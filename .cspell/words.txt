@@ -5,6 +5,7 @@ anyhow
 APFS
 atuin
 catppuccin
+Catppuccin
 claudemd
 clippy
 cmark
