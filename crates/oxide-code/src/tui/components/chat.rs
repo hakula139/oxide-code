@@ -1592,7 +1592,15 @@ mod tests {
         // duplicates it on screen; skip the first body line when it
         // matches the label verbatim.
         let mut chat = test_chat();
-        chat.push_tool_result("Found 2 files", "Found 2 files\na.rs\nb.rs", false);
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files
+                a.rs
+                b.rs"
+            },
+            false,
+        );
         let text = all_text(&chat);
         // Only the status line carries "Found 2 files" — the body
         // starts at the file list.
@@ -1612,7 +1620,14 @@ mod tests {
         // vs "Found 2 files in cache") must render both — the label
         // is a distinct header.
         let mut chat = test_chat();
-        chat.push_tool_result("Found 2 files", "Found 2 files in cache\na.rs", false);
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files in cache
+                a.rs"
+            },
+            false,
+        );
         let text = all_text(&chat);
         assert!(
             text.contains("Found 2 files in cache"),

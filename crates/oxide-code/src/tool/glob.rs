@@ -199,6 +199,8 @@ fn parse_truncation_footer(footer: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::{formatdoc, indoc};
+
     use super::*;
 
     // ── run ──
@@ -338,7 +340,10 @@ mod tests {
         let view = GlobTool
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
-                "src/main.rs\nsrc/lib.rs",
+                indoc! {"
+                    src/main.rs
+                    src/lib.rs"
+                },
                 &ToolMetadata::default(),
             )
             .unwrap();
@@ -354,13 +359,15 @@ mod tests {
 
     #[test]
     fn result_view_preserves_total_from_truncation_footer() {
-        let body = (0..MAX_RESULTS)
-            .map(|i| format!("f{i:03}.rs"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!(
-            "{body}\n\n(Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
-        );
+        // Files vector reflects the tool's MAX_RESULTS cap; total
+        // preserves the unbounded count so the renderer can surface it.
+        let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
+        let body = files.join("\n");
+        let content = formatdoc! {"
+            {body}
+
+            (Showing {MAX_RESULTS} of 1234 matches. Use a more specific pattern.)"
+        };
         let view = GlobTool
             .result_view(
                 &serde_json::json!({"pattern": "**/*.rs"}),
@@ -369,18 +376,7 @@ mod tests {
             )
             .unwrap();
 
-        // Files vector reflects the tool's MAX_RESULTS cap; total
-        // preserves the unbounded count so the renderer can surface it.
-        let ToolResultView::GlobFiles { files, total } = view else {
-            panic!("expected GlobFiles variant");
-        };
-        assert_eq!(files.len(), MAX_RESULTS);
-        assert_eq!(files[0], "f000.rs");
-        assert_eq!(
-            files[MAX_RESULTS - 1],
-            format!("f{:03}.rs", MAX_RESULTS - 1)
-        );
-        assert_eq!(total, 1234);
+        assert_eq!(view, ToolResultView::GlobFiles { files, total: 1234 });
     }
 
     #[test]
@@ -403,13 +399,47 @@ mod tests {
     }
 
     #[test]
+    fn result_view_falls_back_for_empty_content() {
+        // `body.lines()` yields nothing — falling through to text shows
+        // the user the raw output instead of a misleading empty list.
+        let view = GlobTool.result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            "",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
+    fn result_view_falls_back_when_footer_total_under_visible_files() {
+        // Inconsistent footer — claims fewer total matches than the
+        // visible body. Render-time math depends on `total >= files.len()`,
+        // so reject up front.
+        let view = GlobTool.result_view(
+            &serde_json::json!({"pattern": "*.rs"}),
+            indoc! {"
+                a.rs
+                b.rs
+
+                (Showing 100 of 1 matches. Use a more specific pattern.)"
+            },
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
     fn result_view_falls_back_for_malformed_footer() {
         // Footer present but unparsable — fall through to the text body
         // rather than absorb the line as a "path" and render misleading
         // structure.
         let view = GlobTool.result_view(
             &serde_json::json!({"pattern": "*.rs"}),
-            "src/main.rs\n\n(Some other footer we don't recognise)",
+            indoc! {"
+                src/main.rs
+
+                (Some other footer we don't recognise)"
+            },
             &ToolMetadata::default(),
         );
         assert!(view.is_none());
