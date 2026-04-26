@@ -79,16 +79,22 @@ pub(super) fn render(
 }
 
 /// Footer combining TUI-side hidden rows (`hidden`) with the tool's
-/// own `MAX_RESULTS` truncation. Reports the total when the tool
-/// capped — `total` is the unbounded match count, more useful than a
-/// bare "limit reached" since glob can disclose it.
+/// own `MAX_RESULTS` truncation. Mirrors grep's `(limit reached)`
+/// parenthetical: lead with what's elided, follow with a paren
+/// disclosing the cap context. `total` is the unbounded match count
+/// — more useful than a bare "limit reached" since glob can disclose
+/// it.
 fn footer_text(hidden: usize, total: usize, truncated_by_tool: bool) -> Option<String> {
     let noun = |n: usize| if n == 1 { "file" } else { "files" };
+    let visible = total.saturating_sub(hidden);
     match (hidden, truncated_by_tool) {
         (0, false) => None,
-        (0, true) => Some(format!("... {total} files total")),
+        (0, true) => Some(format!("... showing {visible} of {total}")),
         (n, false) => Some(format!("... +{n} {}", noun(n))),
-        (n, true) => Some(format!("... +{n} {} of {total} total", noun(n))),
+        (n, true) => Some(format!(
+            "... +{n} {} (showing {visible} of {total})",
+            noun(n),
+        )),
     }
 }
 
@@ -234,8 +240,8 @@ mod tests {
             "header should anchor the body to the input pattern: {body}",
         );
         assert!(
-            body.contains("... +5 files of 1234 total"),
-            "footer: {body}"
+            body.contains("... +5 files (showing 1229 of 1234)"),
+            "footer: {body}",
         );
     }
 
@@ -253,20 +259,25 @@ mod tests {
     }
 
     #[test]
-    fn footer_text_tool_truncated_with_no_tui_hidden_reports_total() {
+    fn footer_text_tool_truncated_with_no_tui_hidden_reports_visible_of_total() {
         // Exotic shape — tool cap hit but TUI fits everything. Defensive
         // arm; in practice MAX_RESULTS (100) is well above MAX_TOOL_OUTPUT_LINES (5).
+        // Wording mirrors grep's `... limit reached` parenthetical: a
+        // single descriptor of the cap context, no `+N` to qualify.
         assert_eq!(
             footer_text(0, 200, true),
-            Some("... 200 files total".to_owned()),
+            Some("... showing 200 of 200".to_owned()),
         );
     }
 
     #[test]
     fn footer_text_combines_hidden_and_total_when_tool_truncated() {
+        // Combined case: `+N files` describes what's elided in the TUI,
+        // the parenthetical anchors that elision against the
+        // tool-disclosed total.
         assert_eq!(
             footer_text(95, 1234, true),
-            Some("... +95 files of 1234 total".to_owned()),
+            Some("... +95 files (showing 1139 of 1234)".to_owned()),
         );
     }
 }

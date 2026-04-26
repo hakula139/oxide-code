@@ -2019,7 +2019,7 @@ mod tests {
             "6th row leaked past cap: {text}"
         );
         assert!(
-            text.contains("... +2 files of 1234 total"),
+            text.contains("... +2 files (showing 1232 of 1234)"),
             "footer text wrong: {text}",
         );
     }
