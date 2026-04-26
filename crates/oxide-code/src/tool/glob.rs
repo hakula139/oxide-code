@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_for_malformed_footer() {
-        // Footer present but unparseable — fall through to the text body
+        // Footer present but unparsable — fall through to the text body
         // rather than absorb the line as a "path" and render misleading
         // structure.
         let view = GlobTool.result_view(
