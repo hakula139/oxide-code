@@ -1,10 +1,11 @@
 ---
 source: crates/oxide-code/src/tui/components/chat.rs
+assertion_line: 2322
 expression: "render_chat(&mut chat, 60, 8)"
 ---
 "▎ ✎ Edit(/tmp/f.rs)                                         "
 "▎ ✓ Edited f.rs                                             "
-"▎   +     return 42;                                        "
+"▎   2 +     return 42;                                      "
 "                                                            "
 "                                                            "
 "                                                            "

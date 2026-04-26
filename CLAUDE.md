@@ -85,9 +85,9 @@ ox                                          # Start an interactive session
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
-│   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget)
+│   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget + line-number gutter + Catppuccin row-bg tint)
 │   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
-│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] │ [text]` row renderer used by read / grep (and future diff)
+│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [separator] [text]` row renderer — pipe separator for read / grep, sign separator + row bg for diff sides
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
