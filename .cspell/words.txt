@@ -42,6 +42,7 @@ reqwest
 reserialized
 rfind
 riscv
+rsplit
 rustls
 serde
 serie
