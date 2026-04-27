@@ -19,7 +19,6 @@ deserialize
 disambiguable
 dtolnay
 frappe
-Frappe
 EACCES
 ESRCH
 feff
@@ -31,9 +30,7 @@ insta
 isatty
 killpg
 latte
-Latte
 macchiato
-Macchiato
 misparse
 mpsc
 mtimes
@@ -49,6 +46,7 @@ reqwest
 reserialized
 rfind
 riscv
+rrggbb
 rsplit
 rustls
 serde
