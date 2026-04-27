@@ -187,7 +187,7 @@ impl StatusBar {
                 } else {
                     "running tool..."
                 };
-                Span::styled(format!("{spinner} {label}"), self.theme.warning())
+                Span::styled(format!("{spinner} {label}"), self.theme.info())
             }
         }
     }

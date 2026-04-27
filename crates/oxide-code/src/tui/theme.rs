@@ -168,10 +168,6 @@ impl Theme {
     // Status indicators
 
     /// Info indicator (in-progress / neutral signals)
-    #[expect(
-        dead_code,
-        reason = "wired in the next commit (status-bar streaming state)"
-    )]
     pub(crate) fn info(&self) -> Style {
         self.info.style()
     }
@@ -179,11 +175,6 @@ impl Theme {
     /// Success indicator
     pub(crate) fn success(&self) -> Style {
         self.success.style()
-    }
-
-    /// Warning indicator
-    pub(crate) fn warning(&self) -> Style {
-        self.warning.style()
     }
 
     /// Error indicator
@@ -392,7 +383,6 @@ mod tests {
         assert_eq!(t.user().fg, t.user.fg);
         assert_eq!(t.secondary().fg, t.secondary.fg);
         assert_eq!(t.success().fg, t.success.fg);
-        assert_eq!(t.warning().fg, t.warning.fg);
         assert_eq!(t.error().fg, t.error.fg);
         assert_eq!(t.inline_code().fg, t.inline_code.fg);
         assert_eq!(t.inline_code().bg, None);
