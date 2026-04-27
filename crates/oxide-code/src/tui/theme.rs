@@ -40,17 +40,9 @@ impl Slot {
 
 // ── Theme ──
 
-/// Iterates the canonical slot list, calling the given callback macro
-/// with `($name, $doc)` pairs. The single source of truth for the
-/// theme schema — `Theme` (`theme.rs`), `ThemeFile` / `into_theme` /
-/// `slot_for_name` (`theme/loader.rs`), and `SLOT_NAMES` are all
-/// generated from this list, so adding or renaming a slot is a
-/// one-place edit.
-///
-/// Section comments inside the invocation are for human navigation
-/// only — they don't reach the generated code (the lexer strips
-/// comments before macro expansion). The canonical role groupings
-/// match `themes/*.toml` and `docs/guide/theming.md`.
+/// Canonical slot list. `Theme`, `ThemeFile`, `into_theme`, and
+/// `slot_for_name` are all generated from this — adding or renaming
+/// a slot is a one-place edit.
 macro_rules! for_each_slot {
     ($callback:ident) => {
         $callback! {
@@ -111,22 +103,11 @@ macro_rules! for_each_slot {
 }
 pub(crate) use for_each_slot;
 
+/// Theme palette. Each slot is one role — `error` is "errors", not
+/// "red". `Default::default()` parses the vendored `themes/mocha.toml`
+/// once on first access.
 macro_rules! define_theme_struct {
     ( $( ($name:ident, $doc:literal), )* ) => {
-        /// Theme palette and style hooks for the TUI.
-        ///
-        /// Each slot maps to one role — `error` is "the color used for
-        /// errors", not "the color red". Cohesion clusters that used
-        /// to be hard-aliased in code (`border_unfocused = dim`,
-        /// `table_border = dim`, `horizontal_rule = dim`,
-        /// `table_header = heading_h2`) are now first-class slots
-        /// with default values that keep them aligned; users can
-        /// break the alignment by overriding one without the others.
-        ///
-        /// The default constructor returns Catppuccin Mocha by
-        /// parsing the vendored `themes/mocha.toml`. The TOML body
-        /// is embedded via `include_str!` and parsed once on first
-        /// access.
         #[derive(Debug, Clone)]
         pub(crate) struct Theme {
             $(
@@ -139,10 +120,8 @@ macro_rules! define_theme_struct {
 for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
-    /// Catppuccin Mocha palette with transparent terminal background.
-    /// Parsed once from the vendored `themes/mocha.toml` and cached;
-    /// each call clones the cached [`Theme`] so callers can own their
-    /// copy without re-parsing.
+    /// Catppuccin Mocha. Parsed once from the embedded TOML; each call
+    /// clones the cached [`Theme`].
     fn default() -> Self {
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")

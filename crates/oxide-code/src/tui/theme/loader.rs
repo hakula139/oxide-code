@@ -95,8 +95,8 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<(
     Ok(())
 }
 
-/// Mutable slot lookup by name. Generated from the canonical slot
-/// list so the mapping cannot drift from [`Theme`]'s fields.
+/// Mutable slot lookup by name. Generated so the mapping can't drift
+/// from [`Theme`]'s fields.
 macro_rules! define_slot_for_name {
     ( $( ($name:ident, $doc:literal), )* ) => {
         fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
@@ -188,11 +188,9 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
     file.into_theme()
 }
 
-/// Generates `ThemeFile` (deserialization shape) and its `into_theme`
-/// converter from the canonical slot list. `deny_unknown_fields`
-/// catches typos at the slot-name level; `into_theme` wraps each
-/// per-slot parse with the slot name so a bad color points at the
-/// offending entry.
+/// `ThemeFile` deserialization shape + `into_theme` converter.
+/// `deny_unknown_fields` catches typos; `into_theme` wraps each
+/// slot's parse error with its name.
 macro_rules! define_theme_file {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Deserialize)]
