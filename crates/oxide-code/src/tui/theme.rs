@@ -1,6 +1,13 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
+mod color;
+
+// Hold a reference to the color parser so dead-code analysis treats
+// it as live before Step 4 wires it into the loader. Removing this
+// shim is part of the Step 4 commit.
+const _: fn(&str) -> anyhow::Result<Color> = color::parse_color;
+
 /// A single theme slot — composes optional foreground, optional
 /// background, and modifiers into a ratatui [`Style`].
 ///
