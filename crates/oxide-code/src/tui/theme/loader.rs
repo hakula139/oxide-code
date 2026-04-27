@@ -129,8 +129,11 @@ pub(crate) enum SlotPatch {
 /// Inline TOML patch — every field optional. `Option<bool>` modifier
 /// flags distinguish "no change" (`None`), "set" (`Some(true)`), and
 /// "clear" (`Some(false)`).
-#[derive(Debug, Deserialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
+///
+/// An entirely empty patch (`error = {}`) would silently re-write
+/// the base value with itself — almost certainly a config bug, so
+/// the custom [`Deserialize`] impl rejects it at parse time.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct InlinePatch {
     fg: Option<String>,
     bg: Option<String>,
@@ -139,6 +142,44 @@ pub(crate) struct InlinePatch {
     underlined: Option<bool>,
     dim: Option<bool>,
     reversed: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for InlinePatch {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            fg: Option<String>,
+            bg: Option<String>,
+            bold: Option<bool>,
+            italic: Option<bool>,
+            underlined: Option<bool>,
+            dim: Option<bool>,
+            reversed: Option<bool>,
+        }
+        let raw = Raw::deserialize(d)?;
+        let is_empty = raw.fg.is_none()
+            && raw.bg.is_none()
+            && raw.bold.is_none()
+            && raw.italic.is_none()
+            && raw.underlined.is_none()
+            && raw.dim.is_none()
+            && raw.reversed.is_none();
+        if is_empty {
+            return Err(serde::de::Error::custom(
+                "inline patch is empty (no fg, bg, or modifier flags)",
+            ));
+        }
+        Ok(Self {
+            fg: raw.fg,
+            bg: raw.bg,
+            bold: raw.bold,
+            italic: raw.italic,
+            underlined: raw.underlined,
+            dim: raw.dim,
+            reversed: raw.reversed,
+        })
+    }
 }
 
 impl SlotPatch {
@@ -631,6 +672,17 @@ mod tests {
             out.modifiers.contains(Modifier::ITALIC),
             "modifier from base survives",
         );
+    }
+
+    #[test]
+    fn inline_patch_empty_table_is_rejected_at_deserialize() {
+        // `error = {}` would silently re-write the base — almost
+        // certainly a config bug, so the parser refuses it. The
+        // untagged `SlotPatch` enum hides the specific error message
+        // from `InlinePatch::Deserialize`, so assert on rejection
+        // rather than the message text.
+        toml::from_str::<HashMap<String, SlotPatch>>("error = {}")
+            .expect_err("empty inline must be rejected at deserialize");
     }
 
     // ── expand_tilde ──
