@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_styled_carries_modifiers() {
+    fn slot_style_carries_modifiers() {
         let s = Slot {
             fg: Some(Color::Green),
             bg: None,
