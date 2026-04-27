@@ -369,6 +369,27 @@ mod tests {
         );
     }
 
+    /// Pin one distinctive hex per non-Mocha palette so a botched
+    /// edit in those TOMLs (typo, dropped digit, copy-pasted from a
+    /// sibling palette) surfaces as a failing test. `text` is the
+    /// load-bearing slot — every Catppuccin variant assigns it a
+    /// different shade.
+    #[test]
+    fn parse_theme_non_mocha_palettes_match_known_text_color() {
+        for (name, body, expected) in [
+            ("latte", builtin::LATTE, Color::Rgb(0x4c, 0x4f, 0x69)),
+            ("frappe", builtin::FRAPPE, Color::Rgb(0xc6, 0xd0, 0xf5)),
+            (
+                "macchiato",
+                builtin::MACCHIATO,
+                Color::Rgb(0xca, 0xd3, 0xf5),
+            ),
+        ] {
+            let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+            assert_eq!(t.text.fg, Some(expected), "{name} text.fg");
+        }
+    }
+
     /// Default modifier semantics: `accent` is bold, `thinking` is
     /// italic, `heading_h1` is bold + underlined, `link` is
     /// underlined. Pinned so a vendored TOML edit can't silently
