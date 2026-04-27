@@ -323,12 +323,12 @@ mod tests {
         assert_eq!(t.warning.fg, Some(Color::Rgb(0xf9, 0xe2, 0xaf)), "Yellow");
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)), "Red");
         assert_eq!(
-            t.diff_add_bg.bg,
+            t.diff_add.bg,
             Some(Color::Rgb(0x2a, 0x3a, 0x37)),
             "delta plus",
         );
         assert_eq!(
-            t.diff_del_bg.bg,
+            t.diff_del.bg,
             Some(Color::Rgb(0x38, 0x2c, 0x34)),
             "delta minus",
         );
@@ -404,10 +404,10 @@ mod tests {
     #[test]
     fn parse_theme_bg_only_inline_slot_leaves_fg_unset() {
         let t = parse_theme(builtin::MOCHA).unwrap();
-        // `diff_add_bg = { bg = "#2a3a37" }` is bg-only.
-        assert_eq!(t.diff_add_bg.fg, None);
-        assert_eq!(t.diff_add_bg.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
-        assert!(t.diff_add_bg.modifiers.is_empty());
+        // `diff_add = { bg = "#2a3a37" }` is bg-only.
+        assert_eq!(t.diff_add.fg, None);
+        assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+        assert!(t.diff_add.modifiers.is_empty());
     }
 
     #[test]

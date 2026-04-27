@@ -12,7 +12,7 @@ pub(crate) use loader::{SlotPatch, resolve_theme};
 /// A single theme slot — composes optional foreground, optional
 /// background, and modifiers into a ratatui [`Style`].
 ///
-/// Most slots are `fg`-only; a few (`diff_add_bg`, `code_bg`) are
+/// Most slots are `fg`-only; a few (`diff_add`, `code_bg`) are
 /// `bg`-only and leave `fg` unset. Modifiers default to empty unless
 /// the role's purpose is to add style (e.g., `accent` is bold,
 /// `thinking` is italic, `link` is underlined).
@@ -64,8 +64,8 @@ macro_rules! for_each_slot {
             (inline_code, "Inline code spans (`` `code` ``)"),
 
             // Diff backgrounds
-            (diff_add_bg, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
-            (diff_del_bg, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
+            (diff_add, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
+            (diff_del, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
 
             // Status indicators (ascending severity)
             (info, "Informational highlight (in-progress / neutral signals)"),
@@ -204,14 +204,14 @@ impl Theme {
     /// `+` row so the green tint extends across the row, including the
     /// trailing pad-to-width filler.
     pub(crate) fn diff_add_row(&self) -> Style {
-        Style::default().bg(self.diff_add_bg.bg.unwrap_or(Color::Reset))
+        Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
     }
 
     /// Bg-only style for deleted diff rows. Mirror of [`diff_add_row`].
     ///
     /// [`diff_add_row`]: Self::diff_add_row
     pub(crate) fn diff_del_row(&self) -> Style {
-        Style::default().bg(self.diff_del_bg.bg.unwrap_or(Color::Reset))
+        Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
     }
 
     // Composite helpers
@@ -384,7 +384,7 @@ mod tests {
         assert_ne!(t.accent.fg, t.secondary.fg);
         assert_ne!(t.user.fg, t.secondary.fg);
         assert_ne!(t.success.fg, t.error.fg);
-        assert_ne!(t.diff_add_bg.bg, t.diff_del_bg.bg);
+        assert_ne!(t.diff_add.bg, t.diff_del.bg);
     }
 
     // ── Style helpers ──
@@ -414,11 +414,11 @@ mod tests {
         let t = Theme::default();
 
         let add = t.diff_add_row();
-        assert_eq!(add.bg, t.diff_add_bg.bg);
+        assert_eq!(add.bg, t.diff_add.bg);
         assert_eq!(add.fg, None);
 
         let del = t.diff_del_row();
-        assert_eq!(del.bg, t.diff_del_bg.bg);
+        assert_eq!(del.bg, t.diff_del.bg);
         assert_eq!(del.fg, None);
     }
 

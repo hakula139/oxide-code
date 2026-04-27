@@ -25,8 +25,8 @@ code = "#8bd5ca"
 inline_code = "#f5a97f"
 
 # Diff backgrounds
-diff_add_bg = { bg = "#283834" }
-diff_del_bg = { bg = "#36293a" }
+diff_add = { bg = "#283834" }
+diff_del = { bg = "#36293a" }
 
 # Markdown headings
 heading_h1 = { fg = "#cad3f5", bold = true, underlined = true }

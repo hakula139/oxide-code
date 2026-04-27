@@ -77,7 +77,7 @@ A theme TOML is a flat document with one entry per slot. Two shapes:
   ```toml
   accent = { fg = "#89b4fa", bold = true }
   link = { fg = "#89b4fa", underlined = true }
-  diff_add_bg = { bg = "#2a3a37" }
+  diff_add = { bg = "#2a3a37" }
   ```
 
 Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. Unknown keys fail the parse.
@@ -132,8 +132,8 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 | Slot          | Role                                         |
 | ------------- | -------------------------------------------- |
-| `diff_add_bg` | Background fill for added rows in Edit diffs |
-| `diff_del_bg` | Background fill for deleted rows             |
+| `diff_add` | Background fill for added rows in Edit diffs |
+| `diff_del` | Background fill for deleted rows             |
 
 ### Markdown headings
 
