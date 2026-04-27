@@ -113,6 +113,12 @@ macro_rules! define_theme_struct {
                 pub(crate) $name: Slot,
             )*
         }
+
+        /// Every slot name in declaration order. Drives the test that
+        /// exercises every `slot_for_name` arm without duplicating the
+        /// list.
+        #[cfg(test)]
+        pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
 for_each_slot!(define_theme_struct);

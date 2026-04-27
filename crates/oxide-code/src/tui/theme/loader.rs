@@ -627,6 +627,42 @@ mod tests {
         assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
     }
 
+    // ── slot_for_name ──
+
+    /// Every slot name must route to a unique slot. Catches the
+    /// "typo in match arm" class of bug — e.g.,
+    /// `"tool_icon" => &mut theme.tool_border` would compile and
+    /// pass a happy-path override test, but this assertion fails
+    /// because patching `tool_icon` would visibly alter `tool_border`.
+    #[test]
+    fn slot_for_name_routes_each_name_to_a_unique_slot() {
+        let sentinel = Slot {
+            fg: Some(Color::Rgb(0xde, 0xad, 0xbe)),
+            bg: None,
+            modifiers: Modifier::empty(),
+        };
+        for &target in super::super::SLOT_NAMES {
+            let mut patched = Theme::default();
+            let original = patched.clone();
+            *slot_for_name(&mut patched, target)
+                .unwrap_or_else(|| panic!("unknown slot {target:?}")) = sentinel;
+            for &other in super::super::SLOT_NAMES {
+                let mut p = patched.clone();
+                let mut o = original.clone();
+                let post = *slot_for_name(&mut p, other).expect("slot must exist");
+                let pre = *slot_for_name(&mut o, other).expect("slot must exist");
+                if other == target {
+                    assert_eq!(post, sentinel, "patched slot {target} should hold sentinel");
+                } else {
+                    assert_eq!(
+                        post, pre,
+                        "patching {target} must not affect {other} (slot_for_name mis-routing)",
+                    );
+                }
+            }
+        }
+    }
+
     // ── SlotPatch::apply ──
 
     #[test]
