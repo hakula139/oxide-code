@@ -53,7 +53,7 @@ impl Slot {
 /// The default constructor returns Catppuccin Mocha by parsing the
 /// vendored `themes/mocha.toml`. The TOML body is embedded via
 /// `include_str!` and parsed once on first access.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Theme {
     // Text hierarchy
     /// Primary text
@@ -145,12 +145,13 @@ pub(crate) struct Theme {
 impl Default for Theme {
     /// Catppuccin Mocha palette with transparent terminal background.
     /// Parsed once from the vendored `themes/mocha.toml` and cached;
-    /// subsequent calls return a `Copy` of the parsed [`Theme`].
+    /// each call clones the cached [`Theme`] so callers can own their
+    /// copy without re-parsing.
     fn default() -> Self {
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
         });
-        *MOCHA
+        MOCHA.clone()
     }
 }
 

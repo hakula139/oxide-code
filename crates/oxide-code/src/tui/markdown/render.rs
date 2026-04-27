@@ -80,7 +80,7 @@ where
     pub(super) fn new(iter: I, theme: &Theme, width: usize) -> Self {
         Self {
             iter,
-            theme: *theme,
+            theme: theme.clone(),
             width,
             lines: Vec::new(),
             needs_newline: false,

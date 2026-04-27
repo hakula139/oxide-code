@@ -52,7 +52,7 @@ pub(crate) enum Status {
 impl StatusBar {
     pub(crate) fn new(theme: &Theme, model: String, cwd: String) -> Self {
         Self {
-            theme: *theme,
+            theme: theme.clone(),
             model,
             title: None,
             cwd,

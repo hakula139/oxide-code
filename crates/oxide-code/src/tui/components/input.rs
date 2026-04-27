@@ -51,7 +51,7 @@ impl InputArea {
         textarea.set_block(Block::default());
 
         Self {
-            theme: *theme,
+            theme: theme.clone(),
             textarea,
             enabled: true,
             last_width: Cell::new(0),

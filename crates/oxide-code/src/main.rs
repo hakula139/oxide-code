@@ -124,7 +124,7 @@ async fn async_main() -> Result<()> {
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
-    let theme = config.theme;
+    let theme = config.theme.clone();
 
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.

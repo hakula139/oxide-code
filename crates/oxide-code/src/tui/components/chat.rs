@@ -71,7 +71,7 @@ pub(crate) struct ChatView {
 impl ChatView {
     pub(crate) fn new(theme: &Theme, show_thinking: bool) -> Self {
         Self {
-            theme: *theme,
+            theme: theme.clone(),
             show_thinking,
             blocks: Vec::new(),
             streaming: None,
@@ -441,12 +441,12 @@ impl ChatView {
     fn advance_streaming_cache(&mut self) {
         let continues = self.streaming_continues_turn();
         let width = self.viewport_width;
-        let theme = self.theme;
+        let theme = &self.theme;
         let show_thinking = self.show_thinking;
         if let Some(s) = &mut self.streaming {
             let ctx = RenderCtx {
                 width,
-                theme: &theme,
+                theme,
                 show_thinking,
             };
             s.advance_cache(&ctx, continues);
