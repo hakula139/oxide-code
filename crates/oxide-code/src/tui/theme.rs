@@ -405,6 +405,7 @@ mod tests {
         assert_eq!(t.user().fg, t.user.fg);
         assert_eq!(t.assistant().fg, t.assistant.fg);
         assert_eq!(t.success().fg, t.success.fg);
+        assert_eq!(t.warning().fg, t.warning.fg);
         assert_eq!(t.error().fg, t.error.fg);
         assert_eq!(t.inline_code().fg, t.inline_code.fg);
         assert_eq!(t.inline_code().bg, None);

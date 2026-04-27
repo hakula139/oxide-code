@@ -441,6 +441,35 @@ mod tests {
         assert!(msg.contains("error"), "names the slot: {msg}");
     }
 
+    /// Sibling to the bare-string parse-error test, but the offending
+    /// value is the `fg` field of an inline-table slot — exercises the
+    /// `InlineSlot::into_slot` fg parse path.
+    #[test]
+    fn parse_theme_invalid_inline_fg_color_names_the_slot() {
+        let body = mocha_with_slot_replacement(
+            r##"accent = { fg = "#89b4fa", bold = true }"##,
+            r#"accent = { fg = "lavender", bold = true }"#,
+        );
+        let err = parse_theme(&body).expect_err("bad inline fg rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("lavender"), "names the value: {msg}");
+        assert!(msg.contains("accent"), "names the slot: {msg}");
+    }
+
+    /// Inline `bg` parse error — exercises the `InlineSlot::into_slot`
+    /// bg parse path that the bare-string and inline-fg tests miss.
+    #[test]
+    fn parse_theme_invalid_inline_bg_color_names_the_slot() {
+        let body = mocha_with_slot_replacement(
+            r##"diff_add = { bg = "#2a3a37" }"##,
+            r#"diff_add = { bg = "magenta-ish" }"#,
+        );
+        let err = parse_theme(&body).expect_err("bad inline bg rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("magenta-ish"), "names the value: {msg}");
+        assert!(msg.contains("diff_add"), "names the slot: {msg}");
+    }
+
     // ── SlotDef forms ──
 
     #[test]
@@ -559,6 +588,25 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
     }
 
+    /// File loaded successfully but its body fails to parse — the
+    /// error must be wrapped with the base name so the user sees
+    /// which theme is broken (not just an opaque slot diagnostic).
+    #[test]
+    fn resolve_theme_file_path_with_bad_body_wraps_with_base_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r#"error = "orange""#);
+        std::fs::write(&path, body).unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+
+        let err =
+            resolve_theme(Some(&path_str), &HashMap::new()).expect_err("bad slot color must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("parsing base theme"), "wrap context: {msg}");
+        assert!(msg.contains(&path_str), "names the source path: {msg}");
+        assert!(msg.contains("orange"), "names the offending value: {msg}");
+    }
+
     // ── resolve_theme: per-slot overrides ──
 
     #[test]
@@ -608,28 +656,6 @@ mod tests {
         assert!(t.success.modifiers.contains(Modifier::ITALIC));
         // fg from base unchanged.
         assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
-    }
-
-    /// Install a permissive global tracing subscriber so the warn
-    /// callsite in `resolve_theme` registers as `Interest::Always`
-    /// regardless of which warn-firing test fires it first. Without
-    /// this, parallel tests racing the default noop subscriber lock
-    /// the per-callsite Interest cache to `Never`, after which any
-    /// per-test `with_default` capture sees nothing.
-    fn install_permissive_global_subscriber() {
-        use std::sync::OnceLock;
-
-        use tracing_subscriber::fmt;
-
-        static INIT: OnceLock<()> = OnceLock::new();
-        INIT.get_or_init(|| {
-            _ = tracing::subscriber::set_global_default(
-                fmt::Subscriber::builder()
-                    .with_writer(std::io::sink)
-                    .with_max_level(tracing::Level::WARN)
-                    .finish(),
-            );
-        });
     }
 
     #[test]
@@ -723,6 +749,44 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
     }
 
+    /// Inline-form override with a bad `fg` color exercises the
+    /// `InlinePatch::apply` fg parse path that the bare-string sibling
+    /// can't reach.
+    #[test]
+    fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "accent".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                fg: Some("not-a-color".to_owned()),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).expect("bad inline fg should warn, not error");
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
+        assert!(
+            t.accent.modifiers.contains(Modifier::BOLD),
+            "base modifiers preserved on warn-fallback",
+        );
+    }
+
+    /// Sibling to the inline-fg test for the `bg` parse path.
+    #[test]
+    fn resolve_theme_inline_override_with_bad_bg_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "diff_add".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                bg: Some("not-a-color".to_owned()),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).expect("bad inline bg should warn, not error");
+        assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+    }
+
     #[test]
     fn resolve_theme_multiple_overrides_apply_independently() {
         let mut overrides = HashMap::new();
@@ -731,6 +795,28 @@ mod tests {
         let t = resolve_theme(None, &overrides).unwrap();
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
+    }
+
+    /// Install a permissive global tracing subscriber so the warn
+    /// callsite in `resolve_theme` registers as `Interest::Always`
+    /// regardless of which warn-firing test fires it first. Without
+    /// this, parallel tests racing the default noop subscriber lock
+    /// the per-callsite Interest cache to `Never`, after which any
+    /// per-test `with_default` capture sees nothing.
+    fn install_permissive_global_subscriber() {
+        use std::sync::OnceLock;
+
+        use tracing_subscriber::fmt;
+
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            _ = tracing::subscriber::set_global_default(
+                fmt::Subscriber::builder()
+                    .with_writer(std::io::sink)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            );
+        });
     }
 
     // ── slot_for_name ──

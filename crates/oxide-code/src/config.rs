@@ -602,6 +602,31 @@ mod tests {
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
+    /// Theme-resolution failures from `[tui.theme]` must propagate
+    /// out of `Config::load` instead of getting swallowed — the user
+    /// needs to see *which* theme name is broken, not a downstream
+    /// "no credentials"-style misdirection.
+    #[tokio::test]
+    async fn load_propagates_theme_resolution_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [tui.theme]
+                base = "no-such-theme"
+            "#},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("unknown theme name must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no-such-theme"), "names the bad theme: {msg}");
+        assert!(
+            msg.contains("not a built-in name") || msg.contains("failed to read"),
+            "explains why the resolution failed: {msg}",
+        );
+    }
+
     // ── Config::load / effort resolution ──
 
     #[tokio::test]
