@@ -99,7 +99,8 @@ macro_rules! for_each_slot {
         }
     };
 }
-pub(crate) use for_each_slot;
+
+pub(super) use for_each_slot;
 
 /// Theme palette. Each slot is one role — `error` is "errors", not
 /// "red". `Default::default()` parses the vendored `themes/mocha.toml`
@@ -121,6 +122,7 @@ macro_rules! define_theme_struct {
         pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
 }
+
 for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
