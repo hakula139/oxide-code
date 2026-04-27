@@ -17,6 +17,7 @@ oxide-code is a Rust reimplementation of Claude Code — an interactive CLI agen
 Early development. What works today:
 
 - Terminal UI with markdown rendering, syntax-highlighted code blocks, and streaming display
+- Runtime-loaded themes — 4 built-in Catppuccin variants and per-slot overrides via `ox.toml`
 - Agent loop with streaming and extended thinking
 - File and search tools (read, write, edit, glob, grep, bash)
 - System prompt with CLAUDE.md / AGENTS.md injection
@@ -35,12 +36,13 @@ ox
 
 ## Documentation
 
-| Document                                        | Description                                     |
-| ----------------------------------------------- | ----------------------------------------------- |
-| [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                 |
-| [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment   |
-| [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules |
-| [Sessions](docs/guide/sessions.md)              | Session persistence, listing, and resume        |
+| Document                                        | Description                                      |
+| ----------------------------------------------- | ------------------------------------------------ |
+| [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                  |
+| [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment    |
+| [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules  |
+| [Sessions](docs/guide/sessions.md)              | Session persistence, listing, and resume         |
+| [Theming](docs/guide/theming.md)                | Built-in palettes, custom themes, slot overrides |
 
 ## Building from Source
 

@@ -75,6 +75,11 @@ ox                                          # Start an interactive session
 │   ├── app.rs                              # Root App struct, tokio::select! event loop, render dispatch
 │   ├── component.rs                        # Component trait (components report UserAction back to the agent loop)
 │   ├── components.rs                       # Components module root
+│   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
+│   ├── theme/
+│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte via include_str!) + lookup
+│   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
+│   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
 │   ├── components/
 │   │   ├── chat.rs                         # ChatView container (scroll, event dispatch, block stacking, load_history)
 │   │   ├── chat/
@@ -101,7 +106,6 @@ ox                                          # Start an interactive session
 │   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
-│   ├── theme.rs                            # Catppuccin Mocha palette, style helpers
 │   └── wrap.rs                             # Word-wrap with continuation indent for styled lines
 ├── util.rs                                 # Shared utilities module root
 └── util/
