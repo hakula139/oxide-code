@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ratatui::style::Modifier;
 use serde::Deserialize;
 use tracing::warn;
@@ -105,6 +105,7 @@ macro_rules! define_slot_for_name {
         }
     };
 }
+
 super::for_each_slot!(define_slot_for_name);
 
 /// Per-slot override from `[tui.theme.overrides]` in user config.
@@ -127,10 +128,18 @@ pub(crate) enum SlotPatch {
 /// flags distinguish "no change" (`None`), "set" (`Some(true)`), and
 /// "clear" (`Some(false)`).
 ///
-/// An entirely empty patch (`error = {}`) would silently re-write
-/// the base value with itself — almost certainly a config bug, so
-/// the custom [`Deserialize`] impl rejects it at parse time.
-#[derive(Debug, Default)]
+/// An entirely empty patch (`error = {}`) would silently re-write the
+/// base value with itself — almost certainly a config bug. [`apply`]
+/// rejects it so the slot warns and falls back to the base value
+/// instead. Per-slot warnings are the right severity for a per-slot
+/// config mistake; a `SlotPatch`-level custom `Deserialize` would
+/// catch it at parse time, but serde's untagged enum dispatcher
+/// swallows inner messages, so the warn path produces a clearer
+/// diagnostic.
+///
+/// [`apply`]: Self::apply
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct InlinePatch {
     fg: Option<String>,
     bg: Option<String>,
@@ -139,44 +148,6 @@ pub(crate) struct InlinePatch {
     underlined: Option<bool>,
     dim: Option<bool>,
     reversed: Option<bool>,
-}
-
-impl<'de> Deserialize<'de> for InlinePatch {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Raw {
-            fg: Option<String>,
-            bg: Option<String>,
-            bold: Option<bool>,
-            italic: Option<bool>,
-            underlined: Option<bool>,
-            dim: Option<bool>,
-            reversed: Option<bool>,
-        }
-        let raw = Raw::deserialize(d)?;
-        let is_empty = raw.fg.is_none()
-            && raw.bg.is_none()
-            && raw.bold.is_none()
-            && raw.italic.is_none()
-            && raw.underlined.is_none()
-            && raw.dim.is_none()
-            && raw.reversed.is_none();
-        if is_empty {
-            return Err(serde::de::Error::custom(
-                "inline patch is empty (no fg, bg, or modifier flags)",
-            ));
-        }
-        Ok(Self {
-            fg: raw.fg,
-            bg: raw.bg,
-            bold: raw.bold,
-            italic: raw.italic,
-            underlined: raw.underlined,
-            dim: raw.dim,
-            reversed: raw.reversed,
-        })
-    }
 }
 
 impl SlotPatch {
@@ -193,7 +164,21 @@ impl SlotPatch {
 }
 
 impl InlinePatch {
+    fn is_empty(&self) -> bool {
+        self.fg.is_none()
+            && self.bg.is_none()
+            && self.bold.is_none()
+            && self.italic.is_none()
+            && self.underlined.is_none()
+            && self.dim.is_none()
+            && self.reversed.is_none()
+    }
+
     fn apply(&self, base: Slot) -> Result<Slot> {
+        if self.is_empty() {
+            bail!("empty patch (no fg, bg, or modifier flags)");
+        }
+
         let fg = self
             .fg
             .as_deref()
@@ -257,6 +242,7 @@ macro_rules! define_theme_file {
         }
     };
 }
+
 super::for_each_slot!(define_theme_file);
 
 /// One slot's TOML representation. The `untagged` enum lets serde
@@ -748,14 +734,21 @@ mod tests {
     }
 
     #[test]
-    fn inline_patch_empty_table_is_rejected_at_deserialize() {
-        // `error = {}` would silently re-write the base — almost
-        // certainly a config bug, so the parser refuses it. The
-        // untagged `SlotPatch` enum hides the specific error message
-        // from `InlinePatch::Deserialize`, so assert on rejection
-        // rather than the message text.
-        toml::from_str::<HashMap<String, SlotPatch>>("error = {}")
-            .expect_err("empty inline must be rejected at deserialize");
+    fn inline_patch_empty_table_apply_errors_with_actionable_message() {
+        // `accent = {}` parses fine — serde's untagged enum dispatcher
+        // would swallow a `Deserialize`-time message — but `apply`
+        // refuses to re-write the base with itself. The error reaches
+        // `resolve_theme`, which warns and falls back to base.
+        let base = Slot {
+            fg: Some(Color::Rgb(0xab, 0xcd, 0xef)),
+            bg: None,
+            modifiers: Modifier::empty(),
+        };
+        let err = InlinePatch::default()
+            .apply(base)
+            .expect_err("empty patch must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty patch"), "{msg}");
     }
 
     // ── parse_theme: built-ins ──
