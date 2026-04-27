@@ -8,16 +8,16 @@ oxide-code's TUI palette is fully user-configurable. Pick a built-in Catppuccin 
 # ox.toml or ~/.config/ox/config.toml
 
 # Built-in name (mocha, macchiato, frappe, latte) or filesystem path.
-[theme]
+[tui.theme]
 base = "latte"
 
 # Patch individual slots on top of the base.
-[theme.overrides]
+[tui.theme.overrides]
 error = "#ff0000"
 accent = { bold = false }
 ```
 
-Both `[theme]` keys are optional. Without them the default is `mocha` (Catppuccin Mocha) with no overrides.
+Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catppuccin Mocha) with no overrides.
 
 ## Built-in themes
 
@@ -35,7 +35,7 @@ Each ships as a vendored TOML file under `crates/oxide-code/themes/` and doubles
 `base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. `~/` expands to `$HOME`:
 
 ```toml
-[theme]
+[tui.theme]
 base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
@@ -82,7 +82,7 @@ A theme TOML is a flat document with one entry per slot. Two shapes:
 
 Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. Unknown keys fail the parse.
 
-A complete theme file has all 31 slots; a missing slot is a parse error (catches typos). For per-slot patches in `[theme.overrides]` the rules differ — see [Overrides](#overrides) below.
+A complete theme file has all 31 slots; a missing slot is a parse error (catches typos). For per-slot patches in `[tui.theme.overrides]` the rules differ — see [Overrides](#overrides) below.
 
 ## Slots
 
@@ -173,10 +173,10 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ## Overrides
 
-`[theme.overrides]` is a table of `slot_name = patch` pairs. A patch is _additive_ — only the fields it lists are applied to the base slot.
+`[tui.theme.overrides]` is a table of `slot_name = patch` pairs. A patch is _additive_ — only the fields it lists are applied to the base slot.
 
 ```toml
-[theme.overrides]
+[tui.theme.overrides]
 # Bare-string form — patches fg only; bg and modifiers come from the base.
 error = "#ff0000"
 # Inline form — patches just modifiers; fg / bg come from the base.
@@ -199,14 +199,14 @@ Bisected severity:
 ### Minimal — switch to Latte
 
 ```toml
-[theme]
+[tui.theme]
 base = "latte"
 ```
 
 ### Mocha base + a brighter error color
 
 ```toml
-[theme.overrides]
+[tui.theme.overrides]
 error = "#ff5555"
 ```
 
@@ -215,10 +215,10 @@ error = "#ff5555"
 ### Custom theme file with a few overrides on top
 
 ```toml
-[theme]
+[tui.theme]
 base = "~/.config/ox/themes/dracula.toml"
 
-[theme.overrides]
+[tui.theme.overrides]
 accent = { fg = "#bd93f9", bold = true }
 link = { fg = "#8be9fd", underlined = true }
 ```
@@ -226,7 +226,7 @@ link = { fg = "#8be9fd", underlined = true }
 ### Use the terminal's foreground for primary text
 
 ```toml
-[theme.overrides]
+[tui.theme.overrides]
 text = "reset"
 ```
 

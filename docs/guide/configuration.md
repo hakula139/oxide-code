@@ -86,7 +86,7 @@ model = "claude-opus-4-7[1m]"
 
 On Opus 4.7, `show_thinking = true` additionally opts the request into `thinking.display = "summarized"` so the API streams reasoning text; otherwise the 4.7 default (`"omitted"`) applies and the UI sees nothing until the final answer starts.
 
-### `[theme]` — Terminal theme
+### `[tui.theme]` — Terminal theme
 
 | Key         | Type   | Default   | Description                                      |
 | ----------- | ------ | --------- | ------------------------------------------------ |
@@ -94,10 +94,10 @@ On Opus 4.7, `show_thinking = true` additionally opts the request into `thinking
 | `overrides` | table  | —         | Per-slot patches applied on top of the base      |
 
 ```toml
-[theme]
+[tui.theme]
 base = "latte"
 
-[theme.overrides]
+[tui.theme.overrides]
 error = "#ff0000"
 accent = { bold = false }
 ```

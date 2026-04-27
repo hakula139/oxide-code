@@ -14,7 +14,7 @@
 //! bad value in `theme.toml` points at the offending entry.
 //!
 //! [`resolve_theme`] applies a base + per-slot overrides from
-//! `[theme]` config to produce a final [`Theme`]. Theme-selection
+//! `[tui.theme]` config to produce a final [`Theme`]. Theme-selection
 //! errors (unknown name, missing file) hard-fail; per-slot value
 //! errors warn and fall back to the base value so the TUI still
 //! launches.
@@ -136,7 +136,7 @@ fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
     })
 }
 
-/// Per-slot override from `[theme.overrides]` in user config.
+/// Per-slot override from `[tui.theme.overrides]` in user config.
 ///
 /// Patches are *additive* on top of the base slot:
 /// - bare-string `error = "#hex"` overwrites the slot's `fg` only;

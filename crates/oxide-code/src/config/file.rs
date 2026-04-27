@@ -27,10 +27,10 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 /// [tui]
 /// show_thinking = true
 ///
-/// [theme]
+/// [tui.theme]
 /// base = "latte"
 ///
-/// [theme.overrides]
+/// [tui.theme.overrides]
 /// error = "#ff0000"
 /// ```
 #[derive(Debug, Default, Deserialize)]
@@ -38,7 +38,6 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 pub(super) struct FileConfig {
     pub(super) client: Option<ClientConfig>,
     pub(super) tui: Option<TuiConfig>,
-    pub(super) theme: Option<ThemeFileConfig>,
 }
 
 /// API client settings (`[client]` section).
@@ -62,14 +61,15 @@ pub(super) struct ClientConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
     pub(super) show_thinking: Option<bool>,
+    pub(super) theme: Option<ThemeFileConfig>,
 }
 
-/// Theme settings (`[theme]` section).
+/// Theme settings (`[tui.theme]` section).
 ///
 /// `base` selects a built-in name (`mocha`, `macchiato`, `frappe`,
 /// `latte`) or a filesystem path (`~/.config/ox/themes/dark.toml`)
-/// to a TOML body. The `[theme.overrides]` table patches individual
-/// slots on top of the resolved base.
+/// to a TOML body. The `[tui.theme.overrides]` table patches
+/// individual slots on top of the resolved base.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ThemeFileConfig {
@@ -85,7 +85,6 @@ impl FileConfig {
         Self {
             client: merge_section(self.client, other.client, ClientConfig::merge),
             tui: merge_section(self.tui, other.tui, TuiConfig::merge),
-            theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
         }
     }
 }
@@ -104,13 +103,10 @@ impl ClientConfig {
 }
 
 impl TuiConfig {
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "signature must match merge_section's fn(T, T) -> T"
-    )]
     fn merge(self, other: Self) -> Self {
         Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
+            theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
         }
     }
 }
@@ -246,8 +242,8 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
+                theme: None,
             }),
-            theme: None,
         };
         let other = FileConfig {
             client: Some(ClientConfig {
@@ -260,8 +256,8 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
-            theme: None,
         };
         let merged = base.merge(other);
 
@@ -296,8 +292,8 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
-            theme: None,
         };
         let merged = base.merge(FileConfig::default());
 
@@ -324,14 +320,13 @@ mod tests {
                 ..Default::default()
             }),
             tui: None,
-            theme: None,
         };
         let other = FileConfig {
             client: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
-            theme: None,
         };
         let merged = base.merge(other);
 
@@ -347,7 +342,6 @@ mod tests {
         let merged = FileConfig::default().merge(FileConfig::default());
         assert!(merged.client.is_none());
         assert!(merged.tui.is_none());
-        assert!(merged.theme.is_none());
     }
 
     // ── load_file ──
@@ -358,7 +352,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            indoc! {r#"
+            indoc! {r##"
                 [client]
                 api_key = "sk-test"
                 model = "claude-test"
@@ -367,7 +361,14 @@ mod tests {
 
                 [tui]
                 show_thinking = true
-            "#},
+
+                [tui.theme]
+                base = "latte"
+
+                [tui.theme.overrides]
+                error = "#ff0000"
+                accent = { bold = false }
+            "##},
         )
         .unwrap();
 
@@ -383,6 +384,12 @@ mod tests {
 
         let tui = config.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+
+        let theme = tui.theme.expect("theme section should be present");
+        assert_eq!(theme.base.as_deref(), Some("latte"));
+        let overrides = theme.overrides.expect("overrides should parse");
+        assert!(overrides.contains_key("error"));
+        assert!(overrides.contains_key("accent"));
     }
 
     #[test]

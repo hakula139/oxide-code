@@ -179,7 +179,7 @@ impl Config {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();
-        let theme_config = fc.theme.unwrap_or_default();
+        let theme_config = tui.theme.unwrap_or_default();
 
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
