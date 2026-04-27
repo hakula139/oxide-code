@@ -114,12 +114,12 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Status indicators
 
-| Slot      | Role                                                |
-| --------- | --------------------------------------------------- |
-| `info`    | In-progress / neutral signals (e.g., streaming)     |
-| `success` | Successful tool results, ready status               |
-| `warning` | Warnings, caution status (reserved for future use)  |
-| `error`   | Errors, failed tools, critical status               |
+| Slot      | Role                                               |
+| --------- | -------------------------------------------------- |
+| `info`    | In-progress / neutral signals (e.g., streaming)    |
+| `success` | Successful tool results, ready status              |
+| `warning` | Warnings, caution status (reserved for future use) |
+| `error`   | Errors, failed tools, critical status              |
 
 ### Code
 
@@ -187,11 +187,11 @@ link = { fg = "#ff79c6", bold = true }
 
 Modifier flags use **three-state semantics**:
 
-| Flag value     | Effect on the base modifier                |
-| -------------- | ------------------------------------------ |
-| omitted        | no change — base value is preserved        |
-| `true`         | sets the bit                               |
-| `false`        | clears the bit                             |
+| Flag value | Effect on the base modifier         |
+| ---------- | ----------------------------------- |
+| omitted    | no change — base value is preserved |
+| `true`     | sets the bit                        |
+| `false`    | clears the bit                      |
 
 So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) is rejected at parse time as it would silently re-write the base with itself.
 
