@@ -95,46 +95,19 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<(
     Ok(())
 }
 
-/// Mutable slot lookup by name. The mapping mirrors [`Theme`]'s
-/// fields exactly; an unknown name returns `None`.
-fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
-    Some(match name {
-        "text" => &mut theme.text,
-        "muted" => &mut theme.muted,
-        "dim" => &mut theme.dim,
-        "surface" => &mut theme.surface,
-        "accent" => &mut theme.accent,
-        "user" => &mut theme.user,
-        "secondary" => &mut theme.secondary,
-        "code" => &mut theme.code,
-        "code_bg" => &mut theme.code_bg,
-        "inline_code" => &mut theme.inline_code,
-        "code_block_fallback" => &mut theme.code_block_fallback,
-        "diff_add_bg" => &mut theme.diff_add_bg,
-        "diff_del_bg" => &mut theme.diff_del_bg,
-        "info" => &mut theme.info,
-        "success" => &mut theme.success,
-        "warning" => &mut theme.warning,
-        "error" => &mut theme.error,
-        "heading_h1" => &mut theme.heading_h1,
-        "heading_h2" => &mut theme.heading_h2,
-        "heading_h3" => &mut theme.heading_h3,
-        "heading_minor" => &mut theme.heading_minor,
-        "thinking" => &mut theme.thinking,
-        "link" => &mut theme.link,
-        "blockquote" => &mut theme.blockquote,
-        "list_marker" => &mut theme.list_marker,
-        "horizontal_rule" => &mut theme.horizontal_rule,
-        "table_header" => &mut theme.table_header,
-        "table_border" => &mut theme.table_border,
-        "tool_border" => &mut theme.tool_border,
-        "tool_icon" => &mut theme.tool_icon,
-        "border_focused" => &mut theme.border_focused,
-        "border_unfocused" => &mut theme.border_unfocused,
-        "separator" => &mut theme.separator,
-        _ => return None,
-    })
+/// Mutable slot lookup by name. Generated from the canonical slot
+/// list so the mapping cannot drift from [`Theme`]'s fields.
+macro_rules! define_slot_for_name {
+    ( $( ($name:ident, $doc:literal), )* ) => {
+        fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
+            match name {
+                $( stringify!($name) => Some(&mut theme.$name), )*
+                _ => None,
+            }
+        }
+    };
 }
+super::for_each_slot!(define_slot_for_name);
 
 /// Per-slot override from `[tui.theme.overrides]` in user config.
 ///
@@ -215,86 +188,32 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
     file.into_theme()
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ThemeFile {
-    text: SlotDef,
-    muted: SlotDef,
-    dim: SlotDef,
-    surface: SlotDef,
-    accent: SlotDef,
-    user: SlotDef,
-    secondary: SlotDef,
-    code: SlotDef,
-    code_bg: SlotDef,
-    inline_code: SlotDef,
-    code_block_fallback: SlotDef,
-    diff_add_bg: SlotDef,
-    diff_del_bg: SlotDef,
-    info: SlotDef,
-    success: SlotDef,
-    warning: SlotDef,
-    error: SlotDef,
-    heading_h1: SlotDef,
-    heading_h2: SlotDef,
-    heading_h3: SlotDef,
-    heading_minor: SlotDef,
-    thinking: SlotDef,
-    link: SlotDef,
-    blockquote: SlotDef,
-    list_marker: SlotDef,
-    horizontal_rule: SlotDef,
-    table_header: SlotDef,
-    table_border: SlotDef,
-    tool_border: SlotDef,
-    tool_icon: SlotDef,
-    border_focused: SlotDef,
-    border_unfocused: SlotDef,
-    separator: SlotDef,
-}
+/// Generates `ThemeFile` (deserialization shape) and its `into_theme`
+/// converter from the canonical slot list. `deny_unknown_fields`
+/// catches typos at the slot-name level; `into_theme` wraps each
+/// per-slot parse with the slot name so a bad color points at the
+/// offending entry.
+macro_rules! define_theme_file {
+    ( $( ($name:ident, $doc:literal), )* ) => {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ThemeFile {
+            $( $name: SlotDef, )*
+        }
 
-impl ThemeFile {
-    fn into_theme(self) -> Result<Theme> {
-        let parse = |def: SlotDef, name: &'static str| -> Result<Slot> {
-            def.into_slot().with_context(|| format!("slot {name:?}"))
-        };
-        Ok(Theme {
-            text: parse(self.text, "text")?,
-            muted: parse(self.muted, "muted")?,
-            dim: parse(self.dim, "dim")?,
-            surface: parse(self.surface, "surface")?,
-            accent: parse(self.accent, "accent")?,
-            user: parse(self.user, "user")?,
-            secondary: parse(self.secondary, "secondary")?,
-            code: parse(self.code, "code")?,
-            code_bg: parse(self.code_bg, "code_bg")?,
-            inline_code: parse(self.inline_code, "inline_code")?,
-            code_block_fallback: parse(self.code_block_fallback, "code_block_fallback")?,
-            diff_add_bg: parse(self.diff_add_bg, "diff_add_bg")?,
-            diff_del_bg: parse(self.diff_del_bg, "diff_del_bg")?,
-            info: parse(self.info, "info")?,
-            success: parse(self.success, "success")?,
-            warning: parse(self.warning, "warning")?,
-            error: parse(self.error, "error")?,
-            heading_h1: parse(self.heading_h1, "heading_h1")?,
-            heading_h2: parse(self.heading_h2, "heading_h2")?,
-            heading_h3: parse(self.heading_h3, "heading_h3")?,
-            heading_minor: parse(self.heading_minor, "heading_minor")?,
-            thinking: parse(self.thinking, "thinking")?,
-            link: parse(self.link, "link")?,
-            blockquote: parse(self.blockquote, "blockquote")?,
-            list_marker: parse(self.list_marker, "list_marker")?,
-            horizontal_rule: parse(self.horizontal_rule, "horizontal_rule")?,
-            table_header: parse(self.table_header, "table_header")?,
-            table_border: parse(self.table_border, "table_border")?,
-            tool_border: parse(self.tool_border, "tool_border")?,
-            tool_icon: parse(self.tool_icon, "tool_icon")?,
-            border_focused: parse(self.border_focused, "border_focused")?,
-            border_unfocused: parse(self.border_unfocused, "border_unfocused")?,
-            separator: parse(self.separator, "separator")?,
-        })
-    }
+        impl ThemeFile {
+            fn into_theme(self) -> Result<Theme> {
+                let parse = |def: SlotDef, name: &'static str| -> Result<Slot> {
+                    def.into_slot().with_context(|| format!("slot {name:?}"))
+                };
+                Ok(Theme {
+                    $( $name: parse(self.$name, stringify!($name))?, )*
+                })
+            }
+        }
+    };
 }
+super::for_each_slot!(define_theme_file);
 
 /// One slot's TOML representation. The `untagged` enum lets serde
 /// accept either form transparently — a bare string or an inline

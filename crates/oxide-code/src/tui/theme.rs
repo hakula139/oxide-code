@@ -40,107 +40,103 @@ impl Slot {
 
 // ── Theme ──
 
-/// Theme palette and style hooks for the TUI.
+/// Iterates the canonical slot list, calling the given callback macro
+/// with `($name, $doc)` pairs. The single source of truth for the
+/// theme schema — `Theme` (`theme.rs`), `ThemeFile` / `into_theme` /
+/// `slot_for_name` (`theme/loader.rs`), and `SLOT_NAMES` are all
+/// generated from this list, so adding or renaming a slot is a
+/// one-place edit.
 ///
-/// Each slot maps to one role — `error` is "the color used for
-/// errors", not "the color red". Cohesion clusters that used to be
-/// hard-aliased in code (`border_unfocused = dim`, `table_border =
-/// dim`, `horizontal_rule = dim`, `table_header = heading_h2`) are
-/// now first-class slots with default values that keep them aligned;
-/// users can break the alignment by overriding one without the
-/// others.
-///
-/// The default constructor returns Catppuccin Mocha by parsing the
-/// vendored `themes/mocha.toml`. The TOML body is embedded via
-/// `include_str!` and parsed once on first access.
-#[derive(Debug, Clone)]
-pub(crate) struct Theme {
-    // Text hierarchy
-    /// Primary text
-    pub(crate) text: Slot,
-    /// Secondary text, labels, borders
-    pub(crate) muted: Slot,
-    /// Dimmed metadata, timestamps
-    pub(crate) dim: Slot,
+/// Section comments inside the invocation are for human navigation
+/// only — they don't reach the generated code (the lexer strips
+/// comments before macro expansion). The canonical role groupings
+/// match `themes/*.toml` and `docs/guide/theming.md`.
+macro_rules! for_each_slot {
+    ($callback:ident) => {
+        $callback! {
+            // Text hierarchy
+            (text, "Primary text"),
+            (muted, "Secondary text, labels, borders"),
+            (dim, "Dimmed metadata, timestamps"),
 
-    // Surfaces
-    /// Elevated surfaces (reserved; no live consumer)
-    pub(crate) surface: Slot,
+            // Surfaces
+            (surface, "Elevated surfaces (reserved; no live consumer)"),
 
-    // Semantic accents
-    /// Highlights, active borders (bold by default)
-    pub(crate) accent: Slot,
-    /// User messages and icon
-    pub(crate) user: Slot,
-    /// Assistant messages and icon
-    pub(crate) secondary: Slot,
+            // Semantic accents
+            (accent, "Highlights, active borders (bold by default)"),
+            (user, "User messages and icon"),
+            (secondary, "Assistant messages and icon"),
 
-    // Code
-    /// Code foreground (reserved palette role)
-    pub(crate) code: Slot,
-    /// Code block background (reserved; bg-only)
-    pub(crate) code_bg: Slot,
-    /// Inline code spans (`` `code` ``)
-    pub(crate) inline_code: Slot,
-    /// Fallback for fenced code blocks with unknown languages
-    pub(crate) code_block_fallback: Slot,
+            // Code
+            (code, "Code foreground (reserved palette role)"),
+            (code_bg, "Code block background (reserved; bg-only)"),
+            (inline_code, "Inline code spans (`` `code` ``)"),
+            (code_block_fallback, "Fallback for fenced code blocks with unknown languages"),
 
-    // Diff backgrounds
-    /// Background fill for added diff rows (Catppuccin Mocha plus-style)
-    pub(crate) diff_add_bg: Slot,
-    /// Background fill for deleted diff rows (Catppuccin Mocha minus-style)
-    pub(crate) diff_del_bg: Slot,
+            // Diff backgrounds
+            (diff_add_bg, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
+            (diff_del_bg, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
 
-    // Status indicators (ascending severity)
-    /// Informational highlights (reserved; no live consumer)
-    pub(crate) info: Slot,
-    /// Successful tool results, normal status
-    pub(crate) success: Slot,
-    /// Warnings, caution status
-    pub(crate) warning: Slot,
-    /// Errors, failed tools, critical status
-    pub(crate) error: Slot,
+            // Status indicators (ascending severity)
+            (info, "Informational highlights (reserved; no live consumer)"),
+            (success, "Successful tool results, normal status"),
+            (warning, "Warnings, caution status"),
+            (error, "Errors, failed tools, critical status"),
 
-    // Markdown headings
-    /// H1 — most prominent heading (bold + underlined)
-    pub(crate) heading_h1: Slot,
-    /// H2 — bold section header
-    pub(crate) heading_h2: Slot,
-    /// H3 — bold italic
-    pub(crate) heading_h3: Slot,
-    /// H4–H6 — italic (demoted minor headings)
-    pub(crate) heading_minor: Slot,
+            // Markdown headings
+            (heading_h1, "H1 — most prominent heading (bold + underlined)"),
+            (heading_h2, "H2 — bold section header"),
+            (heading_h3, "H3 — bold italic"),
+            (heading_minor, "H4–H6 — italic (demoted minor headings)"),
 
-    // Markdown elements
-    /// Thinking text (dimmed italic)
-    pub(crate) thinking: Slot,
-    /// Markdown links — underlined
-    pub(crate) link: Slot,
-    /// Markdown blockquote marker (`> `)
-    pub(crate) blockquote: Slot,
-    /// List item bullet / number marker
-    pub(crate) list_marker: Slot,
+            // Markdown body
+            (thinking, "Thinking text (dimmed italic)"),
+            (link, "Markdown links — underlined"),
+            (blockquote, "Markdown blockquote marker (`> `)"),
+            (list_marker, "List item bullet / number marker"),
 
-    // Markdown chrome (default-aligned with `dim` / `heading_h2`)
-    /// Markdown horizontal rule (`---`)
-    pub(crate) horizontal_rule: Slot,
-    /// Markdown table header cell
-    pub(crate) table_header: Slot,
-    /// Markdown table border glyphs
-    pub(crate) table_border: Slot,
+            // Markdown chrome (default-aligned with `dim` / `heading_h2`)
+            (horizontal_rule, "Markdown horizontal rule (`---`)"),
+            (table_header, "Markdown table header cell"),
+            (table_border, "Markdown table border glyphs"),
 
-    // UI chrome
-    /// Left border for tool call blocks
-    pub(crate) tool_border: Slot,
-    /// Tool icon accent (non-bold by default)
-    pub(crate) tool_icon: Slot,
-    /// Focused component border
-    pub(crate) border_focused: Slot,
-    /// Unfocused component border (default-aligned with `dim`)
-    pub(crate) border_unfocused: Slot,
-    /// Status bar separator (dimmed pipe)
-    pub(crate) separator: Slot,
+            // UI chrome
+            (tool_border, "Left border for tool call blocks"),
+            (tool_icon, "Tool icon accent (non-bold by default)"),
+            (border_focused, "Focused component border"),
+            (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
+            (separator, "Status bar separator (dimmed pipe)"),
+        }
+    };
 }
+pub(crate) use for_each_slot;
+
+macro_rules! define_theme_struct {
+    ( $( ($name:ident, $doc:literal), )* ) => {
+        /// Theme palette and style hooks for the TUI.
+        ///
+        /// Each slot maps to one role — `error` is "the color used for
+        /// errors", not "the color red". Cohesion clusters that used
+        /// to be hard-aliased in code (`border_unfocused = dim`,
+        /// `table_border = dim`, `horizontal_rule = dim`,
+        /// `table_header = heading_h2`) are now first-class slots
+        /// with default values that keep them aligned; users can
+        /// break the alignment by overriding one without the others.
+        ///
+        /// The default constructor returns Catppuccin Mocha by
+        /// parsing the vendored `themes/mocha.toml`. The TOML body
+        /// is embedded via `include_str!` and parsed once on first
+        /// access.
+        #[derive(Debug, Clone)]
+        pub(crate) struct Theme {
+            $(
+                #[doc = $doc]
+                pub(crate) $name: Slot,
+            )*
+        }
+    };
+}
+for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
     /// Catppuccin Mocha palette with transparent terminal background.
