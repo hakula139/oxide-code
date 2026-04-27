@@ -32,7 +32,7 @@ Each ships as a vendored TOML file under `crates/oxide-code/themes/` and doubles
 
 ## Custom theme files
 
-`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. `~/` expands to `$HOME`:
+`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`; no other expansion happens — environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) are passed through literally and will fail to read.
 
 ```toml
 [tui.theme]
@@ -55,13 +55,17 @@ Every `fg` / `bg` value, and every bare-string slot, accepts:
 ANSI 16-color names accepted (case-insensitive):
 
 - **Standard** — `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` (alias `grey`).
-- **Bright** — `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green`, `bright_yellow`, `bright_blue`, `bright_magenta`, `bright_cyan`, `white`.
+- **Bright** — `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green` (alias `light_green`), `bright_yellow` (alias `light_yellow`), `bright_blue` (alias `light_blue`), `bright_magenta` (alias `light_magenta`), `bright_cyan` (alias `light_cyan`), `white` (alias `bright_white` / `light_white`).
 
 See the [ANSI escape code reference][ansi] for what each name maps to in your terminal's palette. Three-digit hex shorthand (`#fff`) is intentionally rejected — always use the full six digits.
 
 [ansi]: https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
 
 ## Slot definitions
+
+A custom theme file must define **all 31 slots** — a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
+
+> **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
 
 A theme TOML is a flat document with one entry per slot. Two shapes:
 
@@ -80,9 +84,7 @@ A theme TOML is a flat document with one entry per slot. Two shapes:
   diff_add = { bg = "#2a3a37" }
   ```
 
-Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. Unknown keys fail the parse.
-
-A complete theme file has all 31 slots; a missing slot is a parse error (catches typos). For per-slot patches in `[tui.theme.overrides]` the rules differ — see [Overrides](#overrides) below.
+Recognized modifier keys: `bold`, `italic`, `underlined`, `dim`, `reversed`. Unknown keys fail the parse. In a theme file, modifier keys are plain booleans defaulting to `false`.
 
 ## Slots
 
@@ -98,10 +100,9 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Surfaces
 
-| Slot      | Role                                      |
-| --------- | ----------------------------------------- |
-| `surface` | Elevated surface (reserved)               |
-| `code_bg` | Code-block background (reserved; bg-only) |
+| Slot      | Role                                                  |
+| --------- | ----------------------------------------------------- |
+| `surface` | Chat / input / status panel background fill (bg-only) |
 
 ### Semantic accents
 
@@ -113,25 +114,24 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Status indicators
 
-| Slot      | Role                                  |
-| --------- | ------------------------------------- |
-| `info`    | Informational highlight (reserved)    |
-| `success` | Successful tool results, ready status |
-| `warning` | Warning status                        |
-| `error`   | Errors, failed tools, critical status |
+| Slot      | Role                                                |
+| --------- | --------------------------------------------------- |
+| `info`    | In-progress / neutral signals (e.g., streaming)     |
+| `success` | Successful tool results, ready status               |
+| `warning` | Warnings, caution status (reserved for future use)  |
+| `error`   | Errors, failed tools, critical status               |
 
 ### Code
 
 | Slot          | Role                                           |
 | ------------- | ---------------------------------------------- |
-| `code`        | Code foreground (reserved palette role)        |
-| `inline_code` | Inline `code` spans (between backticks)        |
 | `code`        | Fenced code blocks with no recognized language |
+| `inline_code` | Inline `code` spans (between backticks)        |
 
 ### Diff backgrounds (bg-only)
 
-| Slot          | Role                                         |
-| ------------- | -------------------------------------------- |
+| Slot       | Role                                         |
+| ---------- | -------------------------------------------- |
 | `diff_add` | Background fill for added rows in Edit diffs |
 | `diff_del` | Background fill for deleted rows             |
 
@@ -185,7 +185,15 @@ accent = { bold = false }
 link = { fg = "#ff79c6", bold = true }
 ```
 
-Modifier flags use three-state semantics: omitted means "no change," `true` sets the bit, `false` clears it. So `accent = { bold = false }` removes bold from the base accent without disturbing its color.
+Modifier flags use **three-state semantics**:
+
+| Flag value     | Effect on the base modifier                |
+| -------------- | ------------------------------------------ |
+| omitted        | no change — base value is preserved        |
+| `true`         | sets the bit                               |
+| `false`        | clears the bit                             |
+
+So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) is rejected at parse time as it would silently re-write the base with itself.
 
 ## Errors
 
@@ -193,6 +201,8 @@ Bisected severity:
 
 - **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that can't be read, a file with a parse error in the base body — any of these stop oxide-code at startup with a message identifying what went wrong.
 - **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, or its slot name isn't recognized, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
+
+The default tracing level is `warn`, so per-slot fallback messages reach stderr without requiring `RUST_LOG`.
 
 ## Examples
 
@@ -231,3 +241,12 @@ text = "reset"
 ```
 
 Useful for transparent / non-truecolor terminals where forcing an RGB foreground fights the user's terminal scheme.
+
+### Tint the chat panel background
+
+```toml
+[tui.theme.overrides]
+surface = { bg = "#1e1e2e" }
+```
+
+Default `surface` is `Color::Reset` (terminal background). Set a `bg` to give the chat / input / status panels an opaque tint — useful on transparent terminals.
