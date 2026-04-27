@@ -315,9 +315,9 @@ mod tests {
     fn effort_rejects_unknown_tokens_with_actionable_error() {
         let err = "extra-high".parse::<Effort>().expect_err("unknown token");
         let msg = format!("{err:#}");
-        assert!(msg.contains("extra-high"), "names the input: {msg}");
+        assert!(msg.contains("extra-high"), "{msg}");
         for token in ["low", "medium", "high", "xhigh", "max"] {
-            assert!(msg.contains(token), "lists {token}: {msg}");
+            assert!(msg.contains(token), "{token}: {msg}");
         }
     }
 
@@ -620,10 +620,10 @@ mod tests {
             .await
             .expect_err("unknown theme name must propagate");
         let msg = format!("{err:#}");
-        assert!(msg.contains("no-such-theme"), "names the bad theme: {msg}");
+        assert!(msg.contains("no-such-theme"), "{msg}");
         assert!(
             msg.contains("not a built-in name") || msg.contains("failed to read"),
-            "explains why the resolution failed: {msg}",
+            "{msg}",
         );
     }
 

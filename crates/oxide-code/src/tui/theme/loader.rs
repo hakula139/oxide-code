@@ -368,10 +368,10 @@ mod tests {
         let err = resolve_theme(Some("solarized"), &HashMap::new())
             .expect_err("unknown built-in and not a path");
         let msg = format!("{err:#}");
-        assert!(msg.contains("solarized"), "names the input: {msg}");
+        assert!(msg.contains("solarized"), "{msg}");
         assert!(
             msg.contains("not a built-in name") || msg.contains("failed to read"),
-            "explains the failure: {msg}",
+            "{msg}",
         );
     }
 
@@ -404,9 +404,9 @@ mod tests {
         let err =
             resolve_theme(Some(&path_str), &HashMap::new()).expect_err("bad slot color must error");
         let msg = format!("{err:#}");
-        assert!(msg.contains("parsing base theme"), "wrap context: {msg}");
-        assert!(msg.contains(&path_str), "names the source path: {msg}");
-        assert!(msg.contains("orange"), "names the offending value: {msg}");
+        assert!(msg.contains("parsing base theme"), "{msg}");
+        assert!(msg.contains(&path_str), "{msg}");
+        assert!(msg.contains("orange"), "{msg}");
     }
 
     // ── resolve_theme: per-slot overrides ──
@@ -886,8 +886,8 @@ mod tests {
         let body = mocha_with_slot_replacement(r##"error = "#f38ba8""##, r#"error = "orange""#);
         let err = parse_theme(&body).expect_err("bad color rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("orange"), "names the value: {msg}");
-        assert!(msg.contains("error"), "names the slot: {msg}");
+        assert!(msg.contains("error"), "{msg}");
+        assert!(msg.contains("orange"), "{msg}");
     }
 
     /// Sibling to the bare-string parse-error test, but the offending
@@ -901,9 +901,9 @@ mod tests {
         );
         let err = parse_theme(&body).expect_err("bad inline fg rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("lavender"), "names the value: {msg}");
-        assert!(msg.contains("accent"), "names the slot: {msg}");
-        assert!(msg.contains("fg"), "names the offending field: {msg}");
+        assert!(msg.contains("accent"), "{msg}");
+        assert!(msg.contains("fg"), "{msg}");
+        assert!(msg.contains("lavender"), "{msg}");
     }
 
     /// Inline `bg` parse error — exercises the `InlineSlot::into_slot`
@@ -916,9 +916,9 @@ mod tests {
         );
         let err = parse_theme(&body).expect_err("bad inline bg rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("bg"), "names the offending field: {msg}");
-        assert!(msg.contains("magenta-ish"), "names the value: {msg}");
-        assert!(msg.contains("diff_add"), "names the slot: {msg}");
+        assert!(msg.contains("diff_add"), "{msg}");
+        assert!(msg.contains("bg"), "{msg}");
+        assert!(msg.contains("magenta-ish"), "{msg}");
     }
 
     // ── parse_theme: SlotDef forms ──
@@ -984,7 +984,7 @@ mod tests {
         // any variant" rather than the inner `unknown field`
         // diagnostic, but the offending line (with `sparkle`) is
         // included in the rendered TOML error context.
-        assert!(msg.contains("sparkle"), "names the offending key: {msg}");
+        assert!(msg.contains("sparkle"), "{msg}");
     }
 
     /// Replace one `accent` / `thinking` / etc. line in the embedded

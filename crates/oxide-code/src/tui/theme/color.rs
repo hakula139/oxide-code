@@ -239,7 +239,7 @@ mod tests {
     fn parse_color_named_rejects_unknown_color() {
         let err = parse_color("orange").expect_err("orange is not a 16-color name");
         let msg = format!("{err:#}");
-        assert!(msg.contains("orange"), "names the input: {msg}");
+        assert!(msg.contains("orange"), "{msg}");
         // Error must hint at every supported format so the user can
         // recover from a typo without consulting the docs.
         assert!(msg.contains("hex") || msg.contains("#rrggbb"), "{msg}");
