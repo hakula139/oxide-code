@@ -328,7 +328,7 @@ impl InlineSlot {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
+    use indoc::{formatdoc, indoc};
     use ratatui::style::Color;
 
     use super::super::builtin;
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn parse_theme_missing_required_slot() {
         // Drop `text` → serde reports "missing field `text`".
-        let body = builtin::MOCHA.replace("text = \"#cdd6f4\"", "");
+        let body = builtin::MOCHA.replace(r##"text = "#cdd6f4""##, "");
         let err = parse_theme(&body).expect_err("missing required slot");
         let msg = format!("{err:#}");
         assert!(msg.contains("missing field"), "{msg}");
@@ -406,7 +406,11 @@ mod tests {
 
     #[test]
     fn parse_theme_unknown_slot_key() {
-        let body = format!("{}\nunknown_slot = \"#000000\"\n", builtin::MOCHA);
+        let body = formatdoc! {r##"
+            {mocha}
+
+            unknown_slot = "#000000"
+        "##, mocha = builtin::MOCHA};
         let err = parse_theme(&body).expect_err("unknown slot rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown field"), "{msg}");
@@ -415,7 +419,7 @@ mod tests {
 
     #[test]
     fn parse_theme_invalid_color_in_slot_names_the_slot() {
-        let body = mocha_with_slot_replacement("error = \"#f38ba8\"", "error = \"orange\"");
+        let body = mocha_with_slot_replacement(r##"error = "#f38ba8""##, r#"error = "orange""#);
         let err = parse_theme(&body).expect_err("bad color rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("orange"), "names the value: {msg}");
@@ -460,7 +464,7 @@ mod tests {
         "##}
         .trim();
         let body = mocha_with_slot_replacement(
-            "thinking = { fg = \"#585b70\", italic = true }",
+            r##"thinking = { fg = "#585b70", italic = true }"##,
             replacement,
         );
         let t = parse_theme(&body).unwrap();
@@ -476,8 +480,8 @@ mod tests {
         // `sparkle = true` is not a recognized modifier; the
         // section's `deny_unknown_fields` rejects it.
         let body = mocha_with_slot_replacement(
-            "accent = { fg = \"#89b4fa\", bold = true }",
-            "accent = { fg = \"#89b4fa\", sparkle = true }",
+            r##"accent = { fg = "#89b4fa", bold = true }"##,
+            r##"accent = { fg = "#89b4fa", sparkle = true }"##,
         );
         let err = parse_theme(&body).expect_err("unknown modifier rejected");
         let msg = format!("{err:#}");
@@ -533,7 +537,7 @@ mod tests {
         // through.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("custom.toml");
-        let body = builtin::MOCHA.replace("error = \"#f38ba8\"", "error = \"#ff0000\"");
+        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
         std::fs::write(&path, body).unwrap();
 
         let t = resolve_theme(Some(&path.to_string_lossy()), &HashMap::new()).unwrap();
