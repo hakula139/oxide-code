@@ -77,10 +77,10 @@ impl<'a, I> MarkdownRenderer<I>
 where
     I: Iterator<Item = Event<'a>>,
 {
-    pub(super) fn new(iter: I, theme: Theme, width: usize) -> Self {
+    pub(super) fn new(iter: I, theme: &Theme, width: usize) -> Self {
         Self {
             iter,
-            theme,
+            theme: *theme,
             width,
             lines: Vec::new(),
             needs_newline: false,
@@ -860,7 +860,7 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::UNDERLINED)
         );
-        assert_eq!(h1.spans[0].style.fg, Some(t.fg));
+        assert_eq!(h1.spans[0].style.fg, t.text.fg);
 
         let h2 = find_heading("## ");
         assert!(h2.spans[0].style.add_modifier.contains(Modifier::BOLD));
@@ -896,7 +896,7 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("> "))
             .expect("> marker not found");
-        assert_eq!(marker_span.style.fg, Some(t.success));
+        assert_eq!(marker_span.style.fg, t.success.fg);
     }
 
     #[test]
@@ -935,7 +935,7 @@ mod tests {
             .iter()
             .find_map(|l| l.spans.iter().find(|s| s.content.contains('─')))
             .expect("rule span not found");
-        assert_eq!(rule_span.style.fg, Some(t.fg_dim));
+        assert_eq!(rule_span.style.fg, t.dim.fg);
     }
 
     // ── Lists ──
@@ -1055,7 +1055,7 @@ mod tests {
             .iter()
             .find_map(|l| l.spans.iter().find(|s| s.content.contains("- ")));
         let span = marker_span.expect("list marker span not found");
-        assert_eq!(span.style.fg, Some(t.accent));
+        assert_eq!(span.style.fg, t.accent.fg);
     }
 
     #[test]
@@ -1068,8 +1068,7 @@ mod tests {
             .find_map(|line| line.spans.iter().find(|s| s.content.contains("foo()")))
             .expect("inline code span missing inside list item");
         assert_eq!(
-            code_span.style.fg,
-            Some(t.user),
+            code_span.style.fg, t.user.fg,
             "inline code keeps peach fg inside list items"
         );
         assert_eq!(
@@ -1140,8 +1139,7 @@ mod tests {
                 .fg
                 .or_else(|| line.spans.iter().find_map(|s| s.style.fg));
             assert_eq!(
-                effective_fg,
-                Some(t.code),
+                effective_fg, t.code.fg,
                 "plain fenced block falls back to `code` fg: {line:?}"
             );
             for span in &line.spans {
@@ -1302,8 +1300,7 @@ mod tests {
             .find_map(|line| line.spans.iter().find(|s| s.content.contains("code")))
             .expect("inline code span missing inside table cell");
         assert_eq!(
-            code_span.style.fg,
-            Some(t.user),
+            code_span.style.fg, t.user.fg,
             "inline code keeps peach fg inside table cells"
         );
         assert_eq!(
@@ -1606,7 +1603,7 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("foo()"))
             .unwrap();
-        assert_eq!(span.style.fg, Some(t.user));
+        assert_eq!(span.style.fg, t.user.fg);
         assert_eq!(
             span.style.bg, None,
             "inline code is fg-only — no background fill"
@@ -1623,8 +1620,7 @@ mod tests {
             .find(|s| s.content.contains("foo()"))
             .expect("code span not found");
         assert_eq!(
-            span.style.fg,
-            Some(t.user),
+            span.style.fg, t.user.fg,
             "code span keeps its distinctive fg"
         );
         assert_eq!(span.style.bg, None, "code span stays fg-only");
@@ -1643,7 +1639,7 @@ mod tests {
             .iter()
             .find_map(|l| l.spans.iter().find(|s| s.content.contains("foo()")))
             .expect("code span not found in heading");
-        assert_eq!(span.style.fg, Some(t.user));
+        assert_eq!(span.style.fg, t.user.fg);
         assert_eq!(span.style.bg, None);
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
@@ -1688,7 +1684,7 @@ mod tests {
             .find(|s| s.content.contains("https://example.com"))
             .unwrap();
         assert!(url_span.style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(url_span.style.fg, Some(t.accent));
+        assert_eq!(url_span.style.fg, t.accent.fg);
     }
 
     // ── Word Wrapping ──

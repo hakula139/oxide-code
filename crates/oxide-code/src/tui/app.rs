@@ -66,14 +66,14 @@ impl App {
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let theme = Theme::default();
-        let mut chat = ChatView::new(theme, show_thinking);
+        let mut chat = ChatView::new(&theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
-        let mut status_bar = StatusBar::new(theme, model, cwd);
+        let mut status_bar = StatusBar::new(&theme, model, cwd);
         status_bar.set_title(title);
         Self {
             status_bar,
             chat,
-            input: InputArea::new(theme),
+            input: InputArea::new(&theme),
             agent_rx,
             user_tx,
             tools,

@@ -50,9 +50,9 @@ pub(crate) enum Status {
 }
 
 impl StatusBar {
-    pub(crate) fn new(theme: Theme, model: String, cwd: String) -> Self {
+    pub(crate) fn new(theme: &Theme, model: String, cwd: String) -> Self {
         Self {
-            theme,
+            theme: *theme,
             model,
             title: None,
             cwd,
@@ -270,7 +270,7 @@ mod tests {
 
     fn test_bar() -> StatusBar {
         StatusBar::new(
-            Theme::default(),
+            &Theme::default(),
             "test-model".to_owned(),
             "~/test".to_owned(),
         )
@@ -439,7 +439,7 @@ mod tests {
         // Real callers pass the pre-converted marketing name (see
         // `main::marketing_name`), so the snapshots mirror what users
         // see on screen rather than the raw API id.
-        let mut bar = StatusBar::new(Theme::default(), "Claude Opus 4.7".into(), cwd.into());
+        let mut bar = StatusBar::new(&Theme::default(), "Claude Opus 4.7".into(), cwd.into());
         bar.set_title(title.map(ToOwned::to_owned));
         bar
     }
@@ -545,7 +545,7 @@ mod tests {
         // Empty cwd (current_dir failed) must short-circuit — no trailing
         // gap, no stray right margin. Generous width exercises the
         // `cwd.is_empty()` guard without racing the title-dropped path.
-        let mut bar = StatusBar::new(Theme::default(), "test-model".to_owned(), String::new());
+        let mut bar = StatusBar::new(&Theme::default(), "test-model".to_owned(), String::new());
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("ox"));
         assert!(output.contains("test-model"));
