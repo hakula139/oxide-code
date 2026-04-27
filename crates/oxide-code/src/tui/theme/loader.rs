@@ -683,6 +683,34 @@ mod tests {
     }
 
     #[test]
+    fn slot_patch_inline_none_modifiers_preserve_every_base_flag() {
+        // Locks down the three-state contract: a patch with no
+        // modifier fields (all `None`) must leave every base modifier
+        // untouched. Catches the regression where the loop is
+        // refactored to `flag.unwrap_or(false)` and silently clears
+        // every base modifier whenever an unrelated patch field is
+        // set.
+        let base = Slot {
+            fg: Some(Color::Red),
+            bg: None,
+            modifiers: Modifier::BOLD
+                | Modifier::ITALIC
+                | Modifier::UNDERLINED
+                | Modifier::DIM
+                | Modifier::REVERSED,
+        };
+        let patch = SlotPatch::Inline(InlinePatch {
+            fg: Some("#abcdef".to_owned()),
+            ..InlinePatch::default()
+        });
+        let out = patch.apply(base).unwrap();
+        assert_eq!(
+            out.modifiers, base.modifiers,
+            "every base modifier survives"
+        );
+    }
+
+    #[test]
     fn slot_patch_inline_with_fg_overwrites_base_fg() {
         // Sibling to the bg-only test: an inline patch carrying `fg`
         // replaces the base fg while preserving bg and modifiers.
