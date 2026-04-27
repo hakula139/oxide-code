@@ -105,8 +105,15 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Floor the default level at `warn` so user-visible signals (theme
+    // override fallbacks, OAuth refresh failures, transient API retries)
+    // reach stderr without requiring `RUST_LOG`. `RUST_LOG`, when set,
+    // still wins via `try_from_default_env`.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     // Handle --list before loading config (no API access needed).
