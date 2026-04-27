@@ -236,7 +236,7 @@ mod tests {
         let theme = Theme::default();
         let line = Line::from(vec![
             Span::raw("plain "),
-            Span::styled("code", theme.code_block_fallback()),
+            Span::styled("code", theme.code()),
         ]);
         let out = apply_thinking_style(line, &theme);
         assert_eq!(out.spans[0].style.fg, theme.thinking().fg);

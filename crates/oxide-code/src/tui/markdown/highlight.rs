@@ -61,7 +61,7 @@ mod tests {
     use crate::tui::theme::Theme;
 
     fn fallback() -> Style {
-        Theme::default().code_block_fallback()
+        Theme::default().code()
     }
 
     fn all_text(lines: &[Line<'_>]) -> String {

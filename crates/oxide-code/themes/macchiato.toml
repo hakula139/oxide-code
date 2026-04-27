@@ -7,8 +7,7 @@ muted = "#6e738d"
 dim = "#5b6078"
 
 # Surfaces
-surface = "#363a4f"          # reserved
-code_bg = { bg = "#24273a" } # reserved
+surface = "reset"
 
 # Semantic accents
 accent = { fg = "#8aadf4", bold = true }
@@ -16,7 +15,7 @@ user = "#f5a97f"
 secondary = "#b7bdf8"
 
 # Status indicators
-info = "#91d7e3"    # reserved
+info = "#91d7e3"
 success = "#a6da95"
 warning = "#eed49f"
 error = "#ed8796"
@@ -24,7 +23,6 @@ error = "#ed8796"
 # Code
 code = "#8bd5ca"
 inline_code = "#f5a97f"
-code_block_fallback = "#8bd5ca"
 
 # Diff backgrounds
 diff_add_bg = { bg = "#283834" }

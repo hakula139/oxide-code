@@ -52,7 +52,7 @@ macro_rules! for_each_slot {
             (dim, "Dimmed metadata, timestamps"),
 
             // Surfaces
-            (surface, "Elevated surfaces (reserved; no live consumer)"),
+            (surface, "Chat / input / status panel background (bg-only)"),
 
             // Semantic accents
             (accent, "Highlights, active borders (bold by default)"),
@@ -60,18 +60,16 @@ macro_rules! for_each_slot {
             (secondary, "Assistant messages and icon"),
 
             // Code
-            (code, "Code foreground (reserved palette role)"),
-            (code_bg, "Code block background (reserved; bg-only)"),
+            (code, "Fenced code blocks with no recognized language"),
             (inline_code, "Inline code spans (`` `code` ``)"),
-            (code_block_fallback, "Fallback for fenced code blocks with unknown languages"),
 
             // Diff backgrounds
             (diff_add_bg, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
             (diff_del_bg, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
 
             // Status indicators (ascending severity)
-            (info, "Informational highlights (reserved; no live consumer)"),
-            (success, "Successful tool results, normal status"),
+            (info, "Informational highlight (in-progress / neutral signals)"),
+            (success, "Successful tool results, ready status"),
             (warning, "Warnings, caution status"),
             (error, "Errors, failed tools, critical status"),
 
@@ -169,10 +167,10 @@ impl Theme {
 
     // Status indicators
 
-    /// Info / cost indicator
+    /// Info indicator (in-progress / neutral signals)
     #[expect(
         dead_code,
-        reason = "part of the theme API; no component reads this slot"
+        reason = "wired in the next commit (status-bar streaming state)"
     )]
     pub(crate) fn info(&self) -> Style {
         self.info.style()
@@ -277,12 +275,9 @@ impl Theme {
         self.inline_code.style()
     }
 
-    /// Fallback style for fenced code blocks with unknown languages.
-    /// Shares the teal foreground with inline code but omits the
-    /// background fill, which would paint only the content portion of
-    /// each line and leave ragged edges.
-    pub(crate) fn code_block_fallback(&self) -> Style {
-        self.code_block_fallback.style()
+    /// Fenced code blocks with no recognized language.
+    pub(crate) fn code(&self) -> Style {
+        self.code.style()
     }
 
     /// Markdown link URL — accent color with underline
@@ -401,8 +396,8 @@ mod tests {
         assert_eq!(t.error().fg, t.error.fg);
         assert_eq!(t.inline_code().fg, t.inline_code.fg);
         assert_eq!(t.inline_code().bg, None);
-        assert_eq!(t.code_block_fallback().fg, t.code_block_fallback.fg);
-        assert_eq!(t.code_block_fallback().bg, None);
+        assert_eq!(t.code().fg, t.code.fg);
+        assert_eq!(t.code().bg, None);
     }
 
     #[test]

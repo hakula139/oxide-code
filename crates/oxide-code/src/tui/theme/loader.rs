@@ -35,6 +35,7 @@ use super::color::parse_color;
 /// Resolve a theme from an optional base + per-slot overrides.
 ///
 /// Errors:
+///
 /// - Unknown built-in name with no matching file path → `Err`.
 /// - File path that fails to read or parse → `Err`.
 /// - Per-slot override with bad color or unknown slot name → warn
@@ -112,6 +113,7 @@ super::for_each_slot!(define_slot_for_name);
 /// Per-slot override from `[tui.theme.overrides]` in user config.
 ///
 /// Patches are *additive* on top of the base slot:
+///
 /// - bare-string `error = "#hex"` overwrites the slot's `fg` only;
 ///   `bg` and modifiers are preserved from the base.
 /// - inline-table overrides patch only the fields that appear, so

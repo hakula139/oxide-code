@@ -122,11 +122,11 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Code
 
-| Slot                  | Role                                           |
-| --------------------- | ---------------------------------------------- |
-| `code`                | Code foreground (reserved palette role)        |
-| `inline_code`         | Inline `code` spans (between backticks)        |
-| `code_block_fallback` | Fenced code blocks with no recognized language |
+| Slot          | Role                                           |
+| ------------- | ---------------------------------------------- |
+| `code`        | Code foreground (reserved palette role)        |
+| `inline_code` | Inline `code` spans (between backticks)        |
+| `code`        | Fenced code blocks with no recognized language |
 
 ### Diff backgrounds (bg-only)
 

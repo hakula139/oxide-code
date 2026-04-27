@@ -315,11 +315,7 @@ where
         let code = std::mem::take(&mut self.code_block.buf);
         let lang = self.code_block.lang.take();
 
-        let highlighted = highlight_code(
-            lang.as_deref().unwrap_or(""),
-            &code,
-            self.theme.code_block_fallback(),
-        );
+        let highlighted = highlight_code(lang.as_deref().unwrap_or(""), &code, self.theme.code());
         for line in highlighted {
             self.lines.push(line);
         }
@@ -1098,7 +1094,7 @@ mod tests {
 
     #[test]
     fn fenced_code_block_plain_has_no_background() {
-        // Plain fenced blocks (no language) use the `code_block_fallback`
+        // Plain fenced blocks (no language) use the `code`
         // style, which omits the bg fill so wrapping / width variance
         // across lines doesn't leave ragged highlight edges.
         //
