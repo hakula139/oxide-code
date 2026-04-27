@@ -328,6 +328,417 @@ mod tests {
     use super::super::builtin;
     use super::*;
 
+    // ── resolve_theme: base resolution ──
+
+    #[test]
+    fn resolve_theme_no_args_returns_default_mocha() {
+        let t = resolve_theme(None, &HashMap::new()).unwrap();
+        assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
+        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+    }
+
+    #[test]
+    fn resolve_theme_named_builtin_loads_that_palette() {
+        let t = resolve_theme(Some("latte"), &HashMap::new()).unwrap();
+        // Latte's text is dark (#4c4f69), unlike Mocha's light text.
+        assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
+    }
+
+    #[test]
+    fn resolve_theme_unknown_name_with_no_matching_file_errors() {
+        let err = resolve_theme(Some("solarized"), &HashMap::new())
+            .expect_err("unknown built-in and not a path");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("solarized"), "names the input: {msg}");
+        assert!(
+            msg.contains("not a built-in name") || msg.contains("failed to read"),
+            "explains the failure: {msg}",
+        );
+    }
+
+    #[test]
+    fn resolve_theme_loads_from_file_path() {
+        // Write a minimal theme file (modify mocha) and resolve via
+        // its absolute path. Confirms the file-path branch works
+        // end-to-end and that the override pathway can hand a file
+        // through.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.toml");
+        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
+        std::fs::write(&path, body).unwrap();
+
+        let t = resolve_theme(Some(&path.to_string_lossy()), &HashMap::new()).unwrap();
+        assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+    }
+
+    /// File loaded successfully but its body fails to parse — the
+    /// error must be wrapped with the base name so the user sees
+    /// which theme is broken (not just an opaque slot diagnostic).
+    #[test]
+    fn resolve_theme_file_path_with_bad_body_wraps_with_base_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r#"error = "orange""#);
+        std::fs::write(&path, body).unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+
+        let err =
+            resolve_theme(Some(&path_str), &HashMap::new()).expect_err("bad slot color must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("parsing base theme"), "wrap context: {msg}");
+        assert!(msg.contains(&path_str), "names the source path: {msg}");
+        assert!(msg.contains("orange"), "names the offending value: {msg}");
+    }
+
+    // ── resolve_theme: per-slot overrides ──
+
+    #[test]
+    fn resolve_theme_bare_string_override_patches_only_fg() {
+        // accent in mocha is bold blue. A bare-string override should
+        // replace fg only, leaving bold intact.
+        let mut overrides = HashMap::new();
+        overrides.insert("accent".to_owned(), SlotPatch::Bare("#ff0000".to_owned()));
+        let t = resolve_theme(None, &overrides).unwrap();
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+        assert_eq!(t.accent.bg, None);
+        assert!(
+            t.accent.modifiers.contains(Modifier::BOLD),
+            "bold from base must survive a bare-string override",
+        );
+    }
+
+    #[test]
+    fn resolve_theme_inline_override_clears_modifier_with_false() {
+        // Explicit `bold = false` removes BOLD from the base slot.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "accent".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                bold: Some(false),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).unwrap();
+        // fg from base stays.
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
+        assert!(!t.accent.modifiers.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn resolve_theme_inline_override_can_add_a_modifier() {
+        // success in mocha has no modifiers; add ITALIC via override.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "success".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                italic: Some(true),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).unwrap();
+        assert!(t.success.modifiers.contains(Modifier::ITALIC));
+        // fg from base unchanged.
+        assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
+    }
+
+    #[test]
+    fn resolve_theme_unknown_slot_in_override_warns_and_resolves() {
+        install_permissive_global_subscriber();
+        // Unknown slot name in overrides must NOT fail the resolve;
+        // it warns to stderr and the rest of the theme loads cleanly.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "purple_thing".to_owned(),
+            SlotPatch::Bare("#ff0000".to_owned()),
+        );
+        let t = resolve_theme(None, &overrides).expect("unknown slot should warn, not error");
+        // The base mocha values must come through unchanged.
+        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+    }
+
+    /// Verify the warn-and-fallback path actually emits a
+    /// `tracing::warn!` event naming the offending slot. Without this
+    /// assertion, a regression to `if let Err(_) = … {}` would
+    /// silently restore the silent-failure pattern the contract was
+    /// designed to prevent — and every other warn-path test would
+    /// still pass because they only check that resolution succeeds.
+    #[test]
+    fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::fmt::{self, MakeWriter};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for Capture {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        install_permissive_global_subscriber();
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(Capture(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut overrides = HashMap::new();
+            overrides.insert(
+                "purple_thing".to_owned(),
+                SlotPatch::Bare("#ff0000".to_owned()),
+            );
+            resolve_theme(None, &overrides).expect("warn-and-fallback shouldn't error");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("purple_thing"),
+            "warn output must name the slot: {captured:?}",
+        );
+        assert!(
+            captured.to_ascii_uppercase().contains("WARN"),
+            "warn level must reach the writer: {captured:?}",
+        );
+    }
+
+    #[test]
+    fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
+        // Bad color string in an override must NOT fail the resolve;
+        // the slot's base value must be preserved.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "error".to_owned(),
+            SlotPatch::Bare("not-a-color".to_owned()),
+        );
+        let t = resolve_theme(None, &overrides).expect("bad color should warn, not error");
+        // error stays at the mocha base.
+        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
+    }
+
+    /// Inline-form override with a bad `fg` color exercises the
+    /// `InlinePatch::apply` fg parse path that the bare-string sibling
+    /// can't reach.
+    #[test]
+    fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "accent".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                fg: Some("not-a-color".to_owned()),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).expect("bad inline fg should warn, not error");
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
+        assert!(
+            t.accent.modifiers.contains(Modifier::BOLD),
+            "base modifiers preserved on warn-fallback",
+        );
+    }
+
+    /// Sibling to the inline-fg test for the `bg` parse path.
+    #[test]
+    fn resolve_theme_inline_override_with_bad_bg_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "diff_add".to_owned(),
+            SlotPatch::Inline(InlinePatch {
+                bg: Some("not-a-color".to_owned()),
+                ..InlinePatch::default()
+            }),
+        );
+        let t = resolve_theme(None, &overrides).expect("bad inline bg should warn, not error");
+        assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
+    }
+
+    #[test]
+    fn resolve_theme_multiple_overrides_apply_independently() {
+        let mut overrides = HashMap::new();
+        overrides.insert("error".to_owned(), SlotPatch::Bare("#ff0000".to_owned()));
+        overrides.insert("success".to_owned(), SlotPatch::Bare("#00ff00".to_owned()));
+        let t = resolve_theme(None, &overrides).unwrap();
+        assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+        assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
+    }
+
+    /// Install a permissive global tracing subscriber so the warn
+    /// callsite in `resolve_theme` registers as `Interest::Always`
+    /// regardless of which warn-firing test fires it first. Without
+    /// this, parallel tests racing the default noop subscriber lock
+    /// the per-callsite Interest cache to `Never`, after which any
+    /// per-test `with_default` capture sees nothing.
+    fn install_permissive_global_subscriber() {
+        use std::sync::OnceLock;
+
+        use tracing_subscriber::fmt;
+
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            _ = tracing::subscriber::set_global_default(
+                fmt::Subscriber::builder()
+                    .with_writer(std::io::sink)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            );
+        });
+    }
+
+    // ── expand_tilde ──
+
+    #[test]
+    fn expand_tilde_rewrites_leading_tilde_to_home() {
+        // Force a stable HOME so the assertion is deterministic.
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            let path = expand_tilde("~/themes/dark.toml");
+            assert_eq!(path, PathBuf::from("/tmp/oxide-fake-home/themes/dark.toml"),);
+        });
+    }
+
+    #[test]
+    fn expand_tilde_passes_non_tilde_paths_through_unchanged() {
+        let path = expand_tilde("/abs/themes/dark.toml");
+        assert_eq!(path, PathBuf::from("/abs/themes/dark.toml"));
+    }
+
+    // ── slot_for_name ──
+
+    /// Every slot name must route to a unique slot. Catches the
+    /// "typo in match arm" class of bug — e.g.,
+    /// `"tool_icon" => &mut theme.tool_border` would compile and
+    /// pass a happy-path override test, but this assertion fails
+    /// because patching `tool_icon` would visibly alter `tool_border`.
+    #[test]
+    fn slot_for_name_routes_each_name_to_a_unique_slot() {
+        let sentinel = Slot {
+            fg: Some(Color::Rgb(0xde, 0xad, 0xbe)),
+            bg: None,
+            modifiers: Modifier::empty(),
+        };
+        for &target in super::super::SLOT_NAMES {
+            let mut patched = Theme::default();
+            let original = patched.clone();
+            *slot_for_name(&mut patched, target)
+                .unwrap_or_else(|| panic!("unknown slot {target:?}")) = sentinel;
+            for &other in super::super::SLOT_NAMES {
+                let mut p = patched.clone();
+                let mut o = original.clone();
+                let post = *slot_for_name(&mut p, other).expect("slot must exist");
+                let pre = *slot_for_name(&mut o, other).expect("slot must exist");
+                if other == target {
+                    assert_eq!(post, sentinel, "patched slot {target} should hold sentinel");
+                } else {
+                    assert_eq!(
+                        post, pre,
+                        "patching {target} must not affect {other} (slot_for_name mis-routing)",
+                    );
+                }
+            }
+        }
+    }
+
+    // ── SlotPatch::apply ──
+
+    #[test]
+    fn slot_patch_inline_with_bg_only_keeps_base_fg_and_modifiers() {
+        let base = Slot {
+            fg: Some(Color::Red),
+            bg: None,
+            modifiers: Modifier::BOLD,
+        };
+        let patch = SlotPatch::Inline(InlinePatch {
+            bg: Some("#000000".to_owned()),
+            ..InlinePatch::default()
+        });
+        let out = patch.apply(base).unwrap();
+        assert_eq!(out.fg, Some(Color::Red), "fg from base");
+        assert_eq!(out.bg, Some(Color::Rgb(0, 0, 0)), "bg from patch");
+        assert!(out.modifiers.contains(Modifier::BOLD), "modifier from base");
+    }
+
+    #[test]
+    fn slot_patch_inline_none_modifiers_preserve_every_base_flag() {
+        // Locks down the three-state contract: a patch with no
+        // modifier fields (all `None`) must leave every base modifier
+        // untouched. Catches the regression where the loop is
+        // refactored to `flag.unwrap_or(false)` and silently clears
+        // every base modifier whenever an unrelated patch field is
+        // set.
+        let base = Slot {
+            fg: Some(Color::Red),
+            bg: None,
+            modifiers: Modifier::BOLD
+                | Modifier::ITALIC
+                | Modifier::UNDERLINED
+                | Modifier::DIM
+                | Modifier::REVERSED,
+        };
+        let patch = SlotPatch::Inline(InlinePatch {
+            fg: Some("#abcdef".to_owned()),
+            ..InlinePatch::default()
+        });
+        let out = patch.apply(base).unwrap();
+        assert_eq!(
+            out.modifiers, base.modifiers,
+            "every base modifier survives"
+        );
+    }
+
+    #[test]
+    fn slot_patch_inline_with_fg_overwrites_base_fg() {
+        // Sibling to the bg-only test: an inline patch carrying `fg`
+        // replaces the base fg while preserving bg and modifiers.
+        let base = Slot {
+            fg: Some(Color::Red),
+            bg: Some(Color::Rgb(0x10, 0x10, 0x10)),
+            modifiers: Modifier::ITALIC,
+        };
+        let patch = SlotPatch::Inline(InlinePatch {
+            fg: Some("#abcdef".to_owned()),
+            ..InlinePatch::default()
+        });
+        let out = patch.apply(base).unwrap();
+        assert_eq!(out.fg, Some(Color::Rgb(0xab, 0xcd, 0xef)), "fg from patch");
+        assert_eq!(
+            out.bg,
+            Some(Color::Rgb(0x10, 0x10, 0x10)),
+            "bg from base survives",
+        );
+        assert!(
+            out.modifiers.contains(Modifier::ITALIC),
+            "modifier from base survives",
+        );
+    }
+
+    #[test]
+    fn inline_patch_empty_table_is_rejected_at_deserialize() {
+        // `error = {}` would silently re-write the base — almost
+        // certainly a config bug, so the parser refuses it. The
+        // untagged `SlotPatch` enum hides the specific error message
+        // from `InlinePatch::Deserialize`, so assert on rejection
+        // rather than the message text.
+        toml::from_str::<HashMap<String, SlotPatch>>("error = {}")
+            .expect_err("empty inline must be rejected at deserialize");
+    }
+
     // ── parse_theme: built-ins ──
 
     /// All four vendored Catppuccin TOMLs must parse without error.
@@ -470,7 +881,7 @@ mod tests {
         assert!(msg.contains("diff_add"), "names the slot: {msg}");
     }
 
-    // ── SlotDef forms ──
+    // ── parse_theme: SlotDef forms ──
 
     #[test]
     fn parse_theme_bare_string_slot_yields_fg_only_no_modifiers() {
@@ -543,416 +954,5 @@ mod tests {
         let body = builtin::MOCHA.replace(from, to);
         assert_ne!(body, builtin::MOCHA, "fixture marker {from:?} not found");
         body
-    }
-
-    // ── resolve_theme: base resolution ──
-
-    #[test]
-    fn resolve_theme_no_args_returns_default_mocha() {
-        let t = resolve_theme(None, &HashMap::new()).unwrap();
-        assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
-    }
-
-    #[test]
-    fn resolve_theme_named_builtin_loads_that_palette() {
-        let t = resolve_theme(Some("latte"), &HashMap::new()).unwrap();
-        // Latte's text is dark (#4c4f69), unlike Mocha's light text.
-        assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
-    }
-
-    #[test]
-    fn resolve_theme_unknown_name_with_no_matching_file_errors() {
-        let err = resolve_theme(Some("solarized"), &HashMap::new())
-            .expect_err("unknown built-in and not a path");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("solarized"), "names the input: {msg}");
-        assert!(
-            msg.contains("not a built-in name") || msg.contains("failed to read"),
-            "explains the failure: {msg}",
-        );
-    }
-
-    #[test]
-    fn resolve_theme_loads_from_file_path() {
-        // Write a minimal theme file (modify mocha) and resolve via
-        // its absolute path. Confirms the file-path branch works
-        // end-to-end and that the override pathway can hand a file
-        // through.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("custom.toml");
-        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
-        std::fs::write(&path, body).unwrap();
-
-        let t = resolve_theme(Some(&path.to_string_lossy()), &HashMap::new()).unwrap();
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
-    }
-
-    /// File loaded successfully but its body fails to parse — the
-    /// error must be wrapped with the base name so the user sees
-    /// which theme is broken (not just an opaque slot diagnostic).
-    #[test]
-    fn resolve_theme_file_path_with_bad_body_wraps_with_base_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("broken.toml");
-        let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r#"error = "orange""#);
-        std::fs::write(&path, body).unwrap();
-        let path_str = path.to_string_lossy().into_owned();
-
-        let err =
-            resolve_theme(Some(&path_str), &HashMap::new()).expect_err("bad slot color must error");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("parsing base theme"), "wrap context: {msg}");
-        assert!(msg.contains(&path_str), "names the source path: {msg}");
-        assert!(msg.contains("orange"), "names the offending value: {msg}");
-    }
-
-    // ── resolve_theme: per-slot overrides ──
-
-    #[test]
-    fn resolve_theme_bare_string_override_patches_only_fg() {
-        // accent in mocha is bold blue. A bare-string override should
-        // replace fg only, leaving bold intact.
-        let mut overrides = HashMap::new();
-        overrides.insert("accent".to_owned(), SlotPatch::Bare("#ff0000".to_owned()));
-        let t = resolve_theme(None, &overrides).unwrap();
-        assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
-        assert_eq!(t.accent.bg, None);
-        assert!(
-            t.accent.modifiers.contains(Modifier::BOLD),
-            "bold from base must survive a bare-string override",
-        );
-    }
-
-    #[test]
-    fn resolve_theme_inline_override_clears_modifier_with_false() {
-        // Explicit `bold = false` removes BOLD from the base slot.
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "accent".to_owned(),
-            SlotPatch::Inline(InlinePatch {
-                bold: Some(false),
-                ..InlinePatch::default()
-            }),
-        );
-        let t = resolve_theme(None, &overrides).unwrap();
-        // fg from base stays.
-        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
-        assert!(!t.accent.modifiers.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn resolve_theme_inline_override_can_add_a_modifier() {
-        // success in mocha has no modifiers; add ITALIC via override.
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "success".to_owned(),
-            SlotPatch::Inline(InlinePatch {
-                italic: Some(true),
-                ..InlinePatch::default()
-            }),
-        );
-        let t = resolve_theme(None, &overrides).unwrap();
-        assert!(t.success.modifiers.contains(Modifier::ITALIC));
-        // fg from base unchanged.
-        assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
-    }
-
-    #[test]
-    fn resolve_theme_unknown_slot_in_override_warns_and_resolves() {
-        install_permissive_global_subscriber();
-        // Unknown slot name in overrides must NOT fail the resolve;
-        // it warns to stderr and the rest of the theme loads cleanly.
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "purple_thing".to_owned(),
-            SlotPatch::Bare("#ff0000".to_owned()),
-        );
-        let t = resolve_theme(None, &overrides).expect("unknown slot should warn, not error");
-        // The base mocha values must come through unchanged.
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
-    }
-
-    /// Verify the warn-and-fallback path actually emits a
-    /// `tracing::warn!` event naming the offending slot. Without this
-    /// assertion, a regression to `if let Err(_) = … {}` would
-    /// silently restore the silent-failure pattern the contract was
-    /// designed to prevent — and every other warn-path test would
-    /// still pass because they only check that resolution succeeds.
-    #[test]
-    fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
-        use std::io;
-        use std::sync::{Arc, Mutex};
-
-        use tracing_subscriber::fmt::{self, MakeWriter};
-
-        install_permissive_global_subscriber();
-
-        #[derive(Clone)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-
-        impl io::Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        impl<'a> MakeWriter<'a> for Capture {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = fmt::Subscriber::builder()
-            .with_writer(Capture(Arc::clone(&buf)))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            let mut overrides = HashMap::new();
-            overrides.insert(
-                "purple_thing".to_owned(),
-                SlotPatch::Bare("#ff0000".to_owned()),
-            );
-            resolve_theme(None, &overrides).expect("warn-and-fallback shouldn't error");
-        });
-
-        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert!(
-            captured.contains("purple_thing"),
-            "warn output must name the slot: {captured:?}",
-        );
-        assert!(
-            captured.to_ascii_uppercase().contains("WARN"),
-            "warn level must reach the writer: {captured:?}",
-        );
-    }
-
-    #[test]
-    fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        // Bad color string in an override must NOT fail the resolve;
-        // the slot's base value must be preserved.
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "error".to_owned(),
-            SlotPatch::Bare("not-a-color".to_owned()),
-        );
-        let t = resolve_theme(None, &overrides).expect("bad color should warn, not error");
-        // error stays at the mocha base.
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
-    }
-
-    /// Inline-form override with a bad `fg` color exercises the
-    /// `InlinePatch::apply` fg parse path that the bare-string sibling
-    /// can't reach.
-    #[test]
-    fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "accent".to_owned(),
-            SlotPatch::Inline(InlinePatch {
-                fg: Some("not-a-color".to_owned()),
-                ..InlinePatch::default()
-            }),
-        );
-        let t = resolve_theme(None, &overrides).expect("bad inline fg should warn, not error");
-        assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
-        assert!(
-            t.accent.modifiers.contains(Modifier::BOLD),
-            "base modifiers preserved on warn-fallback",
-        );
-    }
-
-    /// Sibling to the inline-fg test for the `bg` parse path.
-    #[test]
-    fn resolve_theme_inline_override_with_bad_bg_warns_and_keeps_base() {
-        install_permissive_global_subscriber();
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "diff_add".to_owned(),
-            SlotPatch::Inline(InlinePatch {
-                bg: Some("not-a-color".to_owned()),
-                ..InlinePatch::default()
-            }),
-        );
-        let t = resolve_theme(None, &overrides).expect("bad inline bg should warn, not error");
-        assert_eq!(t.diff_add.bg, Some(Color::Rgb(0x2a, 0x3a, 0x37)));
-    }
-
-    #[test]
-    fn resolve_theme_multiple_overrides_apply_independently() {
-        let mut overrides = HashMap::new();
-        overrides.insert("error".to_owned(), SlotPatch::Bare("#ff0000".to_owned()));
-        overrides.insert("success".to_owned(), SlotPatch::Bare("#00ff00".to_owned()));
-        let t = resolve_theme(None, &overrides).unwrap();
-        assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
-        assert_eq!(t.success.fg, Some(Color::Rgb(0x00, 0xff, 0x00)));
-    }
-
-    /// Install a permissive global tracing subscriber so the warn
-    /// callsite in `resolve_theme` registers as `Interest::Always`
-    /// regardless of which warn-firing test fires it first. Without
-    /// this, parallel tests racing the default noop subscriber lock
-    /// the per-callsite Interest cache to `Never`, after which any
-    /// per-test `with_default` capture sees nothing.
-    fn install_permissive_global_subscriber() {
-        use std::sync::OnceLock;
-
-        use tracing_subscriber::fmt;
-
-        static INIT: OnceLock<()> = OnceLock::new();
-        INIT.get_or_init(|| {
-            _ = tracing::subscriber::set_global_default(
-                fmt::Subscriber::builder()
-                    .with_writer(std::io::sink)
-                    .with_max_level(tracing::Level::WARN)
-                    .finish(),
-            );
-        });
-    }
-
-    // ── slot_for_name ──
-
-    /// Every slot name must route to a unique slot. Catches the
-    /// "typo in match arm" class of bug — e.g.,
-    /// `"tool_icon" => &mut theme.tool_border` would compile and
-    /// pass a happy-path override test, but this assertion fails
-    /// because patching `tool_icon` would visibly alter `tool_border`.
-    #[test]
-    fn slot_for_name_routes_each_name_to_a_unique_slot() {
-        let sentinel = Slot {
-            fg: Some(Color::Rgb(0xde, 0xad, 0xbe)),
-            bg: None,
-            modifiers: Modifier::empty(),
-        };
-        for &target in super::super::SLOT_NAMES {
-            let mut patched = Theme::default();
-            let original = patched.clone();
-            *slot_for_name(&mut patched, target)
-                .unwrap_or_else(|| panic!("unknown slot {target:?}")) = sentinel;
-            for &other in super::super::SLOT_NAMES {
-                let mut p = patched.clone();
-                let mut o = original.clone();
-                let post = *slot_for_name(&mut p, other).expect("slot must exist");
-                let pre = *slot_for_name(&mut o, other).expect("slot must exist");
-                if other == target {
-                    assert_eq!(post, sentinel, "patched slot {target} should hold sentinel");
-                } else {
-                    assert_eq!(
-                        post, pre,
-                        "patching {target} must not affect {other} (slot_for_name mis-routing)",
-                    );
-                }
-            }
-        }
-    }
-
-    // ── SlotPatch::apply ──
-
-    #[test]
-    fn slot_patch_inline_with_bg_only_keeps_base_fg_and_modifiers() {
-        let base = Slot {
-            fg: Some(Color::Red),
-            bg: None,
-            modifiers: Modifier::BOLD,
-        };
-        let patch = SlotPatch::Inline(InlinePatch {
-            bg: Some("#000000".to_owned()),
-            ..InlinePatch::default()
-        });
-        let out = patch.apply(base).unwrap();
-        assert_eq!(out.fg, Some(Color::Red), "fg from base");
-        assert_eq!(out.bg, Some(Color::Rgb(0, 0, 0)), "bg from patch");
-        assert!(out.modifiers.contains(Modifier::BOLD), "modifier from base");
-    }
-
-    #[test]
-    fn slot_patch_inline_none_modifiers_preserve_every_base_flag() {
-        // Locks down the three-state contract: a patch with no
-        // modifier fields (all `None`) must leave every base modifier
-        // untouched. Catches the regression where the loop is
-        // refactored to `flag.unwrap_or(false)` and silently clears
-        // every base modifier whenever an unrelated patch field is
-        // set.
-        let base = Slot {
-            fg: Some(Color::Red),
-            bg: None,
-            modifiers: Modifier::BOLD
-                | Modifier::ITALIC
-                | Modifier::UNDERLINED
-                | Modifier::DIM
-                | Modifier::REVERSED,
-        };
-        let patch = SlotPatch::Inline(InlinePatch {
-            fg: Some("#abcdef".to_owned()),
-            ..InlinePatch::default()
-        });
-        let out = patch.apply(base).unwrap();
-        assert_eq!(
-            out.modifiers, base.modifiers,
-            "every base modifier survives"
-        );
-    }
-
-    #[test]
-    fn slot_patch_inline_with_fg_overwrites_base_fg() {
-        // Sibling to the bg-only test: an inline patch carrying `fg`
-        // replaces the base fg while preserving bg and modifiers.
-        let base = Slot {
-            fg: Some(Color::Red),
-            bg: Some(Color::Rgb(0x10, 0x10, 0x10)),
-            modifiers: Modifier::ITALIC,
-        };
-        let patch = SlotPatch::Inline(InlinePatch {
-            fg: Some("#abcdef".to_owned()),
-            ..InlinePatch::default()
-        });
-        let out = patch.apply(base).unwrap();
-        assert_eq!(out.fg, Some(Color::Rgb(0xab, 0xcd, 0xef)), "fg from patch");
-        assert_eq!(
-            out.bg,
-            Some(Color::Rgb(0x10, 0x10, 0x10)),
-            "bg from base survives",
-        );
-        assert!(
-            out.modifiers.contains(Modifier::ITALIC),
-            "modifier from base survives",
-        );
-    }
-
-    #[test]
-    fn inline_patch_empty_table_is_rejected_at_deserialize() {
-        // `error = {}` would silently re-write the base — almost
-        // certainly a config bug, so the parser refuses it. The
-        // untagged `SlotPatch` enum hides the specific error message
-        // from `InlinePatch::Deserialize`, so assert on rejection
-        // rather than the message text.
-        toml::from_str::<HashMap<String, SlotPatch>>("error = {}")
-            .expect_err("empty inline must be rejected at deserialize");
-    }
-
-    // ── expand_tilde ──
-
-    #[test]
-    fn expand_tilde_rewrites_leading_tilde_to_home() {
-        // Force a stable HOME so the assertion is deterministic.
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
-            let path = expand_tilde("~/themes/dark.toml");
-            assert_eq!(path, PathBuf::from("/tmp/oxide-fake-home/themes/dark.toml"),);
-        });
-    }
-
-    #[test]
-    fn expand_tilde_passes_non_tilde_paths_through_unchanged() {
-        let path = expand_tilde("/abs/themes/dark.toml");
-        assert_eq!(path, PathBuf::from("/abs/themes/dark.toml"));
     }
 }
