@@ -7,7 +7,7 @@ oxide-code's TUI palette is fully user-configurable. Pick a built-in Catppuccin 
 ```toml
 # ox.toml or ~/.config/ox/config.toml
 
-# Built-in name (mocha, macchiato, frappe, latte) or filesystem path.
+# Built-in name (mocha, macchiato, frappe, latte, material) or filesystem path.
 [tui.theme]
 base = "latte"
 
@@ -21,12 +21,13 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 
 ## Built-in themes
 
-| Name        | Variant                |
-| ----------- | ---------------------- |
-| `mocha`     | Dark — neutral default |
-| `macchiato` | Medium-dark            |
-| `frappe`    | Medium                 |
-| `latte`     | Light                  |
+| Name        | Family     | Variant                |
+| ----------- | ---------- | ---------------------- |
+| `mocha`     | Catppuccin | Dark — neutral default |
+| `macchiato` | Catppuccin | Medium-dark            |
+| `frappe`    | Catppuccin | Medium                 |
+| `latte`     | Catppuccin | Light                  |
+| `material`  | Material   | Dark — M2 baseline     |
 
 Each ships as a vendored TOML file under `crates/oxide-code/themes/` and doubles as a copy-paste starting point for custom themes.
 

@@ -372,8 +372,7 @@ mod tests {
     /// Pin one distinctive hex per non-Mocha palette so a botched
     /// edit in those TOMLs (typo, dropped digit, copy-pasted from a
     /// sibling palette) surfaces as a failing test. `text` is the
-    /// load-bearing slot — every Catppuccin variant assigns it a
-    /// different shade.
+    /// load-bearing slot — every variant assigns it a different shade.
     #[test]
     fn parse_theme_non_mocha_palettes_match_known_text_color() {
         for (name, body, expected) in [
@@ -384,6 +383,7 @@ mod tests {
                 builtin::MACCHIATO,
                 Color::Rgb(0xca, 0xd3, 0xf5),
             ),
+            ("material", builtin::MATERIAL, Color::Rgb(0xde, 0xde, 0xde)),
         ] {
             let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
             assert_eq!(t.text.fg, Some(expected), "{name} text.fg");
