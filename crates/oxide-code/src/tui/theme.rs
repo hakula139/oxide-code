@@ -7,11 +7,7 @@ mod builtin;
 mod color;
 mod loader;
 
-// Hold a reference to `builtin::lookup` so dead-code analysis treats
-// the rest of the BUILT_IN catalogue (latte / frappe / macchiato) as
-// live before Step 4 wires the loader through `Config::load`.
-// Removing this shim is part of the Step 4 commit.
-const _: fn(&str) -> Option<&'static str> = builtin::lookup;
+pub(crate) use loader::{SlotPatch, resolve_theme};
 
 /// A single theme slot — composes optional foreground, optional
 /// background, and modifiers into a ratatui [`Style`].
@@ -57,10 +53,6 @@ impl Slot {
 /// The default constructor returns Catppuccin Mocha by parsing the
 /// vendored `themes/mocha.toml`. The TOML body is embedded via
 /// `include_str!` and parsed once on first access.
-#[expect(
-    dead_code,
-    reason = "all slots are part of the theme API; some are unused by current components"
-)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Theme {
     // Text hierarchy

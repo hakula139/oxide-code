@@ -1,43 +1,53 @@
 # Catppuccin Macchiato — medium-dark variant.
-# Palette: https://github.com/catppuccin/catppuccin
+# https://github.com/catppuccin/catppuccin
 
-text = "#cad3f5"  # Text
-muted = "#6e738d" # Overlay0
-dim = "#5b6078"   # Surface2
+# Text hierarchy
+text = "#cad3f5"
+muted = "#6e738d"
+dim = "#5b6078"
 
-surface = "#363a4f" # Surface0
+# Surfaces
+surface = "#363a4f"          # reserved
+code_bg = { bg = "#24273a" } # reserved
 
-accent = { fg = "#8aadf4", bold = true } # Blue (bold)
-user = "#f5a97f"                         # Peach
-secondary = "#b7bdf8"                    # Lavender
+# Semantic accents
+accent = { fg = "#8aadf4", bold = true }
+user = "#f5a97f"
+secondary = "#b7bdf8"
 
-code = "#8bd5ca"                # Teal
-code_bg = { bg = "#24273a" }    # Base
-inline_code = "#f5a97f"         # Peach
-code_block_fallback = "#8bd5ca" # Teal
+# Status indicators
+info = "#91d7e3"    # reserved
+success = "#a6da95"
+warning = "#eed49f"
+error = "#ed8796"
 
+# Code
+code = "#8bd5ca"
+inline_code = "#f5a97f"
+code_block_fallback = "#8bd5ca"
+
+# Diff backgrounds
 diff_add_bg = { bg = "#283834" }
 diff_del_bg = { bg = "#36293a" }
 
-info = "#91d7e3"    # Sky
-success = "#a6da95" # Green
-warning = "#eed49f" # Yellow
-error = "#ed8796"   # Red
-
+# Markdown headings
 heading_h1 = { fg = "#cad3f5", bold = true, underlined = true }
 heading_h2 = { fg = "#cad3f5", bold = true }
 heading_h3 = { fg = "#cad3f5", bold = true, italic = true }
 heading_minor = { fg = "#cad3f5", italic = true }
 
+# Markdown body
 thinking = { fg = "#5b6078", italic = true }
 link = { fg = "#8aadf4", underlined = true }
 blockquote = "#a6da95"
 list_marker = "#8aadf4"
 
+# Markdown chrome
 horizontal_rule = "#5b6078"
 table_header = { fg = "#cad3f5", bold = true }
 table_border = "#5b6078"
 
+# UI chrome
 tool_border = "#6e738d"
 tool_icon = "#8aadf4"
 border_focused = "#8aadf4"

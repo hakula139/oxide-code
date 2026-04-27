@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::tui::theme::SlotPatch;
 use crate::util::path::xdg_dir;
 
 const USER_CONFIG_DIR: &str = "ox";
@@ -24,12 +26,19 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 ///
 /// [tui]
 /// show_thinking = true
+///
+/// [theme]
+/// base = "latte"
+///
+/// [theme.overrides]
+/// error = "#ff0000"
 /// ```
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
     pub(super) client: Option<ClientConfig>,
     pub(super) tui: Option<TuiConfig>,
+    pub(super) theme: Option<ThemeFileConfig>,
 }
 
 /// API client settings (`[client]` section).
@@ -55,6 +64,19 @@ pub(super) struct TuiConfig {
     pub(super) show_thinking: Option<bool>,
 }
 
+/// Theme settings (`[theme]` section).
+///
+/// `base` selects a built-in name (`mocha`, `macchiato`, `frappe`,
+/// `latte`) or a filesystem path (`~/.config/ox/themes/dark.toml`)
+/// to a TOML body. The `[theme.overrides]` table patches individual
+/// slots on top of the resolved base.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ThemeFileConfig {
+    pub(super) base: Option<String>,
+    pub(super) overrides: Option<HashMap<String, SlotPatch>>,
+}
+
 // ── Merge ──
 
 impl FileConfig {
@@ -63,6 +85,7 @@ impl FileConfig {
         Self {
             client: merge_section(self.client, other.client, ClientConfig::merge),
             tui: merge_section(self.tui, other.tui, TuiConfig::merge),
+            theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
         }
     }
 }
@@ -88,6 +111,27 @@ impl TuiConfig {
     fn merge(self, other: Self) -> Self {
         Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
+        }
+    }
+}
+
+impl ThemeFileConfig {
+    /// Merge two theme configs. `base` follows the standard "other
+    /// wins" rule. `overrides` are merged key-by-key — each side
+    /// contributes its slot patches; on key collision, `other` wins
+    /// so a project-level patch overrides a user-level patch for
+    /// the same slot.
+    fn merge(self, other: Self) -> Self {
+        let overrides = match (self.overrides, other.overrides) {
+            (Some(mut s), Some(o)) => {
+                s.extend(o);
+                Some(s)
+            }
+            (s, o) => o.or(s),
+        };
+        Self {
+            base: other.base.or(self.base),
+            overrides,
         }
     }
 }
@@ -203,6 +247,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
             }),
+            theme: None,
         };
         let other = FileConfig {
             client: Some(ClientConfig {
@@ -216,6 +261,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
             }),
+            theme: None,
         };
         let merged = base.merge(other);
 
@@ -251,6 +297,7 @@ mod tests {
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
             }),
+            theme: None,
         };
         let merged = base.merge(FileConfig::default());
 
@@ -277,12 +324,14 @@ mod tests {
                 ..Default::default()
             }),
             tui: None,
+            theme: None,
         };
         let other = FileConfig {
             client: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
             }),
+            theme: None,
         };
         let merged = base.merge(other);
 
@@ -298,6 +347,7 @@ mod tests {
         let merged = FileConfig::default().merge(FileConfig::default());
         assert!(merged.client.is_none());
         assert!(merged.tui.is_none());
+        assert!(merged.theme.is_none());
     }
 
     // ── load_file ──

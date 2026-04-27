@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use super::Client;
 use crate::config::{Auth, Config, PromptCacheTtl};
+use crate::tui::theme::Theme;
 
 /// Minimal [`Config`] suitable for unit and wiremock tests. Defaults
 /// match every existing call site: `max_tokens = 128`, `thinking = None`,
@@ -19,6 +20,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         thinking: None,
         show_thinking: false,
+        theme: Theme::default(),
     }
 }
 

@@ -1,44 +1,53 @@
 # Catppuccin Latte — light variant.
-# Palette: https://github.com/catppuccin/catppuccin
+# https://github.com/catppuccin/catppuccin
 
-text = "#4c4f69"  # Text
-muted = "#9ca0b0" # Overlay0
-dim = "#acb0be"   # Surface2
+# Text hierarchy
+text = "#4c4f69"
+muted = "#9ca0b0"
+dim = "#acb0be"
 
-surface = "#ccd0da" # Surface0
+# Surfaces
+surface = "#ccd0da"          # reserved
+code_bg = { bg = "#eff1f5" } # reserved
 
-accent = { fg = "#1e66f5", bold = true } # Blue (bold)
-user = "#fe640b"                         # Peach
-secondary = "#7287fd"                    # Lavender
+# Semantic accents
+accent = { fg = "#1e66f5", bold = true }
+user = "#fe640b"
+secondary = "#7287fd"
 
-code = "#179299"                # Teal
-code_bg = { bg = "#eff1f5" }    # Base
-inline_code = "#fe640b"         # Peach
-code_block_fallback = "#179299" # Teal
+# Status indicators
+info = "#04a5e5"    # reserved
+success = "#40a02b"
+warning = "#df8e1d"
+error = "#d20f39"
 
-# Light tinted diff backgrounds — pastels keyed off Green / Red.
+# Code
+code = "#179299"
+inline_code = "#fe640b"
+code_block_fallback = "#179299"
+
+# Diff backgrounds (light pastels for the light variant)
 diff_add_bg = { bg = "#c8e4ce" }
 diff_del_bg = { bg = "#f0c8d0" }
 
-info = "#04a5e5"    # Sky
-success = "#40a02b" # Green
-warning = "#df8e1d" # Yellow
-error = "#d20f39"   # Red
-
+# Markdown headings
 heading_h1 = { fg = "#4c4f69", bold = true, underlined = true }
 heading_h2 = { fg = "#4c4f69", bold = true }
 heading_h3 = { fg = "#4c4f69", bold = true, italic = true }
 heading_minor = { fg = "#4c4f69", italic = true }
 
+# Markdown body
 thinking = { fg = "#acb0be", italic = true }
 link = { fg = "#1e66f5", underlined = true }
 blockquote = "#40a02b"
 list_marker = "#1e66f5"
 
+# Markdown chrome
 horizontal_rule = "#acb0be"
 table_header = { fg = "#4c4f69", bold = true }
 table_border = "#acb0be"
 
+# UI chrome
 tool_border = "#9ca0b0"
 tool_icon = "#1e66f5"
 border_focused = "#1e66f5"

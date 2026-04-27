@@ -14,6 +14,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::tui::theme::{self, Theme};
 use crate::util::env;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
@@ -160,6 +161,10 @@ pub(crate) struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
+    /// Resolved TUI theme — base + per-slot overrides applied at
+    /// load time. Theme-selection errors hard-fail; per-slot value
+    /// errors warn and fall back to the base value.
+    pub(crate) theme: Theme,
 }
 
 impl Config {
@@ -174,6 +179,7 @@ impl Config {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();
+        let theme_config = fc.theme.unwrap_or_default();
 
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
@@ -229,6 +235,11 @@ impl Config {
             None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
         };
 
+        let theme = theme::resolve_theme(
+            theme_config.base.as_deref(),
+            &theme_config.overrides.unwrap_or_default(),
+        )?;
+
         Ok(Self {
             auth,
             base_url,
@@ -238,6 +249,7 @@ impl Config {
             prompt_cache_ttl,
             thinking,
             show_thinking,
+            theme,
         })
     }
 }

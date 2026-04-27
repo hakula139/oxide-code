@@ -18,6 +18,8 @@ deque
 deserialize
 disambiguable
 dtolnay
+frappe
+Frappe
 EACCES
 ESRCH
 feff
@@ -28,6 +30,10 @@ indoc
 insta
 isatty
 killpg
+latte
+Latte
+macchiato
+Macchiato
 misparse
 mpsc
 mtimes

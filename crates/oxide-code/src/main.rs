@@ -117,6 +117,7 @@ async fn async_main() -> Result<()> {
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
+    let theme = config.theme;
 
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
@@ -150,7 +151,7 @@ async fn async_main() -> Result<()> {
         .await;
     }
 
-    run_tui(&client, &model, show_thinking, tools, resumed).await
+    run_tui(&client, &model, show_thinking, &theme, tools, resumed).await
 }
 
 // ── Session Helpers ──
@@ -240,6 +241,7 @@ async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
+    theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
 ) -> Result<()> {
@@ -269,6 +271,7 @@ async fn run_tui(
 
     let mut terminal = tui::terminal::init()?;
     let mut app = tui::app::App::new(
+        theme,
         display_model,
         show_thinking,
         cwd,
