@@ -610,8 +610,31 @@ mod tests {
         assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
     }
 
+    /// Install a permissive global tracing subscriber so the warn
+    /// callsite in `resolve_theme` registers as `Interest::Always`
+    /// regardless of which warn-firing test fires it first. Without
+    /// this, parallel tests racing the default noop subscriber lock
+    /// the per-callsite Interest cache to `Never`, after which any
+    /// per-test `with_default` capture sees nothing.
+    fn install_permissive_global_subscriber() {
+        use std::sync::OnceLock;
+
+        use tracing_subscriber::fmt;
+
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            _ = tracing::subscriber::set_global_default(
+                fmt::Subscriber::builder()
+                    .with_writer(std::io::sink)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish(),
+            );
+        });
+    }
+
     #[test]
     fn resolve_theme_unknown_slot_in_override_warns_and_resolves() {
+        install_permissive_global_subscriber();
         // Unknown slot name in overrides must NOT fail the resolve;
         // it warns to stderr and the rest of the theme loads cleanly.
         let mut overrides = HashMap::new();
@@ -636,6 +659,8 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         use tracing_subscriber::fmt::{self, MakeWriter};
+
+        install_permissive_global_subscriber();
 
         #[derive(Clone)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -685,6 +710,7 @@ mod tests {
 
     #[test]
     fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
+        install_permissive_global_subscriber();
         // Bad color string in an override must NOT fail the resolve;
         // the slot's base value must be preserved.
         let mut overrides = HashMap::new();
