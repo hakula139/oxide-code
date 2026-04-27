@@ -624,6 +624,65 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
     }
 
+    /// Verify the warn-and-fallback path actually emits a
+    /// `tracing::warn!` event naming the offending slot. Without this
+    /// assertion, a regression to `if let Err(_) = … {}` would
+    /// silently restore the silent-failure pattern the contract was
+    /// designed to prevent — and every other warn-path test would
+    /// still pass because they only check that resolution succeeds.
+    #[test]
+    fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::fmt::{self, MakeWriter};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for Capture {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(Capture(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut overrides = HashMap::new();
+            overrides.insert(
+                "purple_thing".to_owned(),
+                SlotPatch::Bare("#ff0000".to_owned()),
+            );
+            resolve_theme(None, &overrides).expect("warn-and-fallback shouldn't error");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("purple_thing"),
+            "warn output must name the slot: {captured:?}",
+        );
+        assert!(
+            captured.to_ascii_uppercase().contains("WARN"),
+            "warn level must reach the writer: {captured:?}",
+        );
+    }
+
     #[test]
     fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
         // Bad color string in an override must NOT fail the resolve;
