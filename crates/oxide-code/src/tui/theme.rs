@@ -59,6 +59,12 @@ macro_rules! for_each_slot {
             (user, "User messages and icon"),
             (assistant, "Assistant messages and icon"),
 
+            // Status indicators (ascending severity)
+            (info, "Informational highlight (in-progress / neutral signals)"),
+            (success, "Successful tool results, ready status"),
+            (warning, "Warnings, caution status"),
+            (error, "Errors, failed tools, critical status"),
+
             // Code
             (code, "Fenced code blocks with no recognized language"),
             (inline_code, "Inline code spans (`` `code` ``)"),
@@ -66,12 +72,6 @@ macro_rules! for_each_slot {
             // Diff backgrounds
             (diff_add, "Background fill for added diff rows (Catppuccin Mocha plus-style)"),
             (diff_del, "Background fill for deleted diff rows (Catppuccin Mocha minus-style)"),
-
-            // Status indicators (ascending severity)
-            (info, "Informational highlight (in-progress / neutral signals)"),
-            (success, "Successful tool results, ready status"),
-            (warning, "Warnings, caution status"),
-            (error, "Errors, failed tools, critical status"),
 
             // Markdown headings
             (heading_h1, "H1 — most prominent heading (bold + underlined)"),
