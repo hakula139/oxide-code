@@ -62,7 +62,7 @@ pub(super) fn render_assistant_markdown(
     ctx: &RenderCtx<'_>,
     starts_new_turn: bool,
 ) -> Vec<Line<'static>> {
-    let icon_style = ctx.theme.secondary();
+    let icon_style = ctx.theme.assistant();
     let md_width = usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width());
     let rendered = render_markdown(text, ctx.theme, md_width);
     rendered

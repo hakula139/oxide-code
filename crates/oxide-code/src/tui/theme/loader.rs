@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)), "Blue");
         assert_eq!(t.user.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)), "Peach");
         assert_eq!(
-            t.secondary.fg,
+            t.assistant.fg,
             Some(Color::Rgb(0xb4, 0xbe, 0xfe)),
             "Lavender",
         );

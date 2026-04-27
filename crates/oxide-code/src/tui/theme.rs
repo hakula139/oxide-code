@@ -57,7 +57,7 @@ macro_rules! for_each_slot {
             // Semantic accents
             (accent, "Highlights, active borders (bold by default)"),
             (user, "User messages and icon"),
-            (secondary, "Assistant messages and icon"),
+            (assistant, "Assistant messages and icon"),
 
             // Code
             (code, "Fenced code blocks with no recognized language"),
@@ -138,7 +138,7 @@ impl Theme {
         self.text.style()
     }
 
-    /// Muted / secondary text
+    /// Muted / assistant text
     pub(crate) fn muted(&self) -> Style {
         self.muted.style()
     }
@@ -169,8 +169,8 @@ impl Theme {
     }
 
     /// Assistant message bar and icon
-    pub(crate) fn secondary(&self) -> Style {
-        self.secondary.style()
+    pub(crate) fn assistant(&self) -> Style {
+        self.assistant.style()
     }
 
     // Status indicators
@@ -381,8 +381,8 @@ mod tests {
         let t = Theme::default();
         assert_ne!(t.text.fg, t.muted.fg);
         assert_ne!(t.muted.fg, t.dim.fg);
-        assert_ne!(t.accent.fg, t.secondary.fg);
-        assert_ne!(t.user.fg, t.secondary.fg);
+        assert_ne!(t.accent.fg, t.assistant.fg);
+        assert_ne!(t.user.fg, t.assistant.fg);
         assert_ne!(t.success.fg, t.error.fg);
         assert_ne!(t.diff_add.bg, t.diff_del.bg);
     }
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(t.dim().fg, t.dim.fg);
         assert_eq!(t.accent().fg, t.accent.fg);
         assert_eq!(t.user().fg, t.user.fg);
-        assert_eq!(t.secondary().fg, t.secondary.fg);
+        assert_eq!(t.assistant().fg, t.assistant.fg);
         assert_eq!(t.success().fg, t.success.fg);
         assert_eq!(t.error().fg, t.error.fg);
         assert_eq!(t.inline_code().fg, t.inline_code.fg);

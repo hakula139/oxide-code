@@ -109,7 +109,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | ----------- | --------------------------------- |
 | `accent`    | Highlights, active borders (bold) |
 | `user`      | User message bar / icon           |
-| `secondary` | Assistant message bar / icon      |
+| `assistant` | Assistant message bar / icon      |
 
 ### Status indicators
 

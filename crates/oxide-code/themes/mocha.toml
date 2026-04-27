@@ -12,7 +12,7 @@ surface = "reset"
 # Semantic accents
 accent = { fg = "#89b4fa", bold = true }
 user = "#fab387"
-secondary = "#b4befe"
+assistant = "#b4befe"
 
 # Status indicators
 info = "#89dceb"
