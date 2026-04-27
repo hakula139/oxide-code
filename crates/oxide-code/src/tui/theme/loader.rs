@@ -749,6 +749,25 @@ mod tests {
         }
     }
 
+    /// `surface` is the bg-only panel fill — a regression where any
+    /// built-in declares it as a bare-string fg (which `SlotDef::Bare`
+    /// would route to `fg`, leaving `bg = None`) would silently paint
+    /// every panel's text in the surface color. Pin the contract.
+    #[test]
+    fn parse_theme_surface_is_bg_only_in_every_builtin() {
+        for (name, body) in builtin::BUILT_IN {
+            let t = parse_theme(body).unwrap_or_else(|e| panic!("{name} parse: {e:#}"));
+            assert_eq!(
+                t.surface.fg, None,
+                "{name}: surface must be bg-only, never fg"
+            );
+            assert!(
+                t.surface.bg.is_some(),
+                "{name}: surface must declare a bg (use \"reset\" for terminal default)",
+            );
+        }
+    }
+
     /// Pin a representative subset of Catppuccin Mocha's hex codes
     /// so an accidental palette edit in `mocha.toml` surfaces as a
     /// failing test rather than a silent visual regression.

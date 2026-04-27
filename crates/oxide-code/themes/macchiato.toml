@@ -7,7 +7,7 @@ muted = "#6e738d"
 dim = "#5b6078"
 
 # Surfaces
-surface = "reset"
+surface = { bg = "reset" }
 
 # Semantic accents
 accent = { fg = "#8aadf4", bold = true }
