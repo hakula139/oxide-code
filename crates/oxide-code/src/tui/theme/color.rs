@@ -22,10 +22,16 @@ use ratatui::style::Color;
 /// in this module's docs. Errors include the offending input and a
 /// hint at supported formats so a typo in `theme.toml` is actionable.
 pub(super) fn parse_color(input: &str) -> Result<Color> {
-    let s = input.trim();
-    if s.is_empty() {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
         bail!("empty color value");
     }
+
+    // Lowercase once so prefix matching, indexed digits, and the named
+    // table all see the same form. Hex digits and indexed digits are
+    // case-insensitive anyway; this just lets `ANSI:5` and `#FFAABB`
+    // route correctly instead of falling through to the named lookup.
+    let s = trimmed.to_ascii_lowercase();
 
     if let Some(hex) = s.strip_prefix('#') {
         return parse_hex(hex).with_context(|| format!("invalid hex color {input:?}"));
@@ -35,7 +41,7 @@ pub(super) fn parse_color(input: &str) -> Result<Color> {
         return parse_indexed(idx).with_context(|| format!("invalid indexed color {input:?}"));
     }
 
-    parse_named(&s.to_ascii_lowercase()).with_context(|| format!("unknown color {input:?}"))
+    parse_named(&s).with_context(|| format!("unknown color {input:?}"))
 }
 
 fn parse_hex(hex: &str) -> Result<Color> {
@@ -165,6 +171,15 @@ mod tests {
         let err = parse_color("ansi:abc").expect_err("non-numeric rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("ansi:abc"), "{msg}");
+    }
+
+    /// Module doc claims `ansi:N` is case-insensitive like the named
+    /// formats. Without this assertion, `"ANSI:5"` falls through to the
+    /// named lookup and fails with an "unknown color" error.
+    #[test]
+    fn parse_color_indexed_prefix_is_case_insensitive() {
+        assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));
+        assert_eq!(parse_color("Ansi:174").unwrap(), Color::Indexed(174));
     }
 
     // ── parse_color: named ──
