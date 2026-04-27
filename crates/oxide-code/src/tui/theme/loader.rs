@@ -687,4 +687,47 @@ mod tests {
         assert_eq!(out.bg, Some(Color::Rgb(0, 0, 0)), "bg from patch");
         assert!(out.modifiers.contains(Modifier::BOLD), "modifier from base");
     }
+
+    #[test]
+    fn slot_patch_inline_with_fg_overwrites_base_fg() {
+        // Sibling to the bg-only test: an inline patch carrying `fg`
+        // replaces the base fg while preserving bg and modifiers.
+        let base = Slot {
+            fg: Some(Color::Red),
+            bg: Some(Color::Rgb(0x10, 0x10, 0x10)),
+            modifiers: Modifier::ITALIC,
+        };
+        let patch = SlotPatch::Inline(InlinePatch {
+            fg: Some("#abcdef".to_owned()),
+            ..InlinePatch::default()
+        });
+        let out = patch.apply(base).unwrap();
+        assert_eq!(out.fg, Some(Color::Rgb(0xab, 0xcd, 0xef)), "fg from patch");
+        assert_eq!(
+            out.bg,
+            Some(Color::Rgb(0x10, 0x10, 0x10)),
+            "bg from base survives",
+        );
+        assert!(
+            out.modifiers.contains(Modifier::ITALIC),
+            "modifier from base survives",
+        );
+    }
+
+    // ── expand_tilde ──
+
+    #[test]
+    fn expand_tilde_rewrites_leading_tilde_to_home() {
+        // Force a stable HOME so the assertion is deterministic.
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            let path = expand_tilde("~/themes/dark.toml");
+            assert_eq!(path, PathBuf::from("/tmp/oxide-fake-home/themes/dark.toml"),);
+        });
+    }
+
+    #[test]
+    fn expand_tilde_passes_non_tilde_paths_through_unchanged() {
+        let path = expand_tilde("/abs/themes/dark.toml");
+        assert_eq!(path, PathBuf::from("/abs/themes/dark.toml"));
+    }
 }

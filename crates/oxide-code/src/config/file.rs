@@ -344,6 +344,64 @@ mod tests {
         assert!(merged.tui.is_none());
     }
 
+    // ── ThemeFileConfig::merge ──
+
+    fn theme_with(base: Option<&str>, overrides: &[(&str, &str)]) -> ThemeFileConfig {
+        ThemeFileConfig {
+            base: base.map(str::to_owned),
+            overrides: (!overrides.is_empty()).then(|| {
+                overrides
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), SlotPatch::Bare((*v).to_owned())))
+                    .collect()
+            }),
+        }
+    }
+
+    #[test]
+    fn theme_merge_other_base_wins_over_self() {
+        let base = theme_with(Some("mocha"), &[]);
+        let other = theme_with(Some("latte"), &[]);
+        let merged = base.merge(other);
+        assert_eq!(merged.base.as_deref(), Some("latte"));
+    }
+
+    #[test]
+    fn theme_merge_overrides_extend_when_both_set() {
+        // Project (other) extends user (self) — disjoint slots
+        // contribute from both layers.
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = theme_with(None, &[("accent", "#bbbbbb")]);
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("merged overrides present");
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("error"), "user-level slot survives");
+        assert!(map.contains_key("accent"), "project-level slot lands");
+    }
+
+    #[test]
+    fn theme_merge_other_override_wins_on_slot_collision() {
+        // Same slot patched in both layers — `other` (higher priority,
+        // typically the project file) wins for that slot.
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = theme_with(None, &[("error", "#bbbbbb")]);
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("merged overrides present");
+        let SlotPatch::Bare(value) = map.get("error").expect("error patch present") else {
+            panic!("expected bare patch")
+        };
+        assert_eq!(value, "#bbbbbb", "project patch wins on collision");
+    }
+
+    #[test]
+    fn theme_merge_overrides_pass_through_when_one_side_is_none() {
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = ThemeFileConfig::default();
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("base overrides survive");
+        assert!(map.contains_key("error"));
+    }
+
     // ── load_file ──
 
     #[test]
