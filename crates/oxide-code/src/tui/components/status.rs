@@ -169,7 +169,8 @@ impl Component for StatusBar {
 
         let block = Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(self.theme.border_unfocused());
+            .border_style(self.theme.border_unfocused())
+            .style(self.theme.surface());
         frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
     }
 }

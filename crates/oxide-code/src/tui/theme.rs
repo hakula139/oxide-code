@@ -148,6 +148,14 @@ impl Theme {
         self.dim.style()
     }
 
+    /// Chat / input / status panel background. Bg-only; default
+    /// `Color::Reset` keeps the terminal background showing through,
+    /// so users on transparent terminals see no change. Override
+    /// `surface = { bg = "..." }` to give the panels an opaque tint.
+    pub(crate) fn surface(&self) -> Style {
+        self.surface.style()
+    }
+
     // Semantic accents
 
     /// Bold accent (highlights, active borders)
@@ -175,6 +183,14 @@ impl Theme {
     /// Success indicator
     pub(crate) fn success(&self) -> Style {
         self.success.style()
+    }
+
+    /// Warning indicator — caution / non-fatal issues. No production
+    /// consumer yet; kept for API symmetry with the rest of the
+    /// status set so users can pre-style.
+    #[allow(dead_code, reason = "API surface; consumed in tests")]
+    pub(crate) fn warning(&self) -> Style {
+        self.warning.style()
     }
 
     /// Error indicator

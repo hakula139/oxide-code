@@ -129,7 +129,8 @@ impl Component for InputArea {
 
         let block = Block::default()
             .borders(Borders::TOP)
-            .border_style(border_style);
+            .border_style(border_style)
+            .style(self.theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 

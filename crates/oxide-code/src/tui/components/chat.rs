@@ -345,7 +345,9 @@ impl Component for ChatView {
         )]
         let height = text.lines.len().min(u16::MAX as usize) as u16;
         self.content_height.set(height);
-        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
+        let paragraph = Paragraph::new(text)
+            .style(self.theme.surface())
+            .scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
     }
 }
