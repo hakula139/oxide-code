@@ -1,12 +1,17 @@
+use std::sync::LazyLock;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
+mod builtin;
 mod color;
+mod loader;
 
-// Hold a reference to the color parser so dead-code analysis treats
-// it as live before Step 4 wires it into the loader. Removing this
-// shim is part of the Step 4 commit.
-const _: fn(&str) -> anyhow::Result<Color> = color::parse_color;
+// Hold a reference to `builtin::lookup` so dead-code analysis treats
+// the rest of the BUILT_IN catalogue (latte / frappe / macchiato) as
+// live before Step 4 wires the loader through `Config::load`.
+// Removing this shim is part of the Step 4 commit.
+const _: fn(&str) -> Option<&'static str> = builtin::lookup;
 
 /// A single theme slot — composes optional foreground, optional
 /// background, and modifiers into a ratatui [`Style`].
@@ -23,33 +28,6 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    /// Foreground-only slot with no modifiers.
-    const fn fg_only(color: Color) -> Self {
-        Self {
-            fg: Some(color),
-            bg: None,
-            modifiers: Modifier::empty(),
-        }
-    }
-
-    /// Background-only slot with no modifiers.
-    const fn bg_only(color: Color) -> Self {
-        Self {
-            fg: None,
-            bg: Some(color),
-            modifiers: Modifier::empty(),
-        }
-    }
-
-    /// Foreground slot with modifiers (bold, italic, underlined, ...).
-    const fn styled(color: Color, modifiers: Modifier) -> Self {
-        Self {
-            fg: Some(color),
-            bg: None,
-            modifiers,
-        }
-    }
-
     /// Compose this slot's fields into a ratatui [`Style`]. Unset
     /// `fg` / `bg` leave the terminal's default in place.
     pub(crate) fn style(&self) -> Style {
@@ -76,10 +54,9 @@ impl Slot {
 /// users can break the alignment by overriding one without the
 /// others.
 ///
-/// The default constructor returns Catppuccin Mocha with a transparent
-/// background (respects the user's terminal theme). Step 3 of the
-/// themable-config track will swap this hardcoded default for parsing
-/// the embedded `themes/mocha.toml`.
+/// The default constructor returns Catppuccin Mocha by parsing the
+/// vendored `themes/mocha.toml`. The TOML body is embedded via
+/// `include_str!` and parsed once on first access.
 #[expect(
     dead_code,
     reason = "all slots are part of the theme API; some are unused by current components"
@@ -175,73 +152,13 @@ pub(crate) struct Theme {
 
 impl Default for Theme {
     /// Catppuccin Mocha palette with transparent terminal background.
-    ///
-    /// Step 3 of the themable-config track will replace this with
-    /// `parse(include_str!("../../themes/mocha.toml"))`, eliminating
-    /// the dual-source-of-truth between this file and the vendored
-    /// TOML.
+    /// Parsed once from the vendored `themes/mocha.toml` and cached;
+    /// subsequent calls return a `Copy` of the parsed [`Theme`].
     fn default() -> Self {
-        // Catppuccin Mocha palette references
-        const TEXT: Color = Color::from_u32(0x00cd_d6f4);
-        const OVERLAY0: Color = Color::from_u32(0x006c_7086);
-        const SURFACE2: Color = Color::from_u32(0x0058_5b70);
-        const SURFACE0: Color = Color::from_u32(0x0031_3244);
-        const BLUE: Color = Color::from_u32(0x0089_b4fa);
-        const PEACH: Color = Color::from_u32(0x00fa_b387);
-        const LAVENDER: Color = Color::from_u32(0x00b4_befe);
-        const TEAL: Color = Color::from_u32(0x0094_e2d5);
-        const BASE: Color = Color::from_u32(0x001e_1e2e);
-        const SKY: Color = Color::from_u32(0x0089_dceb);
-        const GREEN: Color = Color::from_u32(0x00a6_e3a1);
-        const YELLOW: Color = Color::from_u32(0x00f9_e2af);
-        const RED: Color = Color::from_u32(0x00f3_8ba8);
-        const DIFF_ADD: Color = Color::from_u32(0x002a_3a37); // catppuccin/delta plus-style
-        const DIFF_DEL: Color = Color::from_u32(0x0038_2c34); // catppuccin/delta minus-style
-
-        Self {
-            text: Slot::fg_only(TEXT),
-            muted: Slot::fg_only(OVERLAY0),
-            dim: Slot::fg_only(SURFACE2),
-
-            surface: Slot::fg_only(SURFACE0),
-
-            accent: Slot::styled(BLUE, Modifier::BOLD),
-            user: Slot::fg_only(PEACH),
-            secondary: Slot::fg_only(LAVENDER),
-
-            code: Slot::fg_only(TEAL),
-            code_bg: Slot::bg_only(BASE),
-            inline_code: Slot::fg_only(PEACH),
-            code_block_fallback: Slot::fg_only(TEAL),
-
-            diff_add_bg: Slot::bg_only(DIFF_ADD),
-            diff_del_bg: Slot::bg_only(DIFF_DEL),
-
-            info: Slot::fg_only(SKY),
-            success: Slot::fg_only(GREEN),
-            warning: Slot::fg_only(YELLOW),
-            error: Slot::fg_only(RED),
-
-            heading_h1: Slot::styled(TEXT, Modifier::BOLD.union(Modifier::UNDERLINED)),
-            heading_h2: Slot::styled(TEXT, Modifier::BOLD),
-            heading_h3: Slot::styled(TEXT, Modifier::BOLD.union(Modifier::ITALIC)),
-            heading_minor: Slot::styled(TEXT, Modifier::ITALIC),
-
-            thinking: Slot::styled(SURFACE2, Modifier::ITALIC),
-            link: Slot::styled(BLUE, Modifier::UNDERLINED),
-            blockquote: Slot::fg_only(GREEN),
-            list_marker: Slot::fg_only(BLUE),
-
-            horizontal_rule: Slot::fg_only(SURFACE2),
-            table_header: Slot::styled(TEXT, Modifier::BOLD),
-            table_border: Slot::fg_only(SURFACE2),
-
-            tool_border: Slot::fg_only(OVERLAY0),
-            tool_icon: Slot::fg_only(BLUE),
-            border_focused: Slot::fg_only(BLUE),
-            border_unfocused: Slot::fg_only(SURFACE2),
-            separator: Slot::fg_only(SURFACE2),
-        }
+        static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
+            loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
+        });
+        *MOCHA
     }
 }
 
@@ -449,7 +366,11 @@ mod tests {
 
     #[test]
     fn slot_fg_only_sets_only_foreground() {
-        let s = Slot::fg_only(Color::Red);
+        let s = Slot {
+            fg: Some(Color::Red),
+            bg: None,
+            modifiers: Modifier::empty(),
+        };
         let style = s.style();
         assert_eq!(style.fg, Some(Color::Red));
         assert_eq!(style.bg, None);
@@ -458,7 +379,11 @@ mod tests {
 
     #[test]
     fn slot_bg_only_sets_only_background() {
-        let s = Slot::bg_only(Color::Blue);
+        let s = Slot {
+            fg: None,
+            bg: Some(Color::Blue),
+            modifiers: Modifier::empty(),
+        };
         let style = s.style();
         assert_eq!(style.fg, None);
         assert_eq!(style.bg, Some(Color::Blue));
@@ -467,7 +392,11 @@ mod tests {
 
     #[test]
     fn slot_styled_carries_modifiers() {
-        let s = Slot::styled(Color::Green, Modifier::BOLD.union(Modifier::ITALIC));
+        let s = Slot {
+            fg: Some(Color::Green),
+            bg: None,
+            modifiers: Modifier::BOLD.union(Modifier::ITALIC),
+        };
         let style = s.style();
         assert_eq!(style.fg, Some(Color::Green));
         assert_eq!(style.bg, None);

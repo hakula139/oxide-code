@@ -1,0 +1,56 @@
+# Catppuccin Mocha — oxide-code's default theme.
+# Palette: https://github.com/catppuccin/catppuccin
+# Diff backgrounds borrowed from catppuccin/delta.
+
+# Text hierarchy
+text = "#cdd6f4"  # Catppuccin Text
+muted = "#6c7086" # Catppuccin Overlay0
+dim = "#585b70"   # Catppuccin Surface2
+
+# Surfaces
+surface = "#313244" # Catppuccin Surface0 (reserved)
+
+# Semantic accents
+accent = { fg = "#89b4fa", bold = true } # Blue (bold)
+user = "#fab387"                         # Peach
+secondary = "#b4befe"                    # Lavender
+
+# Code
+code = "#94e2d5"                # Teal
+code_bg = { bg = "#1e1e2e" }    # Base (reserved)
+inline_code = "#fab387"         # Peach
+code_block_fallback = "#94e2d5" # Teal
+
+# Diff row backgrounds
+diff_add_bg = { bg = "#2a3a37" } # catppuccin/delta plus-style
+diff_del_bg = { bg = "#382c34" } # catppuccin/delta minus-style
+
+# Status indicators
+info = "#89dceb"    # Sky (reserved)
+success = "#a6e3a1" # Green
+warning = "#f9e2af" # Yellow
+error = "#f38ba8"   # Red
+
+# Markdown headings
+heading_h1 = { fg = "#cdd6f4", bold = true, underlined = true }
+heading_h2 = { fg = "#cdd6f4", bold = true }
+heading_h3 = { fg = "#cdd6f4", bold = true, italic = true }
+heading_minor = { fg = "#cdd6f4", italic = true }
+
+# Markdown elements
+thinking = { fg = "#585b70", italic = true }
+link = { fg = "#89b4fa", underlined = true }
+blockquote = "#a6e3a1"                       # uses success green as a distinctive accent
+list_marker = "#89b4fa"
+
+# Markdown chrome (default-aligned with `dim` / `heading_h2`)
+horizontal_rule = "#585b70"
+table_header = { fg = "#cdd6f4", bold = true }
+table_border = "#585b70"
+
+# UI chrome
+tool_border = "#6c7086"
+tool_icon = "#89b4fa"
+border_focused = "#89b4fa"
+border_unfocused = "#585b70"
+separator = "#585b70"
