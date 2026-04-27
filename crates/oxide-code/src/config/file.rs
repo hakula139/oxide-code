@@ -387,10 +387,11 @@ mod tests {
         let other = theme_with(None, &[("error", "#bbbbbb")]);
         let merged = base.merge(other);
         let map = merged.overrides.expect("merged overrides present");
-        let SlotPatch::Bare(value) = map.get("error").expect("error patch present") else {
-            panic!("expected bare patch")
-        };
-        assert_eq!(value, "#bbbbbb", "project patch wins on collision");
+        let patch = map.get("error").expect("error patch present");
+        assert!(
+            matches!(patch, SlotPatch::Bare(value) if value == "#bbbbbb"),
+            "project patch wins on collision; got {patch:?}",
+        );
     }
 
     #[test]
