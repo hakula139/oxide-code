@@ -9,7 +9,7 @@
 //!   — explicit `fg` / `bg` / modifier flags. Recognized modifier
 //!   keys: `bold`, `italic`, `underlined`, `dim`, `reversed`.
 //!
-//! All 31 slots must be present; `deny_unknown_fields` catches typos.
+//! Every slot must be present; `deny_unknown_fields` catches typos.
 //! Per-slot color parse errors are wrapped with the slot name so a
 //! bad value in `theme.toml` points at the offending entry.
 //!
@@ -27,10 +27,7 @@ use ratatui::style::Modifier;
 use serde::Deserialize;
 use tracing::warn;
 
-use super::Slot;
-use super::Theme;
-use super::builtin;
-use super::color::parse_color;
+use super::{Slot, Theme, builtin, color::parse_color};
 
 /// Resolve a theme from an optional base + per-slot overrides.
 ///
@@ -197,8 +194,20 @@ impl SlotPatch {
 
 impl InlinePatch {
     fn apply(&self, base: Slot) -> Result<Slot> {
-        let fg = self.fg.as_deref().map(parse_color).transpose()?.or(base.fg);
-        let bg = self.bg.as_deref().map(parse_color).transpose()?.or(base.bg);
+        let fg = self
+            .fg
+            .as_deref()
+            .map(parse_color)
+            .transpose()
+            .context("fg")?
+            .or(base.fg);
+        let bg = self
+            .bg
+            .as_deref()
+            .map(parse_color)
+            .transpose()
+            .context("bg")?
+            .or(base.bg);
         let mut modifiers = base.modifiers;
         for (flag, modifier) in [
             (self.bold, Modifier::BOLD),
@@ -298,8 +307,18 @@ impl SlotDef {
 
 impl InlineSlot {
     fn into_slot(self) -> Result<Slot> {
-        let fg = self.fg.as_deref().map(parse_color).transpose()?;
-        let bg = self.bg.as_deref().map(parse_color).transpose()?;
+        let fg = self
+            .fg
+            .as_deref()
+            .map(parse_color)
+            .transpose()
+            .context("fg")?;
+        let bg = self
+            .bg
+            .as_deref()
+            .map(parse_color)
+            .transpose()
+            .context("bg")?;
         let mut modifiers = Modifier::empty();
         if self.bold {
             modifiers |= Modifier::BOLD;
@@ -884,6 +903,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("lavender"), "names the value: {msg}");
         assert!(msg.contains("accent"), "names the slot: {msg}");
+        assert!(msg.contains("fg"), "names the offending field: {msg}");
     }
 
     /// Inline `bg` parse error — exercises the `InlineSlot::into_slot`
@@ -896,6 +916,7 @@ mod tests {
         );
         let err = parse_theme(&body).expect_err("bad inline bg rejected");
         let msg = format!("{err:#}");
+        assert!(msg.contains("bg"), "names the offending field: {msg}");
         assert!(msg.contains("magenta-ish"), "names the value: {msg}");
         assert!(msg.contains("diff_add"), "names the slot: {msg}");
     }

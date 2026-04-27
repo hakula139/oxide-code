@@ -12,9 +12,9 @@ pub(crate) use loader::{SlotPatch, resolve_theme};
 /// A single theme slot — composes optional foreground, optional
 /// background, and modifiers into a ratatui [`Style`].
 ///
-/// Most slots are `fg`-only; a few (`diff_add`, `code_bg`) are
-/// `bg`-only and leave `fg` unset. Modifiers default to empty unless
-/// the role's purpose is to add style (e.g., `accent` is bold,
+/// Most slots are `fg`-only; a few (`surface`, `diff_add`, `diff_del`)
+/// are `bg`-only and leave `fg` unset. Modifiers default to empty
+/// unless the role's purpose is to add style (e.g., `accent` is bold,
 /// `thinking` is italic, `link` is underlined).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
@@ -92,7 +92,7 @@ macro_rules! for_each_slot {
 
             // UI chrome
             (tool_border, "Left border for tool call blocks"),
-            (tool_icon, "Tool icon accent (non-bold by default)"),
+            (tool_icon, "Tool icon accent"),
             (border_focused, "Focused component border"),
             (border_unfocused, "Unfocused component border (default-aligned with `dim`)"),
             (separator, "Status bar separator (dimmed pipe)"),
@@ -194,7 +194,13 @@ impl Theme {
     /// Warning indicator — caution / non-fatal issues. No production
     /// consumer yet; kept for API symmetry with the rest of the
     /// status set so users can pre-style.
-    #[allow(dead_code, reason = "API surface; consumed in tests")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "API surface; consumed in tests until a runtime caller lands"
+        )
+    )]
     pub(crate) fn warning(&self) -> Style {
         self.warning.style()
     }

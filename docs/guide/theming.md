@@ -64,7 +64,7 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 ## Slot definitions
 
-A custom theme file must define **all 31 slots** — a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
+A custom theme file must define **every slot** — a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
 > **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
 
