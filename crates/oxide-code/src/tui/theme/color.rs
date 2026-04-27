@@ -94,7 +94,7 @@ mod tests {
     // ── parse_color: hex ──
 
     #[test]
-    fn parse_hex_lowercase() {
+    fn parse_color_hex_lowercase() {
         assert_eq!(
             parse_color("#cdd6f4").unwrap(),
             Color::Rgb(0xcd, 0xd6, 0xf4)
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_hex_uppercase() {
+    fn parse_color_hex_uppercase() {
         assert_eq!(
             parse_color("#CDD6F4").unwrap(),
             Color::Rgb(0xcd, 0xd6, 0xf4)
@@ -110,14 +110,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_hex_pure_red_green_blue() {
+    fn parse_color_hex_pure_red_green_blue() {
         assert_eq!(parse_color("#ff0000").unwrap(), Color::Rgb(255, 0, 0));
         assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
         assert_eq!(parse_color("#0000ff").unwrap(), Color::Rgb(0, 0, 255));
     }
 
     #[test]
-    fn parse_hex_rejects_three_digit_shorthand() {
+    fn parse_color_hex_rejects_three_digit_shorthand() {
         let err = parse_color("#fff").expect_err("3-digit hex rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("#fff"), "{msg}");
@@ -125,14 +125,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_hex_rejects_non_hex_chars() {
+    fn parse_color_hex_rejects_non_hex_chars() {
         let err = parse_color("#zzzzzz").expect_err("invalid characters rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("#zzzzzz"), "{msg}");
     }
 
     #[test]
-    fn parse_hex_rejects_missing_hash_prefix() {
+    fn parse_color_hex_rejects_missing_hash_prefix() {
         // Without `#`, falls through to the named lookup and reports
         // an unknown color.
         let err = parse_color("cdd6f4").expect_err("bare hex without # rejected");
@@ -143,25 +143,25 @@ mod tests {
     // ── parse_color: indexed ──
 
     #[test]
-    fn parse_indexed_min_max() {
+    fn parse_color_indexed_min_max() {
         assert_eq!(parse_color("ansi:0").unwrap(), Color::Indexed(0));
         assert_eq!(parse_color("ansi:255").unwrap(), Color::Indexed(255));
     }
 
     #[test]
-    fn parse_indexed_mid_value() {
+    fn parse_color_indexed_mid_value() {
         assert_eq!(parse_color("ansi:174").unwrap(), Color::Indexed(174));
     }
 
     #[test]
-    fn parse_indexed_rejects_out_of_range() {
+    fn parse_color_indexed_rejects_out_of_range() {
         let err = parse_color("ansi:256").expect_err("256 is out of u8 range");
         let msg = format!("{err:#}");
         assert!(msg.contains("ansi:256"), "{msg}");
     }
 
     #[test]
-    fn parse_indexed_rejects_non_numeric() {
+    fn parse_color_indexed_rejects_non_numeric() {
         let err = parse_color("ansi:abc").expect_err("non-numeric rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("ansi:abc"), "{msg}");
@@ -170,7 +170,7 @@ mod tests {
     // ── parse_color: named ──
 
     #[test]
-    fn parse_named_standard_8() {
+    fn parse_color_named_standard_8() {
         assert_eq!(parse_color("black").unwrap(), Color::Black);
         assert_eq!(parse_color("red").unwrap(), Color::Red);
         assert_eq!(parse_color("green").unwrap(), Color::Green);
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_named_bright_8() {
+    fn parse_color_named_bright_8() {
         assert_eq!(parse_color("dark_gray").unwrap(), Color::DarkGray);
         assert_eq!(parse_color("bright_red").unwrap(), Color::LightRed);
         assert_eq!(parse_color("bright_green").unwrap(), Color::LightGreen);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_named_light_alias_matches_bright() {
+    fn parse_color_named_light_alias_matches_bright() {
         // `light_X` is interchangeable with `bright_X` for users
         // coming from terminal configs that prefer the `light_` form.
         assert_eq!(parse_color("light_red").unwrap(), Color::LightRed);
@@ -203,25 +203,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_named_grey_alias_matches_gray() {
+    fn parse_color_named_grey_alias_matches_gray() {
         assert_eq!(parse_color("grey").unwrap(), Color::Gray);
         assert_eq!(parse_color("dark_grey").unwrap(), Color::DarkGray);
     }
 
     #[test]
-    fn parse_named_case_insensitive() {
+    fn parse_color_named_case_insensitive() {
         assert_eq!(parse_color("RED").unwrap(), Color::Red);
         assert_eq!(parse_color("Bright_Blue").unwrap(), Color::LightBlue);
         assert_eq!(parse_color("Reset").unwrap(), Color::Reset);
     }
 
     #[test]
-    fn parse_named_reset_is_terminal_default() {
+    fn parse_color_named_reset_is_terminal_default() {
         assert_eq!(parse_color("reset").unwrap(), Color::Reset);
     }
 
     #[test]
-    fn parse_named_rejects_unknown_color() {
+    fn parse_color_named_rejects_unknown_color() {
         let err = parse_color("orange").expect_err("orange is not a 16-color name");
         let msg = format!("{err:#}");
         assert!(msg.contains("orange"), "names the input: {msg}");
@@ -235,14 +235,14 @@ mod tests {
     // ── parse_color: edge cases ──
 
     #[test]
-    fn parse_rejects_empty_string() {
+    fn parse_color_rejects_empty_string() {
         let err = parse_color("").expect_err("empty string rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("empty"), "{msg}");
     }
 
     #[test]
-    fn parse_trims_surrounding_whitespace() {
+    fn parse_color_trims_surrounding_whitespace() {
         assert_eq!(parse_color("  red  ").unwrap(), Color::Red);
         assert_eq!(
             parse_color(" #cdd6f4 ").unwrap(),
