@@ -77,7 +77,7 @@ ox                                          # Start an interactive session
 │   ├── components.rs                       # Components module root
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
 │   ├── theme/
-│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte via include_str!) + lookup
+│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup
 │   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
 │   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
 │   ├── components/

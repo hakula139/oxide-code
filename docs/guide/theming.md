@@ -1,6 +1,6 @@
 # Theming
 
-oxide-code's TUI palette is fully user-configurable. Pick a built-in Catppuccin variant, point at a TOML file you wrote yourself, or patch individual color slots on top of any base. No recompile.
+oxide-code's TUI palette is fully user-configurable. Pick one of the bundled Catppuccin or Material palettes, point at a TOML file you wrote yourself, or patch individual color slots on top of any base. No recompile.
 
 ## Quick start
 
@@ -29,11 +29,13 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 | `latte`     | Catppuccin | Light                  |
 | `material`  | Material   | Dark — M2 baseline     |
 
-Each ships as a vendored TOML file under `crates/oxide-code/themes/` and doubles as a copy-paste starting point for custom themes.
+Each ships as a vendored TOML file [in the source tree][themes-src] and doubles as a copy-paste starting point for custom themes.
+
+[themes-src]: https://github.com/hakula139/oxide-code/tree/main/crates/oxide-code/themes
 
 ## Custom theme files
 
-`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`; no other expansion happens — environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) are passed through literally and will fail to read.
+`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`; no other expansion happens — environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) are passed through literally and will fail to read. Relative paths are resolved against the process working directory, not the config file directory; prefer absolute or `~/`-anchored paths.
 
 ```toml
 [tui.theme]
@@ -46,12 +48,12 @@ If the value isn't a built-in name AND can't be read as a file, oxide-code refus
 
 Every `fg` / `bg` value, and every bare-string slot, accepts:
 
-| Form              | Example      | Maps to                           |
-| ----------------- | ------------ | --------------------------------- |
-| 6-digit hex       | `"#cdd6f4"`  | 24-bit RGB                        |
-| ANSI 16 named     | `"red"`      | terminal palette color (see list) |
-| Indexed 256-color | `"ansi:174"` | 256-color palette index           |
-| Terminal default  | `"reset"`    | follows the terminal foreground   |
+| Form              | Example      | Maps to                                                                |
+| ----------------- | ------------ | ---------------------------------------------------------------------- |
+| 6-digit hex       | `"#cdd6f4"`  | 24-bit RGB                                                             |
+| ANSI 16 named     | `"red"`      | terminal palette color (see list)                                      |
+| Indexed 256-color | `"ansi:174"` | 256-color palette index                                                |
+| Terminal default  | `"reset"`    | the terminal default for whichever channel (`fg` or `bg`) it's set to  |
 
 ANSI 16-color names accepted (case-insensitive):
 
@@ -104,6 +106,8 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | Slot      | Role                                                  |
 | --------- | ----------------------------------------------------- |
 | `surface` | Chat / input / status panel background fill (bg-only) |
+
+> **Always declare `surface` as an inline table with `bg`** — e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
 
 ### Semantic accents
 
@@ -194,16 +198,16 @@ Modifier flags use **three-state semantics**:
 | `true`     | sets the bit                        |
 | `false`    | clears the bit                      |
 
-So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) is rejected at parse time as it would silently re-write the base with itself.
+So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base — it would otherwise silently re-write the base with itself, almost certainly a config bug.
 
 ## Errors
 
 Bisected severity:
 
 - **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that can't be read, a file with a parse error in the base body — any of these stop oxide-code at startup with a message identifying what went wrong.
-- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, or its slot name isn't recognized, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
+- **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
 
-The default tracing level is `warn`, so per-slot fallback messages reach stderr without requiring `RUST_LOG`.
+The default tracing level is `warn`, so per-slot fallback messages reach stderr without requiring `RUST_LOG`. In TUI mode the alternate screen hides stderr while ratatui owns the terminal — the warning lines reappear in the scrollback once `ox` exits, or you can capture them with `ox 2> theme.log`.
 
 ## Examples
 

@@ -41,7 +41,7 @@ The direction is simple:
 ### Terminal UI
 
 - Streaming display with markdown rendering and syntax-highlighted code blocks.
-- Runtime-loaded theme files — pick from 4 built-in Catppuccin variants (Mocha default, plus Macchiato / Frappe / Latte) or point at a user TOML, with per-slot overrides on top. Hex / ANSI named / indexed / `reset` color formats supported.
+- Runtime-loaded theme files — pick from 5 built-in palettes (Catppuccin Mocha default, plus Macchiato / Frappe / Latte / Material) or point at a user TOML, with per-slot overrides on top. Hex / ANSI named / indexed / `reset` color formats supported.
 - Per-tool result views:
   - Tool-call blocks with per-tool icons and success / error indicators.
   - GitHub-style Edit diffs with line-number gutters and red / green row tints.
