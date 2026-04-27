@@ -119,7 +119,7 @@ super::for_each_slot!(define_slot_for_name);
 /// - inline-table overrides patch only the fields that appear, so
 ///   `accent = { bold = false }` removes bold from the base accent
 ///   without touching its `fg`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum SlotPatch {
     Bare(String),
@@ -133,7 +133,7 @@ pub(crate) enum SlotPatch {
 /// An entirely empty patch (`error = {}`) would silently re-write
 /// the base value with itself — almost certainly a config bug, so
 /// the custom [`Deserialize`] impl rejects it at parse time.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct InlinePatch {
     fg: Option<String>,
     bg: Option<String>,
@@ -197,14 +197,8 @@ impl SlotPatch {
 
 impl InlinePatch {
     fn apply(&self, base: Slot) -> Result<Slot> {
-        let fg = match &self.fg {
-            Some(s) => Some(parse_color(s)?),
-            None => base.fg,
-        };
-        let bg = match &self.bg {
-            Some(s) => Some(parse_color(s)?),
-            None => base.bg,
-        };
+        let fg = self.fg.as_deref().map(parse_color).transpose()?.or(base.fg);
+        let bg = self.bg.as_deref().map(parse_color).transpose()?.or(base.bg);
         let mut modifiers = base.modifiers;
         for (flag, modifier) in [
             (self.bold, Modifier::BOLD),
