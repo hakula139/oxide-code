@@ -25,6 +25,7 @@ use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::message::Message;
 use crate::tool::ToolMetadata;
+use crate::util::fs::create_private_dir_all;
 use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
@@ -383,35 +384,6 @@ pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
         bail!("{} does not begin with a header", path.display());
     };
     Ok(session_id)
-}
-
-/// Creates `path` (and parents) with owner-only (`0o700`) perms on Unix.
-///
-/// Session files are already `0o600`, but lax parent-dir perms would leak
-/// session IDs, project names, and mtimes via `ls`. Passing the mode to
-/// `DirBuilder` applies it in the create syscall, closing the TOCTOU gap
-/// a post-create `chmod` would leave. Already-existing directories then
-/// get a best-effort tighten (no-op on POSIX-less mounts).
-fn create_private_dir_all(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-            debug!("failed to tighten {} to 0o700: {e}", path.display());
-        }
-    }
-    Ok(())
 }
 
 /// Restrict session IDs to ASCII alphanumerics + `-_`, max 64 chars.

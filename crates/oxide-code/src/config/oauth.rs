@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 
 #[cfg(target_os = "macos")]
 use crate::util::env;
+use crate::util::fs::atomic_write_private;
 use crate::util::lock;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -310,53 +311,6 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
         warn!("failed to update Keychain: {e:#}");
     }
 
-    Ok(())
-}
-
-/// Writes `bytes` to `path` atomically with owner-only (`0o600`) permissions
-/// on Unix. Creates a sibling `.tmp.<uuid>` file then renames — the rename
-/// is atomic on POSIX, so readers always see either the old or new content.
-fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("credentials path has no parent directory")?;
-    let tmp = parent.join(format!(
-        ".{}.tmp.{}",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("creds"),
-        uuid::Uuid::new_v4().simple(),
-    ));
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts
-        .open(&tmp)
-        .with_context(|| format!("failed to create temp file {}", tmp.display()))?;
-
-    let write_result = std::io::Write::write_all(&mut file, bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(anyhow::Error::from);
-
-    if let Err(e) = write_result {
-        _ = std::fs::remove_file(&tmp);
-        return Err(e.context(format!(
-            "failed to write temp credentials {}",
-            tmp.display()
-        )));
-    }
-    drop(file);
-
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e).context(format!(
-            "failed to install credentials at {}",
-            path.display()
-        )));
-    }
     Ok(())
 }
 
