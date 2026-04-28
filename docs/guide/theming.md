@@ -48,12 +48,12 @@ If the value isn't a built-in name AND can't be read as a file, oxide-code refus
 
 Every `fg` / `bg` value, and every bare-string slot, accepts:
 
-| Form              | Example      | Maps to                                                                |
-| ----------------- | ------------ | ---------------------------------------------------------------------- |
-| 6-digit hex       | `"#cdd6f4"`  | 24-bit RGB                                                             |
-| ANSI 16 named     | `"red"`      | terminal palette color (see list)                                      |
-| Indexed 256-color | `"ansi:174"` | 256-color palette index                                                |
-| Terminal default  | `"reset"`    | the terminal default for whichever channel (`fg` or `bg`) it's set to  |
+| Form              | Example      | Maps to                                                               |
+| ----------------- | ------------ | --------------------------------------------------------------------- |
+| 6-digit hex       | `"#cdd6f4"`  | 24-bit RGB                                                            |
+| ANSI 16 named     | `"red"`      | terminal palette color (see list)                                     |
+| Indexed 256-color | `"ansi:174"` | 256-color palette index                                               |
+| Terminal default  | `"reset"`    | the terminal default for whichever channel (`fg` or `bg`) it's set to |
 
 ANSI 16-color names accepted (case-insensitive):
 
@@ -207,7 +207,12 @@ Bisected severity:
 - **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that can't be read, a file with a parse error in the base body — any of these stop oxide-code at startup with a message identifying what went wrong.
 - **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
 
-The default tracing level is `warn`, so per-slot fallback messages reach stderr without requiring `RUST_LOG`. In TUI mode the alternate screen hides stderr while ratatui owns the terminal — the warning lines reappear in the scrollback once `ox` exits, or you can capture them with `ox 2> theme.log`.
+The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
+
+- **TUI** — diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame.
+- **Bare REPL / headless / `--list`** — diagnostics go to stderr, the natural CLI surface.
+
+Set `RUST_LOG=info` (or `debug`) for more detail. The same routing applies in both modes.
 
 ## Examples
 
