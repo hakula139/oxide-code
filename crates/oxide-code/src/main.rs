@@ -105,19 +105,16 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Route diagnostics to stderr — `fmt()` defaults to stdout, which
-    // would mix logs with program output (and corrupt the TUI's
-    // alternate screen). Floor the level at `warn` so theme-override
-    // fallbacks, OAuth refresh failures, and API retries surface
-    // without `RUST_LOG`; `RUST_LOG`, when set, still wins via
-    // `try_from_default_env`.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    // Decide mode before subscriber init so the writer can match it.
+    // TUI mode routes tracing into a file under `$XDG_STATE_HOME` so
+    // diagnostics never bleed onto the alternate screen; every other
+    // mode keeps stderr (its natural surface for command-line output).
+    let tui_mode =
+        !cli.no_tui && cli.prompt.is_none() && !cli.list && std::io::stdout().is_terminal();
+    // Bind for the function lifetime so the appender's worker thread
+    // keeps flushing right up to the final teardown warning. `None` in
+    // stderr modes — no async worker to drain.
+    let _log_guard = util::log::init_tracing(tui_mode)?;
 
     // Handle --list before loading config (no API access needed).
     if cli.list {

@@ -100,7 +100,8 @@ pub(crate) fn spawn<S>(
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
             // Expected failure mode: transient network hiccup, rate-limit,
             // or Haiku returning non-JSON. The first-prompt title stays in
-            // the file and in the status bar; the user never sees this.
+            // the file and in the status bar; the warning lands away from
+            // the rendered frame — see `crate::util::log::init_tracing`.
             warn!("AI title generation failed: {e}");
         }
     });

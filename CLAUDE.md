@@ -111,6 +111,7 @@ ox                                          # Start an interactive session
 └── util/
     ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
+    ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     └── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
 ```
 
