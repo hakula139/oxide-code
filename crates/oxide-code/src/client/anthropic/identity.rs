@@ -23,7 +23,11 @@ const ID_LEN: usize = 64;
 /// Loads the persisted device id, minting and writing one if absent.
 /// Filesystem failures fall back to an ephemeral id with a `warn!`.
 pub(super) fn load_or_create_device_id() -> String {
-    match try_load_or_create() {
+    fallback_to_ephemeral(try_load_or_create())
+}
+
+fn fallback_to_ephemeral(result: Result<String>) -> String {
+    match result {
         Ok(id) => id,
         Err(e) => {
             warn!("device-id storage unavailable, using ephemeral id: {e:#}");
@@ -107,6 +111,20 @@ mod tests {
         assert!(is_valid_id(&id), "{id}");
     }
 
+    // ── fallback_to_ephemeral ──
+
+    #[test]
+    fn fallback_to_ephemeral_returns_persisted_id_on_ok() {
+        let persisted = "a".repeat(64);
+        assert_eq!(fallback_to_ephemeral(Ok(persisted.clone())), persisted);
+    }
+
+    #[test]
+    fn fallback_to_ephemeral_mints_fresh_id_on_err() {
+        let id = fallback_to_ephemeral(Err(anyhow::anyhow!("disk full")));
+        assert!(is_valid_id(&id), "fallback mints a valid id: {id}");
+    }
+
     // ── try_load_or_create_at ──
 
     #[test]
@@ -149,6 +167,18 @@ mod tests {
         assert!(
             chain.contains("/dev/null"),
             "actionable path in error: {chain}"
+        );
+    }
+
+    #[test]
+    fn try_load_or_create_at_errors_on_path_without_parent() {
+        // Empty path: read_existing returns None (NotFound), then
+        // `.parent()` is None, exercising the "no parent" branch.
+        let err = try_load_or_create_at(Path::new("")).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("no parent"),
+            "actionable error for parentless path: {chain}"
         );
     }
 

@@ -199,4 +199,26 @@ mod tests {
             "actionable error: {chain}"
         );
     }
+
+    #[test]
+    fn atomic_write_private_cleans_up_temp_when_rename_fails() {
+        // POSIX `rename(file, existing_dir)` errors with EISDIR; the
+        // function must remove the temp file rather than leak it.
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+
+        let err = atomic_write_private(&target, b"x").unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("failed to install file"),
+            "actionable error: {chain}"
+        );
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp cleaned up: {leftovers:?}");
+    }
 }
