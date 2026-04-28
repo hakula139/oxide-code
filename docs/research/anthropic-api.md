@@ -36,7 +36,7 @@ OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
 ## Required Headers and Parameters
 
-Three things are required for OAuth tokens to work with non-Haiku models:
+Four things make up the canonical claude-code request shape. The first two are OAuth-load-bearing — their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request and are additionally fingerprinted by strict 3P re-distribution gateways (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 ### 1. Beta headers
 
@@ -117,7 +117,7 @@ The API validates that the **first non-attribution text block** matches one of t
 Claude Code prepends an attribution header as the very first system block:
 
 ```json
-{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.87.a3f; cc_entrypoint=cli; cch=1b4e2;"}
+{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.121.91c; cc_entrypoint=cli; cch=8f81f;"}
 ```
 
 Format: `x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>; cch=<HASH>;`
@@ -166,6 +166,8 @@ x-app: cli
 ```
 
 The `User-Agent` must start with `claude-cli/`. Claude Code constructs it as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
+
+The Stainless TS SDK auto-emits a richer fingerprint alongside these — `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, `-retry-count` — which 1P accepts as advisory but strict 3P gateways treat as load-bearing. See [Third-Party Gateway Validation](#third-party-gateway-validation) for the full set and rejection paths.
 
 ## What Happens Without These
 
