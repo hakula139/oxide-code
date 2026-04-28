@@ -1,0 +1,53 @@
+# Catppuccin Mocha — oxide-code's default theme.
+# https://github.com/catppuccin/catppuccin
+
+# Text hierarchy
+text = "#cdd6f4"
+muted = "#6c7086"
+dim = "#585b70"
+
+# Surfaces
+surface = { bg = "reset" }
+
+# Semantic accents
+accent = { fg = "#89b4fa", bold = true }
+user = "#fab387"
+assistant = "#b4befe"
+
+# Status indicators
+info = "#89dceb"
+success = "#a6e3a1"
+warning = "#f9e2af"
+error = "#f38ba8"
+
+# Code
+code = "#94e2d5"
+inline_code = "#fab387"
+
+# Diff backgrounds
+diff_add = { bg = "#2a3a37" }
+diff_del = { bg = "#382c34" }
+
+# Markdown headings
+heading_h1 = { fg = "#cdd6f4", bold = true, underlined = true }
+heading_h2 = { fg = "#cdd6f4", bold = true }
+heading_h3 = { fg = "#cdd6f4", bold = true, italic = true }
+heading_minor = { fg = "#cdd6f4", italic = true }
+
+# Markdown body
+thinking = { fg = "#585b70", italic = true }
+link = { fg = "#89b4fa", underlined = true }
+blockquote = "#a6e3a1"
+list_marker = "#89b4fa"
+
+# Markdown chrome
+horizontal_rule = "#585b70"
+table_header = { fg = "#cdd6f4", bold = true }
+table_border = "#585b70"
+
+# UI chrome
+tool_border = "#6c7086"
+tool_icon = "#89b4fa"
+border_focused = "#89b4fa"
+border_unfocused = "#585b70"
+separator = "#585b70"

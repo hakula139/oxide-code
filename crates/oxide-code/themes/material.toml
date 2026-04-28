@@ -1,0 +1,59 @@
+# Material Design 2 — baseline dark theme.
+# https://m2.material.io/design/color/dark-theme.html
+# Palette: https://m2.material.io/design/color/the-color-system.html
+#
+# Colors are taken directly from Google's M2 baseline dark scheme and
+# the Material 200-tone palette (recommended for dark surfaces).
+
+# Text hierarchy (M2 dark emphasis: 87% / 60% / 38% white)
+text = "#dedede"
+muted = "#999999"
+dim = "#616161"
+
+# Surfaces
+# M2 dark theme baseline surface (elevation 0). Override to "reset"
+# to inherit the terminal background instead.
+surface = { bg = "#121212" }
+
+# Semantic accents (M2 dark theme baseline primary, Material 200-tone)
+accent = { fg = "#bb86fc", bold = true }
+user = "#ffab91"
+assistant = "#ce93d8"
+
+# Status indicators (Material 200-tone palette + M2 dark error)
+info = "#80deea"
+success = "#a5d6a7"
+warning = "#ffe082"
+error = "#cf6679"
+
+# Code (M2 dark theme baseline secondary)
+code = "#03dac6"
+inline_code = "#ffab91"
+
+# Diff backgrounds (subtle dark tints, harmonized with success / error hues)
+diff_add = { bg = "#1f3329" }
+diff_del = { bg = "#3a1f25" }
+
+# Markdown headings
+heading_h1 = { fg = "#dedede", bold = true, underlined = true }
+heading_h2 = { fg = "#dedede", bold = true }
+heading_h3 = { fg = "#dedede", bold = true, italic = true }
+heading_minor = { fg = "#dedede", italic = true }
+
+# Markdown body
+thinking = { fg = "#616161", italic = true }
+link = { fg = "#82b1ff", underlined = true }
+blockquote = "#a5d6a7"
+list_marker = "#bb86fc"
+
+# Markdown chrome
+horizontal_rule = "#424242"
+table_header = { fg = "#dedede", bold = true }
+table_border = "#424242"
+
+# UI chrome
+tool_border = "#999999"
+tool_icon = "#bb86fc"
+border_focused = "#bb86fc"
+border_unfocused = "#424242"
+separator = "#424242"

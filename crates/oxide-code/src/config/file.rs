@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::tui::theme::SlotPatch;
 use crate::util::path::xdg_dir;
 
 const USER_CONFIG_DIR: &str = "ox";
@@ -24,6 +26,12 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 ///
 /// [tui]
 /// show_thinking = true
+///
+/// [tui.theme]
+/// base = "latte"
+///
+/// [tui.theme.overrides]
+/// error = "#ff0000"
 /// ```
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +61,20 @@ pub(super) struct ClientConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
     pub(super) show_thinking: Option<bool>,
+    pub(super) theme: Option<ThemeFileConfig>,
+}
+
+/// Theme settings (`[tui.theme]` section).
+///
+/// `base` selects a built-in name (`mocha`, `macchiato`, `frappe`,
+/// `latte`) or a filesystem path (`~/.config/ox/themes/dark.toml`)
+/// to a TOML body. The `[tui.theme.overrides]` table patches
+/// individual slots on top of the resolved base.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ThemeFileConfig {
+    pub(super) base: Option<String>,
+    pub(super) overrides: Option<HashMap<String, SlotPatch>>,
 }
 
 // ── Merge ──
@@ -81,13 +103,31 @@ impl ClientConfig {
 }
 
 impl TuiConfig {
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "signature must match merge_section's fn(T, T) -> T"
-    )]
     fn merge(self, other: Self) -> Self {
         Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
+            theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
+        }
+    }
+}
+
+impl ThemeFileConfig {
+    /// Merge two theme configs. `base` follows the standard "other
+    /// wins" rule. `overrides` are merged key-by-key — each side
+    /// contributes its slot patches; on key collision, `other` wins
+    /// so a project-level patch overrides a user-level patch for
+    /// the same slot.
+    fn merge(self, other: Self) -> Self {
+        let overrides = match (self.overrides, other.overrides) {
+            (Some(mut s), Some(o)) => {
+                s.extend(o);
+                Some(s)
+            }
+            (s, o) => o.or(s),
+        };
+        Self {
+            base: other.base.or(self.base),
+            overrides,
         }
     }
 }
@@ -202,6 +242,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
+                theme: None,
             }),
         };
         let other = FileConfig {
@@ -215,6 +256,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
         };
         let merged = base.merge(other);
@@ -250,6 +292,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
         };
         let merged = base.merge(FileConfig::default());
@@ -282,6 +325,7 @@ mod tests {
             client: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                theme: None,
             }),
         };
         let merged = base.merge(other);
@@ -300,6 +344,65 @@ mod tests {
         assert!(merged.tui.is_none());
     }
 
+    // ── ThemeFileConfig::merge ──
+
+    fn theme_with(base: Option<&str>, overrides: &[(&str, &str)]) -> ThemeFileConfig {
+        ThemeFileConfig {
+            base: base.map(str::to_owned),
+            overrides: (!overrides.is_empty()).then(|| {
+                overrides
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), SlotPatch::Bare((*v).to_owned())))
+                    .collect()
+            }),
+        }
+    }
+
+    #[test]
+    fn theme_merge_other_base_wins_over_self() {
+        let base = theme_with(Some("mocha"), &[]);
+        let other = theme_with(Some("latte"), &[]);
+        let merged = base.merge(other);
+        assert_eq!(merged.base.as_deref(), Some("latte"));
+    }
+
+    #[test]
+    fn theme_merge_overrides_extend_when_both_set() {
+        // Project (other) extends user (self) — disjoint slots
+        // contribute from both layers.
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = theme_with(None, &[("accent", "#bbbbbb")]);
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("merged overrides present");
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("error"), "user-level slot survives");
+        assert!(map.contains_key("accent"), "project-level slot lands");
+    }
+
+    #[test]
+    fn theme_merge_other_override_wins_on_slot_collision() {
+        // Same slot patched in both layers — `other` (higher priority,
+        // typically the project file) wins for that slot.
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = theme_with(None, &[("error", "#bbbbbb")]);
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("merged overrides present");
+        let patch = map.get("error").expect("error patch present");
+        assert!(
+            matches!(patch, SlotPatch::Bare(value) if value == "#bbbbbb"),
+            "project patch wins on collision; got {patch:?}",
+        );
+    }
+
+    #[test]
+    fn theme_merge_overrides_pass_through_when_one_side_is_none() {
+        let base = theme_with(None, &[("error", "#aaaaaa")]);
+        let other = ThemeFileConfig::default();
+        let merged = base.merge(other);
+        let map = merged.overrides.expect("base overrides survive");
+        assert!(map.contains_key("error"));
+    }
+
     // ── load_file ──
 
     #[test]
@@ -308,7 +411,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            indoc! {r#"
+            indoc! {r##"
                 [client]
                 api_key = "sk-test"
                 model = "claude-test"
@@ -317,7 +420,14 @@ mod tests {
 
                 [tui]
                 show_thinking = true
-            "#},
+
+                [tui.theme]
+                base = "latte"
+
+                [tui.theme.overrides]
+                error = "#ff0000"
+                accent = { bold = false }
+            "##},
         )
         .unwrap();
 
@@ -333,6 +443,12 @@ mod tests {
 
         let tui = config.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+
+        let theme = tui.theme.expect("theme section should be present");
+        assert_eq!(theme.base.as_deref(), Some("latte"));
+        let overrides = theme.overrides.expect("overrides should parse");
+        assert!(overrides.contains_key("error"));
+        assert!(overrides.contains_key("accent"));
     }
 
     #[test]

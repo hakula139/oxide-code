@@ -55,6 +55,7 @@ impl App {
         reason = "ctor wires the full surface (display config, IPC channels, resumed state, tool registry); a builder would obscure which dependencies App owns"
     )]
     pub(crate) fn new(
+        theme: &Theme,
         model: String,
         show_thinking: bool,
         cwd: String,
@@ -65,7 +66,6 @@ impl App {
         history_metadata: &HashMap<String, ToolMetadata>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-        let theme = Theme::default();
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
         let mut status_bar = StatusBar::new(theme, model, cwd);
@@ -332,6 +332,7 @@ mod tests {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(8);
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
+            &Theme::default(),
             "test-model".to_owned(),
             false,
             "~/test".to_owned(),

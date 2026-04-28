@@ -14,6 +14,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::tui::theme::{self, Theme};
 use crate::util::env;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
@@ -160,6 +161,10 @@ pub(crate) struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
+    /// Resolved TUI theme — base + per-slot overrides applied at
+    /// load time. Theme-selection errors hard-fail; per-slot value
+    /// errors warn and fall back to the base value.
+    pub(crate) theme: Theme,
 }
 
 impl Config {
@@ -174,6 +179,7 @@ impl Config {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
         let tui = fc.tui.unwrap_or_default();
+        let theme_config = tui.theme.unwrap_or_default();
 
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
@@ -229,6 +235,11 @@ impl Config {
             None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
         };
 
+        let theme = theme::resolve_theme(
+            theme_config.base.as_deref(),
+            &theme_config.overrides.unwrap_or_default(),
+        )?;
+
         Ok(Self {
             auth,
             base_url,
@@ -238,6 +249,7 @@ impl Config {
             prompt_cache_ttl,
             thinking,
             show_thinking,
+            theme,
         })
     }
 }
@@ -303,9 +315,9 @@ mod tests {
     fn effort_rejects_unknown_tokens_with_actionable_error() {
         let err = "extra-high".parse::<Effort>().expect_err("unknown token");
         let msg = format!("{err:#}");
-        assert!(msg.contains("extra-high"), "names the input: {msg}");
+        assert!(msg.contains("extra-high"), "{msg}");
         for token in ["low", "medium", "high", "xhigh", "max"] {
-            assert!(msg.contains(token), "lists {token}: {msg}");
+            assert!(msg.contains(token), "{token}: {msg}");
         }
     }
 
@@ -588,6 +600,31 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid config at"), "{msg}");
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+    }
+
+    /// Theme-resolution failures from `[tui.theme]` must propagate
+    /// out of `Config::load` instead of getting swallowed — the user
+    /// needs to see *which* theme name is broken, not a downstream
+    /// "no credentials"-style misdirection.
+    #[tokio::test]
+    async fn load_propagates_theme_resolution_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [tui.theme]
+                base = "no-such-theme"
+            "#},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("unknown theme name must propagate");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no-such-theme"), "{msg}");
+        assert!(
+            msg.contains("not a built-in name") || msg.contains("failed to read"),
+            "{msg}",
+        );
     }
 
     // ── Config::load / effort resolution ──

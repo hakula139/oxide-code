@@ -1,0 +1,53 @@
+# Catppuccin Frappe — medium variant.
+# https://github.com/catppuccin/catppuccin
+
+# Text hierarchy
+text = "#c6d0f5"
+muted = "#737994"
+dim = "#626880"
+
+# Surfaces
+surface = { bg = "reset" }
+
+# Semantic accents
+accent = { fg = "#8caaee", bold = true }
+user = "#ef9f76"
+assistant = "#babbf1"
+
+# Status indicators
+info = "#99d1db"
+success = "#a6d189"
+warning = "#e5c890"
+error = "#e78284"
+
+# Code
+code = "#81c8be"
+inline_code = "#ef9f76"
+
+# Diff backgrounds
+diff_add = { bg = "#344037" }
+diff_del = { bg = "#41323d" }
+
+# Markdown headings
+heading_h1 = { fg = "#c6d0f5", bold = true, underlined = true }
+heading_h2 = { fg = "#c6d0f5", bold = true }
+heading_h3 = { fg = "#c6d0f5", bold = true, italic = true }
+heading_minor = { fg = "#c6d0f5", italic = true }
+
+# Markdown body
+thinking = { fg = "#626880", italic = true }
+link = { fg = "#8caaee", underlined = true }
+blockquote = "#a6d189"
+list_marker = "#8caaee"
+
+# Markdown chrome
+horizontal_rule = "#626880"
+table_header = { fg = "#c6d0f5", bold = true }
+table_border = "#626880"
+
+# UI chrome
+tool_border = "#737994"
+tool_icon = "#8caaee"
+border_focused = "#8caaee"
+border_unfocused = "#626880"
+separator = "#626880"

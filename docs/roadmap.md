@@ -41,7 +41,8 @@ The direction is simple:
 ### Terminal UI
 
 - Streaming display with markdown rendering and syntax-highlighted code blocks.
-- Catppuccin Mocha theme with per-tool result views:
+- Runtime-loaded theme files — pick from 5 built-in palettes (Catppuccin Mocha default, plus Macchiato / Frappe / Latte / Material) or point at a user TOML, with per-slot overrides on top. Hex / ANSI named / indexed / `reset` color formats supported.
+- Per-tool result views:
   - Tool-call blocks with per-tool icons and success / error indicators.
   - GitHub-style Edit diffs with line-number gutters and red / green row tints.
   - Styled Read excerpts with line-numbered bodies and path / range headers.
@@ -62,7 +63,6 @@ The direction is simple:
 ### Terminal UI
 
 - Viewport virtualization for long conversations after the richer result views and block measurement hooks are in place.
-- Runtime-loaded theme files so users can pick a built-in palette or override individual color slots without recompiling.
 
 ### Tool & Prompt Enhancements
 

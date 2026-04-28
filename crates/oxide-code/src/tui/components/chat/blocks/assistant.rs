@@ -62,7 +62,7 @@ pub(super) fn render_assistant_markdown(
     ctx: &RenderCtx<'_>,
     starts_new_turn: bool,
 ) -> Vec<Line<'static>> {
-    let icon_style = ctx.theme.secondary();
+    let icon_style = ctx.theme.assistant();
     let md_width = usize::from(ctx.width).saturating_sub(ASSISTANT_PREFIX.width());
     let rendered = render_markdown(text, ctx.theme, md_width);
     rendered
@@ -146,7 +146,6 @@ fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static>
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use ratatui::style::Style;
 
     use super::super::BAR;
     use super::*;
@@ -189,7 +188,7 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
             .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, Some(theme.code));
+        assert_eq!(fence_line.style.fg, theme.code.fg);
     }
 
     // ── AssistantThinking::render ──
@@ -223,7 +222,7 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("let x = 1;")))
             .expect("fence body line missing from render");
-        assert_eq!(fence_line.style.fg, Some(theme.code));
+        assert_eq!(fence_line.style.fg, theme.code.fg);
 
         let first_span = fence_line.spans.first().expect("empty fence line");
         assert_eq!(first_span.content, THINKING_PREFIX);
@@ -237,10 +236,10 @@ mod tests {
         let theme = Theme::default();
         let line = Line::from(vec![
             Span::raw("plain "),
-            Span::styled("code", Style::default().fg(theme.code)),
+            Span::styled("code", theme.code()),
         ]);
         let out = apply_thinking_style(line, &theme);
         assert_eq!(out.spans[0].style.fg, theme.thinking().fg);
-        assert_eq!(out.spans[1].style.fg, Some(theme.code));
+        assert_eq!(out.spans[1].style.fg, theme.code.fg);
     }
 }

@@ -86,6 +86,24 @@ model = "claude-opus-4-7[1m]"
 
 On Opus 4.7, `show_thinking = true` additionally opts the request into `thinking.display = "summarized"` so the API streams reasoning text; otherwise the 4.7 default (`"omitted"`) applies and the UI sees nothing until the final answer starts.
 
+### `[tui.theme]` — Terminal theme
+
+| Key         | Type   | Default   | Description                                      |
+| ----------- | ------ | --------- | ------------------------------------------------ |
+| `base`      | string | `"mocha"` | Built-in theme name OR filesystem path to a TOML |
+| `overrides` | table  | —         | Per-slot patches applied on top of the base      |
+
+```toml
+[tui.theme]
+base = "latte"
+
+[tui.theme.overrides]
+error = "#ff0000"
+accent = { bold = false }
+```
+
+See [Theming](theming.md) for the full slot reference, color value formats (hex, ANSI names, indexed, `reset`), and override semantics.
+
 ## Authentication
 
 oxide-code checks three credential sources in order:

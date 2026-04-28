@@ -265,9 +265,9 @@ mod tests {
 
         let row = &out[0];
         assert_eq!(row.spans[0].style.bg, None, "bar prefix must stay clear");
-        assert_eq!(row.spans[1].style.bg, Some(theme.diff_add_bg));
-        assert_eq!(row.spans[2].style.bg, Some(theme.diff_add_bg));
-        assert_eq!(row.spans[3].style.bg, Some(theme.diff_add_bg));
+        assert_eq!(row.spans[1].style.bg, theme.diff_add.bg);
+        assert_eq!(row.spans[2].style.bg, theme.diff_add.bg);
+        assert_eq!(row.spans[3].style.bg, theme.diff_add.bg);
     }
 
     #[test]
@@ -302,7 +302,7 @@ mod tests {
             "trailing pad span must be spaces only, got {:?}",
             last.content,
         );
-        assert_eq!(last.style.bg, Some(theme.diff_del_bg));
+        assert_eq!(last.style.bg, theme.diff_del.bg);
     }
 
     #[test]
@@ -357,7 +357,7 @@ mod tests {
             assert_eq!(total, 20, "every wrapped row must reach ctx.width");
             assert_eq!(
                 line.spans.last().unwrap().style.bg,
-                Some(theme.diff_del_bg),
+                theme.diff_del.bg,
                 "trailing span on every line must carry row bg",
             );
         }

@@ -69,9 +69,9 @@ pub(crate) struct ChatView {
 }
 
 impl ChatView {
-    pub(crate) fn new(theme: Theme, show_thinking: bool) -> Self {
+    pub(crate) fn new(theme: &Theme, show_thinking: bool) -> Self {
         Self {
-            theme,
+            theme: theme.clone(),
             show_thinking,
             blocks: Vec::new(),
             streaming: None,
@@ -345,7 +345,9 @@ impl Component for ChatView {
         )]
         let height = text.lines.len().min(u16::MAX as usize) as u16;
         self.content_height.set(height);
-        let paragraph = Paragraph::new(text).scroll((self.scroll_offset, 0));
+        let paragraph = Paragraph::new(text)
+            .style(self.theme.surface())
+            .scroll((self.scroll_offset, 0));
         frame.render_widget(paragraph, area);
     }
 }
@@ -441,12 +443,12 @@ impl ChatView {
     fn advance_streaming_cache(&mut self) {
         let continues = self.streaming_continues_turn();
         let width = self.viewport_width;
-        let theme = self.theme;
+        let theme = &self.theme;
         let show_thinking = self.show_thinking;
         if let Some(s) = &mut self.streaming {
             let ctx = RenderCtx {
                 width,
-                theme: &theme,
+                theme,
                 show_thinking,
             };
             s.advance_cache(&ctx, continues);
@@ -503,7 +505,7 @@ mod tests {
     // ── Fixtures ──
 
     fn test_chat() -> ChatView {
-        ChatView::new(Theme::default(), true)
+        ChatView::new(&Theme::default(), true)
     }
 
     fn test_tools() -> ToolRegistry {
@@ -943,7 +945,7 @@ mod tests {
 
     #[test]
     fn load_history_hides_resumed_thinking_when_show_thinking_disabled() {
-        let mut chat = ChatView::new(Theme::default(), false);
+        let mut chat = ChatView::new(&Theme::default(), false);
         chat.load_history(
             &[Message {
                 role: Role::Assistant,
@@ -1301,7 +1303,7 @@ mod tests {
 
     #[test]
     fn append_thinking_token_hidden_when_disabled() {
-        let mut chat = ChatView::new(Theme::default(), false);
+        let mut chat = ChatView::new(&Theme::default(), false);
         chat.append_thinking_token("pondering...");
         let text = all_text(&chat);
         assert!(!text.contains("Thinking..."));
@@ -2405,7 +2407,7 @@ mod tests {
 
     #[test]
     fn render_history_with_resumed_thinking_block() {
-        let mut chat = ChatView::new(Theme::default(), true);
+        let mut chat = ChatView::new(&Theme::default(), true);
         let tools = test_tools();
         let history = vec![
             Message::user("hello"),

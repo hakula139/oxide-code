@@ -16,7 +16,7 @@ use super::theme::Theme;
 pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let parser = Parser::new_ext(input, options);
-    let mut renderer = MarkdownRenderer::new(parser, *theme, width);
+    let mut renderer = MarkdownRenderer::new(parser, theme, width);
     renderer.run();
     Text::from(renderer.lines)
 }

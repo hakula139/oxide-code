@@ -41,7 +41,7 @@ pub(crate) struct InputArea {
 }
 
 impl InputArea {
-    pub(crate) fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: &Theme) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
@@ -51,7 +51,7 @@ impl InputArea {
         textarea.set_block(Block::default());
 
         Self {
-            theme,
+            theme: theme.clone(),
             textarea,
             enabled: true,
             last_width: Cell::new(0),
@@ -129,7 +129,8 @@ impl Component for InputArea {
 
         let block = Block::default()
             .borders(Borders::TOP)
-            .border_style(border_style);
+            .border_style(border_style)
+            .style(self.theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -250,7 +251,7 @@ mod tests {
     use super::*;
 
     fn test_input() -> InputArea {
-        InputArea::new(Theme::default())
+        InputArea::new(&Theme::default())
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -411,7 +412,7 @@ mod tests {
         // Enable/disable only changes per-cell styling, which a text-only
         // snapshot collapses. Inspect the buffer directly instead.
         let theme = Theme::default();
-        let mut input = InputArea::new(theme);
+        let mut input = InputArea::new(&theme);
         type_text(&mut input, "pending");
 
         let enabled_fg = render_to_backend(&input, 60, 3)

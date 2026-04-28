@@ -105,8 +105,18 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Route diagnostics to stderr — `fmt()` defaults to stdout, which
+    // would mix logs with program output (and corrupt the TUI's
+    // alternate screen). Floor the level at `warn` so theme-override
+    // fallbacks, OAuth refresh failures, and API retries surface
+    // without `RUST_LOG`; `RUST_LOG`, when set, still wins via
+    // `try_from_default_env`.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     // Handle --list before loading config (no API access needed).
@@ -117,6 +127,7 @@ async fn async_main() -> Result<()> {
     let config = Config::load().await?;
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
+    let theme = config.theme.clone();
 
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
@@ -150,7 +161,7 @@ async fn async_main() -> Result<()> {
         .await;
     }
 
-    run_tui(&client, &model, show_thinking, tools, resumed).await
+    run_tui(&client, &model, show_thinking, &theme, tools, resumed).await
 }
 
 // ── Session Helpers ──
@@ -240,6 +251,7 @@ async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
+    theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
 ) -> Result<()> {
@@ -269,6 +281,7 @@ async fn run_tui(
 
     let mut terminal = tui::terminal::init()?;
     let mut app = tui::app::App::new(
+        theme,
         display_model,
         show_thinking,
         cwd,
