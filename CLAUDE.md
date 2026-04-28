@@ -31,9 +31,10 @@ ox                                          # Start an interactive session
 ├── client/
 │   ├── anthropic.rs                        # Anthropic Messages API client (Client struct + streaming)
 │   └── anthropic/
-│       ├── betas.rs                        # Per-request `anthropic-beta` header computation, 1P / [1m] gating
+│       ├── betas.rs                        # Per-request `anthropic-beta` header computation, [1m] gating
 │       ├── billing.rs                      # Anthropic billing attestation (fingerprint, cch hash, x-anthropic-billing-header)
 │       ├── completion.rs                   # Non-streaming `Client::complete` + body builder for one-shots
+│       ├── identity.rs                     # Per-machine `device_id` for `metadata.user_id` — lazy mint + persist at $XDG_DATA_HOME/ox/user-id
 │       ├── sse.rs                          # SSE pump, frame parsing, API-error formatting
 │       ├── testing.rs                      # Cfg-test fixtures shared by client, agent, and title_generator tests
 │       └── wire.rs                         # Request / response wire types (CreateMessageRequest, StreamEvent, etc.)
@@ -110,6 +111,7 @@ ox                                          # Start an interactive session
 ├── util.rs                                 # Shared utilities module root
 └── util/
     ├── env.rs                              # Environment-variable helpers (`string`, `bool`: empty-is-absent semantics)
+    ├── fs.rs                               # Filesystem helpers — `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     └── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
