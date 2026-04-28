@@ -1,8 +1,7 @@
 //! Filesystem helpers shared across modules that persist private state.
 //!
-//! Both helpers tighten Unix permissions in the create syscall (rather
-//! than `chmod`-ing afterwards) so the temp window where a wider mode
-//! is observable closes inside the kernel.
+//! Permissions are tightened in the create syscall, not via post-create
+//! `chmod`, so no temp window with a wider mode is observable.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -13,11 +12,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 /// Creates `path` (and parents) with owner-only (`0o700`) perms on Unix.
-///
-/// Lax parent-dir perms would leak filenames, mtimes, and project names
-/// via `ls`, so we set the mode in `DirBuilder` (closing the TOCTOU gap
-/// a post-create `chmod` would leave) and then best-effort tighten an
-/// already-existing directory.
+/// Existing directories are tightened best-effort.
 pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -40,9 +35,8 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes `bytes` to `path` atomically with owner-only (`0o600`) permissions
-/// on Unix. Creates a sibling `.tmp.<uuid>` file then renames — the rename
-/// is atomic on POSIX, so readers always see either the old or new content.
+/// Writes `bytes` to `path` atomically with owner-only (`0o600`) perms
+/// on Unix via sibling `.tmp.<uuid>` + POSIX rename.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -122,6 +116,33 @@ mod tests {
         assert_eq!(mode, 0o700, "expected 0o700, got {mode:o}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_tightens_lax_existing_directory() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("lax");
+        fs::DirBuilder::new().mode(0o755).create(&target).unwrap();
+        create_private_dir_all(&target).unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "existing dir tightened: {mode:o}");
+    }
+
+    #[test]
+    fn create_private_dir_all_errors_with_actionable_path_when_parent_is_a_file() {
+        let dir = tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"").unwrap();
+        let target = blocker.join("nested");
+        let err = create_private_dir_all(&target).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("failed to create") && chain.contains("nested"),
+            "actionable error: {chain}"
+        );
+    }
+
     // ── atomic_write_private ──
 
     #[test]
@@ -155,5 +176,27 @@ mod tests {
             .filter(|n| n.to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_private_errors_when_parent_is_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("does/not/exist/file");
+        let err = atomic_write_private(&path, b"x").unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("failed to create temp file"),
+            "actionable error: {chain}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_private_errors_when_path_has_no_parent() {
+        let err = atomic_write_private(Path::new("/"), b"x").unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("no parent directory"),
+            "actionable error: {chain}"
+        );
     }
 }

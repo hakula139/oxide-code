@@ -1,13 +1,9 @@
 //! Per-request `anthropic-beta` header computation.
 //!
-//! Every beta ships independent of the base URL — the
-//! `prompt-caching-scope-2026-01-05` header in particular goes out
-//! unconditionally because 3P re-distribution proxies fingerprint its
-//! absence as "not from claude-code". The body-side
-//! `cache_control.scope: "global"` field is the only 1P-only knob, and
-//! it lives on [`is_first_party_base_url`] / [`static_prefix_cache_control`].
-//! The header without the field is a server-side no-op but keeps the
-//! canonical wire fingerprint intact for the verifier.
+//! All betas ship base-URL-independent — `prompt-caching-scope` goes
+//! out unconditionally to keep the wire fingerprint intact. The
+//! body-side `cache_control.scope: "global"` is the only 1P-only
+//! knob; see [`is_first_party_base_url`] / [`static_prefix_cache_control`].
 
 use crate::config::{Auth, PromptCacheTtl};
 
@@ -56,10 +52,8 @@ pub(super) fn compute_betas(
         out.push(OAUTH_BETA_HEADER);
     }
 
-    // Order matches claude-code 2.1.121 wire captures: interleaved-thinking
-    // → context-management → prompt-caching-scope → effort. 3P proxies
-    // fingerprint this exact ordering, so even commutative reordering
-    // can flip the verifier from accept to reject.
+    // Order matches the claude-code 2.1.121 wire capture; 3P
+    // fingerprints exact ordering, so reordering can flip accept→reject.
     if is_agentic {
         if caps.interleaved_thinking {
             out.push(INTERLEAVED_THINKING_BETA_HEADER);
@@ -67,13 +61,9 @@ pub(super) fn compute_betas(
         if caps.context_management {
             out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
         }
-        // Prompt-caching scope is the beta that enables `scope: "global"`
-        // on `cache_control`. claude-code emits the header
-        // unconditionally; the body-side `scope: "global"` field is
-        // separately gated on `is_first_party_base_url` because 3P
-        // gateways reject it (tools taint the cache prefix). Sending
-        // the header without the field is a server-side no-op but
-        // matches the canonical wire fingerprint.
+        // Header ships unconditionally; body-side `scope: "global"`
+        // is gated on `is_first_party_base_url` (3P rejects scope
+        // downstream of tools). Header alone is a server-side no-op.
         out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
         if caps.effort {
             out.push(EFFORT_BETA_HEADER);
@@ -177,12 +167,8 @@ mod tests {
 
     #[test]
     fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
-        // Plain model (no `[1m]` tag) must not auto-enable 1M context —
-        // a gateway without 1M access would 400. The exact-equality
-        // assertion locks beta order to claude-code 2.1.121's wire
-        // capture: identity / auth → interleaved-thinking → context-
-        // management → prompt-caching-scope → effort. 3P proxies
-        // fingerprint this ordering.
+        // Plain model (no `[1m]` tag) must not auto-enable 1M context.
+        // Exact-equality locks the wire-capture order; 3P fingerprints it.
         let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
         assert_eq!(
             betas,

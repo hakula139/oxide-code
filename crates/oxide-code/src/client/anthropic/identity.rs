@@ -1,18 +1,8 @@
-//! Stable per-machine `device_id` sent in `metadata.user_id`.
+//! Per-machine `device_id` sent in `metadata.user_id.device_id`.
 //!
-//! Mirrors claude-code's `getOrCreateUserID` (`utils/config.ts:1757`):
-//! 64 lowercase hex chars (32 random bytes), generated lazily on first
-//! use and persisted under `$XDG_DATA_HOME/ox/user-id`. 3P proxies
-//! fingerprint absence and malformed shape, not the value itself, so
-//! a fresh ox-private id satisfies the verifier without depending on
-//! claude-code's `~/.claude.json#userID` (which is private to that
-//! tool's keychain and not meant to be shared).
-//!
-//! Never panics on filesystem errors: a missing or unwritable XDG dir
-//! falls back to an in-memory id so the request still ships with a
-//! valid shape. The 3P verifier checks shape, not persistence — a
-//! per-process id costs only a tiny amount of cache fragmentation
-//! upstream and is strictly better than missing.
+//! 64 lowercase hex chars persisted at `$XDG_DATA_HOME/ox/user-id`,
+//! lazily minted on first use. Filesystem failure degrades to an
+//! in-memory id rather than blocking client construction.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -30,9 +20,8 @@ const DATA_DIR: &str = "ox";
 const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
 
-/// Loads the persisted device id, generating and writing one if it
-/// does not yet exist. Filesystem failures degrade to a fresh ephemeral
-/// id rather than failing client construction.
+/// Loads the persisted device id, minting and writing one if absent.
+/// Filesystem failures fall back to an ephemeral id with a `warn!`.
 pub(super) fn load_or_create_device_id() -> String {
     match try_load_or_create() {
         Ok(id) => id,
@@ -45,13 +34,17 @@ pub(super) fn load_or_create_device_id() -> String {
 
 fn try_load_or_create() -> Result<String> {
     let path = device_id_path().context("cannot determine device-id storage location")?;
-    if let Some(existing) = read_existing(&path)? {
+    try_load_or_create_at(&path)
+}
+
+fn try_load_or_create_at(path: &Path) -> Result<String> {
+    if let Some(existing) = read_existing(path)? {
         return Ok(existing);
     }
     let parent = path.parent().context("device-id path has no parent")?;
     create_private_dir_all(parent)?;
     let id = generate();
-    atomic_write_private(&path, id.as_bytes())?;
+    atomic_write_private(path, id.as_bytes())?;
     Ok(id)
 }
 
@@ -64,10 +57,9 @@ fn device_id_path() -> Option<PathBuf> {
     )
 }
 
-/// Returns the trimmed contents of `path` when it exists *and* parses
-/// as a 64-char lowercase hex string. Anything else — missing file,
-/// truncated write from a crash, accidental hand-edit — is treated as
-/// "no id present" so the caller mints a fresh one.
+/// `Some(id)` only when `path` exists and parses as 64-char lowercase
+/// hex; missing, malformed, or non-UTF-8 content returns `None` so
+/// the caller mints fresh.
 fn read_existing(path: &Path) -> Result<Option<String>> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -87,8 +79,6 @@ fn is_valid_id(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// 32 random bytes (two UUID v4s), hex-encoded → 64 lowercase hex chars.
-/// `Uuid::new_v4` pulls from `getrandom`, which uses the OS CSPRNG.
 fn generate() -> String {
     let mut buf = String::with_capacity(ID_LEN);
     let a = Uuid::new_v4().into_bytes();
@@ -110,52 +100,80 @@ mod tests {
     // ── load_or_create_device_id ──
 
     #[test]
-    fn load_or_create_device_id_persists_across_calls() {
+    fn load_or_create_device_id_returns_valid_id_under_normal_env() {
+        // Without forcing env, exercises `device_id_path` + the happy
+        // path of `try_load_or_create_at`. Doesn't override XDG_DATA_HOME
+        // because parallel `Client::new()` calls in other tests would
+        // race on the same tempdir.
+        let id = load_or_create_device_id();
+        assert!(is_valid_id(&id), "{id}");
+    }
+
+    // ── try_load_or_create_at ──
+
+    #[test]
+    fn try_load_or_create_at_persists_across_calls() {
         let dir = tempdir().unwrap();
-        let id1 = temp_env::with_var(
-            "XDG_DATA_HOME",
-            Some(dir.path().to_string_lossy().into_owned()),
-            load_or_create_device_id,
-        );
-        let id2 = temp_env::with_var(
-            "XDG_DATA_HOME",
-            Some(dir.path().to_string_lossy().into_owned()),
-            load_or_create_device_id,
-        );
-        assert!(is_valid_id(&id1), "first id valid: {id1}");
+        let path = dir.path().join("ox/user-id");
+        let id1 = try_load_or_create_at(&path).unwrap();
+        let id2 = try_load_or_create_at(&path).unwrap();
+        assert!(is_valid_id(&id1));
         assert_eq!(id1, id2, "second call returns the persisted id");
     }
 
     #[test]
-    fn load_or_create_device_id_writes_to_xdg_data_home() {
+    fn try_load_or_create_at_writes_id_to_path() {
         let dir = tempdir().unwrap();
-        let id = temp_env::with_var(
-            "XDG_DATA_HOME",
-            Some(dir.path().to_string_lossy().into_owned()),
-            load_or_create_device_id,
-        );
-        let on_disk = fs::read_to_string(dir.path().join("ox/user-id")).unwrap();
+        let path = dir.path().join("ox/user-id");
+        let id = try_load_or_create_at(&path).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
         assert_eq!(on_disk.trim(), id);
     }
 
     #[test]
-    fn load_or_create_device_id_replaces_invalid_persisted_value() {
-        // A truncated or hand-edited file must be treated as "no id"
-        // so the verifier sees a well-formed value instead of the
-        // garbage on disk.
+    fn try_load_or_create_at_replaces_invalid_persisted_value() {
         let dir = tempdir().unwrap();
-        let target = dir.path().join("ox/user-id");
-        create_private_dir_all(target.parent().unwrap()).unwrap();
-        atomic_write_private(&target, b"not-a-valid-id").unwrap();
-
-        let id = temp_env::with_var(
-            "XDG_DATA_HOME",
-            Some(dir.path().to_string_lossy().into_owned()),
-            load_or_create_device_id,
-        );
-        assert!(is_valid_id(&id), "minted id valid: {id}");
-        let on_disk = fs::read_to_string(&target).unwrap();
+        let path = dir.path().join("ox/user-id");
+        create_private_dir_all(path.parent().unwrap()).unwrap();
+        atomic_write_private(&path, b"not-a-valid-id").unwrap();
+        let id = try_load_or_create_at(&path).unwrap();
+        assert!(is_valid_id(&id));
+        let on_disk = fs::read_to_string(&path).unwrap();
         assert_eq!(on_disk.trim(), id, "invalid value rewritten");
+    }
+
+    #[test]
+    fn try_load_or_create_at_propagates_unwritable_parent_as_error() {
+        // `/dev/null/user-id` — parent is a regular file, can't `mkdir`.
+        let path = Path::new("/dev/null/ox/user-id");
+        let err = try_load_or_create_at(path).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("/dev/null"),
+            "actionable path in error: {chain}"
+        );
+    }
+
+    // ── read_existing ──
+
+    #[test]
+    fn read_existing_propagates_io_error_other_than_not_found() {
+        // Reading a directory as a file errors with IsADirectory (not NotFound).
+        let dir = tempdir().unwrap();
+        let err = read_existing(dir.path()).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("failed to read device id"),
+            "wrap message: {chain}"
+        );
+    }
+
+    #[test]
+    fn read_existing_returns_none_for_non_utf8_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("user-id");
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+        assert!(read_existing(&path).unwrap().is_none());
     }
 
     // ── is_valid_id ──

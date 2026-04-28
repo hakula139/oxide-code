@@ -91,7 +91,7 @@ impl Client {
 /// [`supports_structured_outputs`].
 #[expect(
     clippy::too_many_arguments,
-    reason = "wire fields are conceptually distinct (model, prompts, auth, identifiers, output shape); a wrapper struct would just rename them at the call site"
+    reason = "8 distinct wire fields; a wrapper struct would just rename them"
 )]
 fn build_completion_body(
     model: &str,

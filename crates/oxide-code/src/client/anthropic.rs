@@ -44,23 +44,14 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Matches the installed Claude Code version. Captured wire shape is
-/// pinned against 2.1.121; keep the `User-Agent` / `cc_version` claim
-/// aligned with the latest packaged release.
+/// Pinned to the latest packaged claude-code release; gateways
+/// reject pre-allowlist versions.
 const CLAUDE_CLI_VERSION: &str = "2.1.121";
-
-/// `@anthropic-ai/sdk` package version as shipped by claude-code 2.1.121.
-/// 3P re-distribution proxies inspect `x-stainless-package-version`
-/// to gate "official Stainless SDK" traffic.
+/// `@anthropic-ai/sdk` version shipped by the pinned claude-code release.
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
-
-/// Node.js runtime version baked into the claude-code release; the
-/// Stainless SDK reports `process.version` here, so a constant string
-/// is sufficient — we don't ship a real Node runtime.
+/// Node.js version the Stainless SDK reports as `process.version`.
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
-
-/// Stainless per-request timeout in seconds. Matches the SDK default
-/// observed on captured 2.1.121 traffic.
+/// Stainless per-request timeout matching the SDK default.
 const STAINLESS_TIMEOUT_SECS: &str = "600";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
@@ -73,18 +64,13 @@ pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
-    /// Stable per-machine identifier sent in `metadata.user_id.device_id`
-    /// so 3P proxies see the canonical claude-code shape. Loaded once at
-    /// construction (lazy create + persist under `$XDG_DATA_HOME/ox`),
-    /// then forwarded into every request body.
+    /// Per-machine id sent in `metadata.user_id.device_id`, lazily
+    /// minted under `$XDG_DATA_HOME/ox/user-id` at construction.
     device_id: String,
     /// Whether `config.base_url` points at the first-party Anthropic
-    /// API. Computed once at construction so per-request paths don't
-    /// re-parse the URL — the value gates `cache_control.scope: "global"`,
-    /// which 3P gateways reject when tools render before system blocks
-    /// and taint the cache prefix. The matching `prompt-caching-scope`
-    /// beta header still ships unconditionally to preserve the canonical
-    /// wire fingerprint (header without field is a server-side no-op).
+    /// API. Cached at construction so per-request paths don't re-parse
+    /// the URL — gates `cache_control.scope: "global"`, which 3P
+    /// gateways reject downstream of tool definitions.
     is_first_party: bool,
 }
 
@@ -123,9 +109,7 @@ impl Client {
             HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
         );
 
-        // Client identification, mirroring Claude Code's Stainless SDK —
-        // 3P re-distribution proxies fingerprint absence of the full
-        // header set as "not from Stainless" and reject the request.
+        // 3P gateways fingerprint absence of the full Stainless header set.
         headers.insert("x-app", HeaderValue::from_static("cli"));
         headers.insert(
             "x-claude-code-session-id",
@@ -212,10 +196,8 @@ impl Client {
             None => messages.to_vec(),
         };
 
-        // Ship the billing attestation on every outbound request, not
-        // just OAuth. claude-code emits this block under both auth
-        // modes; 3P re-distribution proxies treat absence of the cch
-        // hash as a missing client signature and reject the request.
+        // 3P gateways reject API-key traffic without the cch
+        // attestation, so the billing block ships under both auth modes.
         let billing_header = {
             let fingerprint = billing::compute_fingerprint(
                 first_user_text(&effective_messages),
@@ -283,14 +265,9 @@ impl Client {
 
 /// Builds the `metadata.user_id` field as a stringified JSON object.
 ///
-/// Field order and presence mirrors claude-code 2.1.121 wire captures:
-/// `device_id`, `account_uuid`, `session_id`. `account_uuid` is empty
-/// on API-key auth and only populated for OAuth subscribers.
-///
-/// Using a typed struct (rather than `serde_json::json!`) keeps the
-/// field order on the wire matching the source declaration — `json!`
-/// ships fields alphabetically without the `preserve_order` feature,
-/// and 3P proxies reject anything but the canonical claude-code order.
+/// Field order matters: gateways reject anything but `device_id,
+/// account_uuid, session_id`. A typed struct (not `serde_json::json!`)
+/// preserves declaration order on the wire — `json!` would alphabetize.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {
@@ -901,12 +878,9 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_billing_block_ships_under_both_auth_modes_with_cch_populated() {
-        // claude-code emits the billing header on every outbound
-        // request, regardless of auth mode. 3P re-distribution proxies
-        // treat absence of the cch hash as a missing client signature
-        // and reject the request, so API-key auth must ship the same
-        // attestation block as OAuth — with the `cch=00000` placeholder
-        // replaced by the computed xxHash64.
+        // 3P gateways reject API-key requests without the cch
+        // attestation, so the billing block must ship under both
+        // auth modes with the placeholder replaced by xxHash64.
         for auth in [api_key(), oauth()] {
             let server = MockServer::start().await;
             let body_sink: Captured<String> = captured();
@@ -995,14 +969,9 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // Mock server URIs are third-party by definition. The
-        // `prompt-caching-scope` beta header now ships unconditionally
-        // (3P proxies fingerprint absence as "not from claude-code"),
-        // but the `cache_control.scope: "global"` body field stays
-        // gated on `is_first_party_base_url` because 3P gateways
-        // reject the scope when tool definitions render before
-        // system blocks and taint the cache prefix. The header alone
-        // is a server-side no-op without the field.
+        // On 3P, the `prompt-caching-scope` beta still ships (gateway
+        // fingerprints absence) but the body-side `scope: "global"`
+        // is dropped (gateway rejects the scope downstream of tools).
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -1223,11 +1192,8 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // `metadata.user_id` is a stringified JSON object on the wire
-        // (not a nested object) — round-trip check keeps the
-        // double-encoding explicit. Field order must be
-        // `device_id, account_uuid, session_id` to match claude-code;
-        // an alphabetical (BTreeMap) reordering trips 3P verification.
+        // Field order must be `device_id, account_uuid, session_id` —
+        // `serde_json::json!` would alphabetize and trip 3P validation.
         let meta = build_metadata("dev-1", "abc-123");
         assert_eq!(
             meta.user_id,
