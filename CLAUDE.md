@@ -200,7 +200,7 @@ ox                                          # Start an interactive session
 - Do not request review from the PR author (GitHub rejects it).
 - Descriptions follow `.github/pull_request_template.md`:
   - Prose intro summarizing what and why.
-  - Per-file Changes table (for non-trivial PRs).
+  - Per-file Changes table (for non-trivial PRs). Drop the `crates/<crate>/src/` prefix on crate sources (e.g. `tool/glob.rs`, not `crates/oxide-code/src/tool/glob.rs`); keep the full path for repo-root files (`CLAUDE.md`, `Cargo.toml`, `docs/...`, `.cspell/...`).
   - Test plan checklist.
 - PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.
 
@@ -232,7 +232,13 @@ cargo build                                        # Build
 cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
 cargo test                                         # Run tests
 cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
+pnpm lint                                          # Lint Markdown
+pnpm spellcheck                                    # Spell check
 ```
+
+The `pnpm` checks gate the `node-check` CI job. Run them before any
+commit that touches Markdown, doc comments, or string literals — a
+new word in a doc comment fails `cspell` just like one in `README.md`.
 
 ### Mutation testing
 
