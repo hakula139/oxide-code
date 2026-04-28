@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn build_completion_body_routes_session_id_into_metadata() {
+    fn build_completion_body_routes_device_and_session_ids_into_metadata() {
         let body = build_completion_body(
             "claude-haiku-4-5",
             "",

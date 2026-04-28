@@ -185,6 +185,14 @@ mod tests {
     // ── read_existing ──
 
     #[test]
+    fn read_existing_treats_non_utf8_content_as_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("user-id");
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+        assert!(read_existing(&path).unwrap().is_none());
+    }
+
+    #[test]
     fn read_existing_propagates_io_error_other_than_not_found() {
         // Reading a directory as a file errors with IsADirectory (not NotFound).
         let dir = tempdir().unwrap();
@@ -194,14 +202,6 @@ mod tests {
             chain.contains("failed to read device id"),
             "wrap message: {chain}"
         );
-    }
-
-    #[test]
-    fn read_existing_returns_none_for_non_utf8_bytes() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("user-id");
-        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
-        assert!(read_existing(&path).unwrap().is_none());
     }
 
     // ── is_valid_id ──

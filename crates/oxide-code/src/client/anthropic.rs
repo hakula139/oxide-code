@@ -1150,6 +1150,19 @@ mod tests {
         );
     }
 
+    // ── build_metadata ──
+
+    #[test]
+    fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
+        // Field order must be `device_id, account_uuid, session_id` —
+        // `serde_json::json!` would alphabetize and trip 3P validation.
+        let meta = build_metadata("dev-1", "abc-123");
+        assert_eq!(
+            meta.user_id,
+            r#"{"device_id":"dev-1","account_uuid":"","session_id":"abc-123"}"#,
+        );
+    }
+
     // ── build_system_blocks ──
 
     #[test]
@@ -1185,19 +1198,6 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
         assert_eq!(blocks[1].text, "only-content");
-    }
-
-    // ── build_metadata ──
-
-    #[test]
-    fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // Field order must be `device_id, account_uuid, session_id` —
-        // `serde_json::json!` would alphabetize and trip 3P validation.
-        let meta = build_metadata("dev-1", "abc-123");
-        assert_eq!(
-            meta.user_id,
-            r#"{"device_id":"dev-1","account_uuid":"","session_id":"abc-123"}"#,
-        );
     }
 
     // ── normalize_platform ──
