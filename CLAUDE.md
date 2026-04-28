@@ -236,9 +236,9 @@ pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
 ```
 
-The `pnpm` checks gate the `node-check` CI job. Run them before any
-commit that touches Markdown, doc comments, or string literals — a
-new word in a doc comment fails `cspell` just like one in `README.md`.
+The `pnpm` checks gate the `node-check` CI job. `cspell` covers Rust
+sources too, so a new word in a doc comment fails the same way as one
+in `README.md`.
 
 ### Mutation testing
 
