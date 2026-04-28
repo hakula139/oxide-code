@@ -84,7 +84,7 @@ Key rules:
 - **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
 - **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
-- **`prompt-caching-scope` requires a 1P base URL** — the beta only matters when a block carries `cache_control.scope: "global"`, which 3P gateways reject (see [Prompt Caching Scope](#prompt-caching-scope)). oxide-code gates the header on `is_first_party_base_url()` so requests going through a gateway ship neither the scope field nor its beta.
+- **`prompt-caching-scope` ships unconditionally** — the header alone is a server-side no-op without a `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()`, since 3P gateways reject the scope field downstream of tool definitions (see [Prompt Caching Scope](#prompt-caching-scope)).
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
 - **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. The per-level ceiling (`xhigh` on 4.7, `max` on Opus 4.6 / 4.7) is separately encoded in `Capabilities::effort_xhigh` / `effort_max`.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op — the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
@@ -207,12 +207,12 @@ Tool definitions render before system blocks. If any earlier block carries a nar
 
 ### oxide-code gating
 
-oxide-code gates `scope: "global"` on `is_first_party_base_url(&config.base_url)`:
+oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request (3P gateways fingerprint its absence) and gates only the body-side `cache_control.scope` on `is_first_party_base_url(&config.base_url)`:
 
-- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}` + `prompt-caching-scope-2026-01-05` beta.
-- Any other host (gateways, self-hosted, malformed URLs) → `{"type": "ephemeral"}`; the beta is dropped since it's a no-op without the scope field.
+- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}`.
+- Any other host (gateways, self-hosted, malformed URLs) → `{"type": "ephemeral"}`. The header still ships; without the scope field it's a server-side no-op.
 
-The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the two 1P-only elements toggle.
+The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the body-side `scope` field toggles.
 
 This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party by that check.
 

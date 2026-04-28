@@ -233,10 +233,8 @@ impl Client {
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Gated on the same capability flag as the
-            // `context-management-2025-06-27` beta header so body and
-            // header stay in sync — claude-code 2.1.119 ships them
-            // together on every 4.6+ agentic request.
+            // Body and header stay in sync — claude-code 2.1.119 ships
+            // both on every 4.6+ agentic request.
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
@@ -395,6 +393,7 @@ mod tests {
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::billing::build_billing_header;
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
@@ -1155,14 +1154,14 @@ mod tests {
 
     #[test]
     fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let billing = "x-anthropic-billing-header: cc_version=2.1.119; cch=00000;";
+        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc");
         let cache = CacheControl {
             r#type: "ephemeral",
             scope: Some("global"),
             ttl: Some("1h"),
         };
         let blocks = build_system_blocks(
-            Some(billing),
+            Some(&billing),
             [("static body", Some(cache)), ("dynamic body", None)],
         );
 

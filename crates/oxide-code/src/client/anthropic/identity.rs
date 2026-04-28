@@ -100,11 +100,9 @@ mod tests {
     // ── load_or_create_device_id ──
 
     #[test]
-    fn load_or_create_device_id_returns_valid_id_under_normal_env() {
-        // Without forcing env, exercises `device_id_path` + the happy
-        // path of `try_load_or_create_at`. Doesn't override XDG_DATA_HOME
-        // because parallel `Client::new()` calls in other tests would
-        // race on the same tempdir.
+    fn load_or_create_device_id_produces_valid_id_under_normal_env() {
+        // Doesn't override XDG_DATA_HOME because parallel `Client::new()`
+        // calls in other tests would race on the same tempdir.
         let id = load_or_create_device_id();
         assert!(is_valid_id(&id), "{id}");
     }
@@ -179,7 +177,7 @@ mod tests {
     // ── is_valid_id ──
 
     #[test]
-    fn is_valid_id_rejects_uppercase_and_non_hex() {
+    fn is_valid_id_accepts_only_64_lowercase_hex_chars() {
         assert!(is_valid_id(&"a".repeat(64)));
         assert!(!is_valid_id(&"A".repeat(64)), "rejects uppercase");
         assert!(!is_valid_id(&"g".repeat(64)), "rejects non-hex");
