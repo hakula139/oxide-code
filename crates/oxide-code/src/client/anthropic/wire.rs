@@ -115,9 +115,10 @@ impl OutputFormat {
 
 /// Top-level `metadata` object on every outbound request.
 ///
-/// `user_id` is a stringified JSON object containing `session_id` (and
-/// optionally `device_id` / `account_uuid`). The API receives it as a
-/// flat string, not a nested object.
+/// `user_id` is a stringified JSON object with the canonical claude-code
+/// shape `{device_id, account_uuid, session_id}`; field order is part of
+/// the wire fingerprint. The API receives it as a flat string, not a
+/// nested object.
 #[derive(Serialize)]
 pub(super) struct RequestMetadata {
     pub(super) user_id: String,

@@ -15,6 +15,7 @@
 mod betas;
 mod billing;
 mod completion;
+mod identity;
 mod sse;
 pub(crate) mod wire;
 
@@ -43,10 +44,15 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Matches the installed Claude Code version. The rest of this PR is
-/// pinned against 2.1.119 packet captures; keep the wire
-/// `User-Agent` / `cc_version` claim aligned.
-const CLAUDE_CLI_VERSION: &str = "2.1.119";
+/// Pinned to the latest packaged claude-code release; gateways
+/// reject pre-allowlist versions.
+const CLAUDE_CLI_VERSION: &str = "2.1.121";
+/// `@anthropic-ai/sdk` version shipped by the pinned claude-code release.
+const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
+/// Node.js version the Stainless SDK reports as `process.version`.
+const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
+/// Stainless per-request timeout matching the SDK default.
+const STAINLESS_TIMEOUT_SECS: &str = "600";
 
 /// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
 /// models with OAuth tokens unless the system prompt starts with this exact
@@ -58,17 +64,20 @@ pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
+    /// Per-machine id sent in `metadata.user_id.device_id`, lazily
+    /// minted under `$XDG_DATA_HOME/ox/user-id` at construction.
+    device_id: String,
     /// Whether `config.base_url` points at the first-party Anthropic
-    /// API. Computed once at construction so per-request paths don't
-    /// re-parse the URL — the value gates the `prompt-caching-scope`
-    /// beta and `cache_control.scope: "global"`, which 3P gateways
-    /// reject.
+    /// API. Cached at construction so per-request paths don't re-parse
+    /// the URL — gates `cache_control.scope: "global"`, which 3P
+    /// gateways reject downstream of tool definitions.
     is_first_party: bool,
 }
 
 impl Client {
     pub(crate) fn new(config: Config, session_id: Option<String>) -> Result<Self> {
         let session_id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let device_id = identity::load_or_create_device_id();
         let is_first_party = betas::is_first_party_base_url(&config.base_url);
         let mut headers = HeaderMap::new();
 
@@ -100,14 +109,22 @@ impl Client {
             HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
         );
 
-        // Client identification, mirroring Claude Code's Stainless SDK —
-        // third-party gateways may check for their presence.
+        // 3P gateways fingerprint absence of the full Stainless header set.
         headers.insert("x-app", HeaderValue::from_static("cli"));
         headers.insert(
             "x-claude-code-session-id",
             HeaderValue::from_str(&session_id)?,
         );
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+        headers.insert(
+            "x-stainless-package-version",
+            HeaderValue::from_static(STAINLESS_PACKAGE_VERSION),
+        );
+        headers.insert("x-stainless-runtime", HeaderValue::from_static("node"));
+        headers.insert(
+            "x-stainless-runtime-version",
+            HeaderValue::from_static(STAINLESS_RUNTIME_VERSION),
+        );
         headers.insert(
             "x-stainless-os",
             HeaderValue::from_static(normalize_platform(std::env::consts::OS)),
@@ -116,6 +133,11 @@ impl Client {
             "x-stainless-arch",
             HeaderValue::from_static(normalize_arch(std::env::consts::ARCH)),
         );
+        headers.insert(
+            "x-stainless-timeout",
+            HeaderValue::from_static(STAINLESS_TIMEOUT_SECS),
+        );
+        headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
         // No whole-request timeout — assistant responses can legitimately
         // run for minutes. The 60 s read timeout catches slowloris dribble;
@@ -131,6 +153,7 @@ impl Client {
             http,
             config,
             session_id,
+            device_id,
             is_first_party,
         })
     }
@@ -173,13 +196,15 @@ impl Client {
             None => messages.to_vec(),
         };
 
-        let billing_header = matches!(self.config.auth, Auth::OAuth(_)).then(|| {
+        // 3P gateways reject API-key traffic without the cch
+        // attestation, so the billing block ships under both auth modes.
+        let billing_header = {
             let fingerprint = billing::compute_fingerprint(
                 first_user_text(&effective_messages),
                 CLAUDE_CLI_VERSION,
             );
             billing::build_billing_header(CLAUDE_CLI_VERSION, &fingerprint)
-        });
+        };
 
         let (static_sections, dynamic_sections) = split_at_boundary(system_sections);
         let static_joined = static_sections.join("\n\n");
@@ -188,7 +213,7 @@ impl Client {
         let static_cache_control =
             static_prefix_cache_control(self.is_first_party, self.config.prompt_cache_ttl);
         let system_blocks = build_system_blocks(
-            billing_header.as_deref(),
+            Some(&billing_header),
             [
                 (static_joined.as_str(), Some(static_cache_control)),
                 (dynamic_joined.as_str(), None),
@@ -203,15 +228,13 @@ impl Client {
             model: betas::api_model_id(&self.config.model),
             max_tokens: self.config.max_tokens,
             stream: true,
-            metadata: build_metadata(&self.session_id),
+            metadata: build_metadata(&self.device_id, &self.session_id),
             system: system_blocks,
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Gated on the same capability flag as the
-            // `context-management-2025-06-27` beta header so body and
-            // header stay in sync — claude-code 2.1.119 ships them
-            // together on every 4.6+ agentic request.
+            // Body and header stay in sync — claude-code 2.1.119 ships
+            // both on every 4.6+ agentic request.
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
@@ -219,22 +242,13 @@ impl Client {
         })
         .context("failed to serialize request")?;
 
-        if billing_header.is_some() {
-            body = billing::inject_cch(&body)?;
-        }
+        body = billing::inject_cch(&body)?;
 
         debug!(body_len = body.len(), "sending API request");
 
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
-        let betas = compute_betas(
-            &self.config.model,
-            &self.config.auth,
-            true,
-            false,
-            self.is_first_party,
-        )
-        .join(",");
+        let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
 
         tokio::spawn(async move {
             let result = stream_sse(&http, &url, betas, body, &tx).await;
@@ -248,8 +262,24 @@ impl Client {
 }
 
 /// Builds the `metadata.user_id` field as a stringified JSON object.
-fn build_metadata(session_id: &str) -> RequestMetadata {
-    let user_id = serde_json::json!({ "session_id": session_id }).to_string();
+///
+/// Field order matters: gateways reject anything but `device_id,
+/// account_uuid, session_id`. A typed struct (not `serde_json::json!`)
+/// preserves declaration order on the wire — `json!` would alphabetize.
+fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
+    #[derive(serde::Serialize)]
+    struct UserId<'a> {
+        device_id: &'a str,
+        account_uuid: &'a str,
+        session_id: &'a str,
+    }
+
+    let user_id = serde_json::to_string(&UserId {
+        device_id,
+        account_uuid: "",
+        session_id,
+    })
+    .expect("UserId fields are owned `str`s with no serialization failure modes");
     RequestMetadata { user_id }
 }
 
@@ -363,6 +393,7 @@ mod tests {
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use super::billing::build_billing_header;
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
@@ -845,10 +876,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_billing_block_is_oauth_only_with_cch_populated() {
-        // OAuth must inject the billing header and replace the
-        // `cch=00000` placeholder; API-key auth must do neither.
-        for (auth, expect_billing) in [(api_key(), false), (oauth(), true)] {
+    async fn stream_message_billing_block_ships_under_both_auth_modes_with_cch_populated() {
+        // 3P gateways reject API-key requests without the cch
+        // attestation, so the billing block must ship under both
+        // auth modes with the placeholder replaced by xxHash64.
+        for auth in [api_key(), oauth()] {
             let server = MockServer::start().await;
             let body_sink: Captured<String> = captured();
             let sink_clone = std::sync::Arc::clone(&body_sink);
@@ -878,14 +910,11 @@ mod tests {
             .unwrap();
 
             let body = body_sink.lock().unwrap().clone().expect("body captured");
-            let has_billing = body.contains("x-anthropic-billing-header:");
-            assert_eq!(
-                has_billing, expect_billing,
-                "billing block presence: {body}"
+            assert!(
+                body.contains("x-anthropic-billing-header:"),
+                "billing block must ship under both auth modes: {body}",
             );
-            if expect_billing {
-                assert!(!body.contains("cch=00000"), "cch populated: {body}");
-            }
+            assert!(!body.contains("cch=00000"), "cch populated: {body}");
         }
     }
 
@@ -938,12 +967,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_third_party_base_url_drops_global_scope_and_its_beta() {
-        // Mock server URIs are third-party by definition. Pin both
-        // halves of the 3P request shape: the static-prefix
-        // cache_control must be `{"type":"ephemeral"}` only, and the
-        // `prompt-caching-scope` beta must be absent. Regressing
-        // either half is exactly how PR #22's gateway 400 fired.
+    async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
+        // On 3P, the `prompt-caching-scope` beta still ships (gateway
+        // fingerprints absence) but the body-side `scope: "global"`
+        // is dropped (gateway rejects the scope downstream of tools).
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -979,18 +1006,21 @@ mod tests {
 
         let (body, beta) = sink.lock().unwrap().clone().expect("request captured");
         assert!(
-            !beta.contains("prompt-caching-scope-2026-01-05"),
-            "prompt-caching-scope beta absent on 3P: {beta}",
+            beta.contains("prompt-caching-scope-2026-01-05"),
+            "prompt-caching-scope beta ships on 3P for fingerprint parity: {beta}",
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let system = v["system"].as_array().expect("system array");
-        // [0] identity prefix (no cache_control), [1] static joined.
-        assert_eq!(system[0]["text"], SYSTEM_PROMPT_PREFIX);
+        // [0] billing header, [1] identity prefix, [2] static joined.
         assert!(
-            system[0].get("cache_control").is_none(),
-            "identity prefix carries no cache_control: {body}",
+            system[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("x-anthropic-billing-header:"),
+            "billing header occupies system[0]: {body}",
         );
-        let cc = &system[1]["cache_control"];
+        assert_eq!(system[1]["text"], SYSTEM_PROMPT_PREFIX);
+        let cc = &system[2]["cache_control"];
         assert_eq!(cc["type"], "ephemeral");
         assert!(
             cc.get("scope").is_none(),
@@ -1120,18 +1150,31 @@ mod tests {
         );
     }
 
+    // ── build_metadata ──
+
+    #[test]
+    fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
+        // Field order must be `device_id, account_uuid, session_id` —
+        // `serde_json::json!` would alphabetize and trip 3P validation.
+        let meta = build_metadata("dev-1", "abc-123");
+        assert_eq!(
+            meta.user_id,
+            r#"{"device_id":"dev-1","account_uuid":"","session_id":"abc-123"}"#,
+        );
+    }
+
     // ── build_system_blocks ──
 
     #[test]
     fn build_system_blocks_orders_billing_then_identity_then_extras() {
-        let billing = "x-anthropic-billing-header: cc_version=2.1.119; cch=00000;";
+        let billing = build_billing_header(CLAUDE_CLI_VERSION, "abc");
         let cache = CacheControl {
             r#type: "ephemeral",
             scope: Some("global"),
             ttl: Some("1h"),
         };
         let blocks = build_system_blocks(
-            Some(billing),
+            Some(&billing),
             [("static body", Some(cache)), ("dynamic body", None)],
         );
 
@@ -1155,18 +1198,6 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, SYSTEM_PROMPT_PREFIX);
         assert_eq!(blocks[1].text, "only-content");
-    }
-
-    // ── build_metadata ──
-
-    #[test]
-    fn build_metadata_wraps_session_id_in_stringified_json() {
-        // `metadata.user_id` is a stringified JSON object on the wire
-        // (not a nested object) — round-trip check keeps the
-        // double-encoding explicit.
-        let meta = build_metadata("abc-123");
-        let parsed: serde_json::Value = serde_json::from_str(&meta.user_id).unwrap();
-        assert_eq!(parsed["session_id"], "abc-123");
     }
 
     // ── normalize_platform ──

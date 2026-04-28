@@ -40,6 +40,7 @@ impl Client {
             user,
             max_tokens,
             &self.config.auth,
+            &self.device_id,
             &self.session_id,
             effective_format,
         )?;
@@ -47,17 +48,8 @@ impl Client {
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         debug!(model, body_len = body.len(), "sending completion request");
 
-        // is_first_party threaded for signature symmetry with stream_message;
-        // one-shots are unaffected because compute_betas only consults the flag
-        // on the agentic branch.
-        let betas = compute_betas(
-            model,
-            &self.config.auth,
-            false,
-            effective_format.is_some(),
-            self.is_first_party,
-        )
-        .join(",");
+        let betas =
+            compute_betas(model, &self.config.auth, false, effective_format.is_some()).join(",");
         let response = self
             .http
             .post(&url)
@@ -97,12 +89,17 @@ impl Client {
 ///
 /// The caller is expected to have pre-gated `output_format` against
 /// [`supports_structured_outputs`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "8 distinct wire fields; a wrapper struct would just rename them"
+)]
 fn build_completion_body(
     model: &str,
     system: &str,
     user: &str,
     max_tokens: u32,
     auth: &Auth,
+    device_id: &str,
     session_id: &str,
     output_format: Option<&OutputFormat>,
 ) -> Result<String> {
@@ -120,7 +117,7 @@ fn build_completion_body(
         model: api_model_id(model),
         max_tokens,
         stream: false,
-        metadata: build_metadata(session_id),
+        metadata: build_metadata(device_id, session_id),
         system: system_blocks,
         tools: None,
         thinking: None,
@@ -429,9 +426,17 @@ mod tests {
 
     #[test]
     fn build_completion_body_omits_tools_thinking_and_output_config_by_default() {
-        let body =
-            build_completion_body("claude-haiku-4-5", "sys", "hi", 40, &api_key(), "sid", None)
-                .unwrap();
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "sys",
+            "hi",
+            40,
+            &api_key(),
+            "did",
+            "sid",
+            None,
+        )
+        .unwrap();
         let v = parse_body(&body);
         assert_eq!(v["model"], "claude-haiku-4-5");
         assert_eq!(v["max_tokens"], 40);
@@ -457,6 +462,7 @@ mod tests {
             "hi",
             40,
             &api_key(),
+            "did",
             "sid",
             None,
         )
@@ -474,6 +480,7 @@ mod tests {
             "Fix login",
             40,
             &oauth(),
+            "did",
             "sid",
             None,
         )
@@ -493,8 +500,17 @@ mod tests {
     fn build_completion_body_empty_system_keeps_identity_prefix_alone() {
         // Identity prefix must survive even without a caller-supplied
         // system prompt — non-Haiku OAuth requires it in block 0.
-        let body = build_completion_body("claude-haiku-4-5", "", "hi", 40, &api_key(), "sid", None)
-            .unwrap();
+        let body = build_completion_body(
+            "claude-haiku-4-5",
+            "",
+            "hi",
+            40,
+            &api_key(),
+            "did",
+            "sid",
+            None,
+        )
+        .unwrap();
         let v = parse_body(&body);
         let system = v["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
@@ -516,6 +532,7 @@ mod tests {
             "hi",
             40,
             &api_key(),
+            "did",
             "sid",
             Some(&fmt),
         )
@@ -526,13 +543,14 @@ mod tests {
     }
 
     #[test]
-    fn build_completion_body_routes_session_id_into_metadata() {
+    fn build_completion_body_routes_device_and_session_ids_into_metadata() {
         let body = build_completion_body(
             "claude-haiku-4-5",
             "",
             "hi",
             40,
             &api_key(),
+            "did-456",
             "sid-789",
             None,
         )
@@ -540,6 +558,10 @@ mod tests {
         assert!(
             body.contains("sid-789"),
             "session_id threads into metadata.user_id: {body}",
+        );
+        assert!(
+            body.contains("did-456"),
+            "device_id threads into metadata.user_id: {body}",
         );
     }
 

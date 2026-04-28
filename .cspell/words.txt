@@ -20,6 +20,7 @@ disambiguable
 dtolnay
 frappe
 EACCES
+EISDIR
 ENOTDIR
 ESRCH
 feff

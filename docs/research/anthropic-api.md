@@ -36,7 +36,7 @@ OAuth requests use `Authorization: Bearer <token>` (not `x-api-key`).
 
 ## Required Headers and Parameters
 
-Three things are required for OAuth tokens to work with non-Haiku models:
+Four things make up the canonical claude-code request shape. The first two are OAuth-load-bearing — their absence triggers 401 / 429 against `api.anthropic.com` on non-Haiku models (see [What Happens Without These](#what-happens-without-these)). The latter two ship on every request and are additionally fingerprinted by strict 3P re-distribution gateways (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 ### 1. Beta headers
 
@@ -84,7 +84,7 @@ Key rules:
 - **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
 - **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
-- **`prompt-caching-scope` requires a 1P base URL** — the beta only matters when a block carries `cache_control.scope: "global"`, which 3P gateways reject (see [Prompt Caching Scope](#prompt-caching-scope)). oxide-code gates the header on `is_first_party_base_url()` so requests going through a proxy ship neither the scope field nor its beta.
+- **`prompt-caching-scope` ships unconditionally** — the header alone is a server-side no-op without a `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()`, since 3P gateways reject the scope field downstream of tool definitions (see [Prompt Caching Scope](#prompt-caching-scope)).
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches claude-code.
 - **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. The per-level ceiling (`xhigh` on 4.7, `max` on Opus 4.6 / 4.7) is separately encoded in `Capabilities::effort_xhigh` / `effort_max`.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op — the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
@@ -117,7 +117,7 @@ The API validates that the **first non-attribution text block** matches one of t
 Claude Code prepends an attribution header as the very first system block:
 
 ```json
-{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.87.a3f; cc_entrypoint=cli; cch=1b4e2;"}
+{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.121.91c; cc_entrypoint=cli; cch=8f81f;"}
 ```
 
 Format: `x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<ENTRYPOINT>; cch=<HASH>;`
@@ -167,6 +167,8 @@ x-app: cli
 
 The `User-Agent` must start with `claude-cli/`. Claude Code constructs it as `claude-cli/<version> (<user_type>, <entrypoint>)` where `user_type` is `external` (or `ant` for Anthropic employees) and `entrypoint` is `cli`.
 
+The Stainless TS SDK auto-emits a richer fingerprint alongside these — `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, `-retry-count` — which 1P accepts as advisory but strict 3P gateways treat as load-bearing. See [Third-Party Gateway Validation](#third-party-gateway-validation) for the full set and rejection paths.
+
 ## What Happens Without These
 
 | Missing                  | Haiku 4.5 | Sonnet / Opus |
@@ -203,18 +205,18 @@ Tool definitions render before system blocks. If any earlier block carries a nar
 ### Gateway behavior differs
 
 - **1P (`api.anthropic.com`)**: accepts `scope: "global"` on the static system block even when tools are present — the server model is lenient about tool-definition scope.
-- **3P proxies / self-hosted gateways**: enforce strict prefix invariance. Any `scope: "global"` block downstream of tools is rejected. The fix path is to drop the scope field (the block still caches at the default org level).
+- **3P gateways / self-hosted**: enforce strict prefix invariance. Any `scope: "global"` block downstream of tools is rejected. The fix path is to drop the scope field (the block still caches at the default org level).
 
 ### oxide-code gating
 
-oxide-code gates `scope: "global"` on `is_first_party_base_url(&config.base_url)`:
+oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request (3P gateways fingerprint its absence) and gates only the body-side `cache_control.scope` on `is_first_party_base_url(&config.base_url)`:
 
-- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}` + `prompt-caching-scope-2026-01-05` beta.
-- Any other host (proxies, self-hosted, malformed URLs) → `{"type": "ephemeral"}`; the beta is dropped since it's a no-op without the scope field.
+- Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}`.
+- Any other host (gateways, self-hosted, malformed URLs) → `{"type": "ephemeral"}`. The header still ships; without the scope field it's a server-side no-op.
 
-The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the two 1P-only elements toggle.
+The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the body-side `scope` field toggles.
 
-This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a proxy still parses as first-party by that check.
+This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party by that check.
 
 ## Agentic Request Body Fields
 
@@ -278,7 +280,21 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 
 The `cch` hash is the primary technical enforcement mechanism. The algorithm (xxHash64, non-cryptographic) and constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time — the current scheme is billing plumbing, not a security boundary.
 
-oxide-code computes valid `cch` hashes for OAuth requests. The fingerprint salt and xxHash64 seed are version-specific constants; they may change with Claude Code releases.
+oxide-code computes valid `cch` hashes on every outbound request — both OAuth and API-key. claude-code 2.1.121 emits the attestation block under both auth modes; 3P re-distribution gateways treat absence as a missing client signature and reject. The fingerprint salt and xxHash64 seed are version-specific constants; they may change with Claude Code releases.
+
+## Third-Party Gateway Validation
+
+Re-distribution gateways front the upstream API and reject anything that doesn't look like an unmodified `claude-code` release. They surface multiple rejection paths — observed status codes include 400, 403, and 503 — but the underlying check is the same: the verifier sums signals across headers and body, and any single mismatch can flip the class. Empirically, the following surfaces are jointly load-bearing for matching the canonical claude-code wire fingerprint:
+
+1. **`User-Agent` version.** `CLAUDE_CLI_VERSION` in `client::anthropic` must track the latest packaged claude-code release; pre-allowlist versions trip the verifier even when the rest of the request shape is correct.
+2. **Stainless SDK headers.** claude-code's TS SDK auto-emits the `lang` / `os` / `arch` triple plus `x-stainless-package-version`, `x-stainless-runtime`, `x-stainless-runtime-version`, `x-stainless-timeout`, and `x-stainless-retry-count`. Absence of any one fingerprints as "not from Stainless"; gateways often return HTTP 403 with `"user agent not allowed"`.
+3. **Billing attestation under both auth modes.** claude-code emits the `x-anthropic-billing-header` block (with the `cch` xxHash64) on API-key requests too; an OAuth-only guard leaves API-key traffic without the integrity primitive the gateway verifies. See [Attribution header](#3-attribution-header).
+4. **Beta header set and order.** Match claude-code's emit order on agentic 4.6+ requests: `claude-code-20250219, [oauth-2025-04-20,] interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24`. `prompt-caching-scope-2026-01-05` ships unconditionally — the matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
+5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` is still required as a present field, not a missing key. Use a typed struct rather than `serde_json::json!` so the wire order matches the source declaration — `json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`; verifiers check shape, not whether the value round-trips to claude-code's `~/.claude.json#userID`.
+
+System-prompt block content is a separate axis the gateway validates — see [system-prompt § Third-Party Gateway Validation](./system-prompt.md#third-party-gateway-validation) for the prompt-content side of the same check.
+
+A residual rejection band remains under sampled stricter checks. Suspected vectors: TLS / HTTP/2 fingerprint (reqwest + rustls vs Node + native TLS) and request body field order — claude-code 2.1.121 emits `model, messages, system, ...` while oxide-code's `CreateMessageRequest` puts `system` before `messages` so `inject_cch`'s `replacen` is unambiguous when tool results contain literal `cch=00000` text. Reordering would require either Bun-style byte-level placeholder discovery or accepting that user message content will never carry the exact placeholder string.
 
 ## API Version
 

@@ -1,8 +1,9 @@
 //! Per-request `anthropic-beta` header computation.
 //!
-//! [`compute_betas`] partners with [`is_first_party_base_url`] so the
-//! `prompt-caching-scope` beta and the `cache_control.scope: "global"`
-//! field stay in sync — 3P proxies see neither, 1P sees both.
+//! All betas ship base-URL-independent — `prompt-caching-scope` goes
+//! out unconditionally to keep the wire fingerprint intact. The
+//! body-side `cache_control.scope: "global"` is the only 1P-only
+//! knob; see [`is_first_party_base_url`] / [`static_prefix_cache_control`].
 
 use crate::config::{Auth, PromptCacheTtl};
 
@@ -26,15 +27,12 @@ pub(super) const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025
 /// `want_structured` is cross-checked against the model's capability
 /// flag so an unsupported [`crate::client::anthropic::wire::OutputFormat`]
 /// silently drops back to free-form text instead of 400ing the
-/// gateway. `is_first_party` gates experimental betas that 3P proxies
-/// reject (currently: `prompt-caching-scope`, which is a no-op without
-/// the scope field it enables).
+/// gateway.
 pub(super) fn compute_betas(
     model: &str,
     auth: &Auth,
     is_agentic: bool,
     want_structured: bool,
-    is_first_party: bool,
 ) -> Vec<&'static str> {
     let caps = crate::model::capabilities_for(model);
     let is_haiku = model
@@ -54,21 +52,19 @@ pub(super) fn compute_betas(
         out.push(OAUTH_BETA_HEADER);
     }
 
+    // Order matches the claude-code 2.1.121 wire capture; 3P
+    // fingerprints exact ordering, so reordering can flip accept→reject.
     if is_agentic {
-        if caps.context_management {
-            out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
-        }
-        // Prompt-caching scope is the beta that enables `scope: "global"`
-        // on `cache_control`. Ship it only when we actually send the
-        // scope field — i.e., on the 1P API. 3P gateways reject the
-        // scope (tools taint the cache prefix) and the beta without
-        // scope is a no-op.
-        if is_first_party {
-            out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
-        }
         if caps.interleaved_thinking {
             out.push(INTERLEAVED_THINKING_BETA_HEADER);
         }
+        if caps.context_management {
+            out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
+        }
+        // Header ships unconditionally; body-side `scope: "global"`
+        // is gated on `is_first_party_base_url` (3P rejects scope
+        // downstream of tools). Header alone is a server-side no-op.
+        out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
         if caps.effort {
             out.push(EFFORT_BETA_HEADER);
         }
@@ -171,19 +167,16 @@ mod tests {
 
     #[test]
     fn compute_betas_agentic_opus_4_6_plain_carries_full_set_except_1m() {
-        // Plain model (no `[1m]` tag) must not auto-enable 1M context —
-        // a gateway without 1M access would 400. The exact-equality
-        // assertion locks beta order: `docs/research/anthropic-api.md`
-        // documents identity / auth -> universal agentic -> capability
-        // gates, and some 3P gateways inspect order, not just presence.
-        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false, true);
+        // Plain model (no `[1m]` tag) must not auto-enable 1M context.
+        // Exact-equality locks the wire-capture order; 3P fingerprints it.
+        let betas = compute_betas("claude-opus-4-6", &api_key(), true, false);
         assert_eq!(
             betas,
             vec![
                 CLAUDE_CODE_BETA_HEADER,
+                INTERLEAVED_THINKING_BETA_HEADER,
                 CONTEXT_MANAGEMENT_BETA_HEADER,
                 PROMPT_CACHING_SCOPE_BETA_HEADER,
-                INTERLEAVED_THINKING_BETA_HEADER,
                 EFFORT_BETA_HEADER,
             ],
         );
@@ -191,14 +184,14 @@ mod tests {
 
     #[test]
     fn compute_betas_opus_4_6_with_1m_tag_adds_context_1m() {
-        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false, true);
+        let betas = compute_betas("claude-opus-4-6[1m]", &api_key(), true, false);
         assert!(betas.contains(&CONTEXT_1M_BETA_HEADER));
         assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     #[test]
     fn compute_betas_oauth_adds_oauth_header() {
-        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false, true);
+        let betas = compute_betas("claude-opus-4-6", &oauth(), true, false);
         assert!(betas.contains(&OAUTH_BETA_HEADER));
     }
 
@@ -206,7 +199,7 @@ mod tests {
     fn compute_betas_sonnet_4_5_has_thinking_but_not_effort() {
         // Sonnet 4.5 supports interleaved thinking but not effort;
         // plain (no `[1m]` tag) means no 1M beta either.
-        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false, true);
+        let betas = compute_betas("claude-sonnet-4-5", &api_key(), true, false);
         assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -217,7 +210,7 @@ mod tests {
     fn compute_betas_haiku_4_5_agentic_omits_1m_effort_and_thinking() {
         // Haiku has a 200K window and no interleaved-thinking / effort
         // support on 3P gateways; all three must be absent.
-        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false, true);
+        let betas = compute_betas("claude-haiku-4-5", &api_key(), true, false);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
@@ -227,7 +220,7 @@ mod tests {
 
     #[test]
     fn compute_betas_haiku_4_5_with_1m_tag_silently_drops_1m() {
-        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false, true);
+        let betas = compute_betas("claude-haiku-4-5[1m]", &api_key(), true, false);
         assert!(!betas.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
@@ -236,11 +229,11 @@ mod tests {
         // Title-generator one-shot on API key → no agent tags, no gateway
         // tag. OAuth one-shot → only the OAuth tag.
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, false, true),
+            compute_betas("claude-haiku-4-5", &api_key(), false, false),
             Vec::<&str>::new(),
         );
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &oauth(), false, false, true),
+            compute_betas("claude-haiku-4-5", &oauth(), false, false),
             vec![OAUTH_BETA_HEADER],
         );
     }
@@ -248,7 +241,7 @@ mod tests {
     #[test]
     fn compute_betas_non_haiku_non_agentic_keeps_claude_code_tag() {
         // OAuth on non-Haiku requires the gateway tag even for one-shots.
-        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false, true);
+        let betas = compute_betas("claude-sonnet-4-6", &oauth(), false, false);
         assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
         assert!(betas.contains(&OAUTH_BETA_HEADER));
         assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
@@ -257,13 +250,13 @@ mod tests {
 
     #[test]
     fn compute_betas_opus_4_7_matches_opus_4_6_family() {
-        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false, true);
+        let plain = compute_betas("claude-opus-4-7", &api_key(), true, false);
         assert!(plain.contains(&INTERLEAVED_THINKING_BETA_HEADER));
         assert!(plain.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
         assert!(plain.contains(&EFFORT_BETA_HEADER));
         assert!(!plain.contains(&CONTEXT_1M_BETA_HEADER));
 
-        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false, true);
+        let with_1m = compute_betas("claude-opus-4-7[1m]", &api_key(), true, false);
         assert!(with_1m.contains(&CONTEXT_1M_BETA_HEADER));
     }
 
@@ -272,26 +265,13 @@ mod tests {
         // Haiku 4.5 supports it → emitted alone on non-agentic API key.
         // Haiku 4 base predates the beta → silently dropped.
         assert_eq!(
-            compute_betas("claude-haiku-4-5", &api_key(), false, true, true),
+            compute_betas("claude-haiku-4-5", &api_key(), false, true),
             vec![STRUCTURED_OUTPUTS_BETA_HEADER],
         );
         assert!(
-            !compute_betas("claude-haiku-4", &api_key(), false, true, true)
+            !compute_betas("claude-haiku-4", &api_key(), false, true)
                 .contains(&STRUCTURED_OUTPUTS_BETA_HEADER),
         );
-    }
-
-    #[test]
-    fn compute_betas_third_party_base_url_drops_prompt_caching_scope() {
-        // 3P gateways reject `scope: "global"` because tool definitions
-        // render before system blocks and taint the cache prefix. Keep
-        // every other agentic beta — only the scope header goes.
-        let betas = compute_betas("claude-opus-4-7", &api_key(), true, false, false);
-        assert!(!betas.contains(&PROMPT_CACHING_SCOPE_BETA_HEADER));
-        assert!(betas.contains(&CLAUDE_CODE_BETA_HEADER));
-        assert!(betas.contains(&CONTEXT_MANAGEMENT_BETA_HEADER));
-        assert!(betas.contains(&INTERLEAVED_THINKING_BETA_HEADER));
-        assert!(betas.contains(&EFFORT_BETA_HEADER));
     }
 
     // ── supports_structured_outputs ──
@@ -357,7 +337,7 @@ mod tests {
         );
     }
 
-    // ── api_model_id / has_1m_tag ──
+    // ── api_model_id ──
 
     #[test]
     fn api_model_id_strips_1m_tag_case_insensitively() {
@@ -368,6 +348,8 @@ mod tests {
         assert_eq!(api_model_id("claude-opus-4-7 [1m]"), "claude-opus-4-7");
         assert_eq!(api_model_id("claude-opus-4-7"), "claude-opus-4-7");
     }
+
+    // ── has_1m_tag ──
 
     #[test]
     fn has_1m_tag_is_case_insensitive() {
