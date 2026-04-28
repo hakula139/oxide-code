@@ -1,12 +1,9 @@
 //! Tracing subscriber initialization.
 //!
-//! TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log` because
-//! `EnterAlternateScreen` only swaps stdout's buffer; stderr (the
-//! default `tracing::fmt()` writer) would paint over the rendered
-//! frame until ratatui's next redraw covers it.
-//!
-//! Bare REPL, headless, and `--list` keep stderr — no alt-screen, no
-//! corruption.
+//! TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log`:
+//! `EnterAlternateScreen` only swaps stdout, so stderr (the default
+//! `tracing::fmt()` writer) would paint over the frame. Other modes
+//! keep stderr.
 
 use std::path::{Path, PathBuf};
 
@@ -22,19 +19,12 @@ const LOG_FILE: &str = "oxide-code.log";
 
 /// Initializes the global `tracing` subscriber.
 ///
-/// In TUI mode the returned `WorkerGuard` flushes the non-blocking
-/// appender on `Drop` — bind it for the program lifetime so teardown
-/// warnings reach disk. Honors `RUST_LOG` with a `warn` floor.
-//
-// Not unit-tested: the `tracing_subscriber::fmt()...init()` chains
-// install a process-global subscriber that can only be set once per
-// process, so exercising both arms inside one `cargo test` binary is
-// impossible without a Box<dyn Subscriber> abstraction (over-engineered
-// for two builder chains). All testable logic lives in the helpers.
+/// Bind the returned `WorkerGuard` (TUI mode only) for the program
+/// lifetime — its `Drop` flushes the non-blocking appender. Honors
+/// `RUST_LOG` with a `warn` floor.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     Ok(if let Some((writer, guard)) = build_log_target(tui_mode)? {
-        // `with_ansi(false)`: keep the log file readable through `cat` / `less`.
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(writer)
@@ -54,8 +44,6 @@ fn make_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
 }
 
-/// `Some((writer, guard))` for the file appender in TUI mode, `None`
-/// otherwise (caller writes to stderr).
 fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>> {
     if !tui_mode {
         return Ok(None);
@@ -64,8 +52,7 @@ fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>
     Ok(Some(open_file_appender(&dir)?))
 }
 
-/// Resolves `$XDG_STATE_HOME/ox/log` per the XDG Base Directory spec,
-/// falling back to `$HOME/.local/state/ox/log`.
+/// `$XDG_STATE_HOME/ox/log`, falling back to `$HOME/.local/state/ox/log`.
 fn resolve_log_dir() -> Option<PathBuf> {
     log_dir_from(
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
@@ -83,9 +70,9 @@ fn log_dir_from(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> 
     )
 }
 
-/// `never` keeps a single unrotated file — the crate emits a handful of
-/// `warn` lines per session, so this stays bounded; switch to `daily`
-/// if `RUST_LOG=debug` dogfooding shows the file growing fast.
+/// `never` keeps a single unrotated file — the crate emits a handful
+/// of warns per session. Switch to `daily` if `RUST_LOG=debug`
+/// dogfooding shows growth.
 fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
     std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let appender = tracing_appender::rolling::never(dir, LOG_FILE);
@@ -154,18 +141,13 @@ mod tests {
                 assert!(log_dir.is_dir());
 
                 writer.write_all(b"sentinel-line\n").unwrap();
-                drop(guard); // flushes the worker thread
+                drop(guard);
 
                 let written = std::fs::read_to_string(log_dir.join(LOG_FILE)).unwrap();
                 assert!(written.contains("sentinel-line"), "written={written}");
             },
         );
     }
-
-    // `resolve_log_dir() -> None` is unreachable in unit tests: on Unix
-    // `dirs::home_dir()` falls back to `getpwuid_r` even with `HOME`
-    // unset. The `?` propagation is exercised by the
-    // `open_file_appender` failure test below.
 
     // ── log_dir_from ──
 
