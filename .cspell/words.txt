@@ -20,8 +20,10 @@ disambiguable
 dtolnay
 frappe
 EACCES
+ENOTDIR
 ESRCH
 feff
+getpwuid
 gitui
 hakula
 impls
@@ -65,6 +67,7 @@ toolu
 tracing
 unmaterialized
 unresumable
+unrotated
 urandom
 venv
 vtable

@@ -98,9 +98,10 @@ pub(crate) fn spawn<S>(
 {
     tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
-            // Expected failure mode: transient network hiccup, rate-limit,
-            // or Haiku returning non-JSON. The first-prompt title stays in
-            // the file and in the status bar; the user never sees this.
+            // Expected failure: network hiccup, rate-limit, or non-JSON
+            // Haiku reply. The first-prompt title stays in the file and
+            // status bar; the warning routes per
+            // `crate::util::log::init_tracing`.
             warn!("AI title generation failed: {e}");
         }
     });

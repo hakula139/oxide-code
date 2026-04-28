@@ -9,7 +9,10 @@
 
 ## Changes
 
-<!-- Per-file breakdown. Remove for trivial PRs. -->
+<!-- Per-file breakdown. Remove for trivial PRs.
+     Drop the `crates/<crate>/src/` prefix on crate sources (e.g. `tool/glob.rs`,
+     not `crates/oxide-code/src/tool/glob.rs`). Keep the full path for
+     repo-root files (`CLAUDE.md`, `Cargo.toml`, `docs/...`, `.cspell/...`). -->
 
 | File | Description |
 | ---- | ----------- |
