@@ -62,12 +62,14 @@ swatinem
 syntect
 sysname
 SYSPROMPT
+tengu
 thiserror
 throbber
 tildified
 tildify
 TOCTOU
 tokio
+toks
 toolu
 tracing
 unmaterialized
