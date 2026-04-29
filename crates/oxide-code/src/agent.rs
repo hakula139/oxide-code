@@ -89,10 +89,12 @@ pub(crate) async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        record_message(session, assistant_msg.clone(), sink).await;
-        messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
+            // Text-only turn: nothing else to coalesce with, so record
+            // and return.
+            record_message(session, assistant_msg.clone(), sink).await;
+            messages.push(assistant_msg);
             return Ok(());
         }
 
@@ -143,10 +145,26 @@ pub(crate) async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        record_message(session, tool_result_msg.clone(), sink).await;
-        // One batch cmd so the actor coalesces every sidecar into one flush.
-        let outcome = session.record_tool_metadata_batch(sidecars).await;
-        sink.session_write_error(outcome.failure.as_deref());
+
+        // Send all three writes concurrently so they queue in the actor's
+        // mpsc channel before its `try_recv` runs — receive-and-drain
+        // then coalesces the assistant message, the tool-result message,
+        // and the sidecar batch into a single absorb pass and a single
+        // buffered flush. Sending serially with awaits between would
+        // block each cmd's caller on the prior flush, defeating the
+        // batching. Iteration-atomic: a crash mid-tool leaves the
+        // session at the previous turn's tail, and resume sees no
+        // half-written tool round.
+        let assistant_fut = session.record_message(assistant_msg.clone());
+        let tool_result_fut = session.record_message(tool_result_msg.clone());
+        let metadata_fut = session.record_tool_metadata_batch(sidecars);
+        let (assistant_outcome, tool_result_outcome, metadata_outcome) =
+            tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
+        sink.session_write_error(assistant_outcome.failure.as_deref());
+        sink.session_write_error(tool_result_outcome.failure.as_deref());
+        sink.session_write_error(metadata_outcome.failure.as_deref());
+
+        messages.push(assistant_msg);
         messages.push(tool_result_msg);
     }
 
