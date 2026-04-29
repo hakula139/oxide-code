@@ -1,8 +1,8 @@
 # Terminal UI Research
 
-Research findings for the oxide-code TUI, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [opencode](https://github.com/anomalyco/opencode), [OpenAI Codex](https://github.com/openai/codex)), the Rust TUI ecosystem, and the terminal flickering problem.
+Research findings for the oxide-code TUI, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), [opencode](https://github.com/anomalyco/opencode)), the Rust TUI ecosystem, and the terminal flickering problem.
 
-## Reference Projects
+## Reference Implementations
 
 ### Claude Code (TypeScript / Ink)
 
@@ -63,6 +63,25 @@ Full-screen redraw on every React state change causes severe flickering in long 
 - `React.memo` on `LogoHeader` prevents dirty-flag cascade through all `MessageRow` siblings (critical for long sessions — without it, 150K+ writes per frame).
 - `OffscreenFreeze` wraps static content to prevent re-renders. `useDeferredValue` for non-critical state updates.
 
+### OpenAI Codex (Rust / ratatui)
+
+OpenAI Codex's Rust TUI lives in `codex-rs/`. Its markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's custom pulldown-cmark renderer.
+
+#### Markdown Rendering — `pending_marker` Pattern
+
+`tui/markdown_render.rs`
+
+The key insight is a **deferred list marker** approach for correct list item rendering. When a `Start(Item)` event arrives, the renderer does not emit the marker (`1.`, `-`) immediately. Instead, it stores the marker in a `pending_marker` field and waits for the next content event (`Text`, `Code`, etc.) to emit both the marker and content on the same line. This solves the "loose list" problem where pulldown-cmark wraps list item content in `<p>` tags, causing naïve renderers to place the marker and content on separate lines.
+
+State management:
+
+- `list_stack` — tracks nesting depth and item counters (ordered vs. unordered).
+- `indent_stack` — accumulated indent string per nesting level (e.g., `"   "` for each level).
+- `inline_styles` — stack of active `Style` modifiers, pushed on `Start(Emphasis)` / `Start(Strong)` / etc., popped on corresponding `End`.
+- `pending_marker` — `Option<String>` holding the deferred list marker. Consumed and prepended when the next text-bearing event arrives.
+
+Other patterns: fenced code blocks are buffered entirely and syntax-highlighted on `End(CodeBlock)` via syntect. Inline code uses a distinct foreground color. Headings are styled per level (H1–H6). Blockquotes use a `▎` left border with dimmed style.
+
 ### opencode (TypeScript / @opentui + Solid.js)
 
 opencode uses **@opentui/core** with **Solid.js** for fine-grained reactive terminal rendering. (Note: despite early documentation suggesting Go / Bubble Tea, the current implementation is a TypeScript monorepo.)
@@ -121,25 +140,6 @@ opencode uses **@opentui/core** with **Solid.js** for fine-grained reactive term
 
 - Left: working directory. Right: LSP count (`• N LSP`), MCP count (`⊙ N MCP`) with error coloring, permission warnings, `/status` hint.
 - Subagent footer shows agent label, sibling index (e.g., "3 of 5"), token usage, parent / prev / next navigation.
-
-### OpenAI Codex (Rust / ratatui)
-
-The [OpenAI Codex](https://github.com/openai/codex) Rust TUI lives in `codex-rs/`. Its markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's custom pulldown-cmark renderer.
-
-#### Markdown Rendering — `pending_marker` Pattern
-
-`tui/markdown_render.rs`
-
-The key insight is a **deferred list marker** approach for correct list item rendering. When a `Start(Item)` event arrives, the renderer does not emit the marker (`1.`, `-`) immediately. Instead, it stores the marker in a `pending_marker` field and waits for the next content event (`Text`, `Code`, etc.) to emit both the marker and content on the same line. This solves the "loose list" problem where pulldown-cmark wraps list item content in `<p>` tags, causing naïve renderers to place the marker and content on separate lines.
-
-State management:
-
-- `list_stack` — tracks nesting depth and item counters (ordered vs. unordered).
-- `indent_stack` — accumulated indent string per nesting level (e.g., `"   "` for each level).
-- `inline_styles` — stack of active `Style` modifiers, pushed on `Start(Emphasis)` / `Start(Strong)` / etc., popped on corresponding `End`.
-- `pending_marker` — `Option<String>` holding the deferred list marker. Consumed and prepended when the next text-bearing event arrives.
-
-Other patterns: fenced code blocks are buffered entirely and syntax-highlighted on `End(CodeBlock)` via syntect. Inline code uses a distinct foreground color. Headings are styled per level (H1–H6). Blockquotes use a `▎` left border with dimmed style.
 
 ## Reference Apps
 

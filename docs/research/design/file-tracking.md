@@ -40,6 +40,8 @@ type FileState = {
 
 **Concurrency:** single-threaded JavaScript with the LRU cache as implicit serialization point. No `Mutex` / `Semaphore`.
 
+**Sources:** `claude-code/src/tools/FileEditTool/FileEditTool.ts:275-311` (Edit-time gate + mtime / content fallback), `claude-code/src/utils/fileStateCache.ts` (LRU cache shape, eviction), `claude-code/src/utils/queryHelpers.ts:346-501` (resume rehydration via message history — the approach we explicitly do **not** take).
+
 ### OpenAI Codex (Rust)
 
 No explicit cache. File validation is deferred to the `apply_patch` verification layer (`codex-rs/core/src/tools/handlers/apply_patch.rs:340-464`).
@@ -54,9 +56,11 @@ There is no "must Read first" rule. Code can be edited that the model has never 
 
 **Concurrency:** per-session `Mutex<SessionState>`; no per-file lock.
 
-### opencode (TypeScript / Effect)
+**Sources:** `codex-rs/core/src/tools/handlers/apply_patch.rs:340-464` (deferred apply-time validation).
 
-Per-file `Semaphore` lock (`packages/opencode/src/tool/edit.ts:36-46`) prevents concurrent edits to the same path; no content / timestamp cache.
+### opencode (TypeScript)
+
+Per-file `Semaphore` lock (`opencode/packages/opencode/src/tool/edit.ts:36-46`) prevents concurrent edits to the same path; no content / timestamp cache.
 
 ```typescript
 const locks = new Map<string, Semaphore.Semaphore>()  // module-global
@@ -75,6 +79,8 @@ A stale `oldString` triggers a "string not found" error — the model must adjus
 
 **Concurrency:** per-file `Semaphore` from `effect` library (`withPermits(1)`). Different files edit in parallel; same file serializes.
 
+**Sources:** `opencode/packages/opencode/src/tool/edit.ts:36-46` (per-file `Semaphore`), `opencode/packages/opencode/src/tool/edit.ts:115-118` (disk re-read on every Edit).
+
 ## Comparison
 
 | Repo               | Tracker            | Read-before-Edit | Stale check              | Resume                 | Concurrency                 |
@@ -90,7 +96,7 @@ Read / Write / Edit tools are unit structs (`ReadTool`, `WriteTool`, `EditTool`)
 
 The only existing signal for external modification is Edit's `"old_string not found in {path}"` error — a false negative if the user happens to leave the matched substring intact while changing surrounding lines. The model would then edit the file based on stale context.
 
-The session machinery already parses past tool_use / tool_result pairs via `crates/oxide-code/src/session/history.rs`. That gives us the building blocks for claude-code-style message-history rehydration if we want it. But the JSONL schema's `Entry::Unknown` `#[serde(other)]` catch-all (see `crates/oxide-code/src/session/entry.rs` and `docs/research/session-persistence.md` § Forward Compatibility) also makes it cheap to add a new entry type — explicit persistence is more direct than parsing message bodies and avoids coupling to sanitization shape.
+The session machinery already parses past tool_use / tool_result pairs via `crates/oxide-code/src/session/history.rs`. That gives us the building blocks for claude-code-style message-history rehydration if we want it. But the JSONL schema's `Entry::Unknown` `#[serde(other)]` catch-all (see `crates/oxide-code/src/session/entry.rs` and [Session Persistence § Forward Compatibility](session-persistence.md#forward-compatibility)) also makes it cheap to add a new entry type — explicit persistence is more direct than parsing message bodies and avoids coupling to sanitization shape.
 
 ## Design Decisions for oxide-code
 
@@ -107,19 +113,8 @@ The roadmap item is: skip re-reads when content hasn't changed, and guard agains
 
 ## Sources
 
-### oxide-code
-
 - `crates/oxide-code/src/session/entry.rs` — JSONL forward-compat (`Entry::Unknown` `#[serde(other)]` catch-all).
 - `crates/oxide-code/src/session/history.rs` — past tool_use / tool_result pairing (alternative resume strategy: rehydrate from message history rather than persisted snapshots).
 - `crates/oxide-code/src/tool/edit.rs:185-266` — read-before-replace flow (line 212 reads pre-edit content; line 256 writes post-edit).
 - `crates/oxide-code/src/tool/read.rs:103-195` — file open + bytes-in-memory point where post-Read hashing would slot in.
 - `crates/oxide-code/src/tool/write.rs:78-101` — `is_new` detection pattern (today's closest analog to "we touched this file").
-
-### Reference projects
-
-- `claude-code/src/tools/FileEditTool/FileEditTool.ts:275-311` — Edit-time gate + mtime/content fallback.
-- `claude-code/src/utils/fileStateCache.ts` — LRU cache shape, eviction.
-- `claude-code/src/utils/queryHelpers.ts:346-501` — resume rehydration via message history (the approach we explicitly do **not** take).
-- `codex-rs/core/src/tools/handlers/apply_patch.rs:340-464` — codex's deferred apply-time validation.
-- `opencode/packages/opencode/src/tool/edit.ts:36-46` — per-file `Semaphore`.
-- `opencode/packages/opencode/src/tool/edit.ts:115-118` — disk re-read on every Edit.

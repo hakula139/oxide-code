@@ -269,7 +269,7 @@ Invalidation order (from the Anthropic caching docs) is `tools → system → me
 
 ### `thinking.display`
 
-See [Extended Thinking § Display modes (Opus 4.7+)](./extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`; `show_thinking=true` in oxide-code opts back into `"summarized"`.
+See [Extended Thinking § Display modes (Opus 4.7+)](extended-thinking.md#display-modes-opus-47). Opus 4.7 silently flipped the default to `"omitted"`; `show_thinking=true` in oxide-code opts back into `"summarized"`.
 
 ## Third-Party Tool Restrictions
 
@@ -292,7 +292,7 @@ Re-distribution gateways front the upstream API and reject anything that doesn't
 4. **Beta header set and order.** Match Claude Code's emit order on agentic 4.6+ requests: `claude-code-20250219, [oauth-2025-04-20,] interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24`. `prompt-caching-scope-2026-01-05` ships unconditionally — the matching `cache_control.scope: "global"` body field stays gated on `is_first_party_base_url` because 3P gateways reject the scope downstream of tool definitions, but the header alone keeps the wire fingerprint intact.
 5. **`metadata.user_id` shape.** Field order: `device_id`, `account_uuid`, `session_id`. Empty `account_uuid` is still required as a present field, not a missing key. Use a typed struct rather than `serde_json::json!` so the wire order matches the source declaration — `json!` ships fields alphabetically without the `preserve_order` feature, which trips the verifier. `device_id` is minted as 64 lowercase hex chars (32 random bytes) and persisted at `$XDG_DATA_HOME/ox/user-id`; verifiers check shape, not whether the value round-trips to Claude Code's `~/.claude.json#userID`.
 
-System-prompt block content is a separate axis the gateway validates — see [system-prompt § Third-Party Gateway Validation](./system-prompt.md#third-party-gateway-validation) for the prompt-content side of the same check.
+System-prompt block content is a separate axis the gateway validates — see [System Prompt § Third-Party Gateway Validation](system-prompt.md#third-party-gateway-validation) for the prompt-content side of the same check.
 
 A residual rejection band remains under sampled stricter checks. Suspected vectors: TLS / HTTP/2 fingerprint (reqwest + rustls vs Node + native TLS) and request body field order — Claude Code 2.1.121 emits `model, messages, system, ...` while oxide-code's `CreateMessageRequest` puts `system` before `messages` so `inject_cch`'s `replacen` is unambiguous when tool results contain literal `cch=00000` text. Reordering would require either Bun-style byte-level placeholder discovery or accepting that user message content will never carry the exact placeholder string.
 

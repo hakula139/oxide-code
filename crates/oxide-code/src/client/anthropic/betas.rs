@@ -39,7 +39,7 @@ pub(super) fn compute_betas(
         .split('-')
         .any(|tok| tok.eq_ignore_ascii_case("haiku"));
 
-    // Order mirrors `docs/research/anthropic-api.md` → Per-model beta
+    // Order mirrors `docs/research/api/anthropic-api.md` → Per-model beta
     // sets: identity / auth → universal agentic → capability-gated.
     let mut out = Vec::with_capacity(8);
 
