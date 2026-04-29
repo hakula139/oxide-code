@@ -260,7 +260,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (_, _) = state.queue_message_entries(&Message::user("first"), now);
+        _ = state.queue_message_entries(&Message::user("first"), now);
         let first_tip = state.last_message_uuid.unwrap();
 
         let (entries, seed) = state.queue_message_entries(&Message::user("second"), now);

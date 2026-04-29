@@ -406,6 +406,6 @@ mod tests {
         // Drain the unused indoc warning — we want the macro imported
         // in tests for symmetry with sibling test files but no
         // current test uses it after the snapshot was simplified.
-        let _ = indoc! {""};
+        _ = indoc! {""};
     }
 }
