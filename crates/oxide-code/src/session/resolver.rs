@@ -1,17 +1,17 @@
 //! CLI `--continue` argument resolution.
 //!
 //! Translates the `clap`-parsed `Option<Option<String>>` into either a
-//! freshly-started [`SessionManager`] or a resumed one with its
-//! loaded messages, via [`resolve_session`]. Split out of `main.rs`
-//! so the resolution logic (parsing, prefix matching, ambiguity
-//! reporting) can be exercised by unit tests.
+//! freshly-started [`SessionHandle`] or a resumed one with its loaded
+//! messages, via [`resolve_session`]. Split out of `main.rs` so the
+//! resolution logic (parsing, prefix matching, ambiguity reporting)
+//! can be exercised by unit tests.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
-use super::manager::{ResumedSession, SessionManager};
+use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
 
 /// Normalized form of the CLI `--continue` argument. Built by
@@ -54,15 +54,14 @@ pub(crate) async fn resolve_session(
     // Path resumes bypass the store's project-subdir lookup entirely and
     // can be resolved without listing anything.
     if let ResumeMode::Path(path) = mode {
-        let resumed = SessionManager::resume_from_path(store, path)?;
+        let resumed = handle::resume_from_path(store, path)?;
         debug!("resuming session from {}", path.display());
         return Ok(resumed);
     }
 
     if matches!(mode, ResumeMode::Fresh) {
-        let manager = SessionManager::start(store, model);
         return Ok(ResumedSession {
-            manager,
+            handle: handle::start(store, model),
             messages: Vec::new(),
             title: None,
             tool_result_metadata: std::collections::HashMap::new(),
@@ -110,7 +109,7 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let resumed = SessionManager::resume(store, &session_id).await?;
+    let resumed = handle::resume(store, &session_id)?;
     debug!("resuming session {session_id}");
     Ok(resumed)
 }
@@ -309,8 +308,9 @@ mod tests {
         // non-empty; without `record_message` the lazy creation
         // never touches disk and the prefix lookup would short-circuit
         // on "no sessions" instead of testing the no-match path.
-        let mut s = SessionManager::start(&store, "m");
-        s.record_message(&Message::user("noop")).await.unwrap();
+        let s = handle::start(&store, "m");
+        s.record_message(Message::user("noop")).await;
+        s.finish().await;
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
@@ -333,8 +333,9 @@ mod tests {
         let store = test_store(dir.path());
 
         for _ in 0..20 {
-            let mut s = SessionManager::start(&store, "m");
-            s.record_message(&Message::user("noop")).await.unwrap();
+            let s = handle::start(&store, "m");
+            s.record_message(Message::user("noop")).await;
+            s.finish().await;
         }
 
         let listed = store.list().unwrap();
@@ -365,13 +366,12 @@ mod tests {
         // and session_id recorded in the header.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original
-            .record_message(&Message::user("external path test"))
-            .await
-            .unwrap();
-        original.finish().unwrap();
+            .record_message(Message::user("external path test"))
+            .await;
+        original.finish().await;
         let path = test_session_file(dir.path(), &full_id);
         drop(original);
 
@@ -385,7 +385,7 @@ mod tests {
         let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.handle.session_id(), full_id);
         assert_eq!(resumed.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("external path test"));
     }
@@ -407,12 +407,10 @@ mod tests {
     async fn resolve_session_prefix_resumes_single_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
-        original
-            .record_message(&Message::user("hello"))
-            .await
-            .unwrap();
+        original.record_message(Message::user("hello")).await;
+        original.finish().await;
         drop(original);
 
         // A 10-char UUID prefix is vanishingly unlikely to collide.
@@ -421,7 +419,7 @@ mod tests {
         let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.handle.session_id(), full_id);
         assert_eq!(resumed.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("hello"));
     }
@@ -435,19 +433,17 @@ mod tests {
         // here also covers the empty `scope_hint`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
-        original
-            .record_message(&Message::user("all scope"))
-            .await
-            .unwrap();
+        original.record_message(Message::user("all scope")).await;
+        original.finish().await;
         drop(original);
 
         let arg = Some(full_id[..10].to_owned());
         let resumed = resolve_session(&store, "m", Some(&arg), true)
             .await
             .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
+        assert_eq!(resumed.handle.session_id(), full_id);
         assert_eq!(resumed.messages.len(), 1);
         assert_eq!(resumed.title.as_deref(), Some("all scope"));
 

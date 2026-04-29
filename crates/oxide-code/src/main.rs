@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{ArgGroup, Parser};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use agent::agent_turn;
@@ -31,11 +31,10 @@ use client::anthropic::Client;
 use config::Config;
 use message::Message;
 use prompt::environment::marketing_name;
+use session::handle::{ResumedSession, SessionHandle};
 use session::list_view::render_list;
-use session::manager::{ResumedSession, SessionManager};
 use session::resolver::resolve_session;
 use session::store::SessionStore;
-use session::writer::{log_session_err, record_session_message};
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
@@ -130,7 +129,7 @@ async fn async_main() -> Result<()> {
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
     let resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    let client = Client::new(config, Some(resumed.manager.session_id().to_owned()))?;
+    let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
     let tools = Arc::new(create_tool_registry());
 
@@ -141,7 +140,7 @@ async fn async_main() -> Result<()> {
             &model,
             show_thinking,
             &prompt_text,
-            resumed.manager,
+            resumed.handle,
         )
         .await;
     }
@@ -152,7 +151,7 @@ async fn async_main() -> Result<()> {
             tools,
             &model,
             show_thinking,
-            resumed.manager,
+            resumed.handle,
             resumed.messages,
         )
         .await;
@@ -253,7 +252,7 @@ async fn run_tui(
     resumed: ResumedSession,
 ) -> Result<()> {
     let ResumedSession {
-        manager: session,
+        handle: session,
         messages: resumed_messages,
         title: resumed_title,
         tool_result_metadata: resumed_tool_metadata,
@@ -290,11 +289,9 @@ async fn run_tui(
         Arc::clone(&tools),
     );
 
-    let session = Arc::new(Mutex::new(session));
-
     let agent_handle = {
         let client = client.clone();
-        let session = Arc::clone(&session);
+        let session = session.clone();
         tokio::spawn(async move {
             agent_loop_task(
                 client,
@@ -330,13 +327,11 @@ async fn run_tui(
         _ => {}
     }
 
-    // Write the session summary after abort to guarantee it runs. The
-    // TUI is already torn down, so surfaced-error channels are gone —
-    // fall back to warn-log only (sink = None).
-    {
-        let mut session = session.lock().await;
-        let r = session.finish();
-        log_session_err(r, &mut session, None);
+    // Summary write after abort, no sink available — actor warn-logs
+    // the cause.
+    let outcome = session.finish().await;
+    if let Some(msg) = outcome.failure {
+        warn!("session finish failed: {msg}");
     }
 
     result
@@ -347,7 +342,7 @@ async fn agent_loop_task(
     tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::Receiver<UserAction>,
-    session: Arc<Mutex<SessionManager>>,
+    session: SessionHandle,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
     let mut messages: Vec<Message> = resumed_messages;
@@ -356,18 +351,19 @@ async fn agent_loop_task(
         match action {
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
-                record_session_message(&session, &user_msg, Some(&sink)).await;
+                let outcome = session.record_message(user_msg.clone()).await;
+                if let Some(msg) = outcome.failure {
+                    _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+                }
                 messages.push(user_msg);
 
-                // Fire the AI title generator exactly once per fresh
-                // session, right after the first user prompt lands on
-                // disk. Resumed sessions already have the seed cleared,
-                // so this take() is always None after the first trip
-                // through this branch.
-                if let Some(seed) = session.lock().await.take_ai_title_seed() {
+                // The actor sets the seed only on a fresh session's
+                // first user-text message — fire-and-forget the AI
+                // title generator from there.
+                if let Some(seed) = outcome.ai_title_seed {
                     session::title_generator::spawn(
                         client.clone(),
-                        Arc::clone(&session),
+                        session.clone(),
                         sink.clone(),
                         seed,
                     );
@@ -403,18 +399,13 @@ async fn bare_repl(
     tools: Arc<ToolRegistry>,
     model: &str,
     show_thinking: bool,
-    session: SessionManager,
+    session: SessionHandle,
     resumed_messages: Vec<Message>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
-    // Wrap in Mutex so `agent_turn` (and the user-msg recorder) can
-    // lock briefly per write. No other task touches `session` here,
-    // so the lock is uncontended; the Mutex just matches agent_turn's
-    // shared-state signature.
-    let session = Mutex::new(session);
     // Tracks whether we broke out of the loop due to a shutdown signal
     // (as opposed to EOF / error). See the post-`finish()` exit note
     // below for why we care.
@@ -446,7 +437,10 @@ async fn bare_repl(
             }
 
             let user_msg = Message::user(&input);
-            record_session_message(&session, &user_msg, Some(&sink)).await;
+            let outcome = session.record_message(user_msg.clone()).await;
+            if let Some(msg) = outcome.failure {
+                _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+            }
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
             // Allow the in-flight turn to be interrupted too; the
@@ -468,9 +462,10 @@ async fn bare_repl(
     }
     .await;
 
-    let mut session = session.into_inner();
-    let r = session.finish();
-    log_session_err(r, &mut session, Some(&sink));
+    let outcome = session.finish().await;
+    if let Some(msg) = outcome.failure {
+        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+    }
 
     // `tokio::io::stdin()` spawns a blocking thread that cannot be
     // cancelled (see tokio::io::stdin docs), so on a signal-induced
@@ -494,15 +489,14 @@ async fn headless(
     model: &str,
     show_thinking: bool,
     prompt_text: &str,
-    session: SessionManager,
+    session: SessionHandle,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
-    // Wrap in Mutex so `agent_turn` can lock briefly per write. Only
-    // one task touches the session in headless mode, so this is just
-    // type-plumbing to match the shared-state signature.
-    let session = Mutex::new(session);
     let user_msg = Message::user(prompt_text);
-    record_session_message(&session, &user_msg, Some(&sink)).await;
+    let outcome = session.record_message(user_msg.clone()).await;
+    if let Some(msg) = outcome.failure {
+        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+    }
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
     // Race the single turn against shutdown signals so the recorded
@@ -518,9 +512,10 @@ async fn headless(
             Ok(())
         }
     };
-    let mut session = session.into_inner();
-    let r = session.finish();
-    log_session_err(r, &mut session, Some(&sink));
+    let outcome = session.finish().await;
+    if let Some(msg) = outcome.failure {
+        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+    }
 
     // Mirror `bare_repl`: on signal exit, skip runtime Drop so any
     // outstanding HTTP / reqwest connection pool doesn't hold the

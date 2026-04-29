@@ -13,19 +13,15 @@
 //! Callers wire this on fresh sessions exactly once; resumed sessions skip
 //! regeneration (the original title, if any, is already on disk).
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
-use crate::session::manager::SessionManager;
-use crate::session::writer::log_session_err;
+use crate::session::handle::SessionHandle;
 
 /// Haiku model used for title generation. Small and fast, OAuth-compatible,
 /// and cheap enough to fire on every fresh session without thought.
@@ -88,12 +84,8 @@ fn title_output_format() -> OutputFormat {
 ///
 /// `first_prompt` should be the user's first message text — truncated here
 /// to [`MAX_PROMPT_CHARS`] to keep the Haiku request small.
-pub(crate) fn spawn<S>(
-    client: Client,
-    session: Arc<Mutex<SessionManager>>,
-    sink: S,
-    first_prompt: String,
-) where
+pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
+where
     S: AgentSink + Clone + Send + 'static,
 {
     tokio::spawn(async move {
@@ -110,7 +102,7 @@ pub(crate) fn spawn<S>(
 /// Single-shot title generator: call Haiku, parse, append, notify.
 async fn generate_and_record(
     client: &Client,
-    session: &Mutex<SessionManager>,
+    session: &SessionHandle,
     sink: &impl AgentSink,
     first_prompt: &str,
 ) -> Result<()> {
@@ -128,13 +120,9 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
-    // Hold the session lock only for the append. `append_ai_title` does
-    // one small write + flush; holding longer would block new user
-    // messages from being recorded.
-    {
-        let mut s = session.lock().await;
-        let r = s.append_ai_title(&title);
-        log_session_err(r, &mut s, Some(sink));
+    let outcome = session.append_ai_title(title.clone()).await;
+    if let Some(msg) = outcome.failure {
+        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
     }
 
     _ = sink.send(AgentEvent::SessionTitleUpdated(title));
@@ -233,15 +221,13 @@ mod tests {
         test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
     }
 
-    /// Session manager with one user message recorded — the file must
-    /// be materialized before `append_ai_title` will find it.
-    async fn prepared_session(dir: &Path) -> Mutex<SessionManager> {
+    /// Session handle with one user message recorded — the file must
+    /// be materialized before `append_ai_title` will land an entry.
+    async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
-        let mut mgr = SessionManager::start(&store, HAIKU_MODEL);
-        mgr.record_message(&Message::user("first prompt"))
-            .await
-            .unwrap();
-        Mutex::new(mgr)
+        let handle = crate::session::handle::start(&store, HAIKU_MODEL);
+        handle.record_message(Message::user("first prompt")).await;
+        handle
     }
 
     // ── title_output_format ──

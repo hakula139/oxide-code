@@ -11,7 +11,7 @@ pub(crate) mod pending_calls;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink};
@@ -19,8 +19,7 @@ use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
-use crate::session::manager::SessionManager;
-use crate::session::writer::record_session_message;
+use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
@@ -65,7 +64,7 @@ pub(crate) async fn agent_turn(
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
     sink: &dyn AgentSink,
-    session: &Mutex<SessionManager>,
+    session: &SessionHandle,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
@@ -90,7 +89,7 @@ pub(crate) async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        record_session_message(session, &assistant_msg, Some(sink)).await;
+        record_message(session, assistant_msg.clone(), sink).await;
         messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
@@ -144,16 +143,13 @@ pub(crate) async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        record_session_message(session, &tool_result_msg, Some(sink)).await;
-        // Sidecar metadata is written immediately after the message
-        // so a mid-turn crash can still recover the display info for
-        // results that did land. Each entry is independent — a single
-        // failure doesn't abort the batch.
-        {
-            let mut s = session.lock().await;
-            for (id, metadata) in &sidecars {
-                let r = s.record_tool_result_metadata(id, metadata);
-                crate::session::writer::log_session_err(r, &mut s, Some(sink));
+        record_message(session, tool_result_msg.clone(), sink).await;
+        // Sidecar metadata follows the tool-result message; the actor
+        // coalesces them into the same batch flush as the message.
+        for (id, metadata) in &sidecars {
+            let outcome = session.record_tool_metadata(id, metadata).await;
+            if let Some(msg) = outcome.failure {
+                _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
             }
         }
         messages.push(tool_result_msg);
@@ -163,6 +159,16 @@ pub(crate) async fn agent_turn(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )
+}
+
+/// Records `msg` and surfaces the first I/O failure (if any) on
+/// `sink`. Drops the title seed — only the fresh-start trigger in
+/// `main` cares about it.
+async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
+    let outcome: RecordOutcome = session.record_message(msg).await;
+    if let Some(msg) = outcome.failure {
+        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+    }
 }
 
 // ── Stream Processing ──
@@ -403,7 +409,7 @@ mod tests {
     };
     use crate::config::Auth;
     use crate::message::Role;
-    use crate::session::manager::SessionManager;
+    use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
@@ -528,9 +534,9 @@ mod tests {
         }
     }
 
-    fn test_session(dir: &std::path::Path) -> Mutex<SessionManager> {
+    fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        Mutex::new(SessionManager::start(&store, "claude-sonnet-4-6"))
+        handle::start(&store, "claude-sonnet-4-6")
     }
 
     #[tokio::test]
