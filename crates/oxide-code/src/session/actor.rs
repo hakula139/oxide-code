@@ -170,7 +170,6 @@ fn surface_failure(failure: Option<&str>, shared: &SharedState) -> Option<String
 mod tests {
     use std::sync::Arc;
 
-    use indoc::indoc;
     use tempfile::tempdir;
 
     use super::super::handle::SharedState;
@@ -385,15 +384,15 @@ mod tests {
         assert!(surface_failure(None, &shared).is_none());
     }
 
-    // ── snapshot ──
+    // ── run (full-turn snapshot) ──
 
     #[tokio::test]
     async fn run_full_turn_produces_byte_compatible_jsonl() {
-        // Shape-level snapshot: a complete turn (user record →
-        // tool-result-bearing user record → tool metadata → finish)
-        // must produce the same JSONL line ordering that the
-        // pre-actor manager wrote. Drives the acceptance criterion
-        // "byte-for-byte identical for a given turn sequence".
+        // Drives the plan's "byte-for-byte identical for a given turn
+        // sequence" acceptance criterion. Captures the JSONL bytes
+        // verbatim with volatile fields (UUIDs, timestamps, cwd) masked
+        // so structure and field ordering are pinned but the snapshot
+        // stays stable across runs.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -417,28 +416,25 @@ mod tests {
 
         let path = super::super::store::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
-        let types: Vec<_> = content
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| {
-                let v: serde_json::Value = serde_json::from_str(l).ok()?;
-                v.get("type")?.as_str().map(str::to_owned)
-            })
-            .collect();
-        assert_eq!(
-            types,
-            vec![
-                "header",
-                "title",
-                "message",
-                "tool_result_metadata",
-                "summary"
-            ],
-            "{content}",
-        );
-        // Drain the unused indoc warning — we want the macro imported
-        // in tests for symmetry with sibling test files but no
-        // current test uses it after the snapshot was simplified.
-        _ = indoc! {""};
+        insta::assert_snapshot!(mask_volatile(&content));
+    }
+
+    /// Replaces the three volatile substrings — UUIDs, ISO-8601
+    /// timestamps, and the cwd value — with stable placeholders so
+    /// `insta::assert_snapshot!` is reproducible across runs while still
+    /// asserting the literal bytes of every other field. UUIDs match
+    /// quoted hex-with-dashes; timestamps match the RFC 3339 / ISO 8601
+    /// shape with optional fractional seconds; cwd is keyed off the
+    /// header field name.
+    fn mask_volatile(content: &str) -> String {
+        let uuid_re =
+            regex::Regex::new(r#""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#)
+                .unwrap();
+        let ts_re =
+            regex::Regex::new(r#""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z""#).unwrap();
+        let cwd_re = regex::Regex::new(r#""cwd":"[^"]*""#).unwrap();
+        let masked = uuid_re.replace_all(content, r#""<UUID>""#);
+        let masked = ts_re.replace_all(&masked, r#""<TS>""#);
+        cwd_re.replace_all(&masked, r#""cwd":"<CWD>""#).into_owned()
     }
 }
