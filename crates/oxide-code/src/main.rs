@@ -353,9 +353,7 @@ async fn agent_loop_task(
             UserAction::SubmitPrompt(text) => {
                 let user_msg = Message::user(&text);
                 let outcome = session.record_message(user_msg.clone()).await;
-                if let Some(msg) = outcome.failure {
-                    _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-                }
+                sink.session_write_error(outcome.failure.as_deref());
                 messages.push(user_msg);
 
                 // The actor sets the seed only on a fresh session's
@@ -439,9 +437,7 @@ async fn bare_repl(
 
             let user_msg = Message::user(&input);
             let outcome = session.record_message(user_msg.clone()).await;
-            if let Some(msg) = outcome.failure {
-                _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-            }
+            sink.session_write_error(outcome.failure.as_deref());
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
             // Allow the in-flight turn to be interrupted too; the
@@ -464,9 +460,7 @@ async fn bare_repl(
     .await;
 
     let outcome = session.finish().await;
-    if let Some(msg) = outcome.failure {
-        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 
     // `tokio::io::stdin()` spawns a blocking thread that cannot be
@@ -496,9 +490,7 @@ async fn headless(
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let user_msg = Message::user(prompt_text);
     let outcome = session.record_message(user_msg.clone()).await;
-    if let Some(msg) = outcome.failure {
-        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
     // Race the single turn against shutdown signals so the recorded
@@ -515,9 +507,7 @@ async fn headless(
         }
     };
     let outcome = session.finish().await;
-    if let Some(msg) = outcome.failure {
-        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 
     // Mirror `bare_repl`: on signal exit, skip runtime Drop so any

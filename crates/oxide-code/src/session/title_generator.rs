@@ -100,9 +100,7 @@ async fn generate_and_record(
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
     let outcome = session.append_ai_title(title.clone()).await;
-    if let Some(msg) = outcome.failure {
-        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
 
     _ = sink.send(AgentEvent::SessionTitleUpdated(title));
     Ok(())

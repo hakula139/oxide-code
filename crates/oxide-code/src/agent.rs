@@ -146,9 +146,7 @@ pub(crate) async fn agent_turn(
         record_message(session, tool_result_msg.clone(), sink).await;
         // One batch cmd so the actor coalesces every sidecar into one flush.
         let outcome = session.record_tool_metadata_batch(sidecars).await;
-        if let Some(msg) = outcome.failure {
-            _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-        }
+        sink.session_write_error(outcome.failure.as_deref());
         messages.push(tool_result_msg);
     }
 
@@ -162,9 +160,7 @@ pub(crate) async fn agent_turn(
 /// (only the fresh-start trigger in `main` consumes it).
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
     let outcome: RecordOutcome = session.record_message(msg).await;
-    if let Some(msg) = outcome.failure {
-        _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-    }
+    sink.session_write_error(outcome.failure.as_deref());
 }
 
 // ── Stream Processing ──
