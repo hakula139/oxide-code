@@ -326,6 +326,53 @@ pub(crate) fn dead_handle_for_tests(session_id: &str) -> SessionHandle {
     }
 }
 
+/// Creates a [`SessionHandle`] whose stand-in actor acks the first
+/// `succeed` cmds with a healthy outcome, then drops every cmd
+/// without acking — the receiver's rx-await fallback fires.
+/// Exercises the cross-task path where the actor task panics or
+/// stalls between receiving a cmd and sending its ack.
+#[cfg(test)]
+pub(crate) fn succeed_n_then_drop_acks_handle_for_tests(
+    session_id: &str,
+    succeed: usize,
+) -> SessionHandle {
+    use super::actor::SessionCmd;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_clone = Arc::clone(&count);
+    let join = tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            let n = count_clone.fetch_add(1, Ordering::SeqCst);
+            if n >= succeed {
+                drop(cmd);
+                continue;
+            }
+            match cmd {
+                SessionCmd::Record { ack, .. } => {
+                    _ = ack.send(RecordOutcome {
+                        ai_title_seed: None,
+                        failure: None,
+                    });
+                }
+                SessionCmd::ToolMetadata { ack, .. }
+                | SessionCmd::AppendAiTitle { ack, .. }
+                | SessionCmd::Finish { ack } => {
+                    _ = ack.send(Outcome { failure: None });
+                }
+            }
+        }
+    });
+
+    SessionHandle {
+        cmd_tx,
+        session_id: Arc::from(session_id),
+        shared: Arc::new(SharedState::default()),
+        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::store::{test_session_file, test_store};
@@ -447,6 +494,46 @@ mod tests {
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
+
+    #[tokio::test]
+    async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
+        // Distinguishes the rx-await fallback in dispatch_outcome from
+        // the cmd_tx.send-failed early return: send succeeds and the
+        // actor receives the cmd, but drops the ack without responding
+        // (simulating a panic between recv and ack). The succeed=3
+        // header lets the same handle exercise the success arm on
+        // ToolMetadata / AppendAiTitle / Finish variants of the
+        // helper's or-pattern, then the drop arm on the 4th cmd.
+        let handle = succeed_n_then_drop_acks_handle_for_tests("acks-then-drops", 3);
+
+        let title = handle.append_ai_title("ok".to_owned()).await;
+        let finish = handle.finish().await;
+        let batch_ok = handle
+            .record_tool_metadata_batch(vec![(
+                "t1".to_owned(),
+                ToolMetadata {
+                    title: Some("f.rs".to_owned()),
+                    ..ToolMetadata::default()
+                },
+            )])
+            .await;
+        let batch_dropped = handle.record_tool_metadata_batch(vec![]).await;
+
+        assert!(title.failure.is_none(), "AppendAiTitle is acked healthily");
+        assert!(finish.failure.is_none(), "Finish is acked healthily");
+        assert!(
+            batch_ok.failure.is_none(),
+            "ToolMetadata is acked healthily"
+        );
+        assert!(
+            batch_dropped.failure.is_some(),
+            "dropped ack surfaces actor-gone",
+        );
+
+        // Drain the actor task so its loop-exit is exercised — without
+        // shutdown, the test runtime tears the task down mid-recv.
+        handle.shutdown().await;
     }
 
     #[tokio::test]
