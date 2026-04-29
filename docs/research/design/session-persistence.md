@@ -1,6 +1,6 @@
 # Session Persistence
 
-Research findings for oxide-code session persistence, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), [learn-claude-code](https://github.com/the-pocket/learn-claude-code)), POSIX append-only semantics, and Anthropic Messages API ordering requirements.
+Research findings for oxide-code session persistence, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex)), POSIX append-only semantics, and Anthropic Messages API ordering requirements.
 
 ## Reference Implementations
 
@@ -21,12 +21,6 @@ Research findings for oxide-code session persistence, based on analysis of refer
 - Ephemeral flag to skip persistence for testing.
 - Bounded `mpsc` channel + `tokio::spawn`-ed `RolloutWriterTask`. Cmds: `AddItems`, `Persist`, `Flush`, `Shutdown` — each barrier carries an `oneshot::Sender<io::Result<()>>` ack. Terminal task failure is read post-mortem from a `Mutex<Option<Arc<IoError>>>` slot on the recorder.
 - Receive-and-drain inside the writer loop — `recv().await` for the first cmd, then `try_recv()` non-blocking to coalesce queued cmds into a single batch flush. No interval timer (Rust + mpsc subsumes claude-code's `FLUSH_INTERVAL_MS = 100` JS-event-loop workaround).
-
-### learn-claude-code (Python)
-
-- Project-local `.transcripts/transcript_{TIMESTAMP}.jsonl`.
-- 3-layer context compression (micro, auto, manual).
-- Auto-archive full transcript before summarization.
 
 ## Storage Format
 

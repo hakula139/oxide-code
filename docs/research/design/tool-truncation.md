@@ -20,13 +20,17 @@ Per-tool defaults are tightened by tool config; per-message budget overrides ind
 
 No per-line truncation in the dispatcher; that's the tool schema's responsibility.
 
+**Sources:** `claude-code/src/services/streamingToolExecutor.ts` (per-tool then per-message cap application), `claude-code/src/utils/toolLimits.ts` (tiered cap constants).
+
 ### OpenAI Codex (Rust)
 
 No system-wide cap. Tools either bound their own output (e.g., `MATCH_LIMIT = 50` for ripgrep results in `fuzzy_file_search.rs`) or return whatever the underlying command produces. Pagination caps appear on message-level features (`THREAD_LIST_DEFAULT_LIMIT = 25`, `THREAD_TURNS_MAX_LIMIT = 100`) but those bound list responses, not tool output bytes.
 
 The implication: a `bash cat large.log` returns however many bytes ripgrep / cat printed. Codex relies on the model to ask for tighter ranges if a tool emits too much.
 
-### opencode (TypeScript / Effect)
+**Sources:** `codex-rs/core/src/tools/handlers/fuzzy_file_search.rs` (`MATCH_LIMIT = 50`, per-tool with no central layer).
+
+### opencode (TypeScript)
 
 Centralized via `Truncate.Service` (one truncation pass after the tool runs, before the result is appended to the message):
 
@@ -43,6 +47,8 @@ When either limit trips, the service:
 3. Returns a result with `{ content: preview, truncated: true, outputPath: path }`.
 
 The hint string adapts to agent capabilities — with a Task tool it reads `"Use the Task tool to have explore agent process this file..."`; without it, `"Use Grep / Read with offset/limit on the full content..."`.
+
+**Sources:** `opencode/packages/opencode/src/tool/truncate.ts` (`Truncate.Service`: `MAX_LINES = 2000`, `MAX_BYTES = 50 KB`, `RETENTION = 7 days`, head / tail + file spillover with adapted hint).
 
 ## Comparison
 
@@ -91,16 +97,7 @@ The roadmap calls for centralizing the byte-budget at the dispatcher. The decisi
 
 ## Sources
 
-### oxide-code
-
 - `crates/oxide-code/src/tool.rs` — `ToolRegistry::run` (dispatcher cap entry point), `cap_output()` (head-tail), `MAX_OUTPUT_BYTES`, `TRUNCATION_OVERHEAD`, `MAX_LINE_LENGTH`, `truncate_line()`.
 - `crates/oxide-code/src/tool/glob.rs` — `MAX_RESULTS`, view-shape `truncated_total` setter.
 - `crates/oxide-code/src/tool/grep.rs` — `DEFAULT_HEAD_LIMIT`, per-mode row caps, `MAX_GREP_FILE_SIZE`.
 - `crates/oxide-code/src/tool/read.rs` — `DEFAULT_LINE_LIMIT`, `MAX_READ_FILE_SIZE`, view-shape footer.
-
-### Reference projects
-
-- `claude-code/src/services/streamingToolExecutor.ts` — dispatcher cap application (per-tool then per-message).
-- `claude-code/src/utils/toolLimits.ts` — tiered cap constants (`DEFAULT_MAX_RESULT_SIZE_CHARS`, `MAX_TOOL_RESULT_TOKENS`, `MAX_TOOL_RESULT_BYTES`, `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS`, `BYTES_PER_TOKEN`).
-- `codex-rs/core/src/tools/handlers/fuzzy_file_search.rs` — `MATCH_LIMIT = 50` (per-tool, no central layer).
-- `opencode/packages/opencode/src/tool/truncate.ts` — `Truncate.Service` (`MAX_LINES = 2000`, `MAX_BYTES = 50 KB`, `RETENTION = 7 days`, head/tail + file spillover with adapted hint).

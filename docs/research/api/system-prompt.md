@@ -140,7 +140,7 @@ Tool schemas are sent via the API `tools` parameter, **not** in the system promp
 
 The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Cache scopes:
 
-- `global` — static instructions identical across all sessions. **First-party only**; 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Prompt Caching Scope](./anthropic-api.md#prompt-caching-scope) for the full invariance rule.
+- `global` — static instructions identical across all sessions. **First-party only**; 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Anthropic API § Prompt Caching Scope](anthropic-api.md#prompt-caching-scope) for the full invariance rule.
 - _(absent)_ — default (org-scoped) ephemeral cache. Universally accepted.
 - `null` (no `cache_control`) — dynamic content, not cached.
 
@@ -211,11 +211,11 @@ The URL includes a `?beta=true` query parameter.
 
 Third-party gateways validate the system-block layout in addition to wire-shape signals. Empirically, prompt-content checks are content-similarity-based and treat the static prefix as load-bearing:
 
-- The identity prefix block (`"You are Claude Code..."` and friends, see [`CLI_SYSPROMPT_PREFIXES`](./anthropic-api.md#2-system-prompt-prefix-as-a-separate-block)) must occupy its own block. Concatenating it into the prompt body fails the same way 1P fails non-Haiku OAuth.
+- The identity prefix block (`"You are Claude Code..."` and friends, see [Anthropic API § System prompt prefix](anthropic-api.md#2-system-prompt-prefix-as-a-separate-block)) must occupy its own block. Concatenating it into the prompt body fails the same way 1P fails non-Haiku OAuth.
 - Static section text is accepted when it closely matches the known Claude Code prompt content shipped with this version. Heavily customized static prompts can trip the verifier even when every header is correct.
 - Dynamic sections (after the `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker) are accepted alongside valid static content. The boundary itself is consumed by `splitSysPromptPrefix()` and never reaches the wire.
 
-For the wire-shape side of the check (Stainless headers, billing attestation, beta header set, `metadata.user_id` shape, `User-Agent`), see [anthropic-api § Third-Party Gateway Validation](./anthropic-api.md#third-party-gateway-validation).
+For the wire-shape side of the check (Stainless headers, billing attestation, beta header set, `metadata.user_id` shape, `User-Agent`), see [Anthropic API § Third-Party Gateway Validation](anthropic-api.md#third-party-gateway-validation).
 
 ## Sources
 
