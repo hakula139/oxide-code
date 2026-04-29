@@ -144,8 +144,7 @@ pub(crate) async fn agent_turn(
             content: results,
         };
         record_message(session, tool_result_msg.clone(), sink).await;
-        // Send all sidecars in one batch cmd so the actor coalesces
-        // them into a single flush following the tool-result message.
+        // One batch cmd so the actor coalesces every sidecar into one flush.
         let outcome = session.record_tool_metadata_batch(sidecars).await;
         if let Some(msg) = outcome.failure {
             _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
@@ -159,9 +158,8 @@ pub(crate) async fn agent_turn(
     )
 }
 
-/// Records `msg` and surfaces the first I/O failure (if any) on
-/// `sink`. Drops the title seed — only the fresh-start trigger in
-/// `main` cares about it.
+/// Surfaces the first I/O failure on `sink`; drops the AI-title seed
+/// (only the fresh-start trigger in `main` consumes it).
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
     let outcome: RecordOutcome = session.record_message(msg).await;
     if let Some(msg) = outcome.failure {
@@ -537,17 +535,16 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
-    /// A handle whose actor channel is already closed. Every write returns
-    /// the actor-gone failure; the first call surfaces it via sink Error.
+    /// Handle whose actor channel is already closed; every write
+    /// returns the actor-gone failure.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::dead_handle_for_tests("dead-test-session")
     }
 
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
-        // When the session actor is gone, record_message must emit exactly
-        // one Error event (sticky once-flag) and agent_turn must still
-        // complete normally (write errors are non-fatal to the turn).
+        // Write errors must not abort the turn — agent_turn returns Ok
+        // and emits exactly one Error event for the user.
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);

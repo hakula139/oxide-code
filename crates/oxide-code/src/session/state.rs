@@ -48,12 +48,10 @@ pub(super) struct SessionState {
 /// - `Pending` — header staged, file not yet on disk. A fresh session
 ///   that exits before the first record cmd leaves no file behind.
 /// - `Active` — file open, [`BufWriter`][std::io::BufWriter] healthy.
-///   Steady state.
-/// - `Broken` — last batch errored mid-flush. `BufWriter`'s buffer
-///   state is undefined per the std docs after a partial-write
-///   failure, so we drop the writer and reopen the file with
-///   [`SessionStore::open_append`] on the next batch. Without this,
-///   a single transient I/O hiccup poisons every subsequent flush.
+/// - `Broken` — last batch errored mid-flush. `BufWriter`'s buffer is
+///   undefined after a partial write per std docs, so the next batch
+///   reopens the file with [`SessionStore::open_append`] instead of
+///   letting one transient hiccup poison every subsequent flush.
 pub(super) enum WriterStatus {
     Pending { header: Entry },
     Active(SessionWriter),
@@ -174,9 +172,8 @@ impl SessionState {
             }
             writer.flush()
         })();
-        // `BufWriter` semantics on partial write are undefined; on flush
-        // failure we drop the writer and flag Broken so the next batch
-        // reopens fresh instead of writing into a poisoned buffer.
+        // `BufWriter`'s buffer is undefined after a partial write — flag
+        // Broken so the next batch reopens instead of poisoning the flush.
         self.writer_status = match result {
             Ok(()) => WriterStatus::Active(writer),
             Err(_) => WriterStatus::Broken,
@@ -364,9 +361,8 @@ mod tests {
 
     #[test]
     fn finish_entry_pending_writer_returns_none_and_marks_finished() {
-        // No record ever happened, so no file exists yet — there is
-        // nothing to summarize. The flag still latches so a later
-        // record cmd can no-op cleanly.
+        // Nothing recorded → nothing to summarize, but `finished` still
+        // latches so a later record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -411,9 +407,7 @@ mod tests {
 
     #[test]
     fn finish_entry_skips_summary_on_empty_resume() {
-        // Resumed session with no new messages must not write a
-        // duplicate summary — would accumulate one line per resume
-        // cycle on noisy runs.
+        // A summary per noisy resume would accumulate one line per cycle.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionState::fresh(store.clone(), "m");
@@ -436,9 +430,7 @@ mod tests {
 
     #[test]
     fn flush_entries_broken_writer_reopens_file_and_appends() {
-        // After a flush error transitions writer_status to Broken, the
-        // next flush must reopen the existing file via store.open_append
-        // and append cleanly — not lose entries, not start a new file.
+        // Reopen must hit the existing file, not create a fresh one.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store.clone(), "m");
@@ -472,9 +464,8 @@ mod tests {
 
     #[test]
     fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
-        // A header-write failure must leave WriterStatus::Pending intact
-        // so the next batch retries via store.create rather than trying
-        // to open a file that was never created.
+        // The next batch must retry create rather than open_append a
+        // file that was never created.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");

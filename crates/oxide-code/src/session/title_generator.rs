@@ -221,8 +221,8 @@ mod tests {
         test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
     }
 
-    /// Async sink backed by an unbounded mpsc channel so tests can
-    /// `recv()` with a timeout instead of polling `CapturingSink` in a loop.
+    /// Sink backed by an mpsc channel so tests can wait on `recv()`
+    /// with a timeout instead of polling `CapturingSink`.
     #[derive(Clone)]
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<AgentEvent>);
 
@@ -233,8 +233,8 @@ mod tests {
         }
     }
 
-    /// Session handle with one user message recorded — the file must
-    /// be materialized before `append_ai_title` will land an entry.
+    /// Session handle with one recorded message so the file is
+    /// materialized when `append_ai_title` runs.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
         let handle = crate::session::handle::start(&store, HAIKU_MODEL);
@@ -277,8 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_error_does_not_emit_session_title_event() {
-        // Haiku returns 503 → generate_and_record fails → warn-logs only;
-        // the spawned wrapper must not panic and must not emit a title event.
+        // 503 → generate_and_record fails → warn-log only, no event.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -294,7 +293,6 @@ mod tests {
 
         spawn(client, session, sink, "first prompt".to_owned());
 
-        // Give the spawned task time to run and confirm it emits nothing.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
             rx.try_recv().is_err(),
@@ -411,9 +409,8 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_write_failure_emits_error_and_title_events() {
-        // When append_ai_title fails (actor gone), generate_and_record must
-        // emit AgentEvent::Error and still emit SessionTitleUpdated (the
-        // function continues past the write failure so the UI updates).
+        // A write failure surfaces an Error to the sink but must not
+        // skip the SessionTitleUpdated event — UI keeps updating.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))

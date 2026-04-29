@@ -38,10 +38,9 @@ pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
     shared: Arc<SharedState>,
-    /// Held outside the cloneable [`mpsc::Sender`] so [`Self::shutdown`]
-    /// can await actor exit after every clone has dropped its sender.
-    /// `Mutex<Option<_>>` so the first call drains the join, subsequent
-    /// calls no-op.
+    /// Drained by [`Self::shutdown`] once every cloned sender has
+    /// dropped. `Mutex<Option<_>>` so the first caller takes the
+    /// join, subsequent shutdowns no-op.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -183,20 +182,12 @@ impl SessionHandle {
         })
     }
 
-    /// Drops this handle's sender and awaits actor task exit. The actor
-    /// only exits once every clone's [`mpsc::Sender`] has dropped, so
-    /// callers must drop other clones first; otherwise the channel
-    /// stays open and this future blocks indefinitely. The first call
-    /// drains the join handle; subsequent calls (on other clones)
-    /// return immediately.
-    ///
-    /// Useful in two places:
-    ///
-    /// - The TUI / REPL shutdown path can call this after `finish().await`
-    ///   for deterministic actor drain before the runtime tears down.
-    /// - Tests that need the actor to drain before reading the file
-    ///   from disk get a race-free wait without depending on the
-    ///   `current_thread` scheduler's ordering.
+    /// Drops this handle's sender and awaits actor task exit. The
+    /// actor only exits once every clone's [`mpsc::Sender`] has
+    /// dropped, so callers must drop other clones first; otherwise
+    /// the channel stays open and this blocks. The first call drains
+    /// the join slot; subsequent calls return immediately. Used by
+    /// process-exit paths and tests for deterministic actor drain.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx,
@@ -279,11 +270,8 @@ fn from_resumed_data(
     writer: super::store::SessionWriter,
 ) -> Result<ResumedSession> {
     sanitize_resumed_messages(&mut data.messages);
-    // After-sanitize check: a file that loaded non-empty but emptied
-    // out (all unresolved tool_use + orphan tool_result) would
-    // otherwise slip through with `last_message_uuid` pointing at a
-    // dropped message, and the next record would chain to a missing
-    // UUID.
+    // Bail rather than chain the next record onto a `last_message_uuid`
+    // that sanitize just dropped.
     if data.messages.is_empty() {
         bail!("session {session_id} has no messages to resume");
     }
@@ -359,7 +347,7 @@ mod tests {
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        // Line 0: header. Line 1: title. Line 2: message.
+        assert!(lines[0].contains(r#""type":"header""#));
         assert!(lines[1].contains(r#""type":"title""#));
         assert!(lines[2].contains(r#""type":"message""#));
     }
@@ -385,29 +373,19 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_surfaces_failure_once_then_silences() {
-        // First call must return Some (the sticky one-time message); the
-        // second call returns None so the user sees the error only once.
         let handle = dead_handle_for_tests("dead");
 
         let first = handle.record_message(Message::user("a")).await;
         let second = handle.record_message(Message::user("b")).await;
 
-        assert!(
-            first.failure.is_some(),
-            "first call after actor gone must surface failure",
-        );
-        assert!(
-            second.failure.is_none(),
-            "subsequent calls must be silent after first surface",
-        );
+        assert!(first.failure.is_some());
+        assert!(second.failure.is_none());
     }
 
     #[tokio::test]
     async fn record_message_actor_gone_carries_underlying_flush_error() {
-        // If a flush error was recorded before the actor died, the
-        // actor-gone message should carry the I/O cause so the user
-        // sees "actor stopped after I/O error: …" instead of just the
-        // generic dropped-task fallback.
+        // The user should see the I/O cause, not the generic
+        // dropped-task fallback, when one is on record.
         let handle = dead_handle_for_tests("dead");
         handle
             .shared
@@ -428,21 +406,16 @@ mod tests {
         // surfaced flush failure must not silence the actor-gone signal.
         let handle = dead_handle_for_tests("dead");
         handle.shared.record_flush_failure("disk full");
-        // Burn the flush-failure surface flag the way the actor would.
         assert!(handle.shared.surface_first_flush_failure());
 
         let first = handle.record_message(Message::user("a")).await;
 
-        assert!(
-            first.failure.is_some(),
-            "actor-gone surface flag is independent of flush surface",
-        );
+        assert!(first.failure.is_some());
     }
 
     #[tokio::test]
     async fn record_message_resumed_session_does_not_seed_ai_title() {
-        // Resumed sessions already have a first-prompt title on disk;
-        // we don't try to regenerate the AI title here.
+        // Resumed sessions inherit the original first-prompt title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -478,9 +451,8 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
-        // The agent loop sends every sidecar from one tool round in
-        // one batch cmd → one flush. Default-metadata items are
-        // skipped at absorb; non-defaults each produce one line.
+        // Default-metadata items are skipped at absorb; non-defaults
+        // each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -668,11 +640,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_after_record_returns_after_actor_exits() {
-        // The whole point of `shutdown`: a single deterministic await
-        // that completes only after the spawned actor task has
-        // observed the channel closing and finished its final batch.
-        // Concretely, the message we recorded must be on disk by the
-        // time `shutdown().await` returns.
+        // shutdown's contract: the recorded message must be on disk by
+        // the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -691,9 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_safe_to_call_after_dead_handle() {
-        // Channel is already closed (no actor was spawned), so the
-        // join slot is None. `shutdown` must not panic and must
-        // return promptly.
+        // Smoke check: empty join slot must not panic.
         let handle = dead_handle_for_tests("dead");
         handle.shutdown().await;
     }
@@ -713,8 +680,7 @@ mod tests {
         );
 
         handle.record_message(Message::user("first")).await;
-        // Awaiting record_message means the actor has flushed the
-        // batch — file is on disk.
+        // The await means the batch flushed; the file is on disk.
         assert!(
             test_session_file(dir.path(), handle.session_id()).exists(),
             "first record_message should materialize the session file",
@@ -750,8 +716,7 @@ mod tests {
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        // Skip finish — `shutdown` waits for the actor to drain the
-        // queued record cmd and exit when the channel closes.
+        // Skip finish — `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
         let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
@@ -772,11 +737,8 @@ mod tests {
 
     #[tokio::test]
     async fn resume_all_messages_sanitized_returns_error() {
-        // A file that loads non-empty but whose only message is an
-        // unresolved assistant tool_use. Sanitization removes it,
-        // leaving an empty message list that would corrupt the UUID
-        // chain on the next record. Resume bails so the next record
-        // can't chain to a missing UUID.
+        // Sanitize drops the lone unresolved tool_use, leaving an
+        // empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -791,7 +753,6 @@ mod tests {
                 }],
             })
             .await;
-        // The ack means the actor flushed — file is on disk.
         drop(original);
 
         let err = resume(&store, &session_id)
@@ -847,8 +808,6 @@ mod tests {
         resumed.finish().await;
         drop(resumed);
 
-        // Read the file and find the new message's parent_uuid — should
-        // match the last uuid from the original run.
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
         let entries: Vec<super::super::entry::Entry> = content
             .lines()

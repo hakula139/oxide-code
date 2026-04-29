@@ -214,9 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_flush_error_records_failure_in_ack() {
-        // Delete the project directory after creating the state so
-        // store.create() cannot create the session file. The first
-        // Record cmd's flush must fail, and the ack must carry the error.
+        // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -271,11 +269,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_drains_burst_into_single_batch() {
-        // Send three records in one mailbox burst. After the actor
-        // finishes, the on-disk file must contain header + title +
-        // 3 messages, in order. Ack ordering proves the FIFO contract;
-        // single-batch coalescing is implicit (we processed all three
-        // before the final flush).
+        // Three records queued at once must all land in the file in
+        // send order — single-batch coalescing is implicit.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -292,9 +287,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_metadata_with_default_short_circuits_without_writing() {
-        // ToolMetadata::default() produces no display fields, so
-        // writing a sidecar entry would be noise. The actor must
-        // ack immediately and never enqueue an entry.
+        // Default metadata has no display fields, so emitting an entry
+        // would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -369,11 +363,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_full_turn_produces_byte_compatible_jsonl() {
-        // Drives the plan's "byte-for-byte identical for a given turn
-        // sequence" acceptance criterion. Captures the JSONL bytes
-        // verbatim with volatile fields (UUIDs, timestamps, cwd) masked
-        // so structure and field ordering are pinned but the snapshot
-        // stays stable across runs.
+        // Pins literal JSONL bytes (with UUIDs / timestamps / cwd
+        // masked for stability) so a stray field rename would fail.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -420,10 +411,8 @@ mod tests {
 
     // ── Helpers ──
 
-    /// Replaces the three volatile substrings — UUIDs, ISO-8601
-    /// timestamps, and the cwd value — with stable placeholders so
-    /// `insta::assert_snapshot!` is reproducible across runs while still
-    /// asserting the literal bytes of every other field.
+    /// Replaces UUIDs, timestamps, and the cwd value with placeholders
+    /// so the snapshot stays stable across runs.
     fn mask_volatile(content: &str) -> String {
         let uuid_re =
             regex::Regex::new(r#""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#)
