@@ -1026,7 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn run_byte_cap_on_read_falls_through_to_text_view() {
         // When the byte cap fires on a read, the trailing
-        // `(Showing lines …)` footer is replaced by the truncation
+        // `(Showing lines ...)` footer is replaced by the truncation
         // separator — `read_excerpt_view` can't parse it, so
         // `result_view` must drop to `Text` instead of panicking or
         // mis-rendering.
