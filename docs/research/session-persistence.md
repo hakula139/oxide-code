@@ -81,6 +81,20 @@ On Unix, session files are created with mode `0o600` (user-only read / write) so
 
 The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a cheap-to-clone `SessionHandle` that forwards every operation as a `SessionCmd` over a bounded mpsc channel. Each cmd carries a oneshot ack so the caller awaits state integration without holding any lock across `await`. The actor's loop is `recv().await` for the first cmd, then `try_recv()` until empty: bursts queued during one agent iteration (assistant message → tool-result message → N tool-metadata sidecars) coalesce into one batch and one buffered flush. Isolated writes still flush immediately because the drain returns `Empty` after the first cmd. No interval timer — Rust's mpsc absorbs claude-code's `FLUSH_INTERVAL_MS = 100` JS-event-loop workaround. The `SessionWriter` wraps a `BufWriter<File>` so the per-batch flush actually coalesces syscalls; `std::fs::File::flush` is a no-op.
 
+Sidecar metadata for one tool round travels as a single `SessionCmd::ToolMetadata { items: Vec<(String, ToolMetadata)> }` instead of N awaits in series, so the agent loop sends every sidecar from a turn in one cmd → one ack → one flush. Items whose `metadata == ToolMetadata::default()` add no display fields and are skipped at absorb.
+
+`SessionHandle` retains the actor's `JoinHandle` in an `Arc<Mutex<Option<JoinHandle<()>>>>` slot. `SessionHandle::shutdown(self)` consumes the handle, drops its sender, and awaits the join — the first caller drains the slot, subsequent calls (on other clones) no-op. Production exit paths (TUI shutdown, REPL, headless) call `shutdown().await` after `finish().await` for deterministic actor drain. A blocking `Drop` impl is intentionally omitted: `Drop` is sync and tokio offers no portable way to await inside it without runtime hacks (`block_in_place` requires multi-thread runtime). The async-consume shape gives the same observable guarantee for callers who can `await`.
+
+### Writer recovery on flush error
+
+`std::io::BufWriter` is undefined after a partial-write error, so a transient mid-batch I/O failure could otherwise poison the next batch's flush with stale buffered bytes. The actor's writer state is therefore a three-variant `WriterStatus`:
+
+- **`Pending { header }`** — file not yet on disk. First batch flush calls `SessionStore::create` to materialize, transitioning to `Active`. A header-write failure leaves `Pending` intact so the next batch retries.
+- **`Active(SessionWriter)`** — steady state. A flush error drops the writer and flips to `Broken`.
+- **`Broken`** — last batch errored. Next batch reopens the existing file via `SessionStore::open_append` and transitions back to `Active`. An open failure stays `Broken` and retries again on the next batch.
+
+Implemented as a `take/restore` helper that pulls the writer out via `mem::replace` — on flush success we restore `Active(writer)`, on flush failure we transition to `Broken`. No `unreachable!()` arms.
+
 ### Lazy materialization
 
 Starting a session allocates the session ID and stages the header in memory; the on-disk file is created by the first batch flush carrying real content. A session that exits before any message is recorded therefore leaves no artifact behind, keeping `ox --list` clear of empty `ox`-then-quit rows. The header's `created_at` is captured at start and persisted unchanged when the file finally materializes.
@@ -107,7 +121,14 @@ The Haiku call ships a `{"title": string}` JSON schema via the `structured-outpu
 
 ### Write-error surfacing
 
-Session I/O runs alongside the agent loop but must not abort it — the user's turn should not fail because the disk is full. The actor warn-logs every failed batch flush, and the first failure populates the handle's `RecordOutcome::failure` (or `Outcome::failure`) slot so the agent loop can emit a one-shot `AgentEvent::Error`. A sticky `failure_surfaced` atomic on the handle's shared state ensures subsequent failures stay silent on the UI; the actor still warn-logs them, so the file log under `$XDG_STATE_HOME` retains the full history.
+Session I/O runs alongside the agent loop but must not abort it — the user's turn should not fail because the disk is full. The actor warn-logs every failed batch flush, and the first failure populates the handle's `RecordOutcome::failure` (or `Outcome::failure`) slot so the agent loop can emit a one-shot `AgentEvent::Error`. The actor still warn-logs every subsequent failure, so the file log under `$XDG_STATE_HOME` retains the full history.
+
+The handle's `SharedState` carries two independent sticky-once flags so qualitatively different failures don't mask each other:
+
+- **`flush_failure_surfaced`** — flips on the first batch-flush error surfaced through a caller's ack.
+- **`actor_gone_surfaced`** — flips on the first send / recv error indicating the actor task has stopped (panic, channel closed). When the actor died after recording an I/O error, the surfaced message includes that underlying cause: "Session writer task has stopped after I/O error: <…>" — read from the `last_flush_failure` slot the actor populates on every batch failure.
+
+Sharing a single flag would let the milder per-batch failure mask the more severe actor-gone signal; keeping them independent ensures both fire exactly once.
 
 ## Listing
 
