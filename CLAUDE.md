@@ -52,17 +52,18 @@ ox                                          # Start an interactive session
 │   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
 ├── session.rs                              # Session module root
 ├── session/
+│   ├── actor.rs                            # SessionActor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path constructors
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
 │   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`)
-│   ├── manager.rs                          # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs                         # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
-│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, XDG path, listing
-│   ├── title_generator.rs                  # Background AI title generation (Haiku) with detached task
-│   └── writer.rs                           # Session-write helpers (record_session_message, log_session_err)
+│   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
+│   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
+│   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout

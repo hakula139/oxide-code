@@ -19,6 +19,8 @@ Research findings for oxide-code session persistence, based on analysis of refer
 - SQLite index for fast metadata queries.
 - `RolloutItem` replay model.
 - Ephemeral flag to skip persistence for testing.
+- Bounded `mpsc` channel + `tokio::spawn`-ed `RolloutWriterTask`. Cmds: `AddItems`, `Persist`, `Flush`, `Shutdown` — each barrier carries an `oneshot::Sender<io::Result<()>>` ack. Terminal task failure is read post-mortem from a `Mutex<Option<Arc<IoError>>>` slot on the recorder.
+- Receive-and-drain inside the writer loop — `recv().await` for the first cmd, then `try_recv()` non-blocking to coalesce queued cmds into a single batch flush. No interval timer (Rust + mpsc subsumes claude-code's `FLUSH_INTERVAL_MS = 100` JS-event-loop workaround).
 
 ### learn-claude-code (Python)
 
@@ -75,15 +77,19 @@ On Unix, session files are created with mode `0o600` (user-only read / write) so
 
 ## Session Lifecycle
 
+### Actor + batched writes
+
+The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a cheap-to-clone `SessionHandle` that forwards every operation as a `SessionCmd` over a bounded mpsc channel. Each cmd carries a oneshot ack so the caller awaits state integration without holding any lock across `await`. The actor's loop is `recv().await` for the first cmd, then `try_recv()` until empty: bursts queued during one agent iteration (assistant message → tool-result message → N tool-metadata sidecars) coalesce into one batch and one buffered flush. Isolated writes still flush immediately because the drain returns `Empty` after the first cmd. No interval timer — Rust's mpsc absorbs claude-code's `FLUSH_INTERVAL_MS = 100` JS-event-loop workaround. The `SessionWriter` wraps a `BufWriter<File>` so the per-batch flush actually coalesces syscalls; `std::fs::File::flush` is a no-op.
+
 ### Lazy materialization
 
-`SessionManager::start` does not touch disk: it allocates the session ID, builds the header in memory, and caches both alongside a clone of the `SessionStore` handle. The on-disk file is materialized by the first `record_message` call, which writes the header before the message itself. A session that exits before any message is recorded therefore leaves no artifact behind, keeping `ox --list` clear of empty `ox`-then-quit rows. The header's `created_at` is captured at `start` and persisted unchanged when the file finally materializes.
+Starting a session allocates the session ID and stages the header in memory; the on-disk file is created by the first batch flush carrying real content. A session that exits before any message is recorded therefore leaves no artifact behind, keeping `ox --list` clear of empty `ox`-then-quit rows. The header's `created_at` is captured at start and persisted unchanged when the file finally materializes.
 
 ### Resume and sanitization
 
-`ox -c` reopens the existing session file in append mode. The loader walks all `Entry::Message` lines into a UUID-indexed DAG, identifies leaves as UUIDs unreferenced by any other message's `parent_uuid`, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The single load pass also surfaces the newest `Entry::Title` (max `updated_at`, so AI-generated titles supersede first-prompt ones) and hands it to the TUI status bar.
+`ox -c` reopens the existing session file in append mode and spawns the actor in `WriterStatus::Active` from the start. The loader walks all `Entry::Message` lines into a UUID-indexed DAG, identifies leaves as UUIDs unreferenced by any other message's `parent_uuid`, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The single load pass also surfaces the newest `Entry::Title` (max `updated_at`, so AI-generated titles supersede first-prompt ones) and hands it to the TUI status bar.
 
-A session can crash mid-turn, leaving invariants the API rejects: unresolved `tool_use`, orphan `tool_result`, trailing `thinking` blocks, or consecutive same-role messages. `SessionManager::resume` runs a symmetric sanitization pipeline — strip trailing thinking, drop unresolved tool_use / orphan tool_result blocks, merge adjacent same-role survivors, and inject head / tail sentinels when the transcript begins assistant-first or ends on an orphan-only user turn. See the rustdoc on `sanitize_resumed_messages` for the full pass ordering.
+A session can crash mid-turn, leaving invariants the API rejects: unresolved `tool_use`, orphan `tool_result`, trailing `thinking` blocks, or consecutive same-role messages. The resume entry point runs a symmetric sanitization pipeline — strip trailing thinking, drop unresolved tool_use / orphan tool_result blocks, merge adjacent same-role survivors, and inject head / tail sentinels when the transcript begins assistant-first or ends on an orphan-only user turn. See the rustdoc on `sanitize_resumed_messages` for the full pass ordering.
 
 ### Fork-on-conflict concurrency
 
@@ -101,7 +107,7 @@ The Haiku call ships a `{"title": string}` JSON schema via the `structured-outpu
 
 ### Write-error surfacing
 
-Session I/O runs alongside the agent loop but must not abort it — the user's turn should not fail because the disk is full. `main::log_session_err` warn-logs every failure and, the first time a write fails in a session, surfaces an `AgentEvent::Error` through the active sink so the TUI / REPL can show it inline. Subsequent failures within the same session warn-log only; the `write_failed` flag on `SessionManager` prevents repeated UI errors for the same root cause.
+Session I/O runs alongside the agent loop but must not abort it — the user's turn should not fail because the disk is full. The actor warn-logs every failed batch flush, and the first failure populates the handle's `RecordOutcome::failure` (or `Outcome::failure`) slot so the agent loop can emit a one-shot `AgentEvent::Error`. A sticky `failure_surfaced` atomic on the handle's shared state ensures subsequent failures stay silent on the UI; the actor still warn-logs them, so the file log under `$XDG_STATE_HOME` retains the full history.
 
 ## Listing
 
@@ -128,4 +134,4 @@ Based on the research and the constraints above, the following decisions shape t
 8. **Fire-and-forget AI titles** — one-shot Haiku call on fresh sessions, JSON envelope prompt, warn-log on failure. The tail-scan's newer `updated_at` lets the AI title supersede the first-prompt fallback automatically on listings and resumes.
 9. **First-failure-only write-error surfacing** — balances visibility (the user learns persistence broke) against spam (no re-report on every write) via a single `AgentEvent::Error` plus warn-logs.
 10. **Head + tail listing scan, mtime sort** — head catches the first-prompt title (line 2, never re-appended); tail picks up later titles and the exit summary; mtime sort reflects "last used" for free.
-11. **Deferred: write batching, compression** — CLI workload is low-frequency, so `fsync`-per-message is fine until profiling proves otherwise. Compression lands as a new entry type via the `Unknown` catch-all, no migration required.
+11. **Actor-owned writes, receive-and-drain batching** — one `tokio::spawn`-ed task owns `SessionState` and the `BufWriter<File>`-wrapped writer; every consumer holds a clone of the cheap `SessionHandle`. The actor coalesces a turn's worth of cmds into one buffered flush. Isolated writes still flush immediately. Removes the `tokio::sync::Mutex<SessionManager>` shape entirely, eliminates per-write `write()` syscalls when bursts queue together, and gives a clean extension surface (compaction, fork, interactive prompts) — each new operation is a new `SessionCmd` variant. **Compression** still lands as a new entry type via the `Unknown` catch-all, no migration required.
