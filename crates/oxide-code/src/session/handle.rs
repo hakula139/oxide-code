@@ -24,6 +24,9 @@ use super::store::{
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 /// Sized for tool-result bursts (a turn can stack a dozen sidecars on
 /// top of a tool-result message). Codex uses 256; we budget higher
 /// because the in-process actor only drains between agent yields.
@@ -315,76 +318,6 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
     }
 }
 
-/// Creates a [`SessionHandle`] whose actor channel is already closed, so
-/// every write call immediately returns the actor-gone failure. Exposed
-/// to sibling `session::*` and `agent` test modules that need a dead handle
-/// without being able to access [`SessionHandle`]'s private fields directly.
-#[cfg(test)]
-pub(crate) fn dead_handle_for_tests(session_id: &str) -> SessionHandle {
-    let (cmd_tx, _) = mpsc::channel(1);
-    SessionHandle {
-        cmd_tx,
-        session_id: Arc::from(session_id),
-        shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(None)),
-    }
-}
-
-/// Creates a [`SessionHandle`] whose stand-in actor acks the first
-/// `succeed` cmds with a healthy outcome, then drops every cmd
-/// without acking — the receiver's rx-await fallback fires.
-/// Exercises the cross-task path where the actor task panics or
-/// stalls between receiving a cmd and sending its ack.
-#[cfg(test)]
-pub(crate) fn succeed_n_then_drop_acks_handle_for_tests(
-    session_id: &str,
-    succeed: usize,
-) -> SessionHandle {
-    use super::actor::SessionCmd;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
-    let count = Arc::new(AtomicUsize::new(0));
-    let count_clone = Arc::clone(&count);
-    let join = tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
-            // Honour Shutdown unconditionally so `handle.shutdown().await`
-            // returns on the test stand-in. The success quota only
-            // governs the write-cmds that have an ack to optionally drop.
-            if let SessionCmd::Shutdown { ack } = cmd {
-                _ = ack.send(());
-                break;
-            }
-            let n = count_clone.fetch_add(1, Ordering::SeqCst);
-            if n >= succeed {
-                drop(cmd);
-                continue;
-            }
-            match cmd {
-                SessionCmd::Record { ack, .. } => {
-                    _ = ack.send(RecordOutcome {
-                        ai_title_seed: None,
-                        failure: None,
-                    });
-                }
-                SessionCmd::ToolMetadata { ack, .. }
-                | SessionCmd::AppendAiTitle { ack, .. }
-                | SessionCmd::Finish { ack } => {
-                    _ = ack.send(Outcome { failure: None });
-                }
-                SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
-            }
-        }
-    });
-
-    SessionHandle {
-        cmd_tx,
-        session_id: Arc::from(session_id),
-        shared: Arc::new(SharedState::default()),
-        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::store::{test_session_file, test_store};
@@ -432,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_surfaces_failure_once_then_silences() {
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
 
         let first = handle.record_message(Message::user("a")).await;
         let second = handle.record_message(Message::user("b")).await;
@@ -445,7 +378,7 @@ mod tests {
     async fn record_message_actor_gone_carries_underlying_flush_error() {
         // The user should see the I/O cause, not the generic
         // dropped-task fallback, when one is on record.
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
         handle
             .shared
             .record_flush_failure("permission denied: /readonly/path");
@@ -463,7 +396,7 @@ mod tests {
     async fn record_message_actor_gone_surfaces_after_prior_flush_failure_was_surfaced() {
         // The two sticky-once flags must be independent: a previously
         // surfaced flush failure must not silence the actor-gone signal.
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
         handle.shared.record_flush_failure("disk full");
         assert!(handle.shared.surface_first_flush_failure());
 
@@ -492,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_actor_gone_surfaces_failure_once_then_silences() {
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
         let item = (
             "t1".to_owned(),
             ToolMetadata {
@@ -517,7 +450,7 @@ mod tests {
         // header lets the same handle exercise the success arm on
         // ToolMetadata / AppendAiTitle / Finish variants of the
         // helper's or-pattern, then the drop arm on the 4th cmd.
-        let handle = succeed_n_then_drop_acks_handle_for_tests("acks-then-drops", 3);
+        let handle = testing::acks_then_drops("acks-then-drops", 3);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
         let finish = handle.finish().await;
@@ -630,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_ai_title_actor_gone_surfaces_failure_once_then_silences() {
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
 
         let first = handle.append_ai_title("Fix auth".to_owned()).await;
         let second = handle.append_ai_title("Fix auth".to_owned()).await;
@@ -665,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_actor_gone_surfaces_failure_once_then_silences() {
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
 
         let first = handle.finish().await;
         let second = handle.finish().await;
@@ -760,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_is_safe_to_call_after_dead_handle() {
         // Smoke check: empty join slot must not panic.
-        let handle = dead_handle_for_tests("dead");
+        let handle = testing::dead("dead");
         handle.shutdown().await;
     }
 

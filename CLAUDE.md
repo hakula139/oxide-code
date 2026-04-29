@@ -56,6 +56,8 @@ ox                                          # Start an interactive session
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path constructors
+│   ├── handle/
+│   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
 │   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`)
 │   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)

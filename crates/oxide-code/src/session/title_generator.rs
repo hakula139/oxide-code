@@ -409,7 +409,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = super::super::handle::dead_handle_for_tests("dead-session");
+        let session = super::super::handle::testing::dead("dead-session");
         let client = title_client(server.uri());
         let sink = CapturingSink::new();
 

@@ -538,7 +538,7 @@ mod tests {
     /// Handle whose actor channel is already closed; every write
     /// returns the actor-gone failure.
     fn dead_test_session() -> SessionHandle {
-        crate::session::handle::dead_handle_for_tests("dead-test-session")
+        crate::session::handle::testing::dead("dead-test-session")
     }
 
     #[tokio::test]
@@ -582,10 +582,7 @@ mod tests {
         // event. Programmable handle: ack the first 2 cmds healthily
         // then drop every cmd without acking — the 3rd cmd
         // (ToolMetadata) hits dispatch_outcome's rx-await fallback.
-        let session = crate::session::handle::succeed_n_then_drop_acks_handle_for_tests(
-            "metadata-batch-fails",
-            2,
-        );
+        let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
         let client = FakeClient::new(vec![
             tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
             text_turn("Done"),
