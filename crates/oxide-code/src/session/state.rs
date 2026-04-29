@@ -220,7 +220,15 @@ fn new_header(model: &str) -> (String, Entry) {
 }
 
 fn current_dir_string() -> String {
-    match std::env::current_dir() {
+    format_current_dir(std::env::current_dir())
+}
+
+/// Pure formatter split out for unit testing — the cwd-failure branch
+/// is otherwise unreachable from a portable test (deleting the cwd
+/// from under a running process is OS-dependent and races with the
+/// runtime).
+fn format_current_dir(result: std::io::Result<std::path::PathBuf>) -> String {
+    match result {
         Ok(p) => p.display().to_string(),
         Err(e) => {
             warn!("failed to read current directory: {e}");
@@ -482,6 +490,20 @@ mod tests {
         let entry = resumed.finish_entry(now);
 
         assert!(entry.is_none(), "no new messages → no summary");
+    }
+
+    // ── format_current_dir ──
+
+    #[test]
+    fn format_current_dir_ok_renders_path() {
+        let path = std::path::PathBuf::from("/tmp/x");
+        assert_eq!(format_current_dir(Ok(path)), "/tmp/x");
+    }
+
+    #[test]
+    fn format_current_dir_err_falls_back_to_unknown() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert_eq!(format_current_dir(Err(err)), "<unknown>");
     }
 
     // ── extract_user_text ──
