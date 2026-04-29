@@ -182,21 +182,25 @@ impl SessionHandle {
         })
     }
 
-    /// Drops this handle's sender and awaits actor task exit. The
-    /// actor only exits once every clone's [`mpsc::Sender`] has
-    /// dropped, so callers must drop other clones first; otherwise
-    /// the channel stays open and this blocks. The first call drains
-    /// the join slot; subsequent calls return immediately. Used by
-    /// process-exit paths and tests for deterministic actor drain.
+    /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
+    /// after the current batch flushes, then awaits the join handle.
+    /// Cmd-driven exit (rather than waiting for every clone's
+    /// [`mpsc::Sender`] to drop) keeps process-exit fast even when an
+    /// orphaned clone — most importantly the detached title-generator
+    /// task — is mid-HTTP and far from dropping its handle.
+    /// Subsequent calls (on other clones) drain the join slot and
+    /// return immediately.
     pub(crate) async fn shutdown(self) {
         let Self {
-            cmd_tx,
-            shared,
-            actor_join,
-            ..
+            cmd_tx, actor_join, ..
         } = self;
+        let (ack, rx) = oneshot::channel();
+        // If send fails the actor is already gone — proceed straight
+        // to awaiting the join handle (likely already finished).
+        if cmd_tx.send(SessionCmd::Shutdown { ack }).await.is_ok() {
+            _ = rx.await;
+        }
         drop(cmd_tx);
-        drop(shared);
         let join = actor_join.lock().ok().and_then(|mut g| g.take());
         if let Some(j) = join {
             _ = j.await;
@@ -344,6 +348,13 @@ pub(crate) fn succeed_n_then_drop_acks_handle_for_tests(
     let count_clone = Arc::clone(&count);
     let join = tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
+            // Honour Shutdown unconditionally so `handle.shutdown().await`
+            // returns on the test stand-in. The success quota only
+            // governs the write-cmds that have an ack to optionally drop.
+            if let SessionCmd::Shutdown { ack } = cmd {
+                _ = ack.send(());
+                break;
+            }
             let n = count_clone.fetch_add(1, Ordering::SeqCst);
             if n >= succeed {
                 drop(cmd);
@@ -361,6 +372,7 @@ pub(crate) fn succeed_n_then_drop_acks_handle_for_tests(
                 | SessionCmd::Finish { ack } => {
                     _ = ack.send(Outcome { failure: None });
                 }
+                SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
             }
         }
     });

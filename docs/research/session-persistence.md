@@ -83,7 +83,7 @@ The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of 
 
 Sidecar metadata for one tool round travels as a single `SessionCmd::ToolMetadata { items: Vec<(String, ToolMetadata)> }` instead of N awaits in series, so the agent loop sends every sidecar from a turn in one cmd → one ack → one flush. Items whose `metadata == ToolMetadata::default()` add no display fields and are skipped at absorb.
 
-`SessionHandle` retains the actor's `JoinHandle` in an `Arc<Mutex<Option<JoinHandle<()>>>>` slot. `SessionHandle::shutdown(self)` consumes the handle, drops its sender, and awaits the join — the first caller drains the slot, subsequent calls (on other clones) no-op. Production exit paths (TUI shutdown, REPL, headless) call `shutdown().await` after `finish().await` for deterministic actor drain. A blocking `Drop` impl is intentionally omitted: `Drop` is sync and tokio offers no portable way to await inside it without runtime hacks (`block_in_place` requires multi-thread runtime). The async-consume shape gives the same observable guarantee for callers who can `await`.
+`SessionHandle` retains the actor's `JoinHandle` in an `Arc<Mutex<Option<JoinHandle<()>>>>` slot. `SessionHandle::shutdown(self)` sends `SessionCmd::Shutdown { ack }` so the actor flushes pending writes, acks, then breaks the loop — the first caller drains the join slot, subsequent calls (on other clones) no-op. Cmd-driven exit (rather than waiting for every `mpsc::Sender` clone to drop) keeps process-exit fast even when an orphaned clone — most importantly the detached title-generator task — is mid-HTTP and far from dropping its handle. The Anthropic client has no whole-request timeout, so a wait-for-clones-drop shape would block shutdown on whichever read / connect timeout the orphan is racing. Production exit paths (TUI, REPL, headless) call `shutdown().await` after `finish().await`. A blocking `Drop` impl is intentionally omitted: `Drop` is sync and tokio offers no portable way to await inside it without runtime hacks (`block_in_place` requires multi-thread runtime). The async-consume shape gives the same observable guarantee for callers who can `await`.
 
 ### Writer recovery on flush error
 
@@ -126,7 +126,7 @@ Session I/O runs alongside the agent loop but must not abort it — the user's t
 The handle's `SharedState` carries two independent sticky-once flags so qualitatively different failures don't mask each other:
 
 - **`flush_failure_surfaced`** — flips on the first batch-flush error surfaced through a caller's ack.
-- **`actor_gone_surfaced`** — flips on the first send / recv error indicating the actor task has stopped (panic, channel closed). When the actor died after recording an I/O error, the surfaced message includes that underlying cause: "Session writer task has stopped after I/O error: <…>" — read from the `last_flush_failure` slot the actor populates on every batch failure.
+- **`actor_gone_surfaced`** — flips on the first send / recv error indicating the actor task has stopped (panic, channel closed). When the actor died after recording an I/O error, the surfaced message includes that underlying cause: "Session writer task has stopped after I/O error: <...>" — read from the `last_flush_failure` slot the actor populates on every batch failure.
 
 Sharing a single flag would let the milder per-batch failure mask the more severe actor-gone signal; keeping them independent ensures both fire exactly once.
 

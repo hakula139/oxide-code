@@ -42,6 +42,14 @@ pub(super) enum SessionCmd {
     Finish {
         ack: oneshot::Sender<Outcome>,
     },
+    /// Drains pending writes, acks, then exits the actor loop. Lets
+    /// [`super::handle::SessionHandle::shutdown`] return even when
+    /// orphaned clones (e.g., the detached title-generator task) still
+    /// hold a sender — a bare clone-drop wait would block on whichever
+    /// HTTP timeout the orphan is racing.
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 /// One absorbed cmd whose ack fires once the batch flush returns. Held
@@ -53,6 +61,7 @@ enum PendingAck {
         ai_title_seed: Option<String>,
     },
     Outcome(oneshot::Sender<Outcome>),
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub(super) async fn run(
@@ -63,14 +72,14 @@ pub(super) async fn run(
     while let Some(first) = rx.recv().await {
         let mut entries: Vec<Entry> = Vec::new();
         let mut acks: Vec<PendingAck> = Vec::new();
-        absorb(first, &mut entries, &mut acks, &mut state);
+        let mut should_exit = false;
+        absorb(first, &mut entries, &mut acks, &mut state, &mut should_exit);
         // Drain whatever is already queued — cmds sent after this point
         // wait for the next outer `recv().await`.
         while let Ok(next) = rx.try_recv() {
-            absorb(next, &mut entries, &mut acks, &mut state);
+            absorb(next, &mut entries, &mut acks, &mut state, &mut should_exit);
         }
-        let result = state.flush_entries(&entries);
-        let failure = match &result {
+        let failure = match state.flush_entries(&entries) {
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!("session write batch failed: {msg}");
@@ -80,6 +89,9 @@ pub(super) async fn run(
             Ok(()) => None,
         };
         deliver_acks(acks, failure.as_deref(), &shared);
+        if should_exit {
+            break;
+        }
     }
 }
 
@@ -88,6 +100,7 @@ fn absorb(
     entries: &mut Vec<Entry>,
     acks: &mut Vec<PendingAck>,
     state: &mut SessionState,
+    should_exit: &mut bool,
 ) {
     let now = OffsetDateTime::now_utc();
     match cmd {
@@ -133,6 +146,10 @@ fn absorb(
             }
             acks.push(PendingAck::Outcome(ack));
         }
+        SessionCmd::Shutdown { ack } => {
+            acks.push(PendingAck::Shutdown(ack));
+            *should_exit = true;
+        }
     }
 }
 
@@ -149,6 +166,10 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
                 _ = ack.send(Outcome {
                     failure: surface_failure(failure, shared),
                 });
+            }
+            PendingAck::Shutdown(ack) => {
+                // Best-effort exit signal — no failure surfacing.
+                _ = ack.send(());
             }
         }
     }
@@ -208,6 +229,11 @@ mod tests {
     fn finish_cmd() -> (SessionCmd, oneshot::Receiver<Outcome>) {
         let (ack, rx) = oneshot::channel();
         (SessionCmd::Finish { ack }, rx)
+    }
+
+    fn shutdown_cmd() -> (SessionCmd, oneshot::Receiver<()>) {
+        let (ack, rx) = oneshot::channel();
+        (SessionCmd::Shutdown { ack }, rx)
     }
 
     // ── run ──
@@ -338,6 +364,48 @@ mod tests {
             .and_then(|s| s.title)
             .expect("title");
         assert_eq!(title.title, "Fix the auth flow");
+    }
+
+    #[tokio::test]
+    async fn run_shutdown_exits_loop_even_with_live_sender_clones() {
+        // The point of `SessionCmd::Shutdown` is to break out without
+        // waiting for every clone to drop — otherwise an orphaned
+        // title-generator's mid-HTTP clone keeps the actor alive
+        // through the whole HTTP timeout.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store, "m");
+        let shared = Arc::new(SharedState::default());
+        let (tx, rx) = mpsc::channel::<SessionCmd>(4);
+        let _orphan_clone = tx.clone();
+        let actor = tokio::spawn(run(state, rx, Arc::clone(&shared)));
+
+        let (cmd, ack_rx) = shutdown_cmd();
+        tx.send(cmd).await.unwrap();
+        ack_rx.await.unwrap();
+
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(1), actor).await;
+        assert!(
+            exit.is_ok(),
+            "actor must exit on Shutdown without the orphan clone dropping",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_shutdown_flushes_preceding_record_in_same_batch() {
+        // Pending writes ahead of Shutdown in the queue must reach
+        // disk; the actor only breaks after the batch flush.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec, _rec_rx) = record_cmd("flush before exit");
+        let (shut, _shut_rx) = shutdown_cmd();
+
+        drive(state, vec![rec, shut]).await;
+
+        let data = store.load_session_data(&session_id).unwrap();
+        assert_eq!(data.messages.len(), 1, "record must reach disk before exit");
     }
 
     #[tokio::test]
