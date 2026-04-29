@@ -428,6 +428,31 @@ mod tests {
 
     // ── flush_entries ──
 
+    // `/dev/full` is the cheapest way to drive a real flush failure on
+    // an Active writer: open succeeds, every write returns ENOSPC. Linux
+    // exposes it; macOS and Windows do not, so the test gates on Linux
+    // rather than smuggling in a custom failing-writer trait.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn flush_entries_active_writer_flush_failure_transitions_to_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let writer = super::super::store::open_append_at(std::path::Path::new("/dev/full"))
+            .expect("/dev/full must be openable on Linux");
+        state.writer_status = WriterStatus::Active(writer);
+
+        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let result = state.flush_entries(&entries);
+
+        assert!(result.is_err(), "flush to /dev/full must surface ENOSPC");
+        assert!(
+            matches!(state.writer_status, WriterStatus::Broken),
+            "flush failure on Active writer must transition to Broken",
+        );
+    }
+
     #[test]
     fn flush_entries_broken_writer_reopens_file_and_appends() {
         // Reopen must hit the existing file, not create a fresh one.
