@@ -509,11 +509,16 @@ mod tests {
     }
 
     fn test_tools() -> ToolRegistry {
+        let tracker = std::sync::Arc::new(crate::tool::tracker::FileTracker::new());
         ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
-            Box::new(crate::tool::read::ReadTool),
-            Box::new(crate::tool::write::WriteTool),
-            Box::new(crate::tool::edit::EditTool),
+            Box::new(crate::tool::read::ReadTool::new(std::sync::Arc::clone(
+                &tracker,
+            ))),
+            Box::new(crate::tool::write::WriteTool::new(std::sync::Arc::clone(
+                &tracker,
+            ))),
+            Box::new(crate::tool::edit::EditTool::new(tracker)),
             Box::new(crate::tool::glob::GlobTool),
             Box::new(crate::tool::grep::GrepTool),
         ])

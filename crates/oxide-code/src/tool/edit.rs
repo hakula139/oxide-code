@@ -1,9 +1,13 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
+use xxhash_rust::xxh64::xxh64;
 
+use super::tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
 use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
@@ -13,7 +17,15 @@ use super::{
 /// edits sometimes target large config or data files.
 const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-pub(crate) struct EditTool;
+pub(crate) struct EditTool {
+    tracker: Arc<FileTracker>,
+}
+
+impl EditTool {
+    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
@@ -100,7 +112,8 @@ impl Tool for EditTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        let tracker = Arc::clone(&self.tracker);
+        Box::pin(run(input, tracker))
     }
 }
 
@@ -156,7 +169,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -168,6 +181,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         &input.old_string,
         &input.new_string,
         input.replace_all,
+        &tracker,
     )
     .await
     {
@@ -187,6 +201,7 @@ async fn edit_file(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
+    tracker: &FileTracker,
 ) -> Result<(String, usize, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
@@ -196,6 +211,7 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
 
+    let file_path = Path::new(path);
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -209,9 +225,30 @@ async fn edit_file(
         ));
     }
 
-    let content = tokio::fs::read_to_string(path)
+    // Strict gate: stat-match short-circuits, drift falls through to a
+    // rehash against the bytes we're about to read anyway.
+    let pre_mtime = metadata
+        .modified()
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let drift_hash =
+        match tracker.pre_modify_check(file_path, pre_mtime, metadata.len(), GatePurpose::Edit) {
+            PreModifyCheck::Pass => None,
+            PreModifyCheck::Drift { stored_hash } => Some(stored_hash),
+            PreModifyCheck::Reject(msg) => return Err(msg),
+        };
+
+    let content_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
+    if let Some(stored_hash) = drift_hash {
+        tracker.confirm_drift_unchanged(
+            stored_hash,
+            xxh64(&content_bytes, HASH_SEED),
+            GatePurpose::Edit,
+        )?;
+    }
+    let content =
+        String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
 
     let eol = dominant_eol(&content);
     let content = normalize_eol(&content);
@@ -256,6 +293,12 @@ async fn edit_file(
     tokio::fs::write(path, &updated)
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
+
+    if let Ok(meta) = tokio::fs::metadata(path).await
+        && let Ok(mtime) = meta.modified()
+    {
+        tracker.record_modify(file_path, updated.as_bytes(), mtime, meta.len());
+    }
 
     let message = if replace_all && match_count > 1 {
         format!("Replaced {match_count} occurrences in {path}.")
@@ -420,7 +463,28 @@ fn apply_eol(content: String, eol: &str) -> String {
 mod tests {
     use indoc::indoc;
 
+    use super::super::tracker::LastView;
     use super::*;
+
+    fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
+    }
+
+    /// Records a full Read of `path` so the gate has a baseline entry,
+    /// mirroring what a real Read turn would have stored.
+    fn seeded_tracker(path: &Path) -> FileTracker {
+        let tracker = FileTracker::new();
+        let bytes = std::fs::read(path).unwrap();
+        let meta = std::fs::metadata(path).unwrap();
+        tracker.record_read(
+            path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Full,
+        );
+        tracker
+    }
 
     // ── result_view ──
 
@@ -466,7 +530,11 @@ mod tests {
             replacements: Some(99),
             ..ToolMetadata::default()
         };
-        let view = EditTool.result_view(&input, "Replaced 2 occurrences in /tmp/f.rs.", &metadata);
+        let view = EditTool::new(tracker()).result_view(
+            &input,
+            "Replaced 2 occurrences in /tmp/f.rs.",
+            &metadata,
+        );
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
@@ -488,7 +556,7 @@ mod tests {
             "old_string": "fn foo()",
             "new_string": "fn bar()",
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -524,7 +592,7 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Replaced 7 occurrences in /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -558,7 +626,7 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -589,7 +657,7 @@ mod tests {
         // than panicking.
         let input = serde_json::json!({"file_path": "/tmp/x"});
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&input, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -607,7 +675,7 @@ mod tests {
             "new_string": "b",
         });
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&bad_old, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -617,7 +685,7 @@ mod tests {
             "new_string": 42,
         });
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&bad_new, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -657,11 +725,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "old_string": "hello",
-            "new_string": "goodbye"
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye"
+            }),
+            Arc::new(seeded_tracker(&path)),
+        )
         .await;
 
         assert!(!output.is_error);
@@ -675,13 +746,42 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_required_fields() {
-        let output = run(serde_json::json!({
-            "file_path": "/tmp/x",
-            "old_string": "a"
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": "/tmp/x",
+                "old_string": "a"
+            }),
+            tracker(),
+        )
         .await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_without_prior_read_is_rejected() {
+        // Strict gate fires before any rewrite.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }),
+            tracker(),
+        )
+        .await;
+
+        assert!(output.is_error);
+        assert!(
+            output.content.contains("not been read"),
+            "expected must-read-first rejection, got: {}",
+            output.content,
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     }
 
     #[tokio::test]
@@ -694,11 +794,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "old_string": "not present",
-            "new_string": "x",
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "not present",
+                "new_string": "x",
+            }),
+            Arc::new(seeded_tracker(&path)),
+        )
         .await;
 
         assert!(output.is_error);
@@ -728,6 +831,7 @@ mod tests {
             "fn foo() {}",
             "fn foo() -> i32 { 42 }",
             false,
+            &seeded_tracker(&path),
         )
         .await
         .unwrap();
@@ -748,9 +852,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let (msg, replacements, chunks) = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
-            .await
-            .unwrap();
+        let (msg, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "ccc",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         assert!(msg.contains("2 occurrences"));
         assert_eq!(replacements, 2);
@@ -769,9 +879,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
-        let (msg, replacements, _chunks) = edit_file(path.to_str().unwrap(), "a", "b", true)
-            .await
-            .unwrap();
+        let (msg, replacements, _chunks) = edit_file(
+            path.to_str().unwrap(),
+            "a",
+            "b",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             msg,
             format!("Replaced 3 occurrences in {}.", path.display())
@@ -785,10 +901,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let (msg, replacements, chunks) =
-            edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
-                .await
-                .unwrap();
+        let (msg, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "goodbye",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         assert!(msg.contains("Successfully edited"));
         assert_eq!(
@@ -805,9 +926,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "line1\nline2", "a\nb", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "line1\nline2",
+            "a\nb",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes, b"a\r\nb\r\n");
@@ -820,9 +947,15 @@ mod tests {
         std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
 
         // new_string contains \r\n — should be normalized before apply_eol.
-        edit_file(path.to_str().unwrap(), "aaa", "x\r\ny", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "x\r\ny",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // \r\n in new_string is normalized to \n, then restored to \r\n — not \r\r\n.
@@ -836,9 +969,15 @@ mod tests {
         // 2 CRLF, 1 LF → dominant is CRLF.
         std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "replace_me",
+            "replaced",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // All line endings normalized to the dominant style (CRLF).
@@ -852,9 +991,15 @@ mod tests {
         // LF between first two lines, CRLF after — previously failed to match.
         std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "foo\nbar", "a\nb", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "foo\nbar",
+            "a\nb",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // Dominant is CRLF (2 vs 1), so all newlines become CRLF.
@@ -867,7 +1012,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "", "x", false)
+        // Empty `old_string` is rejected before the gate fires, so an
+        // empty tracker is fine.
+        let err = edit_file(path.to_str().unwrap(), "", "x", false, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("must not be empty"));
@@ -880,9 +1027,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "hello",
+            false,
+            &FileTracker::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("identical"));
     }
 
@@ -892,17 +1045,101 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "nonexistent", "replacement", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "nonexistent",
+            "replacement",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("not found"));
     }
 
     #[tokio::test]
-    async fn edit_file_rejects_nonexistent_file() {
-        let err = edit_file("/nonexistent/file.txt", "a", "b", false)
+    async fn edit_file_without_prior_read_is_rejected() {
+        // Strict gate: existing file but no Read entry → must read first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "goodbye",
+            false,
+            &FileTracker::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not been read"),
+            "expected must-read-first rejection, got: {err}",
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_after_external_modification_is_rejected() {
+        // Read at one mtime, then overwrite the bytes so pre_modify_check
+        // returns Drift; the rehash catches the new bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tracker = seeded_tracker(&path);
+        std::fs::write(&path, "external edit").unwrap();
+
+        let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &tracker)
             .await
             .unwrap_err();
+        assert!(
+            err.contains("modified externally"),
+            "drift error expected, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_partial_read_is_rejected() {
+        // A ranged Read does not satisfy the modification gate even
+        // when the bytes happen to match.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let tracker = FileTracker::new();
+        tracker.record_read(
+            &path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Partial {
+                offset: 1,
+                limit: 1,
+            },
+        );
+
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("partially"),
+            "expected partial-view rejection, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_nonexistent_file() {
+        let err = edit_file(
+            "/nonexistent/file.txt",
+            "a",
+            "b",
+            false,
+            &FileTracker::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("Error reading"));
     }
 
@@ -912,9 +1149,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "aaa", "ccc", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "ccc",
+            false,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("2 occurrences"));
     }
 
@@ -925,12 +1168,14 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false)
+        // Size cap fires before the gate, so an empty tracker is fine.
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("too large"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn edit_file_fails_if_write_is_rejected() {
         use std::os::unix::fs::PermissionsExt;
@@ -938,12 +1183,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("readonly.txt");
         std::fs::write(&path, "hello world").unwrap();
+        let tracker = seeded_tracker(&path);
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o444);
         std::fs::set_permissions(&path, perms).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false)
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to write"));
@@ -961,9 +1207,15 @@ mod tests {
         let path = dir.path().join("multi.txt");
         std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
 
-        let (_, replacements, chunks) = edit_file(path.to_str().unwrap(), "B", "X", true)
-            .await
-            .unwrap();
+        let (_, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "B",
+            "X",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2);
@@ -1009,9 +1261,15 @@ mod tests {
         std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
 
         // "B" → "X\nY" adds one line per replacement.
-        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "B", "X\nY", true)
-            .await
-            .unwrap();
+        let (_, _, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "B",
+            "X\nY",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(chunks.len(), 2);
         // Match 0: original line 2 unaffected by prior shifts.
@@ -1058,9 +1316,15 @@ mod tests {
         std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
 
         // "X\nY" → "Z" drops one line per replacement.
-        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "X\nY", "Z", true)
-            .await
-            .unwrap();
+        let (_, _, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "X\nY",
+            "Z",
+            true,
+            &seeded_tracker(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].old[0].number, 1);

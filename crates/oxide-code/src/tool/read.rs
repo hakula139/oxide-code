@@ -1,9 +1,12 @@
 use std::fmt::Write as _;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
+use super::tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
 use super::{
     ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
     extract_input_field, summarize_path_call,
@@ -14,7 +17,15 @@ const DEFAULT_LINE_LIMIT: usize = 2000;
 /// config / log files while rejecting accidental binary dumps.
 const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-pub(crate) struct ReadTool;
+pub(crate) struct ReadTool {
+    tracker: Arc<FileTracker>,
+}
+
+impl ReadTool {
+    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Tool for ReadTool {
     fn name(&self) -> &'static str {
@@ -72,7 +83,8 @@ impl Tool for ReadTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        let tracker = Arc::clone(&self.tracker);
+        Box::pin(run(input, tracker))
     }
 }
 
@@ -89,14 +101,14 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
     let name = super::file_name(&input.file_path);
-    ToolOutput::from_result(read_file(&input.file_path, input.offset, input.limit).await)
+    ToolOutput::from_result(read_file(&input.file_path, input.offset, input.limit, &tracker).await)
         .with_title(format!("Read {name}"))
 }
 
@@ -104,6 +116,7 @@ async fn read_file(
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
+    tracker: &FileTracker,
 ) -> Result<String, String> {
     let metadata = tokio::fs::metadata(path)
         .await
@@ -141,22 +154,31 @@ async fn read_file(
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
     }
 
+    // Capture mtime / size before formatting so the tracker entry
+    // matches the bytes the model is about to see.
+    let mtime = metadata
+        .modified()
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let size = metadata.len();
+    let view = view_for(offset, limit);
+
     let text = String::from_utf8_lossy(&bytes);
     let text = strip_bom(&text);
 
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
     if total_lines == 0 {
-        return Ok("(empty file)".into());
+        let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
+        return Ok(stub_or(outcome, "(empty file)").into_owned());
     }
 
     // offset is 1-indexed; 0 is treated as 1.
-    let offset = offset.unwrap_or(1).max(1);
-    let limit = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
-    let start_idx = offset - 1;
+    let offset_n = offset.unwrap_or(1).max(1);
+    let limit_n = limit.unwrap_or(DEFAULT_LINE_LIMIT).max(1);
+    let start_idx = offset_n - 1;
     if start_idx >= total_lines {
         return Err(format!(
-            "Offset {offset} is beyond the end of the file ({total_lines} lines).",
+            "Offset {offset_n} is beyond the end of the file ({total_lines} lines).",
         ));
     }
 
@@ -164,7 +186,7 @@ async fn read_file(
     // bounded; the byte safety net lives in ToolRegistry::run.
     let mut output = String::new();
     let mut num_shown: usize = 0;
-    for (i, line) in lines[start_idx..].iter().enumerate().take(limit) {
+    for (i, line) in lines[start_idx..].iter().enumerate().take(limit_n) {
         let line_num = start_idx + i + 1;
         if !output.is_empty() {
             output.push('\n');
@@ -174,14 +196,39 @@ async fn read_file(
     }
 
     if num_shown < total_lines {
-        let last_shown = offset + num_shown - 1;
+        let last_shown = offset_n + num_shown - 1;
         _ = write!(
             output,
-            "\n\n(Showing lines {offset}–{last_shown} of {total_lines} total)"
+            "\n\n(Showing lines {offset_n}–{last_shown} of {total_lines} total)"
         );
     }
 
-    Ok(output)
+    let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
+    Ok(stub_or(outcome, &output).into_owned())
+}
+
+/// Substitutes [`CACHE_HIT_STUB`] for the rendered excerpt when the
+/// Read was a redundant full re-read, otherwise returns the excerpt.
+fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
+    match outcome {
+        RecordRead::CacheHit => std::borrow::Cow::Borrowed(CACHE_HIT_STUB),
+        RecordRead::Inserted => std::borrow::Cow::Borrowed(body),
+    }
+}
+
+/// Maps Read inputs to the recorded view. Default `(None, None)` is
+/// `Full` so a no-args re-read can cache-hit; any explicit slice is
+/// `Partial` even if it happens to cover the whole file (the model
+/// asked for a range, so a future Read with different bounds is a
+/// different question).
+fn view_for(offset: Option<usize>, limit: Option<usize>) -> LastView {
+    match (offset, limit) {
+        (None, None) => LastView::Full,
+        (offset, limit) => LastView::Partial {
+            offset: offset.unwrap_or(1),
+            limit: limit.unwrap_or(DEFAULT_LINE_LIMIT),
+        },
+    }
 }
 
 // ── Formatting ──
@@ -248,6 +295,10 @@ mod tests {
 
     use super::*;
 
+    fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
+    }
+
     // ── run ──
 
     #[tokio::test]
@@ -256,9 +307,10 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap()
-        }))
+        let output = run(
+            serde_json::json!({"file_path": path.to_str().unwrap()}),
+            tracker(),
+        )
         .await;
 
         assert!(!output.is_error);
@@ -266,8 +318,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_records_full_read_in_tracker() {
+        // A no-args read populates the tracker as Full so a follow-up
+        // Edit clears the gate.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+        let tracker = tracker();
+
+        let output = run(
+            serde_json::json!({"file_path": path.to_str().unwrap()}),
+            Arc::clone(&tracker),
+        )
+        .await;
+        assert!(!output.is_error);
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let check = tracker.pre_modify_check(
+            &path,
+            meta.modified().unwrap(),
+            meta.len(),
+            super::super::tracker::GatePurpose::Edit,
+        );
+        assert!(matches!(check, super::super::tracker::PreModifyCheck::Pass));
+    }
+
+    #[tokio::test]
+    async fn run_full_reread_returns_cache_hit_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+        let tracker = tracker();
+
+        let first = run(
+            serde_json::json!({"file_path": path.to_str().unwrap()}),
+            Arc::clone(&tracker),
+        )
+        .await;
+        assert_eq!(first.content, "1\thello\n2\tworld");
+
+        let second = run(
+            serde_json::json!({"file_path": path.to_str().unwrap()}),
+            tracker,
+        )
+        .await;
+        assert!(!second.is_error);
+        assert_eq!(second.content, CACHE_HIT_STUB);
+    }
+
+    #[tokio::test]
+    async fn run_partial_reread_does_not_cache_hit() {
+        // Partial reads always return the line-numbered slice so the
+        // model can re-request a different range.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        let tracker = tracker();
+
+        let json = serde_json::json!({
+            "file_path": path.to_str().unwrap(),
+            "offset": 1,
+            "limit": 2,
+        });
+        let first = run(json.clone(), Arc::clone(&tracker)).await;
+        let second = run(json, tracker).await;
+        assert_ne!(second.content, CACHE_HIT_STUB);
+        assert_eq!(first.content, second.content);
+    }
+
+    #[tokio::test]
     async fn run_missing_file_path() {
-        let output = run(serde_json::json!({})).await;
+        let output = run(serde_json::json!({}), tracker()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
     }
@@ -280,7 +401,9 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+            .await
+            .unwrap();
         assert_eq!(result, "1\talpha\n2\tbeta\n3\tgamma");
     }
 
@@ -290,9 +413,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), Some(2), Some(2))
-            .await
-            .unwrap();
+        let result = read_file(
+            path.to_str().unwrap(),
+            Some(2),
+            Some(2),
+            &FileTracker::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result, "2\tb\n3\tc\n\n(Showing lines 2–3 of 5 total)");
     }
 
@@ -302,7 +430,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "first\nsecond\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), Some(0), None)
+        let result = read_file(path.to_str().unwrap(), Some(0), None, &FileTracker::new())
             .await
             .unwrap();
         assert_eq!(result, "1\tfirst\n2\tsecond");
@@ -314,7 +442,9 @@ mod tests {
         let path = dir.path().join("bom.txt");
         std::fs::write(&path, "\u{feff}hello\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+            .await
+            .unwrap();
         assert!(result.contains("1\thello"));
         assert!(!result.contains('\u{feff}'));
     }
@@ -325,13 +455,15 @@ mod tests {
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+            .await
+            .unwrap();
         assert_eq!(result, "(empty file)");
     }
 
     #[tokio::test]
     async fn read_file_not_found() {
-        let err = read_file("/nonexistent/path.txt", None, None)
+        let err = read_file("/nonexistent/path.txt", None, None, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("Error reading"));
@@ -340,9 +472,14 @@ mod tests {
     #[tokio::test]
     async fn read_file_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let err = read_file(dir.path().to_str().unwrap(), None, None)
-            .await
-            .unwrap_err();
+        let err = read_file(
+            dir.path().to_str().unwrap(),
+            None,
+            None,
+            &FileTracker::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("is a directory"));
     }
 
@@ -353,7 +490,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_READ_FILE_SIZE + 1).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None)
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("too large"));
@@ -368,7 +505,7 @@ mod tests {
         let path = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None)
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(
@@ -383,7 +520,7 @@ mod tests {
         let path = dir.path().join("binary.bin");
         std::fs::write(&path, b"hello\x00world").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None)
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("binary"));
@@ -395,10 +532,39 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), Some(100), None)
+        let err = read_file(path.to_str().unwrap(), Some(100), None, &FileTracker::new())
             .await
             .unwrap_err();
         assert!(err.contains("beyond the end"));
+    }
+
+    // ── view_for ──
+
+    #[test]
+    fn view_for_no_args_is_full() {
+        assert_eq!(view_for(None, None), LastView::Full);
+    }
+
+    #[test]
+    fn view_for_offset_only_uses_default_limit() {
+        assert_eq!(
+            view_for(Some(5), None),
+            LastView::Partial {
+                offset: 5,
+                limit: DEFAULT_LINE_LIMIT,
+            },
+        );
+    }
+
+    #[test]
+    fn view_for_limit_only_uses_default_offset() {
+        assert_eq!(
+            view_for(None, Some(20)),
+            LastView::Partial {
+                offset: 1,
+                limit: 20,
+            },
+        );
     }
 
     // ── result_view ──
@@ -408,7 +574,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let path = cwd.join("example.rs");
         let input = serde_json::json!({"file_path": path});
-        let view = ReadTool
+        let view = ReadTool::new(tracker())
             .result_view(&input, "10\tfn main() {}\n11\t}", &ToolMetadata::default())
             .unwrap();
 
@@ -434,7 +600,7 @@ mod tests {
     #[test]
     fn result_view_preserves_total_lines_from_footer() {
         let input = serde_json::json!({"file_path": "/tmp/example.rs"});
-        let view = ReadTool
+        let view = ReadTool::new(tracker())
             .result_view(
                 &input,
                 indoc! { "\
@@ -468,7 +634,7 @@ mod tests {
     #[test]
     fn result_view_handles_empty_file() {
         let input = serde_json::json!({"file_path": "/tmp/empty.rs"});
-        let view = ReadTool
+        let view = ReadTool::new(tracker())
             .result_view(&input, "(empty file)", &ToolMetadata::default())
             .unwrap();
 
@@ -486,7 +652,7 @@ mod tests {
     fn result_view_falls_back_for_malformed_output() {
         let input = serde_json::json!({"file_path": "/tmp/example.rs"});
         assert!(
-            ReadTool
+            ReadTool::new(tracker())
                 .result_view(&input, "not line-numbered", &ToolMetadata::default())
                 .is_none()
         );
@@ -496,7 +662,7 @@ mod tests {
     fn result_view_falls_back_for_missing_file_path() {
         let input = serde_json::json!({});
         assert!(
-            ReadTool
+            ReadTool::new(tracker())
                 .result_view(&input, "1\tline", &ToolMetadata::default())
                 .is_none()
         );

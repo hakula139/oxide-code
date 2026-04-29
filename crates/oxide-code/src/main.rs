@@ -37,7 +37,7 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
-    write::WriteTool,
+    tracker::FileTracker, write::WriteTool,
 };
 use util::path::tildify;
 
@@ -131,7 +131,8 @@ async fn async_main() -> Result<()> {
     let resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
-    let tools = Arc::new(create_tool_registry());
+    let file_tracker = Arc::new(FileTracker::new());
+    let tools = Arc::new(create_tool_registry(&file_tracker));
 
     if let Some(prompt_text) = cli.prompt {
         return headless(
@@ -190,12 +191,12 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry() -> ToolRegistry {
+fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
     ToolRegistry::new(vec![
         Box::new(BashTool),
-        Box::new(ReadTool),
-        Box::new(WriteTool),
-        Box::new(EditTool),
+        Box::new(ReadTool::new(Arc::clone(tracker))),
+        Box::new(WriteTool::new(Arc::clone(tracker))),
+        Box::new(EditTool::new(Arc::clone(tracker))),
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
