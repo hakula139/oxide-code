@@ -211,6 +211,13 @@ fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
     })
 }
 
+/// Splits the read tool's output on its `(Showing lines N–M of TOTAL total)`
+/// view-shape footer. The footer is parsed here rather than carried in
+/// metadata because the totals are a read-specific signal (line counts,
+/// not byte counts); the byte safety net in [`crate::tool::ToolRegistry::run`]
+/// uses a different metadata field. When the byte cap fires, the footer
+/// is replaced by the truncation separator and this function returns
+/// `None` for the footer — the caller falls through to the raw text view.
 fn split_read_footer(content: &str) -> (&str, Option<&str>) {
     match content.split_once("\n\n") {
         Some((body, footer)) if footer.starts_with("(Showing lines ") => (body, Some(footer)),
