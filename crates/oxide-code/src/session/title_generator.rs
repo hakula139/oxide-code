@@ -58,27 +58,6 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
     Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 "#};
 
-/// `{"title": string}` schema for [`Client::complete`]'s structured
-/// outputs. Built once per call — the schema JSON itself is small and
-/// constructing a `serde_json::Value` is cheap compared to the HTTP
-/// round-trip, so a `LazyLock` optimization would be theatre.
-///
-/// Without this, a first prompt phrased as a direct request (e.g.
-/// `"see what's next to do in this repo"`) would frequently drive Haiku
-/// to answer the task instead of titling it, and [`parse_title`] would
-/// then bail on the conversational reply. The schema forces Haiku onto
-/// the envelope shape regardless of how the prompt scans.
-fn title_output_format() -> OutputFormat {
-    OutputFormat::json_schema(serde_json::json!({
-        "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-        },
-        "required": ["title"],
-        "additionalProperties": false,
-    }))
-}
-
 /// Spawns a detached task that asks Haiku for a title, records it on
 /// `session`, and notifies `sink`.
 ///
@@ -127,6 +106,27 @@ async fn generate_and_record(
 
     _ = sink.send(AgentEvent::SessionTitleUpdated(title));
     Ok(())
+}
+
+/// `{"title": string}` schema for [`Client::complete`]'s structured
+/// outputs. Built once per call — the schema JSON itself is small and
+/// constructing a `serde_json::Value` is cheap compared to the HTTP
+/// round-trip, so a `LazyLock` optimization would be theatre.
+///
+/// Without this, a first prompt phrased as a direct request (e.g.
+/// `"see what's next to do in this repo"`) would frequently drive Haiku
+/// to answer the task instead of titling it, and [`parse_title`] would
+/// then bail on the conversational reply. The schema forces Haiku onto
+/// the envelope shape regardless of how the prompt scans.
+fn title_output_format() -> OutputFormat {
+    OutputFormat::json_schema(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+        },
+        "required": ["title"],
+        "additionalProperties": false,
+    }))
 }
 
 /// Parses Haiku's response as the `{"title": "..."}` JSON envelope, or
@@ -300,20 +300,6 @@ mod tests {
         );
     }
 
-    // ── title_output_format ──
-
-    #[test]
-    fn title_output_format_matches_title_envelope_shape() {
-        // The schema must line up with [`TitleEnvelope`] so a
-        // schema-conforming response parses via `parse_title`.
-        let fmt = title_output_format();
-        let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
-        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
-        assert_eq!(v["schema"]["additionalProperties"], false);
-    }
-
     // ── generate_and_record ──
 
     #[tokio::test]
@@ -469,6 +455,20 @@ mod tests {
             "outer context: {msg}"
         );
         assert!(msg.contains("503"), "status surfaced: {msg}");
+    }
+
+    // ── title_output_format ──
+
+    #[test]
+    fn title_output_format_matches_title_envelope_shape() {
+        // The schema must line up with [`TitleEnvelope`] so a
+        // schema-conforming response parses via `parse_title`.
+        let fmt = title_output_format();
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
+        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
+        assert_eq!(v["schema"]["additionalProperties"], false);
     }
 
     // ── parse_title ──
