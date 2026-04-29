@@ -160,30 +160,20 @@ async fn read_file(
         ));
     }
 
-    // The byte budget prevents a single minified line from flooding context.
+    // Per-line cap (truncate_line) and the row cap (limit) keep this
+    // bounded; the byte safety net lives in ToolRegistry::run.
     let mut output = String::new();
     let mut num_shown: usize = 0;
-    let mut truncated_by_bytes = false;
-
     for (i, line) in lines[start_idx..].iter().enumerate().take(limit) {
         let line_num = start_idx + i + 1;
-        let truncated = super::truncate_line(line);
-
-        let line_num_str = line_num.to_string();
-        let entry_len = 1 + line_num_str.len() + 1 + truncated.len();
-        if !output.is_empty() && output.len() + entry_len > super::MAX_OUTPUT_BYTES {
-            truncated_by_bytes = true;
-            break;
-        }
-
         if !output.is_empty() {
             output.push('\n');
         }
-        _ = write!(output, "{line_num}\t{truncated}");
+        _ = write!(output, "{line_num}\t{}", super::truncate_line(line));
         num_shown += 1;
     }
 
-    if num_shown < total_lines || truncated_by_bytes {
+    if num_shown < total_lines {
         let last_shown = offset + num_shown - 1;
         _ = write!(
             output,
@@ -249,7 +239,6 @@ fn strip_bom(text: &str) -> &str {
 mod tests {
     use indoc::indoc;
 
-    use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
     // ── run ──
@@ -321,21 +310,6 @@ mod tests {
         let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
         assert!(result.contains("1\thello"));
         assert!(!result.contains('\u{feff}'));
-    }
-
-    #[tokio::test]
-    async fn read_file_byte_budget_truncates_large_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("big.txt");
-        let line = "x".repeat(600);
-        let content = std::iter::repeat_n(format!("{line}\n"), 500).collect::<String>();
-        std::fs::write(&path, &content).unwrap();
-
-        let result = read_file(path.to_str().unwrap(), None, None).await.unwrap();
-
-        assert!(result.len() < MAX_OUTPUT_BYTES + 200);
-        assert!(result.contains("Showing lines"));
-        assert!(!result.contains("500\t"));
     }
 
     #[tokio::test]

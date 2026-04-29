@@ -999,6 +999,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_caps_real_tool_output_via_dispatcher() {
+        // Pinned end-to-end: real ReadTool emits enough bytes to trip
+        // the registry cap now that read no longer self-caps. Guards
+        // against a regression that bypasses the wrapper.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let line = "x".repeat(600);
+        let content = std::iter::repeat_n(format!("{line}\n"), 500).collect::<String>();
+        std::fs::write(&path, &content).unwrap();
+
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let output = registry
+            .run(
+                "read",
+                serde_json::json!({"file_path": path.to_str().unwrap()}),
+            )
+            .await;
+
+        assert!(!output.is_error);
+        assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+        assert!(output.content.contains("bytes truncated; head + tail kept"));
+        assert!(output.metadata.truncated_total.is_some());
+    }
+
+    #[tokio::test]
     async fn run_unknown_tool_returns_error_payload() {
         // Mirrors the pre-refactor agent-side fallback so the model
         // sees the same Unknown-tool message regardless of dispatcher

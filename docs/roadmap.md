@@ -66,7 +66,6 @@ The direction is simple:
 
 ### Tool & Prompt Enhancements
 
-- Centralized output truncation in the tool dispatcher.
 - File-change tracking — skip re-reads when content hasn't changed, and guard against blind overwrites.
 - Configurable instruction directories beyond `.claude/`.
 
