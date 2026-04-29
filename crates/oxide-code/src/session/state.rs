@@ -43,11 +43,21 @@ pub(super) struct SessionState {
     pub(super) finished: bool,
 }
 
-/// Lazy file materialization: a fresh session stays in `Pending` until
-/// the first append, so `ox` then quit leaves no file behind.
+/// Lifecycle states for the underlying file:
+///
+/// - `Pending` — header staged, file not yet on disk. A fresh session
+///   that exits before the first record cmd leaves no file behind.
+/// - `Active` — file open, [`BufWriter`][std::io::BufWriter] healthy.
+///   Steady state.
+/// - `Broken` — last batch errored mid-flush. `BufWriter`'s buffer
+///   state is undefined per the std docs after a partial-write
+///   failure, so we drop the writer and reopen the file with
+///   [`SessionStore::open_append`] on the next batch. Without this,
+///   a single transient I/O hiccup poisons every subsequent flush.
 pub(super) enum WriterStatus {
     Pending { header: Entry },
     Active(SessionWriter),
+    Broken,
 }
 
 impl SessionState {
@@ -150,24 +160,42 @@ impl SessionState {
         })
     }
 
-    /// Buffer every entry then flush once. Materializes the file on
-    /// first call (writing the staged header first); a transient header
-    /// failure leaves `Pending` so the next batch retries.
+    /// Buffer every entry then flush once. Materializes or reopens the
+    /// file as needed; a transient open / header / flush failure leaves
+    /// the writer in a state that retries cleanly on the next batch.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
-        if let WriterStatus::Pending { header } = &self.writer_status {
-            let writer = self.store.create(header)?;
+        if !matches!(self.writer_status, WriterStatus::Active(_)) {
+            // `Pending` materializes the file via the staged header;
+            // `Broken` reopens the existing file in append mode. A
+            // failure here propagates with the original status preserved
+            // — the next batch retries.
+            let writer = match &self.writer_status {
+                WriterStatus::Pending { header } => self.store.create(header)?,
+                WriterStatus::Broken => self.store.open_append(&self.session_id)?,
+                WriterStatus::Active(_) => unreachable!("matched above"),
+            };
             self.writer_status = WriterStatus::Active(writer);
         }
         let WriterStatus::Active(writer) = &mut self.writer_status else {
-            unreachable!("writer_status is Active after Pending materialization");
+            unreachable!("writer_status is Active after materialization above");
         };
-        for entry in entries {
-            writer.append_no_flush(entry)?;
+        let result = (|| -> Result<()> {
+            for entry in entries {
+                writer.append_no_flush(entry)?;
+            }
+            writer.flush()
+        })();
+        if result.is_err() {
+            // `BufWriter` semantics on partial write are undefined; the
+            // safe move is to drop the writer and reopen for the next
+            // batch instead of feeding more entries into a poisoned
+            // buffer.
+            self.writer_status = WriterStatus::Broken;
         }
-        writer.flush()
+        result
     }
 }
 
@@ -316,6 +344,66 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(seed.is_none());
         assert!(!state.first_user_prompt_seen);
+    }
+
+    // ── SessionState::flush_entries ──
+
+    #[test]
+    fn flush_entries_broken_writer_reopens_file_and_appends() {
+        // After a flush error transitions writer_status to Broken, the
+        // next flush must reopen the existing file via store.open_append
+        // and append cleanly — not lose entries, not start a new file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store.clone(), "m");
+        let now = OffsetDateTime::now_utc();
+        let session_id = state.session_id.to_string();
+
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        state.flush_entries(&entries).unwrap();
+        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
+        state.writer_status = WriterStatus::Broken;
+
+        let (entries, _) = state.queue_message_entries(&Message::user("second"), now);
+        state.flush_entries(&entries).unwrap();
+
+        assert!(
+            matches!(state.writer_status, WriterStatus::Active(_)),
+            "Broken must transition back to Active after a successful reopen",
+        );
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let messages: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"message""#))
+            .collect();
+        assert_eq!(
+            messages.len(),
+            2,
+            "both messages on disk after reopen: {content}",
+        );
+    }
+
+    #[test]
+    fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
+        // A header-write failure must leave WriterStatus::Pending intact
+        // so the next batch retries via store.create rather than trying
+        // to open a file that was never created.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let result = state.flush_entries(&entries);
+
+        assert!(result.is_err(), "create must fail with project dir gone");
+        assert!(
+            matches!(state.writer_status, WriterStatus::Pending { .. }),
+            "create failure must leave Pending intact for next-batch retry",
+        );
     }
 
     // ── SessionState::finish_entry ──
