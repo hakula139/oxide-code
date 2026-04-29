@@ -539,6 +539,46 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
+    /// A handle whose actor channel is already closed. Every write returns
+    /// the actor-gone failure; the first call surfaces it via sink Error.
+    fn dead_test_session() -> SessionHandle {
+        crate::session::handle::dead_handle_for_tests("dead-test-session")
+    }
+
+    #[tokio::test]
+    async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
+        // When the session actor is gone, record_message must emit exactly
+        // one Error event (sticky once-flag) and agent_turn must still
+        // complete normally (write errors are non-fatal to the turn).
+        let session = dead_test_session();
+        let client = FakeClient::new(vec![text_turn("Hello!")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![crate::message::Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events();
+        let error_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .collect();
+        assert_eq!(
+            error_events.len(),
+            1,
+            "exactly one write-failure Error event (sticky once-flag): {events:?}",
+        );
+    }
+
     #[tokio::test]
     async fn agent_turn_text_only_response_records_assistant_message_and_returns() {
         let dir = tempfile::tempdir().unwrap();

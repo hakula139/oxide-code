@@ -221,6 +221,18 @@ mod tests {
         test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
     }
 
+    /// Async sink backed by an unbounded mpsc channel so tests can
+    /// `recv()` with a timeout instead of polling `CapturingSink` in a loop.
+    #[derive(Clone)]
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<AgentEvent>);
+
+    impl crate::agent::event::AgentSink for ChannelSink {
+        fn send(&self, event: AgentEvent) -> anyhow::Result<()> {
+            _ = self.0.send(event);
+            Ok(())
+        }
+    }
+
     /// Session handle with one user message recorded — the file must
     /// be materialized before `append_ai_title` will land an entry.
     async fn prepared_session(dir: &Path) -> SessionHandle {
@@ -228,6 +240,66 @@ mod tests {
         let handle = crate::session::handle::start(&store, HAIKU_MODEL);
         handle.record_message(Message::user("first prompt")).await;
         handle
+    }
+
+    // ── spawn ──
+
+    #[tokio::test]
+    async fn spawn_success_notifies_sink_with_session_title_event() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = title_client(server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ChannelSink(tx);
+
+        spawn(client, session, sink, "first prompt".to_owned());
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for title event")
+            .expect("channel closed before event");
+
+        assert!(
+            matches!(&event, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth"),
+            "unexpected event: {event:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_error_does_not_emit_session_title_event() {
+        // Haiku returns 503 → generate_and_record fails → warn-logs only;
+        // the spawned wrapper must not panic and must not emit a title event.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = title_client(server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ChannelSink(tx);
+
+        spawn(client, session, sink, "first prompt".to_owned());
+
+        // Give the spawned task time to run and confirm it emits nothing.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no event should be emitted on generation failure",
+        );
     }
 
     // ── title_output_format ──
@@ -334,6 +406,44 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(_))),
             "no title event on parse failure",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_write_failure_emits_error_and_title_events() {
+        // When append_ai_title fails (actor gone), generate_and_record must
+        // emit AgentEvent::Error and still emit SessionTitleUpdated (the
+        // function continues past the write failure so the UI updates).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let session = super::super::handle::dead_handle_for_tests("dead-session");
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed"))),
+            "Error event expected for write failure: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth")),
+            "SessionTitleUpdated expected even after write failure: {events:?}",
         );
     }
 

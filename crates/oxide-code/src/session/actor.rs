@@ -203,6 +203,28 @@ mod tests {
     // ── run ──
 
     #[tokio::test]
+    async fn run_flush_error_records_failure_in_ack() {
+        // Delete the project directory after creating the state so
+        // store.create() cannot create the session file. The first
+        // Record cmd's flush must fail, and the ack must carry the error.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let (cmd, rx) = record_cmd("hello");
+        drive(state, vec![cmd]).await;
+
+        let outcome = rx.await.unwrap();
+        assert!(
+            outcome.failure.is_some(),
+            "flush error must surface in the Record ack",
+        );
+    }
+
+    #[tokio::test]
     async fn run_record_then_finish_writes_header_message_summary_in_order() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());

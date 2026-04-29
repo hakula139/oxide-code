@@ -270,6 +270,20 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
     }
 }
 
+/// Creates a [`SessionHandle`] whose actor channel is already closed, so
+/// every write call immediately returns the actor-gone failure. Exposed
+/// to sibling `session::*` and `agent` test modules that need a dead handle
+/// without being able to access [`SessionHandle`]'s private fields directly.
+#[cfg(test)]
+pub(crate) fn dead_handle_for_tests(session_id: &str) -> SessionHandle {
+    let (cmd_tx, _) = mpsc::channel(1);
+    SessionHandle {
+        cmd_tx,
+        session_id: Arc::from(session_id),
+        shared: Arc::new(SharedState::default()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::store::{test_session_file, test_store};
@@ -349,6 +363,38 @@ mod tests {
         drop(original);
 
         assert!(resume(&store, &session_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_all_messages_sanitized_returns_error() {
+        // A file that loads non-empty but whose only message is an
+        // unresolved assistant tool_use. Sanitization removes it,
+        // leaving an empty message list that would corrupt the UUID
+        // chain on the next record. The bail! on line 236 guards this.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(crate::message::Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .await;
+        // The ack means the actor flushed — file is on disk.
+        drop(original);
+
+        let err = resume(&store, &session_id)
+            .err()
+            .expect("all messages sanitized must be an error");
+        assert!(
+            format!("{err:#}").contains("no messages to resume"),
+            "error explains why: {err:#}",
+        );
     }
 
     #[tokio::test]
@@ -464,6 +510,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_message_actor_gone_surfaces_failure_once_then_silences() {
+        // First call must return Some (the sticky one-time message); the
+        // second call returns None so the user sees the error only once.
+        let handle = dead_handle_for_tests("dead");
+
+        let first = handle
+            .record_message(crate::message::Message::user("a"))
+            .await;
+        let second = handle
+            .record_message(crate::message::Message::user("b"))
+            .await;
+
+        assert!(
+            first.failure.is_some(),
+            "first call after actor gone must surface failure",
+        );
+        assert!(
+            second.failure.is_none(),
+            "subsequent calls must be silent after first surface",
+        );
+    }
+
+    #[tokio::test]
     async fn record_message_resumed_session_does_not_seed_ai_title() {
         // Resumed sessions already have a first-prompt title on disk;
         // we don't try to regenerate the AI title here.
@@ -481,6 +550,21 @@ mod tests {
     }
 
     // ── record_tool_metadata ──
+
+    #[tokio::test]
+    async fn record_tool_metadata_actor_gone_surfaces_failure_once_then_silences() {
+        let handle = dead_handle_for_tests("dead");
+        let meta = crate::tool::ToolMetadata {
+            title: Some("f.rs".to_owned()),
+            ..crate::tool::ToolMetadata::default()
+        };
+
+        let first = handle.record_tool_metadata("t1", &meta).await;
+        let second = handle.record_tool_metadata("t2", &meta).await;
+
+        assert!(first.failure.is_some(), "first call must surface failure");
+        assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
 
     #[tokio::test]
     async fn record_tool_metadata_round_trips_title_and_replacements() {
@@ -533,6 +617,17 @@ mod tests {
     // ── append_ai_title ──
 
     #[tokio::test]
+    async fn append_ai_title_actor_gone_surfaces_failure_once_then_silences() {
+        let handle = dead_handle_for_tests("dead");
+
+        let first = handle.append_ai_title("Fix auth".to_owned()).await;
+        let second = handle.append_ai_title("Fix auth".to_owned()).await;
+
+        assert!(first.failure.is_some(), "first call must surface failure");
+        assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
+
+    #[tokio::test]
     async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -555,6 +650,17 @@ mod tests {
     }
 
     // ── finish ──
+
+    #[tokio::test]
+    async fn finish_actor_gone_surfaces_failure_once_then_silences() {
+        let handle = dead_handle_for_tests("dead");
+
+        let first = handle.finish().await;
+        let second = handle.finish().await;
+
+        assert!(first.failure.is_some(), "first call must surface failure");
+        assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
 
     #[tokio::test]
     async fn finish_writes_summary_with_count() {
