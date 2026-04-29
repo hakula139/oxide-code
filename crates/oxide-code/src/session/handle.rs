@@ -130,7 +130,7 @@ impl SessionHandle {
                 failure: self.actor_gone_failure(),
             };
         }
-        rx.await.unwrap_or(RecordOutcome {
+        rx.await.unwrap_or_else(|_| RecordOutcome {
             ai_title_seed: None,
             failure: self.actor_gone_failure(),
         })
