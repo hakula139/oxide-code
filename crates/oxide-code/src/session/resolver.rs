@@ -179,96 +179,6 @@ mod tests {
     use super::*;
     use crate::message::Message;
 
-    // ── normalize_resume_arg ──
-
-    #[test]
-    fn normalize_resume_arg_maps_none_to_fresh() {
-        assert!(matches!(
-            normalize_resume_arg(None).unwrap(),
-            ResumeMode::Fresh
-        ));
-    }
-
-    #[test]
-    fn normalize_resume_arg_maps_bare_flag_to_latest() {
-        assert!(matches!(
-            normalize_resume_arg(Some(&None)).unwrap(),
-            ResumeMode::Latest
-        ));
-    }
-
-    #[test]
-    fn normalize_resume_arg_trims_valid_prefix() {
-        let arg = Some("  abc123 ".to_owned());
-        let mode = normalize_resume_arg(Some(&arg)).unwrap();
-        assert!(matches!(mode, ResumeMode::Prefix("abc123")));
-    }
-
-    #[test]
-    fn normalize_resume_arg_classifies_path_arguments() {
-        for raw in [
-            "/abs/path.jsonl",
-            "./relative.jsonl",
-            "sub/dir/session.jsonl",
-            "name.jsonl",           // no separator but has .jsonl suffix
-            r"C:\Users\me\s.jsonl", // windows-shaped
-        ] {
-            let arg = Some(raw.to_owned());
-            let mode = normalize_resume_arg(Some(&arg)).unwrap();
-            assert!(
-                matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
-                "{raw:?} should classify as Path",
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
-        // A v4 UUID prefix uses only hex + `-`; neither triggers the path
-        // heuristic, so bare prefixes still resume through the store.
-        let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
-        let mode = normalize_resume_arg(Some(&arg)).unwrap();
-        assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
-    }
-
-    #[test]
-    fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
-        for raw in ["", "   ", "\t\n"] {
-            let arg = Some(raw.to_owned());
-            let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
-            assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
-            assert!(err.contains("bare"), "{raw:?} → {err:?}");
-        }
-    }
-
-    // ── format_session_id_preview ──
-
-    #[test]
-    fn format_session_id_preview_truncates_ids_to_eight_chars() {
-        let ids = [
-            "aaaaaaaaaaa".to_owned(),
-            "bbbbbbbbbbb".to_owned(),
-            "c".to_owned(),
-        ];
-        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
-    }
-
-    #[test]
-    fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
-        let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
-        let out = format_session_id_preview(ids);
-        let short_count = out.split(", ").filter(|s| *s != "...").count();
-        assert_eq!(short_count, 5, "{out:?}");
-        assert!(out.ends_with(", ..."), "{out:?}");
-    }
-
-    #[test]
-    fn format_session_id_preview_no_ellipsis_at_limit() {
-        let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
-        let out = format_session_id_preview(ids);
-        assert!(!out.ends_with(", ..."), "{out:?}");
-    }
-
     // ── resolve_session ──
 
     #[tokio::test]
@@ -458,5 +368,95 @@ mod tests {
             !err.contains("use --all"),
             "hint should not suggest --all when already set: {err}",
         );
+    }
+
+    // ── normalize_resume_arg ──
+
+    #[test]
+    fn normalize_resume_arg_maps_none_to_fresh() {
+        assert!(matches!(
+            normalize_resume_arg(None).unwrap(),
+            ResumeMode::Fresh
+        ));
+    }
+
+    #[test]
+    fn normalize_resume_arg_maps_bare_flag_to_latest() {
+        assert!(matches!(
+            normalize_resume_arg(Some(&None)).unwrap(),
+            ResumeMode::Latest
+        ));
+    }
+
+    #[test]
+    fn normalize_resume_arg_trims_valid_prefix() {
+        let arg = Some("  abc123 ".to_owned());
+        let mode = normalize_resume_arg(Some(&arg)).unwrap();
+        assert!(matches!(mode, ResumeMode::Prefix("abc123")));
+    }
+
+    #[test]
+    fn normalize_resume_arg_classifies_path_arguments() {
+        for raw in [
+            "/abs/path.jsonl",
+            "./relative.jsonl",
+            "sub/dir/session.jsonl",
+            "name.jsonl",           // no separator but has .jsonl suffix
+            r"C:\Users\me\s.jsonl", // windows-shaped
+        ] {
+            let arg = Some(raw.to_owned());
+            let mode = normalize_resume_arg(Some(&arg)).unwrap();
+            assert!(
+                matches!(mode, ResumeMode::Path(p) if p == Path::new(raw)),
+                "{raw:?} should classify as Path",
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
+        // A v4 UUID prefix uses only hex + `-`; neither triggers the path
+        // heuristic, so bare prefixes still resume through the store.
+        let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
+        let mode = normalize_resume_arg(Some(&arg)).unwrap();
+        assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));
+    }
+
+    #[test]
+    fn normalize_resume_arg_rejects_empty_and_whitespace_prefix() {
+        for raw in ["", "   ", "\t\n"] {
+            let arg = Some(raw.to_owned());
+            let err = normalize_resume_arg(Some(&arg)).err().unwrap().to_string();
+            assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
+            assert!(err.contains("bare"), "{raw:?} → {err:?}");
+        }
+    }
+
+    // ── format_session_id_preview ──
+
+    #[test]
+    fn format_session_id_preview_truncates_ids_to_eight_chars() {
+        let ids = [
+            "aaaaaaaaaaa".to_owned(),
+            "bbbbbbbbbbb".to_owned(),
+            "c".to_owned(),
+        ];
+        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
+    }
+
+    #[test]
+    fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
+        let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
+        let out = format_session_id_preview(ids);
+        let short_count = out.split(", ").filter(|s| *s != "...").count();
+        assert_eq!(short_count, 5, "{out:?}");
+        assert!(out.ends_with(", ..."), "{out:?}");
+    }
+
+    #[test]
+    fn format_session_id_preview_no_ellipsis_at_limit() {
+        let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
+        let out = format_session_id_preview(ids);
+        assert!(!out.ends_with(", ..."), "{out:?}");
     }
 }
