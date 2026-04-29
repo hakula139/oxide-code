@@ -26,9 +26,9 @@ use crate::tool::{DiffChunk, DiffLine};
 /// without hiding the change's middle behind an ellipsis.
 const MAX_DIFF_BODY_LINES: usize = 20;
 
-/// Maximum line numbers listed inline in the "applied at lines …"
+/// Maximum line numbers listed inline in the "applied at lines ..."
 /// footer for a deduplicated multi-chunk render. Beyond this, the
-/// list collapses to "…and N more locations" so a 50-hit
+/// list collapses to "...and N more locations" so a 50-hit
 /// `replace_all` doesn't produce a 50-number footer.
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
 
@@ -43,7 +43,7 @@ const MAX_LOCATIONS_DISPLAYED: usize = 8;
 /// - Single chunk → body alone, with a legacy
 ///   `{N} occurrences replaced` footer when a resumed transcript has
 ///   `replace_all` and N > 1 but no structured chunks.
-/// - Multi-chunk → body shown once, plus an "applied at lines X, Y, …"
+/// - Multi-chunk → body shown once, plus an "applied at lines X, Y, ..."
 ///   footer naming each site.
 pub(super) fn render(
     out: &mut Vec<Line<'static>>,
@@ -163,7 +163,7 @@ fn number_column_width(chunk: &DiffChunk) -> usize {
 /// Renders the deduplicated multi-chunk footer naming every location.
 /// `locations` carries one anchor line per chunk (old-side first line,
 /// falling back to new-side for pure insertions). Caps at
-/// [`MAX_LOCATIONS_DISPLAYED`] with a "…and N more locations" suffix.
+/// [`MAX_LOCATIONS_DISPLAYED`] with a "...and N more locations" suffix.
 fn render_locations_footer(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -560,7 +560,7 @@ mod tests {
     fn render_multi_chunk_emits_one_body_plus_locations_footer() {
         // Live `replace_all` case: N chunks of identical trimmed
         // content collapse into one body (rendered once) plus an
-        // "applied at lines …" footer naming each match site.
+        // "applied at lines ..." footer naming each match site.
         let theme = Theme::default();
         let chunk_a = DiffChunk {
             old: vec![DiffLine {

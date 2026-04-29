@@ -77,6 +77,16 @@ pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 /// This keeps the agent loop DRY — the same code drives both display modes.
 pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;
+
+    /// Emit an `Error` event for a session-write failure surfaced via
+    /// `Outcome` / `RecordOutcome` in `session::handle`. No-op when
+    /// `failure` is `None`. Send errors (e.g., a closed TUI channel
+    /// during teardown) are dropped — surfacing is best-effort.
+    fn session_write_error(&self, failure: Option<&str>) {
+        if let Some(msg) = failure {
+            _ = self.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+        }
+    }
 }
 
 // ── Stdio Sink (bare REPL / headless) ──

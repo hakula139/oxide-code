@@ -1,0 +1,10 @@
+---
+source: crates/oxide-code/src/session/actor.rs
+assertion_line: 419
+expression: mask_volatile(&content)
+---
+{"type":"header","session_id":"<UUID>","cwd":"<CWD>","model":"m","created_at":"<TS>","version":1}
+{"type":"title","title":"Edit something","source":"first_prompt","updated_at":"<TS>"}
+{"type":"message","uuid":"<UUID>","message":{"role":"user","content":[{"type":"text","text":"Edit something"}]},"timestamp":"<TS>"}
+{"type":"tool_result_metadata","tool_use_id":"t1","metadata":{"title":"Edited f.rs","replacements":2},"timestamp":"<TS>"}
+{"type":"summary","message_count":1,"updated_at":"<TS>"}

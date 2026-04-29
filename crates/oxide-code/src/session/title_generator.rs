@@ -13,19 +13,15 @@
 //! Callers wire this on fresh sessions exactly once; resumed sessions skip
 //! regeneration (the original title, if any, is already on disk).
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
-use crate::session::manager::SessionManager;
-use crate::session::writer::log_session_err;
+use crate::session::handle::SessionHandle;
 
 /// Haiku model used for title generation. Small and fast, OAuth-compatible,
 /// and cheap enough to fire on every fresh session without thought.
@@ -62,6 +58,54 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
     Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 "#};
 
+/// Spawns a detached task that asks Haiku for a title, records it on
+/// `session`, and notifies `sink`.
+///
+/// `first_prompt` should be the user's first message text — truncated here
+/// to [`MAX_PROMPT_CHARS`] to keep the Haiku request small.
+pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
+where
+    S: AgentSink + Clone + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
+            // Expected failure: network hiccup, rate-limit, or non-JSON
+            // Haiku reply. The first-prompt title stays in the file and
+            // status bar; the warning routes per
+            // `crate::util::log::init_tracing`.
+            warn!("AI title generation failed: {e}");
+        }
+    });
+}
+
+/// Single-shot title generator: call Haiku, parse, append, notify.
+async fn generate_and_record(
+    client: &Client,
+    session: &SessionHandle,
+    sink: &impl AgentSink,
+    first_prompt: &str,
+) -> Result<()> {
+    let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
+    let output_format = title_output_format();
+    let raw = client
+        .complete(
+            HAIKU_MODEL,
+            SYSTEM_PROMPT,
+            &prompt,
+            MAX_TOKENS,
+            Some(&output_format),
+        )
+        .await
+        .context("Haiku completion failed")?;
+    let title = parse_title(&raw).context("Haiku returned a malformed title")?;
+
+    let outcome = session.append_ai_title(title.clone()).await;
+    sink.session_write_error(outcome.failure.as_deref());
+
+    _ = sink.send(AgentEvent::SessionTitleUpdated(title));
+    Ok(())
+}
+
 /// `{"title": string}` schema for [`Client::complete`]'s structured
 /// outputs. Built once per call — the schema JSON itself is small and
 /// constructing a `serde_json::Value` is cheap compared to the HTTP
@@ -81,64 +125,6 @@ fn title_output_format() -> OutputFormat {
         "required": ["title"],
         "additionalProperties": false,
     }))
-}
-
-/// Spawns a detached task that asks Haiku for a title, records it on
-/// `session`, and notifies `sink`.
-///
-/// `first_prompt` should be the user's first message text — truncated here
-/// to [`MAX_PROMPT_CHARS`] to keep the Haiku request small.
-pub(crate) fn spawn<S>(
-    client: Client,
-    session: Arc<Mutex<SessionManager>>,
-    sink: S,
-    first_prompt: String,
-) where
-    S: AgentSink + Clone + Send + 'static,
-{
-    tokio::spawn(async move {
-        if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
-            // Expected failure: network hiccup, rate-limit, or non-JSON
-            // Haiku reply. The first-prompt title stays in the file and
-            // status bar; the warning routes per
-            // `crate::util::log::init_tracing`.
-            warn!("AI title generation failed: {e}");
-        }
-    });
-}
-
-/// Single-shot title generator: call Haiku, parse, append, notify.
-async fn generate_and_record(
-    client: &Client,
-    session: &Mutex<SessionManager>,
-    sink: &impl AgentSink,
-    first_prompt: &str,
-) -> Result<()> {
-    let prompt = truncate_prompt(first_prompt, MAX_PROMPT_CHARS);
-    let output_format = title_output_format();
-    let raw = client
-        .complete(
-            HAIKU_MODEL,
-            SYSTEM_PROMPT,
-            &prompt,
-            MAX_TOKENS,
-            Some(&output_format),
-        )
-        .await
-        .context("Haiku completion failed")?;
-    let title = parse_title(&raw).context("Haiku returned a malformed title")?;
-
-    // Hold the session lock only for the append. `append_ai_title` does
-    // one small write + flush; holding longer would block new user
-    // messages from being recorded.
-    {
-        let mut s = session.lock().await;
-        let r = s.append_ai_title(&title);
-        log_session_err(r, &mut s, Some(sink));
-    }
-
-    _ = sink.send(AgentEvent::SessionTitleUpdated(title));
-    Ok(())
 }
 
 /// Parses Haiku's response as the `{"title": "..."}` JSON envelope, or
@@ -233,29 +219,83 @@ mod tests {
         test_client(base_url, Auth::ApiKey("sk".to_owned()), HAIKU_MODEL)
     }
 
-    /// Session manager with one user message recorded — the file must
-    /// be materialized before `append_ai_title` will find it.
-    async fn prepared_session(dir: &Path) -> Mutex<SessionManager> {
-        let store = test_store(dir);
-        let mut mgr = SessionManager::start(&store, HAIKU_MODEL);
-        mgr.record_message(&Message::user("first prompt"))
-            .await
-            .unwrap();
-        Mutex::new(mgr)
+    /// Sink backed by an mpsc channel so tests can wait on `recv()`
+    /// with a timeout instead of polling `CapturingSink`.
+    #[derive(Clone)]
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<AgentEvent>);
+
+    impl crate::agent::event::AgentSink for ChannelSink {
+        fn send(&self, event: AgentEvent) -> anyhow::Result<()> {
+            _ = self.0.send(event);
+            Ok(())
+        }
     }
 
-    // ── title_output_format ──
+    /// Session handle with one recorded message so the file is
+    /// materialized when `append_ai_title` runs.
+    async fn prepared_session(dir: &Path) -> SessionHandle {
+        let store = test_store(dir);
+        let handle = crate::session::handle::start(&store, HAIKU_MODEL);
+        handle.record_message(Message::user("first prompt")).await;
+        handle
+    }
 
-    #[test]
-    fn title_output_format_matches_title_envelope_shape() {
-        // The schema must line up with [`TitleEnvelope`] so a
-        // schema-conforming response parses via `parse_title`.
-        let fmt = title_output_format();
-        let v = serde_json::to_value(&fmt).unwrap();
-        assert_eq!(v["type"], "json_schema");
-        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
-        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
-        assert_eq!(v["schema"]["additionalProperties"], false);
+    // ── spawn ──
+
+    #[tokio::test]
+    async fn spawn_success_notifies_sink_with_session_title_event() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = title_client(server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ChannelSink(tx);
+
+        spawn(client, session, sink, "first prompt".to_owned());
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for title event")
+            .expect("channel closed before event");
+
+        assert!(
+            matches!(&event, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth"),
+            "unexpected event: {event:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_error_does_not_emit_session_title_event() {
+        // 503 → generate_and_record fails → warn-log only, no event.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("bad gateway"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        let client = title_client(server.uri());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ChannelSink(tx);
+
+        spawn(client, session, sink, "first prompt".to_owned());
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no event should be emitted on generation failure",
+        );
     }
 
     // ── generate_and_record ──
@@ -313,11 +353,13 @@ mod tests {
             .await
             .unwrap();
 
-        let got = sink.events().into_iter().find_map(|e| match e {
-            AgentEvent::SessionTitleUpdated(t) => Some(t),
-            _ => None,
-        });
-        assert_eq!(got.as_deref(), Some("Add OAuth auth"));
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Add OAuth auth")),
+            "sink got SessionTitleUpdated: {events:?}",
+        );
     }
 
     #[tokio::test]
@@ -352,6 +394,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_and_record_write_failure_emits_error_and_title_events() {
+        // A write failure surfaces an Error to the sink but must not
+        // skip the SessionTitleUpdated event — UI keeps updating.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let session = super::super::handle::testing::dead("dead-session");
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed"))),
+            "Error event expected for write failure: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth")),
+            "SessionTitleUpdated expected even after write failure: {events:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn generate_and_record_http_error_bails_with_context() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -374,6 +453,20 @@ mod tests {
             "outer context: {msg}"
         );
         assert!(msg.contains("503"), "status surfaced: {msg}");
+    }
+
+    // ── title_output_format ──
+
+    #[test]
+    fn title_output_format_matches_title_envelope_shape() {
+        // The schema must line up with [`TitleEnvelope`] so a
+        // schema-conforming response parses via `parse_title`.
+        let fmt = title_output_format();
+        let v = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(v["type"], "json_schema");
+        assert_eq!(v["schema"]["properties"]["title"]["type"], "string");
+        assert_eq!(v["schema"]["required"], serde_json::json!(["title"]));
+        assert_eq!(v["schema"]["additionalProperties"], false);
     }
 
     // ── parse_title ──

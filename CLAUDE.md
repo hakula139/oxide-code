@@ -52,17 +52,20 @@ ox                                          # Start an interactive session
 │   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
 ├── session.rs                              # Session module root
 ├── session/
+│   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path constructors
+│   ├── handle/
+│   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
 │   ├── list_view.rs                        # `ox --list` table rendering (writes to any `impl Write`)
-│   ├── manager.rs                          # SessionManager: lifecycle (start, resume, record, finish)
 │   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs                         # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
-│   ├── store.rs                            # SessionStore / SessionWriter: file I/O, XDG path, listing
-│   ├── title_generator.rs                  # Background AI title generation (Haiku) with detached task
-│   └── writer.rs                           # Session-write helpers (record_session_message, log_session_err)
+│   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
+│   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
+│   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
@@ -202,6 +205,7 @@ ox                                          # Start an interactive session
 - Do not request review from the PR author (GitHub rejects it).
 - Descriptions follow `.github/pull_request_template.md`:
   - Prose intro summarizing what and why.
+  - Optional Design decisions section for non-trivial PRs — bullet list of tradeoffs (alternatives rejected, invariants preserved, intentional omissions). Skip for mechanical changes.
   - Per-file Changes table (for non-trivial PRs). Drop the `crates/<crate>/src/` prefix on crate sources (e.g. `tool/glob.rs`, not `crates/oxide-code/src/tool/glob.rs`); keep the full path for repo-root files (`CLAUDE.md`, `Cargo.toml`, `docs/...`, `.cspell/...`).
   - Test plan checklist.
 - PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.

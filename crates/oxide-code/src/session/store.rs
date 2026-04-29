@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -100,11 +100,7 @@ impl SessionStore {
     /// Session files carry no file-level lock: concurrent resumes are
     /// explicitly allowed and form forks in the recorded UUID chain.
     /// See [`Self::load_session_data`] for the fork-aware loader.
-    #[expect(
-        clippy::unused_async,
-        reason = "async preserves the call-site shape for a planned tokio::fs migration; synchronous fs calls are short-lived (open + header write)"
-    )]
-    pub(crate) async fn create(&self, header: &Entry) -> Result<SessionWriter> {
+    pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
         let Entry::Header {
             session_id,
             created_at,
@@ -121,7 +117,7 @@ impl SessionStore {
         let file = open_create_exclusive(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
 
-        let mut writer = SessionWriter { file };
+        let mut writer = SessionWriter::new(file);
         writer.append(header)?;
         Ok(writer)
     }
@@ -139,11 +135,7 @@ impl SessionStore {
     /// on POSIX `O_APPEND` for line positioning; writes larger than
     /// `PIPE_BUF` (typically 4 KiB) may interleave, but the loader
     /// warn-skips any malformed UTF-8 / JSON fragments that result.
-    #[expect(
-        clippy::unused_async,
-        reason = "async preserves the call-site shape for a planned tokio::fs migration; synchronous fs calls are short-lived"
-    )]
-    pub(crate) async fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
+    pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
         open_append_at(&path)
     }
@@ -261,14 +253,14 @@ impl SessionStore {
 
 /// Opens an existing session file in append mode by path. Underlies
 /// [`SessionStore::open_append`] (which resolves the path first) and
-/// `SessionManager::resume_from_path` (which bypasses the store entirely
-/// for sessions living outside the XDG project subdirectories).
+/// [`super::handle::resume_from_path`] (which bypasses the store
+/// entirely for sessions living outside the XDG project subdirectories).
 pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     let file = OpenOptions::new()
         .append(true)
         .open(path)
         .with_context(|| format!("session not found: {}", path.display()))?;
-    Ok(SessionWriter { file })
+    Ok(SessionWriter::new(file))
 }
 
 /// Loads session data from an explicit path. See
@@ -371,8 +363,10 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
 }
 
 /// Reads just the `session_id` from a session file's header (line 1).
-/// Used by external-path resume so callers can key the resumed
-/// [`SessionManager`] on the file's declared identity rather than its path.
+/// Used by external-path resume so the resumed [`SessionHandle`] can
+/// key on the file's declared identity rather than its path.
+///
+/// [`SessionHandle`]: super::handle::SessionHandle
 pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
@@ -474,19 +468,42 @@ fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
 
 // ── SessionWriter ──
 
-/// Handle for appending entries to an open session file.
+/// Append-only handle for an open session file. Wraps the file in a
+/// [`BufWriter`] so the actor's batching loop can coalesce a turn's
+/// entries into one `write()` syscall.
 #[derive(Debug)]
 pub(crate) struct SessionWriter {
-    file: File,
+    file: BufWriter<File>,
 }
 
 impl SessionWriter {
-    /// Serializes an entry as a single JSON line and flushes immediately.
-    pub(crate) fn append(&mut self, entry: &Entry) -> Result<()> {
+    fn new(file: File) -> Self {
+        Self {
+            file: BufWriter::new(file),
+        }
+    }
+
+    /// Buffer one entry. Concurrent readers don't see it until
+    /// [`Self::flush`].
+    pub(super) fn append_no_flush(&mut self, entry: &Entry) -> Result<()> {
         let json = serde_json::to_string(entry).context("failed to serialize entry")?;
         writeln!(self.file, "{json}").context("failed to write entry")?;
+        Ok(())
+    }
+
+    /// Drain the buffer in one `write()`. No `fsync` — entries reach
+    /// the OS cache, which is the durability tier the resume loader
+    /// already tolerates (warn-skip on truncated tail entries).
+    pub(super) fn flush(&mut self) -> Result<()> {
         self.file.flush().context("failed to flush entry")?;
         Ok(())
+    }
+
+    /// Append + flush. Used by header writes on file creation and by
+    /// store tests that read back immediately.
+    fn append(&mut self, entry: &Entry) -> Result<()> {
+        self.append_no_flush(entry)?;
+        self.flush()
     }
 }
 
@@ -651,9 +668,9 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
 /// Opens a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
-/// Shared between the `session::store` and `session::manager` test
-/// modules (and the cross-module `agent::tests`) so they exercise the
-/// same project-scoping path.
+/// Shared between the `session::store`, `session::handle`,
+/// `session::actor`, and `agent::tests` modules so they all exercise
+/// the same project-scoping path.
 #[cfg(test)]
 pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
@@ -816,7 +833,7 @@ mod tests {
         let store = test_store(dir.path());
         let header = sample_header("test-id");
 
-        let _writer = store.create(&header).await.unwrap();
+        let _writer = store.create(&header).unwrap();
 
         let content = fs::read_to_string(test_session_file(dir.path(), "test-id")).unwrap();
         let parsed: Entry = serde_json::from_str(content.trim()).unwrap();
@@ -831,7 +848,7 @@ mod tests {
         let store = test_store(dir.path());
         let entry = sample_message_entry(Uuid::new_v4(), "hi");
 
-        assert!(store.create(&entry).await.is_err());
+        assert!(store.create(&entry).is_err());
     }
 
     #[tokio::test]
@@ -844,7 +861,7 @@ mod tests {
         };
         let taken = test_project_path(dir.path(), &session_filename("existing", created_at));
         fs::write(taken, "{}").unwrap();
-        assert!(store.create(&header).await.is_err());
+        assert!(store.create(&header).is_err());
     }
 
     #[cfg(unix)]
@@ -854,7 +871,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("perm-test")).await.unwrap();
+        let _writer = store.create(&sample_header("perm-test")).unwrap();
 
         let meta = fs::metadata(test_session_file(dir.path(), "perm-test")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -866,7 +883,7 @@ mod tests {
     async fn open_append_writes_to_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("append-test")).await.unwrap();
+        let mut writer = store.create(&sample_header("append-test")).unwrap();
         let u1 = Uuid::new_v4();
         writer
             .append(&sample_message_at(
@@ -878,7 +895,7 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        let mut writer = store.open_append("append-test").await.unwrap();
+        let mut writer = store.open_append("append-test").unwrap();
         writer
             .append(&sample_message_at(
                 Uuid::new_v4(),
@@ -903,7 +920,7 @@ mod tests {
     async fn open_append_fails_for_nonexistent_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        assert!(store.open_append("no-such-session").await.is_err());
+        assert!(store.open_append("no-such-session").is_err());
     }
 
     #[tokio::test]
@@ -914,10 +931,10 @@ mod tests {
         // `load_session_data_picks_newest_leaf_on_fork`).
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer_a = store.create(&sample_header("concurrent")).await.unwrap();
+        let _writer_a = store.create(&sample_header("concurrent")).unwrap();
 
         let start = std::time::Instant::now();
-        let writer_b = store.open_append("concurrent").await;
+        let writer_b = store.open_append("concurrent");
         let elapsed = start.elapsed();
 
         assert!(
@@ -936,7 +953,7 @@ mod tests {
     async fn load_session_data_returns_only_messages_with_last_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("load-test")).await.unwrap();
+        let mut writer = store.create(&sample_header("load-test")).unwrap();
 
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
@@ -1029,7 +1046,7 @@ mod tests {
         // leaf as the tip and walk back to the shared ancestor.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("fork")).await.unwrap();
+        let mut writer = store.create(&sample_header("fork")).unwrap();
 
         let root = Uuid::new_v4();
         writer
@@ -1090,7 +1107,7 @@ mod tests {
         // returned.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("orphan")).await.unwrap();
+        let mut writer = store.create(&sample_header("orphan")).unwrap();
 
         let only = Uuid::new_v4();
         writer
@@ -1117,7 +1134,7 @@ mod tests {
         // Defensive: the walker must terminate rather than looping.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("cycle")).await.unwrap();
+        let mut writer = store.create(&sample_header("cycle")).unwrap();
 
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
@@ -1158,7 +1175,7 @@ mod tests {
         // supposed to dedupe on.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("dup")).await.unwrap();
+        let mut writer = store.create(&sample_header("dup")).unwrap();
 
         let u = Uuid::new_v4();
         writer
@@ -1334,7 +1351,6 @@ mod tests {
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
-            .await
             .unwrap();
         wa.append(&sample_title_entry("Older")).unwrap();
         wa.append(&sample_summary_entry(3)).unwrap();
@@ -1347,7 +1363,6 @@ mod tests {
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
                 version: CURRENT_VERSION,
             })
-            .await
             .unwrap();
         wb.append(&sample_title_entry("Newer")).unwrap();
         wb.append(&sample_summary_entry(5)).unwrap();
@@ -1375,7 +1390,6 @@ mod tests {
                 created_at: datetime!(2026-01-01 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
-            .await
             .unwrap();
         w_old.append(&sample_title_entry("Old")).unwrap();
         drop(w_old);
@@ -1388,7 +1402,6 @@ mod tests {
                 created_at: datetime!(2026-04-17 10:00:00 UTC),
                 version: CURRENT_VERSION,
             })
-            .await
             .unwrap();
         w_new.append(&sample_title_entry("New")).unwrap();
         drop(w_new);
@@ -1421,7 +1434,7 @@ mod tests {
     async fn list_picks_latest_title_when_re_appended() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("retitled")).await.unwrap();
+        let mut writer = store.create(&sample_header("retitled")).unwrap();
         writer
             .append(&Entry::Title {
                 title: "original prompt".to_owned(),
@@ -1450,7 +1463,7 @@ mod tests {
         // has been appended.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("long")).await.unwrap();
+        let mut writer = store.create(&sample_header("long")).unwrap();
         writer
             .append(&Entry::Title {
                 title: "first prompt".to_owned(),
@@ -1479,7 +1492,7 @@ mod tests {
         // the AI title here; the full-file scan must surface it.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("buried")).await.unwrap();
+        let mut writer = store.create(&sample_header("buried")).unwrap();
         writer
             .append(&Entry::Title {
                 title: "first prompt".to_owned(),
@@ -1515,7 +1528,7 @@ mod tests {
     async fn list_works_without_title_or_summary() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _writer = store.create(&sample_header("bare")).await.unwrap();
+        let _writer = store.create(&sample_header("bare")).unwrap();
 
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -1543,15 +1556,12 @@ mod tests {
         // in other project subdirectories stay hidden.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).await.unwrap();
+        let _own = store.create(&sample_header("own")).unwrap();
 
         // Drop a session into a sibling project subdir.
         let sibling_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = sibling_store
-            .create(&sample_header("foreign"))
-            .await
-            .unwrap();
+        let _foreign = sibling_store.create(&sample_header("foreign")).unwrap();
         drop(sibling_store);
 
         let sessions = store.list().unwrap();
@@ -1565,14 +1575,11 @@ mod tests {
     async fn list_all_spans_every_project_subdirectory() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).await.unwrap();
+        let _own = store.create(&sample_header("own")).unwrap();
 
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = foreign_store
-            .create(&sample_header("foreign"))
-            .await
-            .unwrap();
+        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
         drop(foreign_store);
 
         let all = store.list_all().unwrap();
@@ -1591,10 +1598,7 @@ mod tests {
         // Session lives in a different project subdirectory.
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _w = foreign_store
-            .create(&sample_header("foreign"))
-            .await
-            .unwrap();
+        let _w = foreign_store.create(&sample_header("foreign")).unwrap();
         drop(foreign_store);
 
         let found = store.find_session_path("foreign").unwrap();
@@ -1623,7 +1627,7 @@ mod tests {
     async fn append_writes_multiple_entries() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("multi")).await.unwrap();
+        let mut writer = store.create(&sample_header("multi")).unwrap();
 
         writer
             .append(&sample_message_entry(Uuid::new_v4(), "hello"))

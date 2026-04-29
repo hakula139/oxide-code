@@ -1,3 +1,6 @@
+acked
+acking
+acks
 agentic
 anthropic
 anthropics
@@ -21,6 +24,7 @@ dtolnay
 frappe
 EACCES
 EISDIR
+ENOSPC
 ENOTDIR
 ESRCH
 feff

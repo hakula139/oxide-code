@@ -1,11 +1,17 @@
 <!-- markdownlint-disable-next-line first-line-heading -->
 ## Summary
 
-<!-- Prose intro: what this PR does and why, in 1-3 sentences. -->
+<!-- Prose intro: what this PR does and why, in 1-3 sentences.
+     Optional follow-up bullets, one per logical change, when prose alone
+     doesn't carry the diff. Trivial PRs can skip the bullets entirely. -->
 
-<!-- Then one bullet per logical change. -->
+## Design decisions
 
--
+<!-- Optional. Use for non-trivial PRs where the reviewer benefits from
+     seeing the tradeoffs behind the chosen approach (alternatives
+     rejected, invariants preserved, intentional omissions). One bullet
+     per decision, lead with the choice in bold. Skip the section when
+     the change is mechanical. -->
 
 ## Changes
 

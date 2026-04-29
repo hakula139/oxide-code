@@ -11,7 +11,7 @@ pub(crate) mod pending_calls;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink};
@@ -19,8 +19,7 @@ use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
-use crate::session::manager::SessionManager;
-use crate::session::writer::record_session_message;
+use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
@@ -65,7 +64,7 @@ pub(crate) async fn agent_turn(
     messages: &mut Vec<Message>,
     prompt: &PromptParts,
     sink: &dyn AgentSink,
-    session: &Mutex<SessionManager>,
+    session: &SessionHandle,
 ) -> Result<()> {
     let tool_defs = tools.definitions();
 
@@ -90,10 +89,12 @@ pub(crate) async fn agent_turn(
             role: Role::Assistant,
             content: blocks,
         };
-        record_session_message(session, &assistant_msg, Some(sink)).await;
-        messages.push(assistant_msg);
 
         if tool_uses.is_empty() {
+            // Text-only turn: nothing else to coalesce with, so record
+            // and return.
+            record_message(session, assistant_msg.clone(), sink).await;
+            messages.push(assistant_msg);
             return Ok(());
         }
 
@@ -144,18 +145,26 @@ pub(crate) async fn agent_turn(
             role: Role::User,
             content: results,
         };
-        record_session_message(session, &tool_result_msg, Some(sink)).await;
-        // Sidecar metadata is written immediately after the message
-        // so a mid-turn crash can still recover the display info for
-        // results that did land. Each entry is independent — a single
-        // failure doesn't abort the batch.
-        {
-            let mut s = session.lock().await;
-            for (id, metadata) in &sidecars {
-                let r = s.record_tool_result_metadata(id, metadata);
-                crate::session::writer::log_session_err(r, &mut s, Some(sink));
-            }
-        }
+
+        // Send all three writes concurrently so they queue in the actor's
+        // mpsc channel before its `try_recv` runs — receive-and-drain
+        // then coalesces the assistant message, the tool-result message,
+        // and the sidecar batch into a single absorb pass and a single
+        // buffered flush. Sending serially with awaits between would
+        // block each cmd's caller on the prior flush, defeating the
+        // batching. Iteration-atomic: a crash mid-tool leaves the
+        // session at the previous turn's tail, and resume sees no
+        // half-written tool round.
+        let assistant_fut = session.record_message(assistant_msg.clone());
+        let tool_result_fut = session.record_message(tool_result_msg.clone());
+        let metadata_fut = session.record_tool_metadata_batch(sidecars);
+        let (assistant_outcome, tool_result_outcome, metadata_outcome) =
+            tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
+        sink.session_write_error(assistant_outcome.failure.as_deref());
+        sink.session_write_error(tool_result_outcome.failure.as_deref());
+        sink.session_write_error(metadata_outcome.failure.as_deref());
+
+        messages.push(assistant_msg);
         messages.push(tool_result_msg);
     }
 
@@ -163,6 +172,13 @@ pub(crate) async fn agent_turn(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )
+}
+
+/// Surfaces the first I/O failure on `sink`; drops the AI-title seed
+/// (only the fresh-start trigger in `main` consumes it).
+async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
+    let outcome: RecordOutcome = session.record_message(msg).await;
+    sink.session_write_error(outcome.failure.as_deref());
 }
 
 // ── Stream Processing ──
@@ -403,7 +419,7 @@ mod tests {
     };
     use crate::config::Auth;
     use crate::message::Role;
-    use crate::session::manager::SessionManager;
+    use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
@@ -528,9 +544,88 @@ mod tests {
         }
     }
 
-    fn test_session(dir: &std::path::Path) -> Mutex<SessionManager> {
+    fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        Mutex::new(SessionManager::start(&store, "claude-sonnet-4-6"))
+        handle::start(&store, "claude-sonnet-4-6")
+    }
+
+    /// Handle whose actor channel is already closed; every write
+    /// returns the actor-gone failure.
+    fn dead_test_session() -> SessionHandle {
+        crate::session::handle::testing::dead("dead-test-session")
+    }
+
+    #[tokio::test]
+    async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
+        // Write errors must not abort the turn — agent_turn returns Ok
+        // and emits exactly one Error event for the user.
+        let session = dead_test_session();
+        let client = FakeClient::new(vec![text_turn("Hello!")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![crate::message::Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events();
+        let error_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .collect();
+        assert_eq!(
+            error_events.len(),
+            1,
+            "exactly one write-failure Error event (sticky once-flag): {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
+        // The assistant + tool-result messages succeed; the sidecar
+        // batch is the first failing cmd, so the batch's failure
+        // handler (not the message handler) is what fires the Error
+        // event. Programmable handle: ack the first 2 cmds healthily
+        // then drop every cmd without acking — the 3rd cmd
+        // (ToolMetadata) hits dispatch_outcome's rx-await fallback.
+        let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events();
+        let error_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .collect();
+        assert_eq!(
+            error_events.len(),
+            1,
+            "exactly one write-failure Error event (sticky once-flag): {events:?}",
+        );
     }
 
     #[tokio::test]

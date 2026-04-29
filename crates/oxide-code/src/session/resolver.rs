@@ -1,17 +1,17 @@
 //! CLI `--continue` argument resolution.
 //!
 //! Translates the `clap`-parsed `Option<Option<String>>` into either a
-//! freshly-started [`SessionManager`] or a resumed one with its
-//! loaded messages, via [`resolve_session`]. Split out of `main.rs`
-//! so the resolution logic (parsing, prefix matching, ambiguity
-//! reporting) can be exercised by unit tests.
+//! freshly-started [`SessionHandle`] or a resumed one with its loaded
+//! messages, via [`resolve_session`]. Split out of `main.rs` so the
+//! resolution logic (parsing, prefix matching, ambiguity reporting)
+//! can be exercised by unit tests.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
-use super::manager::{ResumedSession, SessionManager};
+use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
 
 /// Normalized form of the CLI `--continue` argument. Built by
@@ -54,15 +54,14 @@ pub(crate) async fn resolve_session(
     // Path resumes bypass the store's project-subdir lookup entirely and
     // can be resolved without listing anything.
     if let ResumeMode::Path(path) = mode {
-        let resumed = SessionManager::resume_from_path(store, path)?;
+        let resumed = handle::resume_from_path(store, path)?;
         debug!("resuming session from {}", path.display());
         return Ok(resumed);
     }
 
     if matches!(mode, ResumeMode::Fresh) {
-        let manager = SessionManager::start(store, model);
         return Ok(ResumedSession {
-            manager,
+            handle: handle::start(store, model),
             messages: Vec::new(),
             title: None,
             tool_result_metadata: std::collections::HashMap::new(),
@@ -110,7 +109,7 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let resumed = SessionManager::resume(store, &session_id).await?;
+    let resumed = handle::resume(store, &session_id)?;
     debug!("resuming session {session_id}");
     Ok(resumed)
 }
@@ -179,6 +178,197 @@ mod tests {
     use super::super::store::{test_project_dir, test_session_file, test_store};
     use super::*;
     use crate::message::Message;
+
+    // ── resolve_session ──
+
+    #[tokio::test]
+    async fn resolve_session_starts_fresh_when_no_continue_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let resumed = resolve_session(&store, "m", None, false).await.unwrap();
+        assert!(resumed.messages.is_empty());
+        assert!(resumed.title.is_none());
+        assert!(resumed.tool_result_metadata.is_empty());
+        assert!(
+            std::fs::read_dir(test_project_dir(dir.path()))
+                .unwrap()
+                .next()
+                .is_none(),
+            "fresh session file should be deferred until the first record_message",
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_session_bare_continue_errors_without_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let err = resolve_session(&store, "m", Some(&None), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("no sessions"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_errors_on_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        // Materialize a session file so the project listing is
+        // non-empty; without `record_message` the lazy creation
+        // never touches disk and the prefix lookup would short-circuit
+        // on "no sessions" instead of testing the no-match path.
+        let s = handle::start(&store, "m");
+        s.record_message(Message::user("noop")).await;
+        s.finish().await;
+        let prefix_arg = Some("zzzz".to_owned());
+        drop(s);
+
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("no session matching prefix"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_reports_ambiguous_matches() {
+        // Spin up 20 sessions and record a message in each so any
+        // of them is resumable. Then pick the hex char that the
+        // most session IDs start with — with 20 v4 UUIDs across 16
+        // characters, this is guaranteed ≥ 2 by pigeonhole, so the
+        // prefix lookup must bail with "ambiguous".
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+
+        for _ in 0..20 {
+            let s = handle::start(&store, "m");
+            s.record_message(Message::user("noop")).await;
+            s.finish().await;
+        }
+
+        let listed = store.list().unwrap();
+        let mut counts = std::collections::HashMap::<char, usize>::new();
+        for info in &listed {
+            *counts
+                .entry(info.session_id.chars().next().unwrap())
+                .or_default() += 1;
+        }
+        let (prefix_char, count) = counts.into_iter().max_by_key(|&(_, n)| n).unwrap();
+        assert!(count >= 2, "pigeonhole violation: 20 UUIDs over 16 chars");
+        let prefix = prefix_char.to_string();
+
+        let prefix_arg = Some(prefix.clone());
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("ambiguous prefix"), "got: {err}");
+        assert!(err.contains(&prefix), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_resumes_from_external_path() {
+        // A session file living somewhere the store wouldn't search.
+        // The path-based resume must still pick up the title, messages,
+        // and session_id recorded in the header.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original
+            .record_message(Message::user("external path test"))
+            .await;
+        original.finish().await;
+        let path = test_session_file(dir.path(), &full_id);
+        drop(original);
+
+        // Copy the file outside the project directory to simulate the
+        // "imported from another machine" scenario.
+        let external_dir = tempfile::tempdir().unwrap();
+        let external_path = external_dir.path().join("copied.jsonl");
+        std::fs::copy(&path, &external_path).unwrap();
+
+        let arg = Some(external_path.to_string_lossy().into_owned());
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("external path test"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_path_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let arg = Some("/does/not/exist.jsonl".to_owned());
+        let err = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("session not found"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_resumes_single_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        original.finish().await;
+        drop(original);
+
+        // A 10-char UUID prefix is vanishingly unlikely to collide.
+        let prefix = full_id[..10].to_owned();
+        let arg = Some(prefix);
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_all_widens_scope_to_list_all() {
+        // `--all` flips the listing from `store.list()` (current project only)
+        // to `store.list_all()` (every project subdir). The prefix match
+        // then resolves across projects and the error hint drops the
+        // "in this project" qualifier. Exercising the `all = true` branch
+        // here also covers the empty `scope_hint`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original.record_message(Message::user("all scope")).await;
+        original.finish().await;
+        drop(original);
+
+        let arg = Some(full_id[..10].to_owned());
+        let resumed = resolve_session(&store, "m", Some(&arg), true)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("all scope"));
+
+        // Error path under `all = true` omits the "use --all" hint.
+        let missing = Some("zzzz".to_owned());
+        let err = resolve_session(&store, "m", Some(&missing), true)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            !err.contains("use --all"),
+            "hint should not suggest --all when already set: {err}",
+        );
+    }
 
     // ── normalize_resume_arg ──
 
@@ -268,199 +458,5 @@ mod tests {
         let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
         let out = format_session_id_preview(ids);
         assert!(!out.ends_with(", ..."), "{out:?}");
-    }
-
-    // ── resolve_session ──
-
-    #[tokio::test]
-    async fn resolve_session_starts_fresh_when_no_continue_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let resumed = resolve_session(&store, "m", None, false).await.unwrap();
-        assert!(resumed.messages.is_empty());
-        assert!(resumed.title.is_none());
-        assert!(resumed.tool_result_metadata.is_empty());
-        assert!(
-            std::fs::read_dir(test_project_dir(dir.path()))
-                .unwrap()
-                .next()
-                .is_none(),
-            "fresh session file should be deferred until the first record_message",
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_session_bare_continue_errors_without_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let err = resolve_session(&store, "m", Some(&None), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("no sessions"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_errors_on_no_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        // Materialize a session file so the project listing is
-        // non-empty; without `record_message` the lazy creation
-        // never touches disk and the prefix lookup would short-circuit
-        // on "no sessions" instead of testing the no-match path.
-        let mut s = SessionManager::start(&store, "m");
-        s.record_message(&Message::user("noop")).await.unwrap();
-        let prefix_arg = Some("zzzz".to_owned());
-        drop(s);
-
-        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("no session matching prefix"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_reports_ambiguous_matches() {
-        // Spin up 20 sessions and record a message in each so any
-        // of them is resumable. Then pick the hex char that the
-        // most session IDs start with — with 20 v4 UUIDs across 16
-        // characters, this is guaranteed ≥ 2 by pigeonhole, so the
-        // prefix lookup must bail with "ambiguous".
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-
-        for _ in 0..20 {
-            let mut s = SessionManager::start(&store, "m");
-            s.record_message(&Message::user("noop")).await.unwrap();
-        }
-
-        let listed = store.list().unwrap();
-        let mut counts = std::collections::HashMap::<char, usize>::new();
-        for info in &listed {
-            *counts
-                .entry(info.session_id.chars().next().unwrap())
-                .or_default() += 1;
-        }
-        let (prefix_char, count) = counts.into_iter().max_by_key(|&(_, n)| n).unwrap();
-        assert!(count >= 2, "pigeonhole violation: 20 UUIDs over 16 chars");
-        let prefix = prefix_char.to_string();
-
-        let prefix_arg = Some(prefix.clone());
-        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("ambiguous prefix"), "got: {err}");
-        assert!(err.contains(&prefix), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn resolve_session_resumes_from_external_path() {
-        // A session file living somewhere the store wouldn't search.
-        // The path-based resume must still pick up the title, messages,
-        // and session_id recorded in the header.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original
-            .record_message(&Message::user("external path test"))
-            .await
-            .unwrap();
-        original.finish().unwrap();
-        let path = test_session_file(dir.path(), &full_id);
-        drop(original);
-
-        // Copy the file outside the project directory to simulate the
-        // "imported from another machine" scenario.
-        let external_dir = tempfile::tempdir().unwrap();
-        let external_path = external_dir.path().join("copied.jsonl");
-        std::fs::copy(&path, &external_path).unwrap();
-
-        let arg = Some(external_path.to_string_lossy().into_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("external path test"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_path_errors_on_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let arg = Some("/does/not/exist.jsonl".to_owned());
-        let err = resolve_session(&store, "m", Some(&arg), false)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("session not found"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_resumes_single_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original
-            .record_message(&Message::user("hello"))
-            .await
-            .unwrap();
-        drop(original);
-
-        // A 10-char UUID prefix is vanishingly unlikely to collide.
-        let prefix = full_id[..10].to_owned();
-        let arg = Some(prefix);
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("hello"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_all_widens_scope_to_list_all() {
-        // `--all` flips the listing from `store.list()` (current project only)
-        // to `store.list_all()` (every project subdir). The prefix match
-        // then resolves across projects and the error hint drops the
-        // "in this project" qualifier. Exercising the `all = true` branch
-        // here also covers the empty `scope_hint`.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut original = SessionManager::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original
-            .record_message(&Message::user("all scope"))
-            .await
-            .unwrap();
-        drop(original);
-
-        let arg = Some(full_id[..10].to_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), true)
-            .await
-            .unwrap();
-        assert_eq!(resumed.manager.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("all scope"));
-
-        // Error path under `all = true` omits the "use --all" hint.
-        let missing = Some("zzzz".to_owned());
-        let err = resolve_session(&store, "m", Some(&missing), true)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            !err.contains("use --all"),
-            "hint should not suggest --all when already set: {err}",
-        );
     }
 }
