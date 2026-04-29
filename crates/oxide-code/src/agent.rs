@@ -144,13 +144,11 @@ pub(crate) async fn agent_turn(
             content: results,
         };
         record_message(session, tool_result_msg.clone(), sink).await;
-        // Sidecar metadata follows the tool-result message; the actor
-        // coalesces them into the same batch flush as the message.
-        for (id, metadata) in &sidecars {
-            let outcome = session.record_tool_metadata(id, metadata).await;
-            if let Some(msg) = outcome.failure {
-                _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
-            }
+        // Send all sidecars in one batch cmd so the actor coalesces
+        // them into a single flush following the tool-result message.
+        let outcome = session.record_tool_metadata_batch(sidecars).await;
+        if let Some(msg) = outcome.failure {
+            _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
         }
         messages.push(tool_result_msg);
     }

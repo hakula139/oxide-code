@@ -130,21 +130,21 @@ impl SessionHandle {
         })
     }
 
-    /// Record display-only sidecar metadata. No-ops at the actor when
-    /// `metadata == ToolMetadata::default()`.
-    pub(crate) async fn record_tool_metadata(
+    /// Record sidecar metadata for every tool result from one agent
+    /// turn in one shot — one cmd, one ack, one flush. The agent loop
+    /// previously awaited per-sidecar, which produced N batches per
+    /// tool round; the batch cmd realises the plan's "a turn's worth
+    /// of cmds collapse into one flush" intent for the hot path.
+    /// Items whose `metadata == ToolMetadata::default()` add no
+    /// display fields and are skipped at absorb.
+    pub(crate) async fn record_tool_metadata_batch(
         &self,
-        tool_use_id: &str,
-        metadata: &ToolMetadata,
+        items: Vec<(String, ToolMetadata)>,
     ) -> Outcome {
         let (ack, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(SessionCmd::ToolMetadata {
-                tool_use_id: tool_use_id.to_owned(),
-                metadata: metadata.clone(),
-                ack,
-            })
+            .send(SessionCmd::ToolMetadata { items, ack })
             .await
             .is_err()
         {
@@ -617,68 +617,102 @@ mod tests {
         assert!(outcome.ai_title_seed.is_none());
     }
 
-    // ── record_tool_metadata ──
+    // ── record_tool_metadata_batch ──
 
     #[tokio::test]
-    async fn record_tool_metadata_actor_gone_surfaces_failure_once_then_silences() {
+    async fn record_tool_metadata_batch_actor_gone_surfaces_failure_once_then_silences() {
         let handle = dead_handle_for_tests("dead");
-        let meta = crate::tool::ToolMetadata {
-            title: Some("f.rs".to_owned()),
-            ..crate::tool::ToolMetadata::default()
-        };
+        let item = (
+            "t1".to_owned(),
+            ToolMetadata {
+                title: Some("f.rs".to_owned()),
+                ..ToolMetadata::default()
+            },
+        );
 
-        let first = handle.record_tool_metadata("t1", &meta).await;
-        let second = handle.record_tool_metadata("t2", &meta).await;
+        let first = handle.record_tool_metadata_batch(vec![item.clone()]).await;
+        let second = handle.record_tool_metadata_batch(vec![item]).await;
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
 
     #[tokio::test]
-    async fn record_tool_metadata_round_trips_title_and_replacements() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let handle = start(&store, "m");
-        let sid = handle.session_id().to_owned();
-        handle.record_message(Message::user("edit something")).await;
-
-        handle
-            .record_tool_metadata(
-                "t1",
-                &ToolMetadata {
-                    title: Some("Edited f.rs".to_owned()),
-                    replacements: Some(4),
-                    ..ToolMetadata::default()
-                },
-            )
-            .await;
-        handle.finish().await;
-        drop(handle);
-
-        let data = store.load_session_data(&sid).unwrap();
-        let metadata = data.tool_result_metadata.get("t1").unwrap();
-        assert_eq!(metadata.title.as_deref(), Some("Edited f.rs"));
-        assert_eq!(metadata.replacements, Some(4));
-    }
-
-    #[tokio::test]
-    async fn record_tool_metadata_skips_default() {
+    async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
+        // The agent loop sends every sidecar from one tool round in
+        // one batch cmd → one flush. Default-metadata items are
+        // skipped at absorb; non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("trigger")).await;
 
-        handle
-            .record_tool_metadata("t1", &ToolMetadata::default())
+        let outcome = handle
+            .record_tool_metadata_batch(vec![
+                (
+                    "t1".to_owned(),
+                    ToolMetadata {
+                        title: Some("Edited a.rs".to_owned()),
+                        ..ToolMetadata::default()
+                    },
+                ),
+                ("t2".to_owned(), ToolMetadata::default()),
+                (
+                    "t3".to_owned(),
+                    ToolMetadata {
+                        replacements: Some(2),
+                        ..ToolMetadata::default()
+                    },
+                ),
+            ])
             .await;
         handle.finish().await;
         drop(handle);
 
+        assert!(outcome.failure.is_none());
+        let data = store.load_session_data(&sid).unwrap();
+        assert_eq!(
+            data.tool_result_metadata.len(),
+            2,
+            "default-only sidecars are skipped; t1 and t3 land",
+        );
+        assert_eq!(
+            data.tool_result_metadata
+                .get("t1")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Edited a.rs"),
+        );
+        assert_eq!(
+            data.tool_result_metadata.get("t3").unwrap().replacements,
+            Some(2),
+        );
+    }
+
+    #[tokio::test]
+    async fn record_tool_metadata_batch_all_default_acks_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+        handle.record_message(Message::user("trigger")).await;
+
+        let outcome = handle
+            .record_tool_metadata_batch(vec![
+                ("t1".to_owned(), ToolMetadata::default()),
+                ("t2".to_owned(), ToolMetadata::default()),
+            ])
+            .await;
+        handle.finish().await;
+        drop(handle);
+
+        assert!(outcome.failure.is_none());
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
         assert!(
             !content.contains(r#""type":"tool_result_metadata""#),
-            "default metadata must not be written: {content}",
+            "all-default batch writes nothing: {content}",
         );
     }
 

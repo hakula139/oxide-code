@@ -25,9 +25,13 @@ pub(super) enum SessionCmd {
         msg: Message,
         ack: oneshot::Sender<RecordOutcome>,
     },
+    /// One or more tool-result sidecars from a single agent turn. The
+    /// batch shape lets the agent loop emit all sidecars for a tool
+    /// round in one cmd → one ack → one flush, instead of N awaits in
+    /// a row. Items whose `metadata == ToolMetadata::default()` add no
+    /// display fields and are skipped at absorb time.
     ToolMetadata {
-        tool_use_id: String,
-        metadata: ToolMetadata,
+        items: Vec<(String, ToolMetadata)>,
         ack: oneshot::Sender<Outcome>,
     },
     AppendAiTitle {
@@ -91,23 +95,28 @@ fn absorb(
             entries.extend(msg_entries);
             acks.push(PendingAck::Record { ack, ai_title_seed });
         }
-        SessionCmd::ToolMetadata {
-            tool_use_id,
-            metadata,
-            ack,
-        } => {
+        SessionCmd::ToolMetadata { items, ack } => {
             // Default metadata adds no display fields; emitting it would
             // bloat the transcript with empty sidecar lines.
-            if metadata == ToolMetadata::default() {
-                _ = ack.send(Outcome { failure: None });
-                return;
+            let mut wrote_any = false;
+            for (tool_use_id, metadata) in items {
+                if metadata == ToolMetadata::default() {
+                    continue;
+                }
+                entries.push(Entry::ToolResultMetadata {
+                    tool_use_id,
+                    metadata,
+                    timestamp: now,
+                });
+                wrote_any = true;
             }
-            entries.push(Entry::ToolResultMetadata {
-                tool_use_id,
-                metadata,
-                timestamp: now,
-            });
-            acks.push(PendingAck::Outcome(ack));
+            if wrote_any {
+                acks.push(PendingAck::Outcome(ack));
+            } else {
+                // Empty / all-default batch — nothing to flush, no
+                // batch result to await.
+                _ = ack.send(Outcome { failure: None });
+            }
         }
         SessionCmd::AppendAiTitle { title, ack } => {
             entries.push(Entry::Title {
@@ -293,8 +302,7 @@ mod tests {
         let (rec, _rec_rx) = record_cmd("trigger");
         let (meta_ack, meta_rx) = oneshot::channel();
         let meta_cmd = SessionCmd::ToolMetadata {
-            tool_use_id: "t1".to_owned(),
-            metadata: ToolMetadata::default(),
+            items: vec![("t1".to_owned(), ToolMetadata::default())],
             ack: meta_ack,
         };
 
@@ -393,12 +401,14 @@ mod tests {
         let (rec, _rec_rx) = record_cmd("Edit something");
         let (meta_ack, _meta_rx) = oneshot::channel();
         let meta_cmd = SessionCmd::ToolMetadata {
-            tool_use_id: "t1".to_owned(),
-            metadata: ToolMetadata {
-                title: Some("Edited f.rs".to_owned()),
-                replacements: Some(2),
-                ..ToolMetadata::default()
-            },
+            items: vec![(
+                "t1".to_owned(),
+                ToolMetadata {
+                    title: Some("Edited f.rs".to_owned()),
+                    replacements: Some(2),
+                    ..ToolMetadata::default()
+                },
+            )],
             ack: meta_ack,
         };
         let (fin, _fin_rx) = finish_cmd();
