@@ -575,6 +575,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
+        // The assistant + tool-result messages succeed; the sidecar
+        // batch is the first failing cmd, so the batch's failure
+        // handler (not the message handler) is what fires the Error
+        // event. Programmable handle: ack the first 2 cmds healthily
+        // then drop every cmd without acking — the 3rd cmd
+        // (ToolMetadata) hits dispatch_outcome's rx-await fallback.
+        let session = crate::session::handle::succeed_n_then_drop_acks_handle_for_tests(
+            "metadata-batch-fails",
+            2,
+        );
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
+            text_turn("Done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("run echo")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+        )
+        .await
+        .unwrap();
+
+        let events = sink.events();
+        let error_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed")))
+            .collect();
+        assert_eq!(
+            error_events.len(),
+            1,
+            "exactly one write-failure Error event (sticky once-flag): {events:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn agent_turn_text_only_response_records_assistant_message_and_returns() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
