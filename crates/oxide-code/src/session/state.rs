@@ -29,18 +29,18 @@ pub(super) struct SessionState {
     /// off the cmd channel.
     pub(super) session_id: Arc<str>,
     /// Cloned at start so the first append can drive `Pending → Active`.
-    pub(super) store: SessionStore,
-    pub(super) writer_status: WriterStatus,
+    store: SessionStore,
+    writer_status: WriterStatus,
     /// `parent_uuid` for the next recorded message.
-    pub(super) last_message_uuid: Option<Uuid>,
+    last_message_uuid: Option<Uuid>,
     /// Loaded message count for resumed sessions; `0` for fresh.
     /// `finish_entry` skips the summary when nothing was added.
-    pub(super) initial_message_count: u32,
-    pub(super) message_count: u32,
+    initial_message_count: u32,
+    message_count: u32,
     /// Latched the first time a user-text message lands so we don't
     /// re-promote a later user message to a duplicate title.
-    pub(super) first_user_prompt_seen: bool,
-    pub(super) finished: bool,
+    first_user_prompt_seen: bool,
+    finished: bool,
 }
 
 /// Lifecycle states for the underlying file:
@@ -52,7 +52,7 @@ pub(super) struct SessionState {
 ///   undefined after a partial write per std docs, so the next batch
 ///   reopens the file with [`SessionStore::open_append`] instead of
 ///   letting one transient hiccup poison every subsequent flush.
-pub(super) enum WriterStatus {
+enum WriterStatus {
     Pending { header: Entry },
     Active(SessionWriter),
     Broken,
