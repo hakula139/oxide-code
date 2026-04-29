@@ -39,28 +39,53 @@ pub(crate) struct SessionHandle {
     shared: Arc<SharedState>,
 }
 
-/// Single most-recent-failure slot the actor populates and the handle
-/// drains. `std::sync::Mutex` is fine here — locks are held for
-/// microseconds and there's no cross-task workflow to coordinate.
+/// Failure-surfacing state shared between the actor and every
+/// [`SessionHandle`] clone. `std::sync::Mutex` is fine here — locks are
+/// held for microseconds and there's no cross-task workflow to coordinate.
+///
+/// The two sticky-once flags cover qualitatively different errors and
+/// must not share a slot: a one-batch flush failure is local damage,
+/// whereas an actor-gone signal means every subsequent write is lost.
+/// Conflating them lets the milder failure mask the more severe one.
 #[derive(Default)]
 pub(super) struct SharedState {
-    failure_seen: AtomicBool,
-    failure_surfaced: AtomicBool,
-    last_failure: std::sync::Mutex<Option<String>>,
+    /// First batch-flush failure has surfaced through a caller's ack.
+    flush_failure_surfaced: AtomicBool,
+    /// First actor-gone surface has fired; subsequent send/recv errors
+    /// stay silent.
+    actor_gone_surfaced: AtomicBool,
+    /// Most recent flush error message. `actor_gone_failure` reads this
+    /// so the user sees the underlying I/O cause when the actor died on
+    /// a real disk error, not just the generic "session actor is gone".
+    last_flush_failure: std::sync::Mutex<Option<String>>,
 }
 
 impl SharedState {
-    pub(super) fn record_failure(&self, msg: &str) {
-        self.failure_seen.store(true, Ordering::Release);
-        if let Ok(mut slot) = self.last_failure.lock() {
+    pub(super) fn record_flush_failure(&self, msg: &str) {
+        if let Ok(mut slot) = self.last_flush_failure.lock() {
             *slot = Some(msg.to_owned());
         }
     }
 
-    /// `true` on the first call after [`Self::record_failure`]; sticky
-    /// `false` afterwards. Mirrors the pre-actor `write_failed` flag.
-    pub(super) fn surface_first_failure(&self) -> bool {
-        !self.failure_surfaced.swap(true, Ordering::AcqRel)
+    /// `true` on the first call after [`Self::record_flush_failure`];
+    /// sticky `false` afterwards. Mirrors the pre-actor `write_failed`
+    /// flag scoped to flush errors.
+    pub(super) fn surface_first_flush_failure(&self) -> bool {
+        !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
+    }
+
+    /// `true` on the first actor-gone surface; sticky `false` afterwards.
+    /// Independent of [`Self::surface_first_flush_failure`] so a prior
+    /// flush error doesn't silence the news that the actor died.
+    pub(super) fn surface_first_actor_gone(&self) -> bool {
+        !self.actor_gone_surfaced.swap(true, Ordering::AcqRel)
+    }
+
+    /// Drains the most recent flush error, if any. Returned for inclusion
+    /// in the actor-gone message so callers see "actor stopped: disk
+    /// full" instead of just "actor stopped".
+    pub(super) fn last_flush_failure(&self) -> Option<String> {
+        self.last_flush_failure.lock().ok().and_then(|s| s.clone())
     }
 }
 
@@ -166,21 +191,27 @@ impl SessionHandle {
         })
     }
 
-    /// "Actor task is unreachable" surfaced exactly once; subsequent
-    /// drops are warn-log only. The actor never restarts, so this is
-    /// almost always a panic-path artifact.
+    /// "Actor task is unreachable" surfaced exactly once via its own
+    /// sticky flag — independent of flush-error surfacing so a prior
+    /// disk hiccup doesn't silence the news that the actor died. If the
+    /// actor recorded an I/O failure before exiting, the underlying
+    /// cause is included in the message.
     fn actor_gone_failure(&self) -> Option<String> {
-        self.shared.record_failure("session actor is gone");
-        if self.shared.surface_first_failure() {
-            tracing::warn!("session actor task is gone — recording dropped");
-            Some(
-                "Session writer task has stopped. Conversation history may be incomplete; \
-                 further write errors will be silent."
-                    .to_owned(),
-            )
-        } else {
-            None
+        if !self.shared.surface_first_actor_gone() {
+            return None;
         }
+        tracing::warn!("session actor task is gone — recording dropped");
+        let cause = self.shared.last_flush_failure();
+        let msg = match cause {
+            Some(io_err) => format!(
+                "Session writer task has stopped after I/O error: {io_err}. Conversation \
+                 history may be incomplete; further write errors will be silent."
+            ),
+            None => "Session writer task has stopped. Conversation history may be incomplete; \
+                     further write errors will be silent."
+                .to_owned(),
+        };
+        Some(msg)
     }
 }
 
@@ -529,6 +560,43 @@ mod tests {
         assert!(
             second.failure.is_none(),
             "subsequent calls must be silent after first surface",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_message_actor_gone_carries_underlying_flush_error() {
+        // If a flush error was recorded before the actor died, the
+        // actor-gone message should carry the I/O cause so the user
+        // sees "actor stopped after I/O error: …" instead of just the
+        // generic dropped-task fallback.
+        let handle = dead_handle_for_tests("dead");
+        handle
+            .shared
+            .record_flush_failure("permission denied: /readonly/path");
+
+        let first = handle.record_message(Message::user("a")).await;
+
+        let msg = first.failure.expect("actor-gone surfaces on first call");
+        assert!(
+            msg.contains("after I/O error: permission denied"),
+            "underlying flush error should be carried: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn record_message_actor_gone_surfaces_after_prior_flush_failure_was_surfaced() {
+        // The two sticky-once flags must be independent: a previously
+        // surfaced flush failure must not silence the actor-gone signal.
+        let handle = dead_handle_for_tests("dead");
+        handle.shared.record_flush_failure("disk full");
+        // Burn the flush-failure surface flag the way the actor would.
+        assert!(handle.shared.surface_first_flush_failure());
+
+        let first = handle.record_message(Message::user("a")).await;
+
+        assert!(
+            first.failure.is_some(),
+            "actor-gone surface flag is independent of flush surface",
         );
     }
 

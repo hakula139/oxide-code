@@ -69,7 +69,7 @@ pub(super) async fn run(
             Err(e) => {
                 let msg = format!("{e:#}");
                 warn!("session write batch failed: {msg}");
-                shared.record_failure(&msg);
+                shared.record_flush_failure(&msg);
                 Some(msg)
             }
             Ok(()) => None,
@@ -144,12 +144,13 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
     }
 }
 
-/// At-most-once failure surfacing: the first failure carries through to
-/// the caller, subsequent ones go to the warn-log only so a
-/// disk-full mid-conversation doesn't drown the user.
+/// At-most-once flush-failure surfacing: the first failure carries
+/// through to the caller, subsequent ones go to the warn-log only so a
+/// disk-full mid-conversation doesn't drown the user. Independent of
+/// the actor-gone surface flag — see [`SharedState`].
 fn surface_failure(failure: Option<&str>, shared: &SharedState) -> Option<String> {
     let msg = failure?;
-    if shared.surface_first_failure() {
+    if shared.surface_first_flush_failure() {
         Some(msg.to_owned())
     } else {
         None
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn surface_failure_first_call_after_record_returns_message_then_silences() {
         let shared = SharedState::default();
-        shared.record_failure("boom");
+        shared.record_flush_failure("boom");
         let first = surface_failure(Some("boom"), &shared);
         let second = surface_failure(Some("boom"), &shared);
         assert_eq!(first.as_deref(), Some("boom"));
