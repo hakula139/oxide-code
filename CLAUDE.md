@@ -203,6 +203,7 @@ ox                                          # Start an interactive session
 - Do not request review from the PR author (GitHub rejects it).
 - Descriptions follow `.github/pull_request_template.md`:
   - Prose intro summarizing what and why.
+  - Optional Design decisions section for non-trivial PRs — bullet list of tradeoffs (alternatives rejected, invariants preserved, intentional omissions). Skip for mechanical changes.
   - Per-file Changes table (for non-trivial PRs). Drop the `crates/<crate>/src/` prefix on crate sources (e.g. `tool/glob.rs`, not `crates/oxide-code/src/tool/glob.rs`); keep the full path for repo-root files (`CLAUDE.md`, `Cargo.toml`, `docs/...`, `.cspell/...`).
   - Test plan checklist.
 - PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.
