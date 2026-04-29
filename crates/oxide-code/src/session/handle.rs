@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use super::actor::{self, SessionCmd};
 use super::sanitize::sanitize_resumed_messages;
@@ -37,6 +38,11 @@ pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
     shared: Arc<SharedState>,
+    /// Held outside the cloneable [`mpsc::Sender`] so [`Self::shutdown`]
+    /// can await actor exit after every clone has dropped its sender.
+    /// `Mutex<Option<_>>` so the first call drains the join, subsequent
+    /// calls no-op.
+    actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// Failure-surfacing state shared between the actor and every
@@ -191,6 +197,35 @@ impl SessionHandle {
         })
     }
 
+    /// Drops this handle's sender and awaits actor task exit. The actor
+    /// only exits once every clone's [`mpsc::Sender`] has dropped, so
+    /// callers must drop other clones first; otherwise the channel
+    /// stays open and this future blocks indefinitely. The first call
+    /// drains the join handle; subsequent calls (on other clones)
+    /// return immediately.
+    ///
+    /// Useful in two places:
+    ///
+    /// - The TUI / REPL shutdown path can call this after `finish().await`
+    ///   for deterministic actor drain before the runtime tears down.
+    /// - Tests that previously relied on `tokio::task::yield_now()` after
+    ///   dropping a handle get a race-free wait without depending on
+    ///   the `current_thread` scheduler's ordering.
+    pub(crate) async fn shutdown(self) {
+        let Self {
+            cmd_tx,
+            shared,
+            actor_join,
+            ..
+        } = self;
+        drop(cmd_tx);
+        drop(shared);
+        let join = actor_join.lock().ok().and_then(|mut g| g.take());
+        if let Some(j) = join {
+            _ = j.await;
+        }
+    }
+
     /// "Actor task is unreachable" surfaced exactly once via its own
     /// sticky flag — independent of flush-error surfacing so a prior
     /// disk hiccup doesn't silence the news that the actor died. If the
@@ -293,11 +328,12 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
     let shared = Arc::new(SharedState::default());
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let actor_shared = Arc::clone(&shared);
-    tokio::spawn(actor::run(state, cmd_rx, actor_shared));
+    let join = tokio::spawn(actor::run(state, cmd_rx, actor_shared));
     SessionHandle {
         cmd_tx,
         session_id,
         shared,
+        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
     }
 }
 
@@ -312,6 +348,7 @@ pub(crate) fn dead_handle_for_tests(session_id: &str) -> SessionHandle {
         cmd_tx,
         session_id: Arc::from(session_id),
         shared: Arc::new(SharedState::default()),
+        actor_join: Arc::new(std::sync::Mutex::new(None)),
     }
 }
 
@@ -373,12 +410,9 @@ mod tests {
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        // Drop the handle without finish — actor task still drains
-        // queued cmds before exiting (mpsc::Receiver returns None
-        // when all senders drop).
-        drop(original);
-        // Yield long enough for the spawned actor to drain.
-        tokio::task::yield_now().await;
+        // Skip finish — `shutdown` waits for the actor to drain the
+        // queued record cmd and exit when the channel closes.
+        original.shutdown().await;
 
         let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
         assert_eq!(messages.len(), 1);
@@ -445,8 +479,7 @@ mod tests {
                 }],
             })
             .await;
-        drop(original);
-        tokio::task::yield_now().await;
+        original.shutdown().await;
 
         let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
         assert_eq!(
@@ -823,5 +856,39 @@ mod tests {
             .filter(|l| l.contains(r#""type":"summary""#))
             .count();
         assert_eq!(summary_count, 1);
+    }
+
+    // ── shutdown ──
+
+    #[tokio::test]
+    async fn shutdown_after_record_returns_after_actor_exits() {
+        // The whole point of `shutdown`: a single deterministic await
+        // that completes only after the spawned actor task has
+        // observed the channel closing and finished its final batch.
+        // Concretely, the message we recorded must be on disk by the
+        // time `shutdown().await` returns.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("hello")).await;
+        handle.shutdown().await;
+
+        let path = test_session_file(dir.path(), &sid);
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(
+            content.contains(r#""type":"message""#),
+            "actor must have flushed before shutdown returned: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_safe_to_call_after_dead_handle() {
+        // Channel is already closed (no actor was spawned), so the
+        // join slot is None. `shutdown` must not panic and must
+        // return promptly.
+        let handle = dead_handle_for_tests("dead");
+        handle.shutdown().await;
     }
 }

@@ -333,6 +333,7 @@ async fn run_tui(
     if let Some(msg) = outcome.failure {
         warn!("session finish failed: {msg}");
     }
+    session.shutdown().await;
 
     result
 }
@@ -466,6 +467,7 @@ async fn bare_repl(
     if let Some(msg) = outcome.failure {
         _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
     }
+    session.shutdown().await;
 
     // `tokio::io::stdin()` spawns a blocking thread that cannot be
     // cancelled (see tokio::io::stdin docs), so on a signal-induced
@@ -516,6 +518,7 @@ async fn headless(
     if let Some(msg) = outcome.failure {
         _ = sink.send(AgentEvent::Error(format!("Session write failed: {msg}")));
     }
+    session.shutdown().await;
 
     // Mirror `bare_repl`: on signal exit, skip runtime Drop so any
     // outstanding HTTP / reqwest connection pool doesn't hold the
