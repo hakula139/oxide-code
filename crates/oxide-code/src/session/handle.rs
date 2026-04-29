@@ -148,19 +148,8 @@ impl SessionHandle {
         items: Vec<(String, ToolMetadata)>,
     ) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCmd::ToolMetadata { items, ack })
+        self.dispatch_outcome(SessionCmd::ToolMetadata { items, ack }, rx)
             .await
-            .is_err()
-        {
-            return Outcome {
-                failure: self.actor_gone_failure(),
-            };
-        }
-        rx.await.unwrap_or(Outcome {
-            failure: self.actor_gone_failure(),
-        })
     }
 
     /// Append an AI-generated session title. Tail-scan picks the
@@ -168,31 +157,29 @@ impl SessionHandle {
     /// first-prompt title on listings and resumes.
     pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(SessionCmd::AppendAiTitle { title, ack })
+        self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
-            .is_err()
-        {
-            return Outcome {
-                failure: self.actor_gone_failure(),
-            };
-        }
-        rx.await.unwrap_or(Outcome {
-            failure: self.actor_gone_failure(),
-        })
     }
 
     /// Write the session summary and finalize. Idempotent; no-op on
     /// fresh sessions that never recorded anything.
     pub(crate) async fn finish(&self) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        if self.cmd_tx.send(SessionCmd::Finish { ack }).await.is_err() {
+        self.dispatch_outcome(SessionCmd::Finish { ack }, rx).await
+    }
+
+    /// Send a cmd whose ack is an [`Outcome`] and await it, falling
+    /// back to the actor-gone path on send / recv failure. Shared by
+    /// every method except [`Self::record_message`], which uses
+    /// [`RecordOutcome`] (carrying the AI-title seed) and so cannot
+    /// route through here without polluting the common path.
+    async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
+        if self.cmd_tx.send(cmd).await.is_err() {
             return Outcome {
                 failure: self.actor_gone_failure(),
             };
         }
-        rx.await.unwrap_or(Outcome {
+        rx.await.unwrap_or_else(|_| Outcome {
             failure: self.actor_gone_failure(),
         })
     }
