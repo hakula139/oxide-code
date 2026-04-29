@@ -1,10 +1,10 @@
 # Session Persistence
 
-Research findings for oxide-code session persistence, based on analysis of reference projects (claude-code, OpenAI Codex, learn-claude-code), POSIX append-only semantics, and Anthropic Messages API ordering requirements.
+Research findings for oxide-code session persistence, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), [learn-claude-code](https://github.com/the-pocket/learn-claude-code)), POSIX append-only semantics, and Anthropic Messages API ordering requirements.
 
 ## Reference Implementations
 
-### claude-code (TypeScript)
+### Claude Code (TypeScript)
 
 - JSONL at `~/.claude/projects/{SANITIZED_PATH}/{UUID}.jsonl` — project-scoped.
 - 18+ entry types (messages, tags, titles, agents, PR links, context compression, file history, attribution, worktree state).
@@ -121,7 +121,7 @@ The session ID flows through to the `x-claude-code-session-id` API header for th
 
 The first user prompt of a fresh session seeds a detached tokio task that calls `claude-haiku-4-5` via `Client::complete` with a 3-7 word sentence-case prompt, appends an `Entry::Title { source: AiGenerated, updated_at: now }`, and pushes `AgentEvent::SessionTitleUpdated(String)` through the sink so the TUI status bar refreshes live. Trigger is one-shot per fresh session — resumed sessions inherit whatever title the original run managed to write. Failures (network hiccup, rate-limit, Haiku returns non-JSON) warn-log only; the first-prompt title stays on disk and in the UI. AI title generation runs in TUI mode only.
 
-The Haiku call ships a `{"title": string}` JSON schema via the `structured-outputs-2025-12-15` beta (`output_config.format` on the body), matching claude-code's `sessionTitle.ts`. Prompt-only instruction is insufficient — for first messages phrased as direct questions ("see what's next to do in this repo"), Haiku reliably answers the question instead of titling it, and the response then fails `parse_title`. The schema forces the envelope shape regardless of how the prompt scans. Models outside the upstream structured-outputs allowlist (Opus 4 / Sonnet 4 / Haiku 4 bases, or unknown future families) fall back to free-form text and take whatever the post-fence JSON parse produces.
+The Haiku call ships a `{"title": string}` JSON schema via the `structured-outputs-2025-12-15` beta (`output_config.format` on the body), matching Claude Code's `sessionTitle.ts`. Prompt-only instruction is insufficient — for first messages phrased as direct questions ("see what's next to do in this repo"), Haiku reliably answers the question instead of titling it, and the response then fails `parse_title`. The schema forces the envelope shape regardless of how the prompt scans. Models outside the upstream structured-outputs allowlist (Opus 4 / Sonnet 4 / Haiku 4 bases, or unknown future families) fall back to free-form text and take whatever the post-fence JSON parse produces.
 
 ### Write-error surfacing
 
