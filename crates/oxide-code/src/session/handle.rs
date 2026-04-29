@@ -169,22 +169,6 @@ impl SessionHandle {
         self.dispatch_outcome(SessionCmd::Finish { ack }, rx).await
     }
 
-    /// Send a cmd whose ack is an [`Outcome`] and await it, falling
-    /// back to the actor-gone path on send / recv failure. Shared by
-    /// every method except [`Self::record_message`], which uses
-    /// [`RecordOutcome`] (carrying the AI-title seed) and so cannot
-    /// route through here without polluting the common path.
-    async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
-        if self.cmd_tx.send(cmd).await.is_err() {
-            return Outcome {
-                failure: self.actor_gone_failure(),
-            };
-        }
-        rx.await.unwrap_or_else(|_| Outcome {
-            failure: self.actor_gone_failure(),
-        })
-    }
-
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
     /// after the current batch flushes, then awaits the join handle.
     /// Cmd-driven exit (rather than waiting for every clone's
@@ -208,6 +192,22 @@ impl SessionHandle {
         if let Some(j) = join {
             _ = j.await;
         }
+    }
+
+    /// Send a cmd whose ack is an [`Outcome`] and await it, falling
+    /// back to the actor-gone path on send / recv failure. Shared by
+    /// every method except [`Self::record_message`], which uses
+    /// [`RecordOutcome`] (carrying the AI-title seed) and so cannot
+    /// route through here without polluting the common path.
+    async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
+        if self.cmd_tx.send(cmd).await.is_err() {
+            return Outcome {
+                failure: self.actor_gone_failure(),
+            };
+        }
+        rx.await.unwrap_or_else(|_| Outcome {
+            failure: self.actor_gone_failure(),
+        })
     }
 
     /// "Actor task is unreachable" surfaced exactly once via its own
