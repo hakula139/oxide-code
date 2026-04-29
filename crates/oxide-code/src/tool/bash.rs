@@ -175,8 +175,6 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         content.push_str("(no output)");
     }
 
-    truncate_output(&mut content);
-
     // Only flag execution failures (timeout, spawn error) as is_error.
     // Nonzero exit codes are informational — many commands use them normally
     // (grep returns 1 for no matches, diff returns 1 for differences, etc.).
@@ -208,46 +206,8 @@ fn kill_process_group(pgid: Option<u32>) {
     _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
 }
 
-// ── Output Truncation ──
-
-/// Upper bound on the bytes inserted by [`truncate_output`] between the
-/// head and tail halves. The separator line is ~35 bytes; 50 gives
-/// headroom for large line counts without slipping truncated output
-/// past [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES) by more than this.
-const TRUNCATION_OVERHEAD: usize = 50;
-
-/// Truncates output that exceeds [`MAX_OUTPUT_BYTES`](super::MAX_OUTPUT_BYTES),
-/// keeping the first and last halves so the LLM sees both the beginning of the
-/// output and the end (where error messages and summaries usually appear).
-fn truncate_output(content: &mut String) {
-    if content.len() <= super::MAX_OUTPUT_BYTES {
-        return;
-    }
-
-    let half = super::MAX_OUTPUT_BYTES / 2;
-    let head_end = content.floor_char_boundary(half);
-    let tail_start = content.floor_char_boundary(content.len() - half);
-
-    // Only truncate if the omitted region is larger than the separator we
-    // would insert — otherwise truncation makes the output longer.
-    let omitted = &content[head_end..tail_start];
-    if omitted.len() < TRUNCATION_OVERHEAD {
-        return;
-    }
-
-    let omitted_lines = omitted.lines().count();
-
-    let mut truncated = String::with_capacity(super::MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-    truncated.push_str(&content[..head_end]);
-    _ = write!(truncated, "\n... [{omitted_lines} lines truncated] ...\n");
-    truncated.push_str(&content[tail_start..]);
-
-    *content = truncated;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::MAX_OUTPUT_BYTES;
     use super::*;
 
     // ── run ──
@@ -351,77 +311,5 @@ mod tests {
             !marker.exists(),
             "backgrounded descendant was not killed: marker file was created",
         );
-    }
-
-    // ── truncate_output ──
-
-    #[test]
-    fn truncate_output_short_content_unchanged() {
-        let mut content = "hello".to_owned();
-        truncate_output(&mut content);
-        assert_eq!(content, "hello");
-    }
-
-    #[test]
-    fn truncate_output_keeps_head_and_tail() {
-        let head = "HEAD_SENTINEL\n";
-        let tail = "TAIL_SENTINEL\n";
-        let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
-        let filler_lines = filler_len / 2; // "x\n" is 2 bytes each
-
-        let mut content = String::with_capacity(head.len() + filler_len + tail.len());
-        content.push_str(head);
-        for _ in 0..filler_lines {
-            content.push_str("x\n");
-        }
-        content.push_str(tail);
-
-        truncate_output(&mut content);
-
-        assert!(content.starts_with("HEAD_SENTINEL\n"));
-        assert!(content.ends_with("TAIL_SENTINEL\n"));
-        assert!(content.contains("lines truncated"));
-        assert!(content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
-        assert!(content.len() >= MAX_OUTPUT_BYTES / 2);
-        // Separator sits between head and tail, not at the edges.
-        let sep_pos = content.find("lines truncated").unwrap();
-        assert!(sep_pos > head.len());
-        assert!(sep_pos < content.len() - tail.len());
-    }
-
-    #[test]
-    fn truncate_output_multibyte_at_split_boundary() {
-        // Place a 4-byte emoji right at the split point to exercise
-        // floor_char_boundary rounding down instead of splitting mid-char.
-        let half = MAX_OUTPUT_BYTES / 2;
-        let emoji = "🦀"; // 4 bytes
-        let prefix_len = half - 2; // emoji straddles the half boundary
-
-        let mut content = String::new();
-        content.push_str(&"a".repeat(prefix_len));
-        content.push_str(emoji);
-        content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2)); // enough to trigger truncation
-
-        truncate_output(&mut content);
-
-        assert!(content.contains("lines truncated"));
-        assert!(content.starts_with("aaaa"));
-        assert!(content.ends_with('b'));
-        // The emoji straddles the byte boundary at `MAX_OUTPUT_BYTES / 2`;
-        // `floor_char_boundary` must drop it from the head and the tail
-        // both starts past it — so the 4-byte sequence must not appear
-        // anywhere in the truncated output. `starts_with("aaaa")` /
-        // `ends_with('b')` alone would pass even if a partial emoji
-        // leaked into the middle of the string.
-        assert!(!content.contains(emoji));
-    }
-
-    #[test]
-    fn truncate_output_barely_over_limit_unchanged() {
-        let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
-        let mut content = original.clone();
-        truncate_output(&mut content);
-        // Head and tail overlap — truncation would make it longer, so skip.
-        assert_eq!(content, original);
     }
 }

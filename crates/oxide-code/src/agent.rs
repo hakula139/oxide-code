@@ -116,14 +116,7 @@ pub(crate) async fn agent_turn(
                     metadata: ToolMetadata::default(),
                 }
             } else {
-                match tools.get(&name) {
-                    Some(t) => t.run(input).await,
-                    None => ToolOutput {
-                        content: format!("Unknown tool: {name}"),
-                        is_error: true,
-                        metadata: ToolMetadata::default(),
-                    },
-                }
+                tools.run(&name, input).await
             };
 
             _ = sink.send(AgentEvent::ToolCallEnd {

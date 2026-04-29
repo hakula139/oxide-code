@@ -1,6 +1,6 @@
 # Extended Thinking
 
-Research notes on how Claude Code handles extended thinking, content block types, and signature verification. Based on [`claude-code`](https://github.com/hakula139/claude-code) (v2.1.87).
+Research notes on how Claude Code handles extended thinking, content block types, and signature verification. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87).
 
 ## Content Block Types
 

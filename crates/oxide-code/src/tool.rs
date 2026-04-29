@@ -14,6 +14,7 @@ pub(crate) mod read;
 pub(crate) mod write;
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -88,8 +89,16 @@ pub(crate) struct ToolMetadata {
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
     /// Unbounded match count when a tool capped returned rows; lets
     /// the renderer show "X of N" without re-parsing prose footers.
+    /// Set by per-tool view-shape caps (glob's `MAX_RESULTS`, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_total: Option<usize>,
+    /// Pre-cap byte count when [`ToolRegistry::run`] applied the
+    /// [`MAX_OUTPUT_BYTES`] safety net. Distinct from `truncated_total`
+    /// — the units don't share a renderer, so encoding them in
+    /// separate fields keeps glob's "X of N matches" from accidentally
+    /// rendering a byte count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) truncated_bytes: Option<usize>,
 }
 
 impl ToolOutput {
@@ -303,6 +312,10 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
+    /// Runs the tool. Output flows through [`ToolRegistry::run`],
+    /// which applies the byte safety net — implementations should not
+    /// pre-truncate by bytes here, only by view-shape (row caps,
+    /// per-line caps).
     fn run(
         &self,
         input: serde_json::Value,
@@ -376,6 +389,30 @@ impl ToolRegistry {
             .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 
+    /// Dispatches a tool call by name and applies the byte safety net.
+    /// Unknown names return an `is_error: true` payload; otherwise the
+    /// tool's output flows through [`cap_output`], stamping
+    /// [`ToolMetadata::truncated_bytes`] when the cap fires. Errors are
+    /// capped too — a 200 KB stack trace is truncated identically.
+    /// Single agent-side dispatch entry point — bypassing it via
+    /// [`Self::get`] + [`Tool::run`] would skip the cap.
+    pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
+        let Some(tool) = self.get(name) else {
+            return ToolOutput {
+                content: format!("Unknown tool: {name}"),
+                is_error: true,
+                metadata: ToolMetadata::default(),
+            };
+        };
+        let mut output = tool.run(input).await;
+        let (content, original_len) = cap_output(output.content);
+        output.content = content;
+        if let Some(len) = original_len {
+            output.metadata.truncated_bytes = Some(len);
+        }
+        output
+    }
+
     /// Builds the structured [`ToolResultView`] for a completed tool
     /// call. Falls back to [`ToolResultView::Text`] in every case a
     /// per-tool renderer cannot cleanly represent:
@@ -407,10 +444,70 @@ impl ToolRegistry {
     }
 }
 
+// ── Output Cap ──
+//
+// Two layers, deliberately separate:
+//
+// 1. Per-tool view-shape budgets — row caps (read's `DEFAULT_LINE_LIMIT`,
+//    grep's match cap, glob's `MAX_RESULTS`) and per-line caps
+//    (`MAX_LINE_LENGTH`). These live in each tool module and capture
+//    "how much of this is useful to show".
+// 2. The byte ceiling below, applied centrally by [`ToolRegistry::run`].
+//    Acts as a safety net for any output that slips past the per-tool
+//    caps; tools should not re-implement byte truncation.
+
+/// Cap on tool output size. Prevents flooding the LLM context window.
+/// Roughly 32K tokens at ~4 chars / token.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
+
+/// Upper bound on the bytes [`cap_output`] inserts between the head
+/// and tail halves; bounds the slack [`MAX_OUTPUT_BYTES`] can be
+/// exceeded by once the separator and byte count are formatted in.
+const TRUNCATION_OVERHEAD: usize = 80;
+
+/// Caps `content` at [`MAX_OUTPUT_BYTES`], keeping the first and last
+/// halves so the model sees both setup context and final outcome.
+/// Returns the original byte count when truncation fired so callers
+/// can record the pre-cap size. No-op when the omitted region is
+/// smaller than the inserted separator — truncating would otherwise
+/// grow the output.
+fn cap_output(content: String) -> (String, Option<usize>) {
+    if content.len() <= MAX_OUTPUT_BYTES {
+        return (content, None);
+    }
+
+    // `MAX_OUTPUT_BYTES` is even and `content.len() > MAX_OUTPUT_BYTES`,
+    // so `head_end ≤ half ≤ content.len() - half ≤ tail_start`; the
+    // subtraction below cannot underflow.
+    let half = MAX_OUTPUT_BYTES / 2;
+    let head_end = content.floor_char_boundary(half);
+    let tail_start = content.floor_char_boundary(content.len() - half);
+
+    let omitted_bytes = tail_start - head_end;
+    if omitted_bytes < TRUNCATION_OVERHEAD {
+        return (content, None);
+    }
+
+    let original_len = content.len();
+    let mut truncated = String::with_capacity(MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+    truncated.push_str(&content[..head_end]);
+    _ = write!(
+        truncated,
+        "\n... [{omitted_bytes} bytes truncated; head + tail kept] ...\n"
+    );
+    truncated.push_str(&content[tail_start..]);
+
+    (truncated, Some(original_len))
+}
+
 // ── Input Parsing ──
 
 /// Deserializes raw JSON into a tool's input struct, returning a
 /// [`ToolOutput`] error that can be sent directly back to the model.
+#[expect(
+    clippy::result_large_err,
+    reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
+)]
 pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result<T, ToolOutput> {
     serde_json::from_value(raw).map_err(|e| ToolOutput {
         content: format!("Invalid input: {e}"),
@@ -540,10 +637,6 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     let mb = bytes as f64 / (1024.0 * 1024.0);
     mb
 }
-
-/// Cap on tool output size. Prevents flooding the LLM context window.
-/// Roughly 32K tokens at ~4 chars / token.
-pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 /// Per-line character cap for read and grep output. Long lines (minified
 /// bundles, base64 blobs) rarely help the model and crowd out useful
@@ -879,6 +972,88 @@ mod tests {
         assert_eq!(registry.label("nonexistent", &input), "nonexistent");
     }
 
+    // ── ToolRegistry::run ──
+
+    /// Helper: writes a temp file whose `read` output trips the byte
+    /// cap. 500 lines × 600 chars × `truncate_line` (caps each at 500)
+    /// ≈ 250 KB, comfortably above [`MAX_OUTPUT_BYTES`].
+    fn write_oversize_file() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let line = "x".repeat(600);
+        let content = format!("{line}\n").repeat(500);
+        std::fs::write(&path, &content).unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_and_caps_byte_overflow() {
+        let (_dir, path) = write_oversize_file();
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let output = registry
+            .run(
+                "read",
+                serde_json::json!({"file_path": path.to_str().unwrap()}),
+            )
+            .await;
+
+        assert!(!output.is_error);
+        assert!(output.content.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+        assert!(output.content.contains("bytes truncated; head + tail kept"));
+        assert!(output.metadata.truncated_bytes.is_some());
+        assert!(output.metadata.truncated_total.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_within_cap_leaves_content_and_metadata_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let output = registry
+            .run(
+                "read",
+                serde_json::json!({"file_path": path.to_str().unwrap()}),
+            )
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, "1\thello\n2\tworld");
+        assert!(output.metadata.truncated_bytes.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_byte_cap_on_read_falls_through_to_text_view() {
+        // When the byte cap fires on a read, the trailing
+        // `(Showing lines ...)` footer is replaced by the truncation
+        // separator — `read_excerpt_view` can't parse it, so
+        // `result_view` must drop to `Text` instead of panicking or
+        // mis-rendering.
+        let (_dir, path) = write_oversize_file();
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool)]);
+        let input = serde_json::json!({"file_path": path.to_str().unwrap()});
+        let output = registry.run("read", input.clone()).await;
+
+        let view = registry.result_view(
+            "read",
+            &input,
+            &output.content,
+            &output.metadata,
+            output.is_error,
+        );
+        assert!(matches!(view, ToolResultView::Text { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_unknown_tool_returns_error_payload() {
+        let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
+        let output = registry.run("nonexistent", serde_json::json!({})).await;
+        assert!(output.is_error);
+        assert_eq!(output.content, "Unknown tool: nonexistent");
+        assert!(output.metadata.truncated_bytes.is_none());
+    }
+
     // ── ToolRegistry::result_view ──
 
     #[test]
@@ -1089,6 +1264,74 @@ mod tests {
     #[test]
     fn file_name_bare_name_unchanged() {
         assert_eq!(file_name("README.md"), "README.md");
+    }
+
+    // ── cap_output ──
+
+    #[test]
+    fn cap_output_short_content_unchanged() {
+        let (out, original) = cap_output("hello".to_owned());
+        assert_eq!(out, "hello");
+        assert!(original.is_none());
+    }
+
+    #[test]
+    fn cap_output_keeps_head_and_tail() {
+        // Sentinels at each end prove head + tail are kept; the
+        // separator lands strictly between them; original_len echoes
+        // the pre-cap byte count.
+        let head = "HEAD_SENTINEL\n";
+        let tail = "TAIL_SENTINEL\n";
+        let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
+
+        let mut content = String::with_capacity(head.len() + filler_len + tail.len());
+        content.push_str(head);
+        content.extend(std::iter::repeat_n('x', filler_len));
+        content.push_str(tail);
+        let original_len = content.len();
+
+        let (out, original) = cap_output(content);
+
+        assert!(out.starts_with(head));
+        assert!(out.ends_with(tail));
+        assert!(out.contains("bytes truncated; head + tail kept"));
+        assert!(out.len() <= MAX_OUTPUT_BYTES + TRUNCATION_OVERHEAD);
+        let sep_pos = out.find("bytes truncated").unwrap();
+        assert!(sep_pos > head.len());
+        assert!(sep_pos < out.len() - tail.len());
+        assert_eq!(original, Some(original_len));
+    }
+
+    #[test]
+    fn cap_output_multibyte_at_split_boundary() {
+        // 4-byte emoji straddles the head split. floor_char_boundary
+        // must drop it from both halves so it never appears in the
+        // result.
+        let half = MAX_OUTPUT_BYTES / 2;
+        let emoji = "🦀"; // 4 bytes
+        let prefix_len = half - 2;
+
+        let mut content = String::new();
+        content.push_str(&"a".repeat(prefix_len));
+        content.push_str(emoji);
+        content.push_str(&"b".repeat(MAX_OUTPUT_BYTES * 2));
+
+        let (out, original) = cap_output(content);
+
+        assert!(out.contains("bytes truncated"));
+        assert!(out.starts_with("aaaa"));
+        assert!(out.ends_with('b'));
+        assert!(!out.contains(emoji));
+        assert!(original.is_some());
+    }
+
+    #[test]
+    fn cap_output_barely_over_limit_unchanged() {
+        // Head + tail halves overlap; truncating would grow the output.
+        let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let (out, original_len) = cap_output(original.clone());
+        assert_eq!(out, original);
+        assert!(original_len.is_none());
     }
 
     // ── truncate_line ──

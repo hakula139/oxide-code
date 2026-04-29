@@ -1,12 +1,12 @@
 # Terminal UI Research
 
-Research findings for the oxide-code TUI, based on analysis of reference projects (claude-code, opencode, codex-rs), the Rust TUI ecosystem, and the terminal flickering problem.
+Research findings for the oxide-code TUI, based on analysis of reference projects ([Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [opencode](https://github.com/anomalyco/opencode), [OpenAI Codex](https://github.com/openai/codex)), the Rust TUI ecosystem, and the terminal flickering problem.
 
 ## Reference Projects
 
-### claude-code (TypeScript / Ink)
+### Claude Code (TypeScript / Ink)
 
-claude-code uses a **custom fork of Ink** — a React-based terminal rendering engine with a custom reconciler. The rendering pipeline is: React component tree → Yoga Flexbox layout (pure TypeScript, no C++ bindings) → screen buffer diff → minimal ANSI output.
+Claude Code uses a **custom fork of Ink** — a React-based terminal rendering engine with a custom reconciler. The rendering pipeline is: React component tree → Yoga Flexbox layout (pure TypeScript, no C++ bindings) → screen buffer diff → minimal ANSI output.
 
 #### Key Patterns
 
@@ -122,9 +122,9 @@ opencode uses **@opentui/core** with **Solid.js** for fine-grained reactive term
 - Left: working directory. Right: LSP count (`• N LSP`), MCP count (`⊙ N MCP`) with error coloring, permission warnings, `/status` hint.
 - Subagent footer shows agent label, sibling index (e.g., "3 of 5"), token usage, parent / prev / next navigation.
 
-### codex-rs (Rust / ratatui)
+### OpenAI Codex (Rust / ratatui)
 
-[codex-rs](https://github.com/openai/codex) (`codex/codex-rs/`) is the Rust TUI for OpenAI's Codex terminal agent. Its markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's custom pulldown-cmark renderer.
+The [OpenAI Codex](https://github.com/openai/codex) Rust TUI lives in `codex-rs/`. Its markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's custom pulldown-cmark renderer.
 
 #### Markdown Rendering — `pending_marker` Pattern
 
@@ -219,8 +219,8 @@ This multiplexes all event sources into a single loop. Render is triggered after
 
 Tokens arrive mid-syntax (e.g., `**part` then `ial**`). Approaches:
 
-1. **Line-based commit with stable-prefix cache**: Buffer tokens, commit to the rendered view at `\n` boundaries. Track a monotonic byte boundary — only lines beyond the cached boundary are re-parsed. The stable prefix is rendered once and stored as owned `Line<'static>` values. This gives O(new lines) per token instead of O(total text). Adopted by oxide-code; inspired by claude-code's block-level variant.
-2. **Block-level commit** (claude-code): Same idea but at pulldown-cmark block boundaries instead of line boundaries. Theoretically more precise (a code fence mid-line is still one block) but requires deeper parser integration.
+1. **Line-based commit with stable-prefix cache**: Buffer tokens, commit to the rendered view at `\n` boundaries. Track a monotonic byte boundary — only lines beyond the cached boundary are re-parsed. The stable prefix is rendered once and stored as owned `Line<'static>` values. This gives O(new lines) per token instead of O(total text). Adopted by oxide-code; inspired by Claude Code's block-level variant.
+2. **Block-level commit** (Claude Code): Same idea but at pulldown-cmark block boundaries instead of line boundaries. Theoretically more precise (a code fence mid-line is still one block) but requires deeper parser integration.
 3. **Code block handling**: Buffer entire code blocks before applying syntax highlighting (avoids partial-highlight flicker), or apply a simple monospace style during streaming and re-highlight on block completion.
 
 Adopted: line-based commit with stable-prefix cache. Upgrade to block-level boundaries when viewport virtualization is added.
@@ -234,7 +234,7 @@ Based on the research, the following decisions guide the TUI implementation:
 3. **Synchronized output** enabled by default. Wrap every frame in DEC 2026 sequences.
 4. **Render throttling at ~60 FPS**. Batch streaming tokens between frames.
 5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on message completion. Monotonic boundary avoids O(n) re-parsing.
-6. **Custom pulldown-cmark + syntect renderer** instead of `tui-markdown`. The external crate had incorrect loose-list rendering (marker and content on separate lines) and limited control over styling. The custom renderer uses codex-rs's `pending_marker` pattern for correct list handling and gives full control over heading styles, blockquote borders, and inline formatting.
+6. **Custom pulldown-cmark + syntect renderer** instead of `tui-markdown`. The external crate had incorrect loose-list rendering (marker and content on separate lines) and limited control over styling. The custom renderer uses OpenAI Codex's `pending_marker` pattern for correct list handling and gives full control over heading styles, blockquote borders, and inline formatting.
 7. **Catppuccin Mocha dark theme by default** with 11 named color slots. Transparent background to respect user's terminal theme.
 8. **Two-tier tool display** — inline summary with per-tool icons, plus truncated output body (inspired by opencode's InlineTool / BlockTool pattern). Truncation at 5 lines with overflow count.
 9. **Viewport virtualization** for long conversations — only render visible messages (planned).

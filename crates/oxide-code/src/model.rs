@@ -63,10 +63,7 @@ pub(crate) struct ModelInfo {
 /// on models that can't honor it.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "seven independent capability flags — each maps 1:1 to a \
-              separate upstream `modelSupports*` predicate or a \
-              per-version allowlist; a bitflag or state-machine refactor \
-              would add indirection without any expressiveness gain"
+    reason = "seven independent capability flags — each maps 1:1 to a separate upstream `modelSupports*` predicate or a per-version allowlist; a bitflag or state-machine refactor would add indirection without any expressiveness gain"
 )]
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Capabilities {
