@@ -1,10 +1,14 @@
 //! Session actor — owns [`SessionState`] + the writer, drains
-//! [`SessionCmd`]s, and coalesces a turn's worth of cmds into one flush.
+//! [`SessionCmd`]s, and writes one batch per `recv()` wakeup.
 //!
-//! The receive-and-drain loop (`recv().await` then `try_recv()` until
-//! empty) gives batching for free: bursts queued during one agent
-//! iteration commit together; isolated writes still flush immediately.
-//! No interval timer — see `docs/research/session-persistence.md`.
+//! Receive-and-drain (`recv().await` then `try_recv()` until empty)
+//! coalesces whatever cmds land in the channel before the actor
+//! processes the first one. `agent_turn` deliberately queues a tool
+//! round's three cmds through one `tokio::join!` so they pile up
+//! before this drain runs; isolated writes (a text-only turn, the
+//! AI title append, the final summary) flush immediately because
+//! the drain returns `Empty` after the first cmd. No interval timer
+//! — see `docs/research/session-persistence.md`.
 
 use std::sync::Arc;
 

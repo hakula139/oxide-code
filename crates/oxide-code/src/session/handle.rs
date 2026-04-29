@@ -27,9 +27,11 @@ use crate::tool::ToolMetadata;
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// Sized for tool-result bursts (a turn can stack a dozen sidecars on
-/// top of a tool-result message). Codex uses 256; we budget higher
-/// because the in-process actor only drains between agent yields.
+/// A tool round bursts three cmds at once (assistant + tool-result +
+/// sidecar batch via [`tokio::join!`]); concurrent senders (the
+/// detached title-generator) can race with that burst. Codex uses
+/// 256; 1024 buys headroom even when several agent loops share one
+/// session through cloned handles, without paying for it in memory.
 const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
