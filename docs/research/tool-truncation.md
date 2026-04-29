@@ -84,20 +84,19 @@ The roadmap calls for centralizing the byte-budget at the dispatcher. The decisi
 1. **Two truncation layers, separated by responsibility.**
    - **View-shape** (per-tool): row caps, line-length caps, structured renderers. Stays per-tool — these are tool-specific knowledge ("250 grep matches", "2000 read lines").
    - **Byte-budget** (centralized): the absolute byte cap so no tool can flood context. Lifts to `ToolRegistry::run` and runs after the per-tool `Tool::run`. Bash's existing head-tail logic is the starting point — preserves both setup context and final outcome.
-2. **Head-tail, not tail-only.** More useful across tools because it keeps the two pieces a model most often needs to reason about (the command, the outcome). Bash's existing tests (`truncate_output_keeps_head_and_tail`, `..._multibyte_at_split_boundary`, `..._barely_over_limit_unchanged`) carry over.
+2. **Head-tail, not tail-only.** More useful across tools because it keeps the two pieces a model most often needs to reason about (the command, the outcome). Bash's pre-refactor tests carry over to `tool.rs` as `cap_output_keeps_head_and_tail`, `cap_output_multibyte_at_split_boundary`, `cap_output_barely_over_limit_unchanged`.
 3. **No spillover to disk for v1.** opencode-style `"use Grep on /tmp/spill.txt"` needs a Task agent to consume the file. oxide-code has none. The 128 KB head-tail rendering already preserves enough on each side for the model to reason about most outputs. Add when Task lands.
-4. **`metadata.truncated_total` becomes the single structural signal.** Glob already uses it; the registry cap also sets it whenever the byte-budget fires. Renderers stop parsing footer prose where the structured field is available.
+4. **Two distinct metadata fields, not one overloaded signal.** `ToolMetadata::truncated_total` carries unbounded match counts (set by per-tool view-shape caps like glob's `MAX_RESULTS`); `ToolMetadata::truncated_bytes` carries the pre-cap byte count (set only by the registry's safety net). Splitting keeps glob's `(X of N matches)` renderer from accidentally rendering bytes when both layers fire — plausible in deep monorepos with long absolute paths.
 5. **`MAX_OUTPUT_BYTES = 128 KB` stays unchanged.** Don't tune in the same change that restructures responsibility. Future PR can adjust based on observed metrics.
 
 ## Sources
 
 ### oxide-code
 
-- `crates/oxide-code/src/tool.rs:546-571` — `MAX_OUTPUT_BYTES`, `MAX_LINE_LENGTH`, `truncate_line`.
-- `crates/oxide-code/src/tool/bash.rs:222` — `truncate_output()` head-tail.
-- `crates/oxide-code/src/tool/glob.rs:151-171` — `MAX_RESULTS` + `metadata.truncated_total` setter.
-- `crates/oxide-code/src/tool/grep.rs:365, 477, 513` — per-mode row caps.
-- `crates/oxide-code/src/tool/read.rs:165-192` — mid-loop byte-budget, row cap, and footer.
+- `crates/oxide-code/src/tool.rs` — `ToolRegistry::run` (dispatcher cap entry point), `cap_output()` (head-tail), `MAX_OUTPUT_BYTES`, `TRUNCATION_OVERHEAD`, `MAX_LINE_LENGTH`, `truncate_line()`.
+- `crates/oxide-code/src/tool/glob.rs` — `MAX_RESULTS`, view-shape `truncated_total` setter.
+- `crates/oxide-code/src/tool/grep.rs` — `DEFAULT_HEAD_LIMIT`, per-mode row caps, `MAX_GREP_FILE_SIZE`.
+- `crates/oxide-code/src/tool/read.rs` — `DEFAULT_LINE_LIMIT`, `MAX_READ_FILE_SIZE`, view-shape footer.
 
 ### Reference projects
 
