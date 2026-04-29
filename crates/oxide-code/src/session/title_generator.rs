@@ -369,11 +369,13 @@ mod tests {
             .await
             .unwrap();
 
-        let got = sink.events().into_iter().find_map(|e| match e {
-            AgentEvent::SessionTitleUpdated(t) => Some(t),
-            _ => None,
-        });
-        assert_eq!(got.as_deref(), Some("Add OAuth auth"));
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Add OAuth auth")),
+            "sink got SessionTitleUpdated: {events:?}",
+        );
     }
 
     #[tokio::test]
