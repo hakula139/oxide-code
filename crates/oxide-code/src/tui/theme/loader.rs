@@ -463,7 +463,7 @@ mod tests {
 
     /// Verify the warn-and-fallback path actually emits a
     /// `tracing::warn!` event naming the offending slot. Without this
-    /// assertion, a regression to `if let Err(_) = … {}` would
+    /// assertion, a regression to `if let Err(_) = ... {}` would
     /// silently restore the silent-failure pattern the contract was
     /// designed to prevent — and every other warn-path test would
     /// still pass because they only check that resolution succeeds.
