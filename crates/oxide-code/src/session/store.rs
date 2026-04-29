@@ -485,22 +485,23 @@ impl SessionWriter {
 
     /// Buffer one entry. Concurrent readers don't see it until
     /// [`Self::flush`].
-    pub(crate) fn append_no_flush(&mut self, entry: &Entry) -> Result<()> {
+    pub(super) fn append_no_flush(&mut self, entry: &Entry) -> Result<()> {
         let json = serde_json::to_string(entry).context("failed to serialize entry")?;
         writeln!(self.file, "{json}").context("failed to write entry")?;
         Ok(())
     }
 
-    /// Drain the buffer in one `write()`. No `fsync` to disk — matches
-    /// pre-batching durability.
-    pub(crate) fn flush(&mut self) -> Result<()> {
+    /// Drain the buffer in one `write()`. No `fsync` — entries reach
+    /// the OS cache, which is the durability tier the resume loader
+    /// already tolerates (warn-skip on truncated tail entries).
+    pub(super) fn flush(&mut self) -> Result<()> {
         self.file.flush().context("failed to flush entry")?;
         Ok(())
     }
 
     /// Append + flush. Used by header writes on file creation and by
     /// store tests that read back immediately.
-    pub(crate) fn append(&mut self, entry: &Entry) -> Result<()> {
+    fn append(&mut self, entry: &Entry) -> Result<()> {
         self.append_no_flush(entry)?;
         self.flush()
     }

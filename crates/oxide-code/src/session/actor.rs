@@ -6,6 +6,8 @@
 //! iteration commit together; isolated writes still flush immediately.
 //! No interval timer — see `docs/research/session-persistence.md`.
 
+use std::sync::Arc;
+
 use time::OffsetDateTime;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
@@ -18,8 +20,7 @@ use crate::tool::ToolMetadata;
 
 /// Cross-task protocol for [`super::handle::SessionHandle`]. Each ack
 /// fires after the batch flush, so a returned ack implies the entry is
-/// at least in the OS write cache — same durability as the pre-actor
-/// sync writer.
+/// in at least the OS write cache.
 pub(super) enum SessionCmd {
     Record {
         msg: Message,
@@ -57,7 +58,7 @@ enum PendingAck {
 pub(super) async fn run(
     mut state: SessionState,
     mut rx: mpsc::Receiver<SessionCmd>,
-    shared: std::sync::Arc<SharedState>,
+    shared: Arc<SharedState>,
 ) {
     while let Some(first) = rx.recv().await {
         let mut entries: Vec<Entry> = Vec::new();
@@ -366,26 +367,6 @@ mod tests {
         assert_eq!(summary_count, 1, "second finish must not duplicate");
     }
 
-    // ── surface_failure ──
-
-    #[test]
-    fn surface_failure_first_call_after_record_returns_message_then_silences() {
-        let shared = SharedState::default();
-        shared.record_flush_failure("boom");
-        let first = surface_failure(Some("boom"), &shared);
-        let second = surface_failure(Some("boom"), &shared);
-        assert_eq!(first.as_deref(), Some("boom"));
-        assert!(second.is_none(), "subsequent failures stay silent");
-    }
-
-    #[test]
-    fn surface_failure_no_failure_returns_none() {
-        let shared = SharedState::default();
-        assert!(surface_failure(None, &shared).is_none());
-    }
-
-    // ── run (full-turn snapshot) ──
-
     #[tokio::test]
     async fn run_full_turn_produces_byte_compatible_jsonl() {
         // Drives the plan's "byte-for-byte identical for a given turn
@@ -419,13 +400,30 @@ mod tests {
         insta::assert_snapshot!(mask_volatile(&content));
     }
 
+    // ── surface_failure ──
+
+    #[test]
+    fn surface_failure_first_call_after_record_returns_message_then_silences() {
+        let shared = SharedState::default();
+        shared.record_flush_failure("boom");
+        let first = surface_failure(Some("boom"), &shared);
+        let second = surface_failure(Some("boom"), &shared);
+        assert_eq!(first.as_deref(), Some("boom"));
+        assert!(second.is_none(), "subsequent failures stay silent");
+    }
+
+    #[test]
+    fn surface_failure_no_failure_returns_none() {
+        let shared = SharedState::default();
+        assert!(surface_failure(None, &shared).is_none());
+    }
+
+    // ── Helpers ──
+
     /// Replaces the three volatile substrings — UUIDs, ISO-8601
     /// timestamps, and the cwd value — with stable placeholders so
     /// `insta::assert_snapshot!` is reproducible across runs while still
-    /// asserting the literal bytes of every other field. UUIDs match
-    /// quoted hex-with-dashes; timestamps match the RFC 3339 / ISO 8601
-    /// shape with optional fractional seconds; cwd is keyed off the
-    /// header field name.
+    /// asserting the literal bytes of every other field.
     fn mask_volatile(content: &str) -> String {
         let uuid_re =
             regex::Regex::new(r#""[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#)

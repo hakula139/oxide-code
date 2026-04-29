@@ -74,8 +74,9 @@ impl SharedState {
     }
 
     /// `true` on the first call after [`Self::record_flush_failure`];
-    /// sticky `false` afterwards. Mirrors the pre-actor `write_failed`
-    /// flag scoped to flush errors.
+    /// sticky `false` afterwards. Surfaces a flush error to the user
+    /// once and stays silent on every subsequent failure so a
+    /// disk-full mid-conversation doesn't drown the UI.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
@@ -137,12 +138,10 @@ impl SessionHandle {
     }
 
     /// Record sidecar metadata for every tool result from one agent
-    /// turn in one shot — one cmd, one ack, one flush. The agent loop
-    /// previously awaited per-sidecar, which produced N batches per
-    /// tool round; the batch cmd realises the plan's "a turn's worth
-    /// of cmds collapse into one flush" intent for the hot path.
-    /// Items whose `metadata == ToolMetadata::default()` add no
-    /// display fields and are skipped at absorb.
+    /// turn in one shot — one cmd, one ack, one flush — realising the
+    /// plan's "a turn's worth of cmds collapse into one flush" intent
+    /// for the hot path. Items whose `metadata == ToolMetadata::default()`
+    /// add no display fields and are skipped at absorb.
     pub(crate) async fn record_tool_metadata_batch(
         &self,
         items: Vec<(String, ToolMetadata)>,
@@ -195,9 +194,9 @@ impl SessionHandle {
     ///
     /// - The TUI / REPL shutdown path can call this after `finish().await`
     ///   for deterministic actor drain before the runtime tears down.
-    /// - Tests that previously relied on `tokio::task::yield_now()` after
-    ///   dropping a handle get a race-free wait without depending on
-    ///   the `current_thread` scheduler's ordering.
+    /// - Tests that need the actor to drain before reading the file
+    ///   from disk get a race-free wait without depending on the
+    ///   `current_thread` scheduler's ordering.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx,
@@ -345,182 +344,6 @@ mod tests {
     use super::*;
     use crate::message::{ContentBlock, Role};
 
-    // ── start ──
-
-    #[tokio::test]
-    async fn start_does_not_materialize_file_until_first_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let handle = start(&store, "test-model");
-
-        let project_dir = super::super::store::test_project_dir(dir.path());
-        assert!(
-            std::fs::read_dir(&project_dir).unwrap().next().is_none(),
-            "fresh session must not create a file before the first record",
-        );
-
-        handle.record_message(Message::user("first")).await;
-        // Awaiting record_message means the actor has flushed the
-        // batch — file is on disk.
-        assert!(
-            test_session_file(dir.path(), handle.session_id()).exists(),
-            "first record_message should materialize the session file",
-        );
-    }
-
-    // ── resume ──
-
-    #[tokio::test]
-    async fn resume_loads_messages_and_keeps_session_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.record_message(Message::user("hello")).await;
-        original.record_message(Message::assistant("hi")).await;
-        original.finish().await;
-        drop(original);
-
-        let ResumedSession {
-            handle: resumed,
-            messages,
-            ..
-        } = resume(&store, &session_id).unwrap();
-        assert_eq!(resumed.session_id(), session_id);
-        assert_eq!(messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn resume_works_on_unfinished_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.record_message(Message::user("hello")).await;
-        // Skip finish — `shutdown` waits for the actor to drain the
-        // queued record cmd and exit when the channel closes.
-        original.shutdown().await;
-
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
-        assert_eq!(messages.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn resume_empty_session_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.finish().await;
-        drop(original);
-
-        assert!(resume(&store, &session_id).is_err());
-    }
-
-    #[tokio::test]
-    async fn resume_all_messages_sanitized_returns_error() {
-        // A file that loads non-empty but whose only message is an
-        // unresolved assistant tool_use. Sanitization removes it,
-        // leaving an empty message list that would corrupt the UUID
-        // chain on the next record. The bail! on line 236 guards this.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original
-            .record_message(crate::message::Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "unresolved".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::Value::Null,
-                }],
-            })
-            .await;
-        // The ack means the actor flushed — file is on disk.
-        drop(original);
-
-        let err = resume(&store, &session_id)
-            .err()
-            .expect("all messages sanitized must be an error");
-        assert!(
-            format!("{err:#}").contains("no messages to resume"),
-            "error explains why: {err:#}",
-        );
-    }
-
-    #[tokio::test]
-    async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.record_message(Message::user("do X")).await;
-        original
-            .record_message(Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "unresolved".to_owned(),
-                    name: "bash".to_owned(),
-                    input: serde_json::Value::Null,
-                }],
-            })
-            .await;
-        original.shutdown().await;
-
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
-        assert_eq!(
-            messages.len(),
-            1,
-            "assistant-only-tool-use should be dropped"
-        );
-        assert_eq!(messages[0].role, Role::User);
-    }
-
-    #[tokio::test]
-    async fn resume_preserves_parent_chain_on_next_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.record_message(Message::user("hello")).await;
-        original.record_message(Message::assistant("hi")).await;
-        original.finish().await;
-        drop(original);
-
-        let resumed = resume(&store, &session_id).unwrap().handle;
-        resumed.record_message(Message::user("follow up")).await;
-        resumed.finish().await;
-        drop(resumed);
-
-        // Read the file and find the new message's parent_uuid — should
-        // match the last uuid from the original run.
-        let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
-        let entries: Vec<super::super::entry::Entry> = content
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-
-        let msg_uuids: Vec<_> = entries
-            .iter()
-            .filter_map(|e| match e {
-                super::super::entry::Entry::Message {
-                    uuid, parent_uuid, ..
-                } => Some((*uuid, *parent_uuid)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(msg_uuids.len(), 3);
-        assert!(msg_uuids[0].1.is_none());
-        assert_eq!(msg_uuids[1].1, Some(msg_uuids[0].0));
-        assert_eq!(
-            msg_uuids[2].1,
-            Some(msg_uuids[1].0),
-            "post-resume message chains to pre-resume tail",
-        );
-    }
-
     // ── record_message ──
 
     #[tokio::test]
@@ -566,12 +389,8 @@ mod tests {
         // second call returns None so the user sees the error only once.
         let handle = dead_handle_for_tests("dead");
 
-        let first = handle
-            .record_message(crate::message::Message::user("a"))
-            .await;
-        let second = handle
-            .record_message(crate::message::Message::user("b"))
-            .await;
+        let first = handle.record_message(Message::user("a")).await;
+        let second = handle.record_message(Message::user("b")).await;
 
         assert!(
             first.failure.is_some(),
@@ -877,5 +696,182 @@ mod tests {
         // return promptly.
         let handle = dead_handle_for_tests("dead");
         handle.shutdown().await;
+    }
+
+    // ── start ──
+
+    #[tokio::test]
+    async fn start_does_not_materialize_file_until_first_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "test-model");
+
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        assert!(
+            std::fs::read_dir(&project_dir).unwrap().next().is_none(),
+            "fresh session must not create a file before the first record",
+        );
+
+        handle.record_message(Message::user("first")).await;
+        // Awaiting record_message means the actor has flushed the
+        // batch — file is on disk.
+        assert!(
+            test_session_file(dir.path(), handle.session_id()).exists(),
+            "first record_message should materialize the session file",
+        );
+    }
+
+    // ── resume ──
+
+    #[tokio::test]
+    async fn resume_loads_messages_and_keeps_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        original.record_message(Message::assistant("hi")).await;
+        original.finish().await;
+        drop(original);
+
+        let ResumedSession {
+            handle: resumed,
+            messages,
+            ..
+        } = resume(&store, &session_id).unwrap();
+        assert_eq!(resumed.session_id(), session_id);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resume_works_on_unfinished_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        // Skip finish — `shutdown` waits for the actor to drain the
+        // queued record cmd and exit when the channel closes.
+        original.shutdown().await;
+
+        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_empty_session_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.finish().await;
+        drop(original);
+
+        assert!(resume(&store, &session_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn resume_all_messages_sanitized_returns_error() {
+        // A file that loads non-empty but whose only message is an
+        // unresolved assistant tool_use. Sanitization removes it,
+        // leaving an empty message list that would corrupt the UUID
+        // chain on the next record. Resume bails so the next record
+        // can't chain to a missing UUID.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original
+            .record_message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .await;
+        // The ack means the actor flushed — file is on disk.
+        drop(original);
+
+        let err = resume(&store, &session_id)
+            .err()
+            .expect("all messages sanitized must be an error");
+        assert!(
+            format!("{err:#}").contains("no messages to resume"),
+            "error explains why: {err:#}",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("do X")).await;
+        original
+            .record_message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "unresolved".to_owned(),
+                    name: "bash".to_owned(),
+                    input: serde_json::Value::Null,
+                }],
+            })
+            .await;
+        original.shutdown().await;
+
+        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "assistant-only-tool-use should be dropped"
+        );
+        assert_eq!(messages[0].role, Role::User);
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_parent_chain_on_next_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        original.record_message(Message::assistant("hi")).await;
+        original.finish().await;
+        drop(original);
+
+        let resumed = resume(&store, &session_id).unwrap().handle;
+        resumed.record_message(Message::user("follow up")).await;
+        resumed.finish().await;
+        drop(resumed);
+
+        // Read the file and find the new message's parent_uuid — should
+        // match the last uuid from the original run.
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
+        let entries: Vec<super::super::entry::Entry> = content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+
+        let msg_uuids: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                super::super::entry::Entry::Message {
+                    uuid, parent_uuid, ..
+                } => Some((*uuid, *parent_uuid)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msg_uuids.len(), 3);
+        assert!(msg_uuids[0].1.is_none());
+        assert_eq!(msg_uuids[1].1, Some(msg_uuids[0].0));
+        assert_eq!(
+            msg_uuids[2].1,
+            Some(msg_uuids[1].0),
+            "post-resume message chains to pre-resume tail",
+        );
     }
 }

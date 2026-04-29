@@ -52,7 +52,7 @@ ox                                          # Start an interactive session
 │   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
 ├── session.rs                              # Session module root
 ├── session/
-│   ├── actor.rs                            # SessionActor task body + SessionCmd protocol + receive-and-drain batching loop
+│   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path constructors

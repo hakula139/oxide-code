@@ -273,7 +273,7 @@ mod tests {
     use super::super::store::test_store;
     use super::*;
 
-    // ── SessionState::queue_message_entries ──
+    // ── queue_message_entries ──
 
     #[test]
     fn queue_message_entries_first_user_text_emits_title_then_message_and_seeds_ai_title() {
@@ -360,67 +360,7 @@ mod tests {
         assert!(!state.first_user_prompt_seen);
     }
 
-    // ── SessionState::flush_entries ──
-
-    #[test]
-    fn flush_entries_broken_writer_reopens_file_and_appends() {
-        // After a flush error transitions writer_status to Broken, the
-        // next flush must reopen the existing file via store.open_append
-        // and append cleanly — not lose entries, not start a new file.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store.clone(), "m");
-        let now = OffsetDateTime::now_utc();
-        let session_id = state.session_id.to_string();
-
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
-        state.flush_entries(&entries).unwrap();
-        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
-        state.writer_status = WriterStatus::Broken;
-
-        let (entries, _) = state.queue_message_entries(&Message::user("second"), now);
-        state.flush_entries(&entries).unwrap();
-
-        assert!(
-            matches!(state.writer_status, WriterStatus::Active(_)),
-            "Broken must transition back to Active after a successful reopen",
-        );
-        let path = super::super::store::test_session_file(dir.path(), &session_id);
-        let content = std::fs::read_to_string(path).unwrap();
-        let messages: Vec<&str> = content
-            .lines()
-            .filter(|l| l.contains(r#""type":"message""#))
-            .collect();
-        assert_eq!(
-            messages.len(),
-            2,
-            "both messages on disk after reopen: {content}",
-        );
-    }
-
-    #[test]
-    fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
-        // A header-write failure must leave WriterStatus::Pending intact
-        // so the next batch retries via store.create rather than trying
-        // to open a file that was never created.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
-        let now = OffsetDateTime::now_utc();
-        let project_dir = super::super::store::test_project_dir(dir.path());
-        std::fs::remove_dir_all(&project_dir).unwrap();
-
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
-        let result = state.flush_entries(&entries);
-
-        assert!(result.is_err(), "create must fail with project dir gone");
-        assert!(
-            matches!(state.writer_status, WriterStatus::Pending { .. }),
-            "create failure must leave Pending intact for next-batch retry",
-        );
-    }
-
-    // ── SessionState::finish_entry ──
+    // ── finish_entry ──
 
     #[test]
     fn finish_entry_pending_writer_returns_none_and_marks_finished() {
@@ -490,6 +430,66 @@ mod tests {
         let entry = resumed.finish_entry(now);
 
         assert!(entry.is_none(), "no new messages → no summary");
+    }
+
+    // ── flush_entries ──
+
+    #[test]
+    fn flush_entries_broken_writer_reopens_file_and_appends() {
+        // After a flush error transitions writer_status to Broken, the
+        // next flush must reopen the existing file via store.open_append
+        // and append cleanly — not lose entries, not start a new file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store.clone(), "m");
+        let now = OffsetDateTime::now_utc();
+        let session_id = state.session_id.to_string();
+
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        state.flush_entries(&entries).unwrap();
+        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
+        state.writer_status = WriterStatus::Broken;
+
+        let (entries, _) = state.queue_message_entries(&Message::user("second"), now);
+        state.flush_entries(&entries).unwrap();
+
+        assert!(
+            matches!(state.writer_status, WriterStatus::Active(_)),
+            "Broken must transition back to Active after a successful reopen",
+        );
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let messages: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"message""#))
+            .collect();
+        assert_eq!(
+            messages.len(),
+            2,
+            "both messages on disk after reopen: {content}",
+        );
+    }
+
+    #[test]
+    fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
+        // A header-write failure must leave WriterStatus::Pending intact
+        // so the next batch retries via store.create rather than trying
+        // to open a file that was never created.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let result = state.flush_entries(&entries);
+
+        assert!(result.is_err(), "create must fail with project dir gone");
+        assert!(
+            matches!(state.writer_status, WriterStatus::Pending { .. }),
+            "create failure must leave Pending intact for next-batch retry",
+        );
     }
 
     // ── format_current_dir ──
