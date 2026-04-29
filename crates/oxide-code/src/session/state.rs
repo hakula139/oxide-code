@@ -167,35 +167,41 @@ impl SessionState {
         if entries.is_empty() {
             return Ok(());
         }
-        if !matches!(self.writer_status, WriterStatus::Active(_)) {
-            // `Pending` materializes the file via the staged header;
-            // `Broken` reopens the existing file in append mode. A
-            // failure here propagates with the original status preserved
-            // — the next batch retries.
-            let writer = match &self.writer_status {
-                WriterStatus::Pending { header } => self.store.create(header)?,
-                WriterStatus::Broken => self.store.open_append(&self.session_id)?,
-                WriterStatus::Active(_) => unreachable!("matched above"),
-            };
-            self.writer_status = WriterStatus::Active(writer);
-        }
-        let WriterStatus::Active(writer) = &mut self.writer_status else {
-            unreachable!("writer_status is Active after materialization above");
-        };
+        let mut writer = self.take_or_open_writer()?;
         let result = (|| -> Result<()> {
             for entry in entries {
                 writer.append_no_flush(entry)?;
             }
             writer.flush()
         })();
-        if result.is_err() {
-            // `BufWriter` semantics on partial write are undefined; the
-            // safe move is to drop the writer and reopen for the next
-            // batch instead of feeding more entries into a poisoned
-            // buffer.
-            self.writer_status = WriterStatus::Broken;
-        }
+        // `BufWriter` semantics on partial write are undefined; on flush
+        // failure we drop the writer and flag Broken so the next batch
+        // reopens fresh instead of writing into a poisoned buffer.
+        self.writer_status = match result {
+            Ok(()) => WriterStatus::Active(writer),
+            Err(_) => WriterStatus::Broken,
+        };
         result
+    }
+
+    /// Yields the writer to flush into, transitioning from Pending /
+    /// Broken as needed. On open failure restores the pre-call state so
+    /// the next batch retries with the same intent (Pending keeps its
+    /// header, Broken stays Broken).
+    fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
+        // Replace with Broken so the borrow checker lets us own the
+        // current variant — caller restores Active or Broken below.
+        match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
+            WriterStatus::Active(w) => Ok(w),
+            WriterStatus::Pending { header } => match self.store.create(&header) {
+                Ok(w) => Ok(w),
+                Err(e) => {
+                    self.writer_status = WriterStatus::Pending { header };
+                    Err(e)
+                }
+            },
+            WriterStatus::Broken => self.store.open_append(&self.session_id),
+        }
     }
 }
 
