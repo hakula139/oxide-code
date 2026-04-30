@@ -24,6 +24,7 @@ Early development. What works today:
 - Authentication (API key and Claude Code OAuth)
 - TOML config file with layered loading
 - Session persistence with JSONL conversation logs, resume, and listing
+- Turn interruption (Esc / Ctrl+C) with queued follow-up prompts and a double-press Ctrl+C exit confirmation
 
 See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 

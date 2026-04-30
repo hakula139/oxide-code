@@ -64,11 +64,18 @@ The direction is simple:
 - Edit and Write require a prior full Read of the file and refuse if the on-disk bytes have drifted since (xxh64 fallback for cloud-sync mtime touches).
 - Tracker state persists into the session JSONL on clean exit and restores stat-verified entries on resume — no forced re-Read across sessions.
 
+### Turn Interruption & Queued Input
+
+- Esc / Ctrl+C while busy drops the in-flight turn (the future is dropped, reqwest closes the SSE stream, `kill_on_drop(true)` reaps any tool subprocess); the partial assistant block commits with a dim italic `(interrupted)` marker.
+- Idle Ctrl+C arms a 1 s exit confirmation hint; a second press inside the window confirms.
+- Typed prompts during a busy turn queue in a per-session FIFO and dispatch one at a time at every turn boundary (completion or cancellation); the preview between chat and input shows up to 3 ghosts plus a `+N more` overflow tag.
+- Esc on idle pops the most recent queued prompt back into the input for editing.
+- Footer hints follow run-state and queue: `Enter / Shift+Enter / Ctrl+C` when idle, `Esc / Ctrl+C: interrupt · Enter: queue prompt` when busy, `Esc: edit queued · Enter: send` when idle with a queue.
+
 ## Current Focus
 
 ### Terminal UI
 
-- Turn interruption and queued input — Esc / Ctrl+C cancels an in-flight stream or tool, double-press Ctrl+C exits from idle, typed prompts during streaming queue and fire after the current turn (see [Cancellation and Queued Input](research/design/cancellation-and-queued-input.md)).
 - Viewport virtualization for long conversations after the richer result views and block measurement hooks are in place.
 
 ### Tool & Prompt Enhancements
