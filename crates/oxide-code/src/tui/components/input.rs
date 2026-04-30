@@ -32,8 +32,11 @@ const MAX_VISIBLE_LINES: u16 = 6;
 ///
 /// Key bindings (busy, i.e. disabled):
 ///
-/// - Esc / Ctrl+C: cancel the in-flight turn
+/// - Ctrl+C: cancel the in-flight turn
 /// - Ctrl+D: quit
+///
+/// Esc routes through [`App::handle_crossterm_event`](super::super::app::App::handle_crossterm_event)
+/// because its meaning depends on App-level state (queue, run state).
 pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
@@ -83,6 +86,31 @@ impl InputArea {
         self.enabled
     }
 
+    /// Current buffer as logical lines. Exposed for cross-module tests
+    /// (`tui::app`) so they can pin queue pop-back / `set_text` behavior
+    /// without reaching through the private textarea.
+    #[cfg(test)]
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.textarea.lines().to_vec()
+    }
+
+    /// Replaces the current buffer with `text` and parks the cursor at
+    /// its end. Used by the queue pop-back path to surface a queued
+    /// prompt for editing.
+    pub(crate) fn set_text(&mut self, text: &str) {
+        self.textarea.select_all();
+        self.textarea.cut();
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.textarea.insert_newline();
+            }
+            for ch in line.chars() {
+                self.textarea.insert_char(ch);
+            }
+        }
+        self.scroll_top.set(0);
+    }
+
     /// Returns the height this component needs (content lines + border + hint).
     pub(crate) fn height(&self) -> u16 {
         let content_lines = self.visual_line_count();
@@ -126,19 +154,6 @@ impl Component for InputArea {
             });
         }
 
-        // Esc only acts mid-turn — idle Esc has no meaning in the prompt.
-        if let Event::Key(KeyEvent {
-            code: KeyCode::Esc, ..
-        }) = event
-            && !self.enabled
-        {
-            return Some(UserAction::Cancel);
-        }
-
-        if !self.enabled {
-            return None;
-        }
-
         if let Event::Key(KeyEvent {
             code: KeyCode::Enter,
             modifiers,
@@ -155,7 +170,15 @@ impl Component for InputArea {
             return self.submit();
         }
 
-        // Delegate to textarea for all other input.
+        // Scroll keys while busy belong to the chat view; the textarea
+        // would otherwise swallow them for cursor movement and the
+        // user would lose the ability to scroll history mid-turn.
+        if !self.enabled && is_scroll_key(event) {
+            return None;
+        }
+
+        // Typing flows through in both states so the user can compose
+        // a follow-up that the queue will fire after the current turn.
         self.textarea.input(event.clone());
         None
     }
@@ -235,6 +258,23 @@ impl Component for InputArea {
 }
 
 // ── Private Helpers ──
+
+/// Whether `event` is one of the chat-scroll keys reserved for the
+/// surrounding `ChatView` while the input is busy.
+fn is_scroll_key(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            code: KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End,
+            ..
+        }),
+    )
+}
 
 impl InputArea {
     /// Estimate the number of visual (screen) lines after word-wrap.
@@ -390,26 +430,52 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_esc_busy_returns_cancel() {
-        let mut input = test_input();
-        input.set_enabled(false);
-        let action = input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UserAction::Cancel)));
-    }
-
-    #[test]
-    fn handle_event_esc_idle_is_silent() {
-        let mut input = test_input();
-        let action = input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(action.is_none());
-    }
-
-    #[test]
-    fn handle_event_disabled_ignores_input() {
+    fn handle_event_disabled_empty_enter_is_silent() {
+        // Submit's empty-buffer guard short-circuits, so a stray Enter
+        // mid-turn produces no action even though the textarea now
+        // accepts typing during busy.
         let mut input = test_input();
         input.set_enabled(false);
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn handle_event_disabled_typing_lands_in_textarea() {
+        // Enables the queue UX: the user composes a follow-up while
+        // the spinner is still spinning.
+        let mut input = test_input();
+        input.set_enabled(false);
+        input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+        input.handle_event(&key(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(input.textarea.lines(), vec!["hi"]);
+    }
+
+    #[test]
+    fn handle_event_disabled_enter_with_content_submits() {
+        let mut input = test_input();
+        input.set_enabled(false);
+        input.handle_event(&key(KeyCode::Char('q'), KeyModifiers::NONE));
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "q"));
+    }
+
+    #[test]
+    fn handle_event_disabled_scroll_keys_pass_through() {
+        // Arrow / Page keys while busy must reach `ChatView` for scroll;
+        // returning `None` lets the parent route them.
+        let mut input = test_input();
+        input.set_enabled(false);
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert!(input.handle_event(&key(code, KeyModifiers::NONE)).is_none());
+        }
     }
 
     #[test]
