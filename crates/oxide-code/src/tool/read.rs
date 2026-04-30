@@ -16,6 +16,10 @@ const DEFAULT_LINE_LIMIT: usize = 2000;
 /// Per-file size cap for `read` (10 MB). Accommodates typical large
 /// config / log files while rejecting accidental binary dumps.
 const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// Stand-in content for a zero-byte file. The producer writes it; the
+/// `read_excerpt_view` consumer compares against it to render an empty
+/// excerpt — the two paths must agree on the exact string.
+const EMPTY_FILE_MARKER: &str = "(empty file)";
 
 pub(crate) struct ReadTool {
     tracker: Arc<FileTracker>,
@@ -169,7 +173,7 @@ async fn read_file(
     let total_lines = lines.len();
     if total_lines == 0 {
         let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
-        return Ok(stub_or(outcome, "(empty file)").into_owned());
+        return Ok(stub_or(outcome, EMPTY_FILE_MARKER).into_owned());
     }
 
     // offset is 1-indexed; 0 is treated as 1.
@@ -233,7 +237,7 @@ fn view_for(offset: Option<usize>, limit: Option<usize>) -> LastView {
 // ── Formatting ──
 
 fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
-    if content.trim() == "(empty file)" {
+    if content.trim() == EMPTY_FILE_MARKER {
         return Some(ToolResultView::ReadExcerpt {
             path,
             lines: Vec::new(),
