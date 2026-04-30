@@ -989,7 +989,7 @@ mod tests {
 
         // Empty `old_string` is rejected before the gate fires, so an
         // empty tracker is fine.
-        let err = edit_file(path.to_str().unwrap(), "", "x", false, &FileTracker::new())
+        let err = edit_file(path.to_str().unwrap(), "", "x", false, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("must not be empty"));
@@ -1007,7 +1007,7 @@ mod tests {
             "hello",
             "hello",
             false,
-            &FileTracker::new(),
+            &FileTracker::default(),
         )
         .await
         .unwrap_err();
@@ -1044,7 +1044,7 @@ mod tests {
             "hello",
             "goodbye",
             false,
-            &FileTracker::new(),
+            &FileTracker::default(),
         )
         .await
         .unwrap_err();
@@ -1083,7 +1083,7 @@ mod tests {
         std::fs::write(&path, "hello world").unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let meta = std::fs::metadata(&path).unwrap();
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.record_read(
             &path,
             &bytes,
@@ -1111,7 +1111,7 @@ mod tests {
             "a",
             "b",
             false,
-            &FileTracker::new(),
+            &FileTracker::default(),
         )
         .await
         .unwrap_err();
@@ -1144,7 +1144,7 @@ mod tests {
         f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
         // Size cap fires before the gate, so an empty tracker is fine.
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &FileTracker::new())
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("too large"));

@@ -398,7 +398,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap();
         assert_eq!(result, "1\talpha\n2\tbeta\n3\tgamma");
@@ -414,7 +414,7 @@ mod tests {
             path.to_str().unwrap(),
             Some(2),
             Some(2),
-            &FileTracker::new(),
+            &FileTracker::default(),
         )
         .await
         .unwrap();
@@ -427,7 +427,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "first\nsecond\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), Some(0), None, &FileTracker::new())
+        let result = read_file(path.to_str().unwrap(), Some(0), None, &FileTracker::default())
             .await
             .unwrap();
         assert_eq!(result, "1\tfirst\n2\tsecond");
@@ -439,7 +439,7 @@ mod tests {
         let path = dir.path().join("bom.txt");
         std::fs::write(&path, "\u{feff}hello\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap();
         assert!(result.contains("1\thello"));
@@ -452,7 +452,7 @@ mod tests {
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, "").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap();
         assert_eq!(result, "(empty file)");
@@ -460,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_not_found() {
-        let err = read_file("/nonexistent/path.txt", None, None, &FileTracker::new())
+        let err = read_file("/nonexistent/path.txt", None, None, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("Error reading"));
@@ -473,7 +473,7 @@ mod tests {
             dir.path().to_str().unwrap(),
             None,
             None,
-            &FileTracker::new(),
+            &FileTracker::default(),
         )
         .await
         .unwrap_err();
@@ -487,7 +487,7 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_READ_FILE_SIZE + 1).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("too large"));
@@ -502,7 +502,7 @@ mod tests {
         let path = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(
@@ -517,7 +517,7 @@ mod tests {
         let path = dir.path().join("binary.bin");
         std::fs::write(&path, b"hello\x00world").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::new())
+        let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("binary"));
@@ -529,7 +529,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), Some(100), None, &FileTracker::new())
+        let err = read_file(path.to_str().unwrap(), Some(100), None, &FileTracker::default())
             .await
             .unwrap_err();
         assert!(err.contains("beyond the end"));

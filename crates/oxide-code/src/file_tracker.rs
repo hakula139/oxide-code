@@ -90,10 +90,6 @@ pub(crate) enum GatePurpose {
 }
 
 impl FileTracker {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Records a successful Read, returning a cache-hit marker when
     /// the call was a redundant full-file re-Read of an unchanged
     /// file. Caller substitutes [`CACHE_HIT_STUB`] for the
@@ -424,9 +420,9 @@ pub(crate) mod testing {
     /// Fresh `Arc<FileTracker>`. Tools that take ownership of the
     /// tracker (`ReadTool::new`, `EditTool::new`, `WriteTool::new`)
     /// reach for this; the bare-`FileTracker` callers go through
-    /// `FileTracker::new()` directly.
+    /// `FileTracker::default()` directly.
     pub(crate) fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
+        Arc::new(FileTracker::default())
     }
 
     /// Seeds `tracker` with a full Read of `path` from disk, mirroring
@@ -446,7 +442,7 @@ pub(crate) mod testing {
     /// Convenience wrapper: fresh tracker pre-seeded with a full Read
     /// of `path`. Most edit-tool tests want exactly this shape.
     pub(crate) fn tracker_seeded(path: &Path) -> FileTracker {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         seed_full_read(&tracker, path);
         tracker
     }
@@ -481,7 +477,7 @@ mod tests {
 
     #[test]
     fn record_read_first_full_read_inserts() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
@@ -493,7 +489,7 @@ mod tests {
 
     #[test]
     fn record_read_redundant_full_read_returns_cache_hit() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
@@ -511,7 +507,7 @@ mod tests {
         // real last-modify. But `mtime` must refresh so a phantom
         // cloud-sync touch with identical bytes doesn't later fall
         // into the `pre_modify_check` drift arm.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let t0 = UNIX_EPOCH + std::time::Duration::from_secs(1);
         let t1 = UNIX_EPOCH + std::time::Duration::from_secs(2);
@@ -530,7 +526,7 @@ mod tests {
         // not be a cache hit. The mtime / size inputs are irrelevant to
         // the cache-hit decision; this is the regression for "did we
         // actually compare hashes?"
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         let outcome = tracker.record_read(path, b"world", UNIX_EPOCH, 5, LastView::Full);
@@ -542,7 +538,7 @@ mod tests {
         // A partial Read can never short-circuit even if the bytes
         // match — the model is asking for a specific slice and may not
         // have seen the rest of the file.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let view = LastView::Partial {
             offset: 1,
@@ -558,7 +554,7 @@ mod tests {
         // Prior was Partial, current is Full — even with matching
         // bytes, this is the model's first full view, so it's not a
         // redundant re-Read.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
             path,
@@ -582,7 +578,7 @@ mod tests {
 
     #[test]
     fn check_stat_no_entry_errors_never_read() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let result = tracker.check_stat(path, UNIX_EPOCH, 0, GatePurpose::Edit);
         assert_eq!(
@@ -596,7 +592,7 @@ mod tests {
 
     #[test]
     fn check_stat_no_entry_carries_write_purpose_for_write_gate() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let result = tracker.check_stat(path, UNIX_EPOCH, 0, GatePurpose::Write);
         assert_eq!(
@@ -610,7 +606,7 @@ mod tests {
 
     #[test]
     fn check_stat_partial_view_errors_partial_read() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
             path,
@@ -634,7 +630,7 @@ mod tests {
 
     #[test]
     fn check_stat_full_match_passes() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
@@ -644,7 +640,7 @@ mod tests {
 
     #[test]
     fn check_stat_mtime_drift_returns_stored_hash() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
@@ -663,7 +659,7 @@ mod tests {
 
     #[test]
     fn check_stat_size_drift_returns_stored_hash() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
@@ -764,7 +760,7 @@ mod tests {
     fn record_modify_updates_existing_entry_with_new_hash() {
         // After an edit, future gate checks compare against the new
         // bytes; the pre-edit hash must not survive.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         let new_mtime = UNIX_EPOCH + Duration::from_secs(1);
@@ -784,7 +780,7 @@ mod tests {
     fn record_modify_promotes_partial_view_to_full() {
         // Edit reads / rewrites the whole file regardless of how it
         // was originally read — the new state is always a full view.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
             path,
@@ -807,7 +803,7 @@ mod tests {
         // The post-write helper re-stats the file and records the new
         // hash, mtime, and size against the bytes the caller just
         // wrote. A subsequent gate check must `Pass` without rehash.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"updated").unwrap();
@@ -829,7 +825,7 @@ mod tests {
         // the OS can't see) must not panic — the helper is best-effort
         // so a successful disk write isn't reported as failed. The
         // tracker simply records nothing.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let path = Path::new("/nonexistent/never-here.rs");
         tracker.record_modify_after_write(path, b"bytes").await;
         assert!(
@@ -842,7 +838,7 @@ mod tests {
 
     #[test]
     fn snapshot_all_collects_every_tracked_file() {
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(Path::new("/tmp/a"), b"a", mtime, 1, LastView::Full);
         _ = tracker.record_read(
@@ -876,7 +872,7 @@ mod tests {
 
     #[test]
     fn snapshot_all_empty_tracker_returns_empty_vec() {
-        let snaps = FileTracker::new().snapshot_all();
+        let snaps = FileTracker::default().snapshot_all();
         assert!(snaps.is_empty());
     }
 
@@ -898,7 +894,7 @@ mod tests {
             recorded_at: OffsetDateTime::now_utc(),
         };
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap.clone()]);
 
         let stored = tracker.lock().get(&path).cloned();
@@ -927,7 +923,7 @@ mod tests {
             recorded_at: OffsetDateTime::now_utc(),
         };
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap]);
         assert!(tracker.lock().get(&path).is_none());
     }
@@ -943,7 +939,7 @@ mod tests {
             recorded_at: OffsetDateTime::now_utc(),
         };
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap]);
         assert!(tracker.lock().is_empty());
     }
@@ -979,12 +975,12 @@ mod tests {
 
         // Order older-then-newer to exercise the "incoming wins" branch;
         // newer-then-older is covered by the symmetric guard.
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.restore_verified(vec![older.clone(), newer.clone()]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(stored.content_hash, 2, "newer recorded_at wins");
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         tracker.restore_verified(vec![newer, older]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(stored.content_hash, 2, "older does not displace newer");
@@ -997,7 +993,7 @@ mod tests {
         // Eight threads each insert 100 unique paths. The mutex
         // serializes inserts; the test catches any future migration
         // to a non-thread-safe representation.
-        let tracker = Arc::new(FileTracker::new());
+        let tracker = Arc::new(FileTracker::default());
         thread::scope(|s| {
             for t in 0..8u32 {
                 let tracker = Arc::clone(&tracker);

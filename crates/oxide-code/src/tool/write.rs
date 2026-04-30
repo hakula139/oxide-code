@@ -202,7 +202,7 @@ mod tests {
         let path = dir.path().join("new.txt");
 
         let (result, is_new) =
-            write_file(path.to_str().unwrap(), "content", &FileTracker::new()).await;
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
         assert!(result.unwrap().contains("created"));
         assert!(is_new);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
@@ -215,7 +215,7 @@ mod tests {
         std::fs::write(&path, "old content").unwrap();
 
         let (result, is_new) =
-            write_file(path.to_str().unwrap(), "new content", &FileTracker::new()).await;
+            write_file(path.to_str().unwrap(), "new content", &FileTracker::default()).await;
         let err = result.unwrap_err();
         assert!(
             err.contains("not been read"),
@@ -231,7 +231,7 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         seed_full_read(&tracker, &path);
 
         let (result, is_new) = write_file(path.to_str().unwrap(), "new content", &tracker).await;
@@ -249,7 +249,7 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         seed_full_read(&tracker, &path);
         std::fs::write(&path, "external edit").unwrap();
 
@@ -267,7 +267,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a").join("b").join("c.txt");
 
-        let (result, _) = write_file(path.to_str().unwrap(), "deep", &FileTracker::new()).await;
+        let (result, _) = write_file(path.to_str().unwrap(), "deep", &FileTracker::default()).await;
         result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
     }
@@ -277,7 +277,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
 
-        let (result, _) = write_file(path.to_str().unwrap(), "", &FileTracker::new()).await;
+        let (result, _) = write_file(path.to_str().unwrap(), "", &FileTracker::default()).await;
         result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
@@ -293,7 +293,7 @@ mod tests {
 
         let path = blocker.join("child.txt");
         let path_str = path.to_str().unwrap();
-        let (result, is_new) = write_file(path_str, "content", &FileTracker::new()).await;
+        let (result, is_new) = write_file(path_str, "content", &FileTracker::default()).await;
         let err = result.unwrap_err();
         assert!(
             err.starts_with("Error reading ") && err.contains(path_str),
@@ -311,7 +311,7 @@ mod tests {
         // reject the write because no Read entry exists.
         let dir = tempfile::tempdir().unwrap();
         let (result, _) =
-            write_file(dir.path().to_str().unwrap(), "content", &FileTracker::new()).await;
+            write_file(dir.path().to_str().unwrap(), "content", &FileTracker::default()).await;
         let err = result.unwrap_err();
         assert!(
             err.contains("not been read"),
@@ -327,7 +327,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("locked.txt");
         std::fs::write(&path, "original").unwrap();
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         seed_full_read(&tracker, &path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 

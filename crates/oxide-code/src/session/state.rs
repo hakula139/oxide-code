@@ -416,7 +416,7 @@ mod tests {
         // the cmd; the actor's only job is to lay them down on disk.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now);

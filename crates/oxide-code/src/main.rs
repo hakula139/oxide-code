@@ -130,7 +130,7 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let file_tracker = Arc::new(FileTracker::new());
+    let file_tracker = Arc::new(FileTracker::default());
     let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     // Restore tracked-file state before the agent loop runs so cleanly-
     // resumed Reads pass the gate without forcing the model to re-Read.

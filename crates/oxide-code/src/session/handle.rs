@@ -746,7 +746,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
         let sid = handle.session_id().to_owned();
 
@@ -772,7 +772,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
@@ -781,7 +781,7 @@ mod tests {
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        let resumed_tracker = FileTracker::new();
+        let resumed_tracker = FileTracker::default();
         let resumed = resume(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
@@ -800,7 +800,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
@@ -813,7 +813,7 @@ mod tests {
         // mismatches and the entry drops.
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
-        let resumed_tracker = FileTracker::new();
+        let resumed_tracker = FileTracker::default();
         let resumed = resume(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
@@ -839,7 +839,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = FileTracker::new();
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
         let session_id = handle.session_id().to_owned();
         handle.record_message(Message::user("hi")).await;
@@ -850,7 +850,7 @@ mod tests {
 
         std::fs::remove_file(&path_a).unwrap();
 
-        let resumed_tracker = FileTracker::new();
+        let resumed_tracker = FileTracker::default();
         let resumed = resume(&store, &session_id).unwrap();
         // restore_verified must silently drop the snapshot rather than
         // panic; the assertion verifies the tracker ends up empty for
