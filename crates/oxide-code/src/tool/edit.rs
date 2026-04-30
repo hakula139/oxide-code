@@ -991,9 +991,15 @@ mod tests {
 
         // Empty `old_string` is rejected before the gate fires, so an
         // empty tracker is fine.
-        let err = edit_file(path.to_str().unwrap(), "", "x", false, &FileTracker::default())
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "",
+            "x",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("must not be empty"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
@@ -1176,9 +1182,15 @@ mod tests {
         f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
         // Size cap fires before the gate, so an empty tracker is fine.
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &FileTracker::default())
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "a",
+            "b",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("too large"));
     }
 

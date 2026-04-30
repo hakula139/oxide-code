@@ -215,8 +215,12 @@ mod tests {
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let (result, is_new) =
-            write_file(path.to_str().unwrap(), "new content", &FileTracker::default()).await;
+        let (result, is_new) = write_file(
+            path.to_str().unwrap(),
+            "new content",
+            &FileTracker::default(),
+        )
+        .await;
         let err = result.unwrap_err();
         assert!(
             err.contains("not been read"),
@@ -333,8 +337,12 @@ mod tests {
         // Existing directory: the gate fires before the OS would
         // reject the write because no Read entry exists.
         let dir = tempfile::tempdir().unwrap();
-        let (result, _) =
-            write_file(dir.path().to_str().unwrap(), "content", &FileTracker::default()).await;
+        let (result, _) = write_file(
+            dir.path().to_str().unwrap(),
+            "content",
+            &FileTracker::default(),
+        )
+        .await;
         let err = result.unwrap_err();
         assert!(
             err.contains("not been read"),

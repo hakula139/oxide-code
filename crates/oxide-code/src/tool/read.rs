@@ -427,9 +427,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "first\nsecond\n").unwrap();
 
-        let result = read_file(path.to_str().unwrap(), Some(0), None, &FileTracker::default())
-            .await
-            .unwrap();
+        let result = read_file(
+            path.to_str().unwrap(),
+            Some(0),
+            None,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result, "1\tfirst\n2\tsecond");
     }
 
@@ -529,9 +534,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
 
-        let err = read_file(path.to_str().unwrap(), Some(100), None, &FileTracker::default())
-            .await
-            .unwrap_err();
+        let err = read_file(
+            path.to_str().unwrap(),
+            Some(100),
+            None,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("beyond the end"));
     }
 

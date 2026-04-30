@@ -755,14 +755,15 @@ mod tests {
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("trigger")).await;
-        let expected_paths: std::collections::HashSet<std::path::PathBuf> = ["a.rs", "b.rs", "c.rs"]
-            .into_iter()
-            .map(|name| {
-                let path = files_dir.path().join(name);
-                record_tracked_file(&tracker, &path, name.as_bytes());
-                path
-            })
-            .collect();
+        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
+            ["a.rs", "b.rs", "c.rs"]
+                .into_iter()
+                .map(|name| {
+                    let path = files_dir.path().join(name);
+                    record_tracked_file(&tracker, &path, name.as_bytes());
+                    path
+                })
+                .collect();
 
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
