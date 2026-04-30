@@ -136,17 +136,14 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Build the closing entries (one [`Entry::FileSnapshot`] per
-    /// supplied snapshot followed by an [`Entry::Summary`]) or an empty
-    /// vec for a no-op finish (already finished, nothing recorded, or
-    /// resumed session that added nothing). Latches `finished = true`
-    /// either way.
-    ///
-    /// Snapshots come before the summary so the summary remains the
-    /// final marker that the session exited cleanly. The caller —
-    /// typically `main.rs` via [`SessionHandle::finish`] — drains the
-    /// tracker just before sending the cmd; this keeps
-    /// `SessionState` free of any `Arc<FileTracker>` coupling.
+    /// Builds the closing entries (one [`Entry::FileSnapshot`] per
+    /// supplied snapshot, then an [`Entry::Summary`]) or an empty vec
+    /// for a no-op finish. Latches `finished = true` either way.
+    /// Snapshots precede the summary so the summary stays the final
+    /// clean-exit marker; the caller (typically `main.rs` via
+    /// [`SessionHandle::finish`]) drains the tracker just before
+    /// sending the cmd, keeping `SessionState` free of any
+    /// `Arc<FileTracker>` coupling.
     pub(super) fn finish_entries(
         &mut self,
         snapshots: Vec<FileSnapshot>,
@@ -410,10 +407,9 @@ mod tests {
 
     #[test]
     fn finish_entries_emits_one_file_snapshot_per_tracked_file() {
-        // Three FileSnapshots in → three FileSnapshot entries out, ahead
-        // of the trailing Summary. The caller — typically `main.rs` via
-        // `SessionHandle::finish` — drains the tracker before sending
-        // the cmd; the actor's only job is to lay them down on disk.
+        // Three snapshots in → three FileSnapshot entries out, ahead
+        // of the trailing Summary. The caller drains the tracker
+        // before sending the cmd; the actor only writes them to disk.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();

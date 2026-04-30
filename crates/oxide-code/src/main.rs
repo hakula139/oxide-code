@@ -132,8 +132,8 @@ async fn async_main() -> Result<()> {
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::default());
     let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    // Restore tracked-file state before the agent loop runs so cleanly-
-    // resumed Reads pass the gate without forcing the model to re-Read.
+    // Restore before the agent loop so resumed Reads clear the gate
+    // without forcing a re-Read.
     file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
 
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;

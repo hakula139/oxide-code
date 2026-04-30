@@ -217,10 +217,9 @@ fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Maps Read inputs to the recorded view. Default `(None, None)` is
-/// `Full` so a no-args re-read can cache-hit; any explicit slice is
-/// `Partial` even if it happens to cover the whole file (the model
-/// asked for a range, so a future Read with different bounds is a
-/// different question).
+/// `Full` so no-args re-Reads cache-hit; any explicit slice is
+/// `Partial` even if it covers the whole file (the model asked for
+/// a range, so a different range is a different question).
 fn view_for(offset: Option<usize>, limit: Option<usize>) -> LastView {
     match (offset, limit) {
         (None, None) => LastView::Full,

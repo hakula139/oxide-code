@@ -104,8 +104,8 @@ async fn write_file(
     };
     let is_new = pre_meta.is_none();
 
-    // Existing files run the strict gate; new files bypass — there is
-    // nothing to clobber.
+    // Existing files run the strict gate; new files bypass — nothing
+    // to clobber.
     if let Some(meta) = &pre_meta
         && let Err(msg) = check_gate(file_path, meta, path, tracker).await
     {
@@ -134,11 +134,10 @@ async fn write_file(
     (Ok(msg), is_new)
 }
 
-/// Runs the existing-file gate ladder. Stat-match short-circuits; on
-/// drift the file is read once to confirm a content-preserving touch
-/// (cloud-sync) before letting the write proceed. Structural
-/// rejects (never-read, partial-view) surface the model-facing
-/// `GateError` rendered via `Display`.
+/// Existing-file gate. Stat-match short-circuits; on drift the file
+/// is read once to confirm a content-preserving touch before letting
+/// the write proceed. Structural rejects (never-read, partial-view)
+/// surface as a model-facing `GateError` via `Display`.
 async fn check_gate(
     file_path: &Path,
     meta: &std::fs::Metadata,
@@ -197,9 +196,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_overwrites_existing_file_uses_updated_verb() {
-        // The new-vs-existing branch picks the title verb, so a fresh
-        // `run` against an existing file pins the `Updated` arm — the
-        // "Created" branch is already pinned by `run_creates_file`.
+        // Pins the `Updated` arm of the verb branch; the `Created`
+        // arm is covered by `run_creates_file`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
@@ -226,10 +224,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_tool_run_dispatches_through_trait_to_inner_run() {
-        // Mirrors `edit_tool_run_dispatches_through_trait_to_inner_run`:
-        // the trait shim is a four-line `Box::pin(run(...))`, but it
-        // owns the `Arc::clone` that hands the tracker to the future,
-        // so the wiring still deserves a coverage anchor.
+        // Mirror of `edit_tool_run_dispatches_through_trait_to_inner_run`
+        // — pin the trait shim's `Arc::clone` of the tracker.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
         let tracker_arc = Arc::new(FileTracker::default());
@@ -298,9 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_after_external_modification_is_rejected() {
-        // Read at one mtime, then bump the mtime to simulate an
-        // external editor saving over our state. The drift hash
-        // mismatch surfaces the "modified externally" error.
+        // Read, then overwrite to simulate an external editor; the
+        // drift rehash surfaces "modified externally".
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
@@ -320,10 +315,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_phantom_drift_passes_via_hash_match() {
-        // Cloud-sync touch on the write side: stat says the file
-        // changed, but the bytes haven't. The gate must rehash and
-        // accept; without the fallback the write would be rejected
-        // even though no real conflict exists.
+        // Cloud-sync shape on Write: stat moved but bytes match —
+        // the rehash fallback must accept.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "stable content").unwrap();
@@ -362,9 +355,9 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_fails_when_parent_is_a_file() {
-        // The parent component is a regular file, so `metadata()`
-        // returns ENOTDIR. The stat error is surfaced via the same
-        // `Error reading {path}: {e}` shape as edit.rs.
+        // Parent is a regular file → `metadata()` returns ENOTDIR;
+        // surfaced via the same `Error reading {path}: {e}` shape
+        // as edit.rs.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "I am a file").unwrap();
@@ -385,8 +378,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_unread_directory_hits_strict_gate() {
-        // Existing directory: the gate fires before the OS would
-        // reject the write because no Read entry exists.
+        // No Read entry → the gate fires before the OS would
+        // reject the write on the directory.
         let dir = tempfile::tempdir().unwrap();
         let (result, _) = write_file(
             dir.path().to_str().unwrap(),
@@ -426,13 +419,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_fails_when_parent_creation_is_denied() {
-        // Pin the create_dir_all failure branch: parent is missing AND
-        // its ancestor is read-only, so mkdir denies. The pre-stat
-        // returns NotFound (ENOENT walks past read-only into the
-        // missing component), letting control reach the create_dir_all
-        // call rather than short-circuiting at the metadata read. The
-        // ancestor stays empty so tempdir cleanup can rmdir it without
-        // re-chmod gymnastics.
+        // Missing parent under a read-only ancestor: pre-stat hits
+        // ENOENT (walks into the missing component) so control
+        // reaches `create_dir_all`, which then denies. Ancestor
+        // stays empty so tempdir can rmdir it during cleanup.
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

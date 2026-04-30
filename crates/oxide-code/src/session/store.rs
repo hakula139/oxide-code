@@ -537,12 +537,11 @@ pub(crate) struct SessionData {
     /// Empty for pre-upgrade sessions — the TUI falls back to its
     /// existing content-derived defaults.
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Persisted file-tracker state collected from every
+    /// Tracker snapshots harvested from every
     /// [`Entry::FileSnapshot`](crate::session::entry::Entry) in the
     /// file. Handed to [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
-    /// before the agent loop runs so the gate clears for files that
-    /// still match disk. Empty for pre-upgrade sessions and for any
-    /// session that exited without writing a summary.
+    /// before the agent loop runs. Empty for pre-upgrade sessions
+    /// and for any session that exited without a summary.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 

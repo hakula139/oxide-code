@@ -88,11 +88,10 @@ impl Tool for EditTool {
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // Live path uses `metadata.diff_chunks` for real line numbers.
-        // Resume path falls back to an input-derived synthesized chunk
-        // (line 1) and recovers the count from `metadata.replacements`
-        // or, for the oldest sessions, the success-message prose.
-        // Empty `Some(vec![])` is treated as absent so a zero-chunks
+        // Live: `metadata.diff_chunks` carries real line numbers.
+        // Resume: synthesize a (line 1) chunk and recover the count
+        // from `metadata.replacements` or the success-message prose.
+        // Empty `Some(vec![])` counts as absent so a zero-chunks
         // regression doesn't surface as `(no change)`.
         let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
         let chunks = live_chunks
@@ -271,12 +270,10 @@ async fn edit_file(
 /// otherwise. Each chunk carries real file line numbers (post-edit
 /// positions on the `+` side) with common anchors trimmed.
 ///
-/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts (one byte per
-/// line is the floor), and the cumulative shift per match is bounded
-/// by that line count; both products fit comfortably in `isize` on
-/// every supported target. The `checked_*` calls below surface any
-/// overflow as a panic — a wrong-but-plausible line number would be
-/// worse.
+/// [`MAX_EDIT_FILE_SIZE`] caps both line counts and per-match shifts
+/// well inside `isize` on every supported target; the `checked_*`
+/// calls below panic on overflow rather than silently emitting a
+/// wrong-but-plausible line number.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
@@ -418,17 +415,12 @@ fn apply_eol(content: String, eol: &str) -> String {
 
 // ── Result View ──
 
-/// Parses the replacement count from the success-path output returned
-/// by [`edit_file`] when `replace_all` hits multiple matches — a
-/// `"Replaced N occurrences in <path>."` string. Returns `None` for
-/// the single-match shape (`"Successfully edited ..."`), in which case
-/// the caller defaults to 1. Used only as a final fallback for resumed
-/// sessions whose JSONL predates structured metadata.
-///
-/// The content-format contract this parser relies on is pinned by
-/// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
-/// test so rewording the success string in `edit_file` breaks the
-/// test, not the renderer silently.
+/// Parses `N` out of `"Replaced N occurrences in <path>."`. `None`
+/// for the single-match shape (`"Successfully edited ..."`), where
+/// the caller defaults to 1. Final fallback for resumed sessions
+/// whose JSONL predates structured metadata; the content-format
+/// contract is pinned by
+/// `edit_file_replace_all_pins_replaced_n_occurrences_format`.
 fn parse_replacement_count(content: &str) -> Option<usize> {
     content
         .strip_prefix("Replaced ")?
@@ -438,14 +430,11 @@ fn parse_replacement_count(content: &str) -> Option<usize> {
         .ok()
 }
 
-/// Builds a single best-effort chunk from raw input strings.
-///
-/// Used by [`EditTool::result_view`] when the resumed session JSONL
-/// carries no structured `diff_chunks`. Line numbers start at 1 —
-/// they're the best we have without re-reading the (possibly already
-/// mutated) file. Exposed `pub(crate)` so TUI snapshot tests can
-/// build the same shape as the production resume path without
-/// duplicating the trim policy.
+/// Single best-effort chunk from raw input strings, used by
+/// [`EditTool::result_view`] when the resumed JSONL has no
+/// `diff_chunks`. Line numbers start at 1 — best we have without
+/// re-reading the (possibly already mutated) file. `pub(crate)` so
+/// TUI snapshot tests can build the same shape as the resume path.
 pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
     let mut chunk = DiffChunk {
         old: split_into_diff_lines(old, 1),
@@ -467,13 +456,8 @@ mod tests {
 
     #[test]
     fn result_view_returns_none_when_new_string_missing_with_old_string_present() {
-        // The two `?` chains on `old_string` and `new_string` are
-        // sequential, so an input that satisfies the first guard but
-        // omits the second is the only way to land on the
-        // `new_string` `?` before falling through. The bare-bones
-        // `result_view_returns_none_when_required_inputs_missing`
-        // short-circuits at the first guard and doesn't reach this
-        // branch.
+        // `_required_inputs_missing` short-circuits at `old_string`;
+        // this case is the only way to reach the `new_string` guard.
         let tool = EditTool::new(Arc::new(FileTracker::default()));
         let view = tool.result_view(
             &serde_json::json!({"old_string": "x"}),
@@ -485,12 +469,9 @@ mod tests {
 
     #[test]
     fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
-        // Live path: `run` attaches `metadata.diff_chunks` via
-        // `with_diff_chunks`, so the renderer gets real file line
-        // numbers. The chunks must win over input-based synthesis,
-        // and `replacements` is derived from `chunks.len()` so a stale
-        // legacy `metadata.replacements` cannot disagree with the
-        // structural source of truth.
+        // Live `metadata.diff_chunks` must win over input-derived
+        // synthesis; `replacements` derives from `chunks.len()` so a
+        // stale legacy `metadata.replacements` can't disagree.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -714,9 +695,8 @@ mod tests {
 
     #[test]
     fn parse_replacement_count_returns_none_when_only_prefix_present() {
-        // `"Replaced "` strips to `""`, which yields no whitespace-
-        // separated token. Pinning the `?` propagation on the empty
-        // case so a future "default to 0 / 1" regression doesn't slip.
+        // Pin the empty-token `?` so a future "default to 0 / 1"
+        // regression doesn't slip.
         assert_eq!(parse_replacement_count("Replaced "), None);
     }
 
@@ -816,12 +796,8 @@ mod tests {
 
     #[tokio::test]
     async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
-        // The trait shim is a four-line `Box::pin(run(...))`, but it
-        // owns the `Arc::clone` that hands the per-tool tracker to the
-        // future. Pinning the shim guarantees the tracker plumbing
-        // doesn't silently regress when callers move from the inner
-        // `run` (used in unit tests) to the `Tool::run` surface (used
-        // by the dispatcher).
+        // Pin the trait shim so the `Arc::clone` it does on the
+        // tracker doesn't silently regress.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1117,8 +1093,8 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_after_external_modification_is_rejected() {
-        // Read at one mtime, then overwrite the bytes so check_stat
-        // returns NeedsBytes; the rehash catches the new bytes.
+        // Read, then overwrite so check_stat returns NeedsBytes
+        // and the rehash catches the new bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1136,12 +1112,9 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_phantom_drift_passes_via_hash_match() {
-        // Cloud-sync touch shape: the stat moved (mtime / size) but the
-        // bytes are identical to what was last Read. Without the rehash
-        // fallback the gate would over-reject. Forcing the drift path
-        // by handing `record_read` a fake older mtime keeps the test
-        // hermetic — the gate check sees a stat mismatch and falls
-        // through to verify_drift_bytes, which matches.
+        // Cloud-sync shape: stat moved but bytes match. A fake older
+        // mtime forces the drift path hermetically — without the
+        // rehash fallback the gate would over-reject.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "old content").unwrap();
@@ -1166,8 +1139,8 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_partial_read_is_rejected() {
-        // A ranged Read does not satisfy the modification gate even
-        // when the bytes happen to match.
+        // Ranged Read never satisfies the gate, even on matching
+        // bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1210,11 +1183,9 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_non_utf8_content() {
-        // Edit operates on text. The model wouldn't normally reach this
-        // for binary files (Read rejects them first), but the gate is
-        // bytes-only — `record_read` accepts arbitrary bytes — so a
-        // session that bypassed Read could still arrive here. Surface
-        // the decode failure rather than panicking.
+        // The gate is bytes-only, so a session that bypassed Read
+        // (which rejects binary) could still hit `edit_file` on a
+        // non-UTF8 file. Surface the decode error, don't panic.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blob.bin");
         let bytes = [0xff_u8, 0xfe, 0xfd];

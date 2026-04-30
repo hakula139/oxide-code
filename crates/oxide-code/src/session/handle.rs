@@ -168,12 +168,11 @@ impl SessionHandle {
     /// Write the session summary and finalize. Idempotent; no-op on
     /// fresh sessions that never recorded anything.
     ///
-    /// `snapshots` is what the caller drained from its shared
+    /// `snapshots` is drained from the shared
     /// [`FileTracker`][crate::file_tracker::FileTracker] just before
-    /// calling — one `Entry::FileSnapshot` lands per snapshot, ahead of
-    /// the `Entry::Summary` marker. Passing an empty `Vec` finalizes
-    /// without any tracker entries, which is what resumed sessions with
-    /// no tracker activity want.
+    /// the call — one `Entry::FileSnapshot` lands per snapshot, ahead
+    /// of the `Entry::Summary`. An empty `Vec` finalizes with no
+    /// tracker entries.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Finish { snapshots, ack }, rx)
@@ -254,11 +253,10 @@ pub(crate) struct ResumedSession {
     pub(crate) messages: Vec<Message>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Persisted file-tracker snapshots. The caller passes these to
+    /// Persisted tracker snapshots. The caller passes these to
     /// [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
-    /// before the agent loop runs so
-    /// the strict gate clears for previously-observed files that still
-    /// match disk; the actor doesn't repopulate the tracker itself.
+    /// before the agent loop runs so the gate clears for previously-
+    /// observed files that still match disk.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
@@ -743,10 +741,10 @@ mod tests {
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Three tracked files in → three FileSnapshot lines on disk,
-        // each pinning the actual path the gate observed. Counting
-        // strings would pass even if every snapshot pointed at the
-        // same file, so parse the JSONL and assert the path set.
+        // Three tracked files in → three FileSnapshot lines on disk
+        // with the right paths. Counting strings would pass even if
+        // every snapshot pointed at the same file; parse and assert
+        // the path set instead.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -825,7 +823,7 @@ mod tests {
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        // Bump the mtime / size before resume so the snapshot stat
+        // Bump mtime / size before resume so the snapshot stat
         // mismatches and the entry drops.
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
@@ -868,9 +866,8 @@ mod tests {
 
         let resumed_tracker = FileTracker::default();
         let resumed = resume(&store, &session_id).unwrap();
-        // restore_verified must silently drop the snapshot rather than
-        // panic; the assertion verifies the tracker ends up empty for
-        // this path.
+        // restore_verified must drop silently; the tracker should
+        // end up empty for this path rather than panic.
         resumed_tracker.restore_verified(resumed.file_snapshots);
         let check = resumed_tracker.check_stat(
             &path_a,

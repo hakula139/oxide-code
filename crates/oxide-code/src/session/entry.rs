@@ -95,10 +95,9 @@ pub(crate) enum Entry {
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// Persisted file-tracker state, one per tracked file. Written by
-    /// [`super::state::SessionState::finish_entries`] at session end so
-    /// resume can skip the cold-tracker re-Read on every previously-
-    /// observed file. The shape is wire-stable; see
+    /// One persisted tracker entry per tracked file, written at
+    /// session finish so resume can skip cold-tracker re-Reads on
+    /// previously-observed files. Wire-stable; see
     /// [`FileSnapshot`][crate::file_tracker::FileSnapshot].
     FileSnapshot {
         #[serde(flatten)]
@@ -409,11 +408,9 @@ mod tests {
 
     #[test]
     fn file_snapshot_round_trips_with_inlined_payload_fields() {
-        // The variant uses `#[serde(flatten)]` so the JSON shape is
-        // `{"type":"file_snapshot","path":...,"content_hash":...,...}`,
-        // not nested under a `snapshot` key. Pin the flattened layout
-        // so a future inline-table refactor can't silently change the
-        // wire format.
+        // `#[serde(flatten)]` inlines the payload directly under
+        // `type`, not under a `snapshot` key. Pin the layout so a
+        // refactor can't silently change the wire format.
         let snapshot = FileSnapshot {
             path: std::path::PathBuf::from("/tmp/a.rs"),
             content_hash: 0xDEAD_BEEF,
@@ -444,11 +441,9 @@ mod tests {
 
     #[test]
     fn file_snapshot_unknown_field_is_ignored_for_forward_compat() {
-        // A newer writer may grow new fields on the snapshot; older
-        // readers must keep parsing the entry by ignoring unknown
-        // keys (the implicit serde default since no
-        // `#[serde(deny_unknown_fields)]` is set). Pin so a future
-        // tightening regresses noisily here, not at resume time.
+        // Older readers must ignore unknown fields a newer writer
+        // may grow (no `#[serde(deny_unknown_fields)]`). Pin here
+        // so a future tightening fails this test, not resume.
         let json = serde_json::json!({
             "type": "file_snapshot",
             "path": "/tmp/a.rs",
