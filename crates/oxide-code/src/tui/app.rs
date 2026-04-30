@@ -612,6 +612,21 @@ mod tests {
         assert_eq!(app.status_bar.status(), Status::Idle);
     }
 
+    #[test]
+    fn expire_armed_exit_when_not_armed_is_a_noop() {
+        // Tick path calls `expire_armed_exit` every frame regardless of
+        // status; the false branch must leave the bar untouched and
+        // skip the dirty bump that would otherwise wake the renderer.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        assert_eq!(app.status_bar.status(), Status::Idle);
+
+        assert!(
+            !app.expire_armed_exit(),
+            "no-op when status isn't ExitArmed",
+        );
+        assert_eq!(app.status_bar.status(), Status::Idle);
+    }
+
     #[tokio::test]
     async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
         // Mid-turn Ctrl+C must reach the agent loop as `Cancel` so it
@@ -805,6 +820,19 @@ mod tests {
         app.handle_agent_event(AgentEvent::StreamToken("partial".to_owned()));
         assert_eq!(app.status_bar.status(), Status::Streaming);
         assert!(!app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_thinking_token_routes_to_chat_and_marks_streaming() {
+        // Thinking tokens land in the chat view as a separate block
+        // (not interleaved with assistant text) and must flip the bar
+        // to Streaming so the user sees the agent is working even
+        // before any visible text arrives.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ThinkingToken("planning...".to_owned()));
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        // Unlike StreamToken, thinking does not disable input on its
+        // own — the matching SubmitPrompt already did that.
     }
 
     #[test]
@@ -1011,6 +1039,25 @@ mod tests {
         assert_eq!(
             app.preview_height(),
             u16::try_from(PREVIEW_VISIBLE + 1).unwrap(),
+        );
+    }
+
+    #[test]
+    fn render_preview_overflow_appends_more_count_row() {
+        // A queue larger than `PREVIEW_VISIBLE` collapses the tail
+        // into a single "+N more" hint so the panel never grows past
+        // the cap; the user keeps the most recent items in view.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        let extra = 3;
+        for i in 0..(PREVIEW_VISIBLE + extra) {
+            app.pending_prompts.push_back(format!("queued-{i}"));
+        }
+
+        let text = rendered_text(&mut app, 60, 20);
+        assert!(
+            text.contains(&format!("+{extra} more")),
+            "overflow hint must show exact extra count: {text}",
         );
     }
 

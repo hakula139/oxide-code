@@ -668,6 +668,52 @@ mod tests {
         insta::assert_snapshot!(render_to_backend(&input, 30, 5));
     }
 
+    #[test]
+    fn render_advances_scroll_top_when_cursor_below_viewport() {
+        // After typing N+1 logical lines, the cursor sits at row N
+        // while we render with only 3 visible content rows. The
+        // scroll-tracking math must advance `scroll_top` so the
+        // cursor stays on-screen — pin it to the expected offset.
+        let mut input = test_input();
+        for _ in 0..7 {
+            input.textarea.insert_newline();
+        }
+        type_text(&mut input, "tail");
+
+        render_to_backend(&input, 60, 5);
+
+        assert_eq!(
+            input.scroll_top.get(),
+            5,
+            "cursor at row 7 + height 3 → scroll_top = 7 + 1 - 3",
+        );
+    }
+
+    #[test]
+    fn render_rewinds_scroll_top_when_cursor_above_viewport() {
+        // First render parks `scroll_top` past the start; moving the
+        // cursor back to row 0 must rewind it so the cursor doesn't
+        // disappear off the top of the viewport.
+        let mut input = test_input();
+        for _ in 0..7 {
+            input.textarea.insert_newline();
+        }
+        type_text(&mut input, "tail");
+        render_to_backend(&input, 60, 5);
+        assert!(input.scroll_top.get() > 0);
+
+        for _ in 0..7 {
+            input.textarea.input(key(KeyCode::Up, KeyModifiers::NONE));
+        }
+        render_to_backend(&input, 60, 5);
+
+        assert_eq!(
+            input.scroll_top.get(),
+            0,
+            "cursor row 0 < prev → scroll_top tracks back down to cursor",
+        );
+    }
+
     // ── refresh_placeholder ──
 
     fn placeholder_text(input: &InputArea) -> String {

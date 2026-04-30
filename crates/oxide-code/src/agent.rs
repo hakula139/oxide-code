@@ -575,9 +575,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
+    use tokio::sync::Notify;
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -703,6 +705,39 @@ mod tests {
                         ..Default::default()
                     },
                 }
+            })
+        }
+    }
+
+    /// Tool that signals when invoked then blocks forever. Lets cancel
+    /// tests reliably wait until the agent is parked inside the tool
+    /// future before sending the interrupt — without it `tokio::join!`
+    /// races the cancel against the prior stream phase.
+    struct GateTool {
+        started: Arc<Notify>,
+    }
+
+    impl Tool for GateTool {
+        fn name(&self) -> &'static str {
+            "gate"
+        }
+
+        fn description(&self) -> &'static str {
+            "blocks until the turn is cancelled"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn run(
+            &self,
+            _input: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<ToolOutput>().await
             })
         }
     }
@@ -967,6 +1002,190 @@ mod tests {
         assert_eq!(
             drained_count, 1,
             "exactly one PromptDrained event for the queued prompt",
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_cancel_during_stream_returns_cancelled_outcome() {
+        // Biased select picks the queued Cancel before the synchronous
+        // stream future, so the turn never produces an assistant
+        // message. The session must stay at its pre-turn tail and the
+        // outcome must be Cancelled (not Completed / not an Err).
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("never reached")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::Cancel).unwrap();
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("cancel must surface as Ok(Cancelled), not Err");
+
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert_eq!(messages.len(), 1, "no assistant message recorded");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_quit_during_stream_returns_quit_outcome() {
+        // `Quit` is the explicit teardown signal; the agent loop relies
+        // on it to break out of its outer driver. Pre-queueing it must
+        // surface as Ok(Quit) so callers don't conflate it with cancel.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("never reached")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::Quit).unwrap();
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("quit must surface as Ok(Quit), not Err");
+
+        assert!(matches!(outcome, TurnOutcome::Quit));
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_sender_drop_during_turn_collapses_to_quit_outcome() {
+        // When every `UserAction` sender drops, `recv()` resolves to
+        // `None`. The agent treats it as Quit so the outer loop can
+        // exit cleanly instead of looping on a dead channel.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("never reached")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        drop(tx);
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("dead channel must surface as Ok(Quit), not Err");
+
+        assert!(matches!(outcome, TurnOutcome::Quit));
+    }
+
+    #[tokio::test]
+    async fn agent_turn_confirm_exit_is_absorbed_without_aborting_turn() {
+        // `ConfirmExit` only matters to the TUI's exit-arming hint; the
+        // agent must absorb stragglers silently so a buffered press
+        // during teardown doesn't kill an in-flight turn.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn("Hello!")]);
+        let tools = ToolRegistry::new(vec![]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        tx.try_send(UserAction::ConfirmExit).unwrap();
+
+        let outcome = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("turn must complete despite ConfirmExit");
+
+        assert!(matches!(outcome, TurnOutcome::Completed));
+        assert_eq!(messages.len(), 2, "assistant message recorded");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_cancel_during_tool_round_returns_cancelled_outcome() {
+        // Drives the tool-round path of `await_unless_aborted`: the
+        // stream completes synchronously, then `dispatch_tool_call`
+        // parks on `GateTool`'s pending future. Sending Cancel after
+        // the gate fires the started signal guarantees the cancel
+        // races the tool future, not the prior stream phase.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![tool_use_turn("tool_1", "gate", r"{}")]);
+        let started = Arc::new(Notify::new());
+        let tools = ToolRegistry::new(vec![Box::new(GateTool {
+            started: started.clone(),
+        })]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("kick off")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let prompt = empty_prompt();
+
+        let (turn_result, ()) = tokio::join!(
+            agent_turn(
+                &client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut rx,
+            ),
+            async {
+                started.notified().await;
+                tx.send(UserAction::Cancel).await.unwrap();
+            },
+        );
+
+        let outcome = turn_result.expect("cancel must surface as Ok(Cancelled), not Err");
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        // Tool-round cancel happens before the assistant tool_use and
+        // tool_result messages are appended, so the conversation must
+        // stay at the pre-turn tail. Iteration-atomic: the next turn
+        // sees the same shape it would after a clean abort.
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        // The agent did emit ToolCallStart for the gated call (the
+        // start event fires before `dispatch_tool_call` parks). The
+        // matching End event must NOT fire because the tool's future
+        // was dropped — assert on that to pin the cancel boundary.
+        let events = sink.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolCallStart { id, .. } if id == "tool_1")),
+            "ToolCallStart fired before cancel: {events:?}",
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolCallEnd { id, .. } if id == "tool_1")),
+            "ToolCallEnd must not fire after cancel: {events:?}",
         );
         drop(tx);
     }
