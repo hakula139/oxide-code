@@ -114,28 +114,34 @@ impl FileTracker {
         view: LastView,
     ) -> RecordRead {
         let content_hash = xxh64(bytes, HASH_SEED);
-        let now = OffsetDateTime::now_utc();
-        let path_buf = path.to_path_buf();
         let mut by_path = self.lock();
-        let cache_hit = matches!(view, LastView::Full)
-            && by_path
-                .get(&path_buf)
-                .is_some_and(|s| s.last_view == LastView::Full && s.content_hash == content_hash);
+
+        // Full re-read of an unchanged file: refresh mtime / size so
+        // a phantom cloud-sync touch doesn't later trip the drift
+        // path, but preserve `recorded_at` so the resume tiebreak
+        // keeps reflecting the last state change, not the last
+        // observation.
+        if matches!(view, LastView::Full)
+            && let Some(state) = by_path.get_mut(path)
+            && state.last_view == LastView::Full
+            && state.content_hash == content_hash
+        {
+            state.mtime = mtime;
+            state.size = size;
+            return RecordRead::CacheHit;
+        }
+
         by_path.insert(
-            path_buf,
+            path.to_path_buf(),
             FileState {
                 content_hash,
                 mtime,
                 size,
                 last_view: view,
-                recorded_at: now,
+                recorded_at: OffsetDateTime::now_utc(),
             },
         );
-        if cache_hit {
-            RecordRead::CacheHit
-        } else {
-            RecordRead::Inserted
-        }
+        RecordRead::Inserted
     }
 
     /// Strict gate run before Edit / Write of an existing file.
@@ -385,6 +391,26 @@ mod tests {
             RecordRead::CacheHit,
             "second full read of unchanged file is a cache hit",
         );
+    }
+
+    #[test]
+    fn record_read_cache_hit_preserves_recorded_at_refreshes_mtime() {
+        // Cache-hit is an observation, not a state change: `recorded_at`
+        // must stay pinned so the resume tiebreak keeps picking the
+        // real last-modify. But `mtime` must refresh so a phantom
+        // cloud-sync touch with identical bytes doesn't later fall
+        // into the `pre_modify_check` drift arm.
+        let tracker = FileTracker::new();
+        let path = Path::new("/tmp/a.rs");
+        let t0 = UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let t1 = UNIX_EPOCH + std::time::Duration::from_secs(2);
+        _ = tracker.record_read(path, b"hello", t0, 5, LastView::Full);
+        let first = tracker.lock().get(path).cloned().unwrap();
+        let outcome = tracker.record_read(path, b"hello", t1, 5, LastView::Full);
+        let second = tracker.lock().get(path).cloned().unwrap();
+        assert_eq!(outcome, RecordRead::CacheHit);
+        assert_eq!(first.recorded_at, second.recorded_at);
+        assert_eq!(second.mtime, t1);
     }
 
     #[test]
