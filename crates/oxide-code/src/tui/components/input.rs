@@ -101,11 +101,10 @@ impl InputArea {
             return;
         }
         self.enabled = enabled;
-        if enabled {
-            self.textarea.set_style(self.theme.text());
-        } else {
-            self.textarea.set_style(self.theme.dim());
-        }
+        // Visual styling stays put — the user can keep composing while
+        // a turn streams (typed prompts queue), so the input never
+        // looks "switched off". Only the placeholder copy reflects the
+        // run-state. Mid-turn cues live on the status bar.
         self.refresh_placeholder();
     }
 
@@ -211,15 +210,13 @@ impl Component for InputArea {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let border_style = if self.enabled {
-            self.theme.border_focused()
-        } else {
-            self.theme.border_unfocused()
-        };
-
+        // Border, marker, and textarea styling don't react to the
+        // run-state — users compose mid-turn for the queue, so the
+        // input always reads as live. The status bar carries the
+        // streaming / running-tool cue.
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(border_style)
+            .border_style(self.theme.border_focused())
             .style(self.theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -234,13 +231,8 @@ impl Component for InputArea {
         ])
         .areas(inner);
 
-        let marker_style = if self.enabled {
-            self.theme.user()
-        } else {
-            self.theme.dim()
-        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, marker_style))),
+            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, self.theme.user()))),
             prompt_area,
         );
 
@@ -249,39 +241,39 @@ impl Component for InputArea {
         // Store width for visual line count estimation on the next frame.
         self.last_width.set(textarea_area.width);
 
-        if self.enabled {
-            // screen_cursor().row is an absolute screen-line index across
-            // all wrapped lines, not viewport-relative. Replicate the
-            // scroll logic from ratatui-textarea's `next_scroll_top` to
-            // convert to a position within the rendered area.
-            let sc = self.textarea.screen_cursor();
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "cursor position fits in u16 for terminal widths"
-            )]
-            let cursor_row = sc.row as u16;
-            let height = textarea_area.height;
-            let prev = self.scroll_top.get();
-            let top = if cursor_row < prev {
-                cursor_row
-            } else if height > 0 && prev + height <= cursor_row {
-                cursor_row + 1 - height
-            } else {
-                prev
-            };
-            self.scroll_top.set(top);
+        // screen_cursor().row is an absolute screen-line index across
+        // all wrapped lines, not viewport-relative. Replicate the
+        // scroll logic from ratatui-textarea's `next_scroll_top` to
+        // convert to a position within the rendered area. Cursor
+        // tracking runs in both run-states so typing into the queue
+        // mid-turn updates the visible caret.
+        let sc = self.textarea.screen_cursor();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "cursor position fits in u16 for terminal widths"
+        )]
+        let cursor_row = sc.row as u16;
+        let height = textarea_area.height;
+        let prev = self.scroll_top.get();
+        let top = if cursor_row < prev {
+            cursor_row
+        } else if height > 0 && prev + height <= cursor_row {
+            cursor_row + 1 - height
+        } else {
+            prev
+        };
+        self.scroll_top.set(top);
 
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "cursor position fits in u16 for terminal widths"
-            )]
-            let cursor_x = textarea_area
-                .x
-                .saturating_add(sc.col as u16)
-                .min(textarea_area.right().saturating_sub(1));
-            let cursor_y = textarea_area.y + cursor_row - top;
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "cursor position fits in u16 for terminal widths"
+        )]
+        let cursor_x = textarea_area
+            .x
+            .saturating_add(sc.col as u16)
+            .min(textarea_area.right().saturating_sub(1));
+        let cursor_y = textarea_area.y + cursor_row - top;
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
@@ -602,10 +594,10 @@ mod tests {
     }
 
     #[test]
-    fn render_disabled_applies_dim_foreground_to_text() {
-        // Enable/disable only changes per-cell styling, which a text-only
-        // snapshot collapses. Sample the first textarea cell (cols 0..2
-        // hold the prompt marker, so step past them).
+    fn render_busy_state_keeps_text_styled_normally() {
+        // Composing mid-turn (for the queue) must look identical to
+        // composing idle — Claude Code does the same. Sample the first
+        // textarea cell across both states and pin them to `text`.
         let theme = Theme::default();
         let mut input = InputArea::new(&theme);
         type_text(&mut input, "pending");
@@ -623,14 +615,14 @@ mod tests {
             .fg;
 
         assert_eq!(enabled_fg, theme.text().fg.unwrap());
-        assert_eq!(disabled_fg, theme.dim().fg.unwrap());
-        assert_ne!(enabled_fg, disabled_fg);
+        assert_eq!(disabled_fg, theme.text().fg.unwrap());
     }
 
     #[test]
-    fn render_prompt_marker_uses_user_color_when_idle_and_dim_when_busy() {
-        // Pin the marker style so the disabled state visibly mutes the
-        // prompt — not just the textarea content.
+    fn render_prompt_marker_always_uses_user_color() {
+        // The chevron stays the user accent across run-states because
+        // composing mid-turn is allowed — same intent as the typed
+        // text styling above.
         let theme = Theme::default();
         let mut input = InputArea::new(&theme);
 
@@ -647,7 +639,7 @@ mod tests {
             .fg;
 
         assert_eq!(enabled_fg, theme.user().fg.unwrap());
-        assert_eq!(disabled_fg, theme.dim().fg.unwrap());
+        assert_eq!(disabled_fg, theme.user().fg.unwrap());
     }
 
     #[test]
