@@ -334,13 +334,13 @@ mod tests {
         assert!(!output.is_error);
 
         let meta = std::fs::metadata(&path).unwrap();
-        let check = tracker.pre_modify_check(
+        let check = tracker.check_stat(
             &path,
             meta.modified().unwrap(),
             meta.len(),
             crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(matches!(check, crate::file_tracker::PreModifyCheck::Pass));
+        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
     }
 
     #[tokio::test]

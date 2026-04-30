@@ -805,13 +805,13 @@ mod tests {
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
         let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.pre_modify_check(
+        let check = resumed_tracker.check_stat(
             &path_a,
             meta.modified().unwrap(),
             meta.len(),
             crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(matches!(check, crate::file_tracker::PreModifyCheck::Pass));
+        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
     }
 
     #[tokio::test]
@@ -837,20 +837,23 @@ mod tests {
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
         let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.pre_modify_check(
+        let check = resumed_tracker.check_stat(
             &path_a,
             meta.modified().unwrap(),
             meta.len(),
             crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(
-            matches!(check, crate::file_tracker::PreModifyCheck::Reject(_)),
-            "drifted file must hit the must-read-first gate, got: {check:?}",
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+            "drifted file must hit the must-read-first gate",
         );
     }
 
     #[tokio::test]
-    async fn resume_handles_missing_files() {
+    async fn resume_drops_snapshots_for_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -868,19 +871,21 @@ mod tests {
         let resumed_tracker = Arc::new(FileTracker::new());
         let resumed = resume(&store, &session_id, &resumed_tracker).unwrap();
         // restore_verified must silently drop the snapshot rather than
-        // panic; assertion is that the call returns and the tracker
-        // ends up empty.
+        // panic; the assertion verifies the tracker ends up empty for
+        // this path.
         resumed_tracker.restore_verified(resumed.file_snapshots);
-        let by_path = resumed_tracker.pre_modify_check(
+        let check = resumed_tracker.check_stat(
             &path_a,
             std::time::UNIX_EPOCH,
             0,
             crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(matches!(
-            by_path,
-            crate::file_tracker::PreModifyCheck::Reject(_)
-        ));
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+        );
     }
 
     // ── resume ──

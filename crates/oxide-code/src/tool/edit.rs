@@ -5,13 +5,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use xxhash_rust::xxh64::xxh64;
 
 use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
 };
-use crate::file_tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
+use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -230,22 +229,16 @@ async fn edit_file(
     let pre_mtime = metadata
         .modified()
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    let drift_hash =
-        match tracker.pre_modify_check(file_path, pre_mtime, metadata.len(), GatePurpose::Edit) {
-            PreModifyCheck::Pass => None,
-            PreModifyCheck::Drift { stored_hash } => Some(stored_hash),
-            PreModifyCheck::Reject(msg) => return Err(msg),
-        };
+    let stat_check = tracker
+        .check_stat(file_path, pre_mtime, metadata.len(), GatePurpose::Edit)
+        .map_err(|e| e.to_string())?;
 
     let content_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    if let Some(stored_hash) = drift_hash {
-        tracker.confirm_drift_unchanged(
-            stored_hash,
-            xxh64(&content_bytes, HASH_SEED),
-            GatePurpose::Edit,
-        )?;
+    if let StatCheck::NeedsBytes { stored_hash } = stat_check {
+        FileTracker::verify_drift_bytes(&content_bytes, stored_hash, GatePurpose::Edit)
+            .map_err(|e| e.to_string())?;
     }
     let content =
         String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;

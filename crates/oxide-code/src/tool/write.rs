@@ -4,10 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use xxhash_rust::xxh64::xxh64;
 
 use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
-use crate::file_tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
+use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
 
 pub(crate) struct WriteTool {
     tracker: Arc<FileTracker>,
@@ -133,10 +132,11 @@ async fn write_file(
     (Ok(msg), is_new)
 }
 
-/// Runs the existing-file gate ladder. `Pass` short-circuits on
-/// stat-match; `Drift` reads the file once to confirm a content-
-/// preserving touch (cloud-sync) before letting the write proceed;
-/// `Reject` surfaces the user-facing error.
+/// Runs the existing-file gate ladder. Stat-match short-circuits; on
+/// drift the file is read once to confirm a content-preserving touch
+/// (cloud-sync) before letting the write proceed. Structural
+/// rejects (never-read, partial-view) surface the model-facing
+/// `GateError` rendered via `Display`.
 async fn check_gate(
     file_path: &Path,
     meta: &std::fs::Metadata,
@@ -146,20 +146,17 @@ async fn check_gate(
     let mtime = meta
         .modified()
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    match tracker.pre_modify_check(file_path, mtime, meta.len(), GatePurpose::Write) {
-        PreModifyCheck::Pass => Ok(()),
-        PreModifyCheck::Reject(msg) => Err(msg),
-        PreModifyCheck::Drift { stored_hash } => {
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|e| format!("Error reading {path}: {e}"))?;
-            tracker.confirm_drift_unchanged(
-                stored_hash,
-                xxh64(&bytes, HASH_SEED),
-                GatePurpose::Write,
-            )
-        }
+    let stat_check = tracker
+        .check_stat(file_path, mtime, meta.len(), GatePurpose::Write)
+        .map_err(|e| e.to_string())?;
+    if let StatCheck::NeedsBytes { stored_hash } = stat_check {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("Error reading {path}: {e}"))?;
+        FileTracker::verify_drift_bytes(&bytes, stored_hash, GatePurpose::Write)
+            .map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
 //! [`crate::session::handle::SharedState`].
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -29,12 +30,9 @@ use xxhash_rust::xxh64::xxh64;
 
 /// Seed for `xxh64` over file bytes. Zero is the convention used
 /// elsewhere in the crate (`session::path::sanitize_cwd`, billing
-/// fingerprints) so the choice is consistent. Re-exported `pub(crate)`
-/// so [`crate::tool::edit`] / [`crate::tool::write`] hash bytes against
-/// the same seed as [`record_read`][FileTracker::record_read] —
-/// otherwise [`confirm_drift_unchanged`][FileTracker::confirm_drift_unchanged]
-/// would compare hashes computed under different seeds and never match.
-pub(crate) const HASH_SEED: u64 = 0;
+/// fingerprints); private so callers can't compute hashes that would
+/// compare unequal to the ones produced here.
+const HASH_SEED: u64 = 0;
 
 // ── FileTracker ──
 
@@ -85,7 +83,7 @@ pub(crate) enum LastView {
 /// Selects the user-facing error wording emitted by the gate. Both
 /// flows share the same staleness logic; only the verb differs
 /// (`editing` vs `writing to`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
     Write,
@@ -144,63 +142,57 @@ impl FileTracker {
         RecordRead::Inserted
     }
 
-    /// Strict gate run before Edit / Write of an existing file.
+    /// Strict stat-only gate run before Edit / Write of an existing
+    /// file. `Pass` on stat-match — the common case skips disk I/O.
+    /// `NeedsBytes` hands the stored hash back so the caller (which
+    /// will read the file anyway, or read it only on this branch)
+    /// forwards the bytes to [`Self::verify_drift_bytes`]. `Err`
+    /// covers the structural rejects (never read, partial read).
     ///
-    /// `Pass` on stat-match — the common case skips disk I/O. `Drift`
-    /// hands the stored hash back so the caller (which is about to
-    /// read the file anyway) computes the current hash via xxh64 and
-    /// resolves with [`Self::confirm_drift_unchanged`]. `Reject`
-    /// carries the user-facing error.
-    ///
-    /// Returning the stored hash from this method (rather than
-    /// requiring a follow-up lookup) keeps lock acquisitions strictly
-    /// minimal — one for the precheck, one for the post-edit record.
-    pub(crate) fn pre_modify_check(
+    /// Returning the stored hash from this method rather than
+    /// requiring a follow-up lookup keeps lock acquisitions minimal —
+    /// one for the precheck, one for the post-edit record.
+    pub(crate) fn check_stat(
         &self,
         path: &Path,
         current_mtime: SystemTime,
         current_size: u64,
         purpose: GatePurpose,
-    ) -> PreModifyCheck {
+    ) -> Result<StatCheck, GateError> {
         let by_path = self.lock();
         let Some(entry) = by_path.get(path) else {
-            return PreModifyCheck::Reject(message_no_entry(purpose));
+            return Err(GateError::NeverRead { purpose });
         };
         if !matches!(entry.last_view, LastView::Full) {
-            return PreModifyCheck::Reject(message_partial(purpose));
+            return Err(GateError::PartialRead { purpose });
         }
         if entry.mtime == current_mtime && entry.size == current_size {
-            PreModifyCheck::Pass
+            Ok(StatCheck::Pass)
         } else {
-            PreModifyCheck::Drift {
+            Ok(StatCheck::NeedsBytes {
                 stored_hash: entry.content_hash,
-            }
+            })
         }
     }
 
-    /// Resolves a [`PreModifyCheck::Drift`] outcome. `current_hash` is
-    /// xxh64 of the file bytes the caller just read (under
-    /// [`HASH_SEED`]). Matching hashes mean the mtime / size touch was
-    /// a no-op (Windows cloud-sync timestamp shuffle) and the gate
-    /// passes; mismatches surface the staleness error.
+    /// Resolves a [`StatCheck::NeedsBytes`] outcome: hashes `bytes`
+    /// under the private seed and compares against `stored_hash`.
+    /// Matching hashes mean the mtime / size touch was a no-op (e.g.
+    /// Windows cloud-sync timestamp shuffle) and the gate passes;
+    /// mismatches surface the staleness error.
     ///
-    /// `&self` keeps the API symmetric with [`Self::pre_modify_check`]
-    /// even though the resolution is stateless — both calls form one
-    /// gate from the caller's perspective.
-    #[expect(
-        clippy::unused_self,
-        reason = "API symmetry with pre_modify_check; both halves of one logical gate"
-    )]
-    pub(crate) fn confirm_drift_unchanged(
-        &self,
+    /// Associated function (no `&self`) because the tracker has no
+    /// state to consult here — it's a pure pairing of the private
+    /// seed with one comparison.
+    pub(crate) fn verify_drift_bytes(
+        bytes: &[u8],
         stored_hash: u64,
-        current_hash: u64,
         purpose: GatePurpose,
-    ) -> Result<(), String> {
-        if stored_hash == current_hash {
+    ) -> Result<(), GateError> {
+        if xxh64(bytes, HASH_SEED) == stored_hash {
             Ok(())
         } else {
-            Err(message_drift(purpose))
+            Err(GateError::ContentDrifted { purpose })
         }
     }
 
@@ -314,49 +306,70 @@ pub(crate) enum RecordRead {
     CacheHit,
 }
 
-/// Outcome of [`FileTracker::pre_modify_check`]. See method doc.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PreModifyCheck {
+/// Stat-only outcome of [`FileTracker::check_stat`]. `Pass` means the
+/// caller may proceed; `NeedsBytes` means the caller must hand the
+/// file bytes to [`FileTracker::verify_drift_bytes`] before
+/// proceeding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatCheck {
     Pass,
-    Drift { stored_hash: u64 },
-    Reject(String),
+    NeedsBytes { stored_hash: u64 },
 }
 
-// ── Error messages ──
+/// Structural rejection from the gate. Rendered via `Display` into
+/// the model-facing tool error; variants carry the `GatePurpose` so
+/// the render swaps verb only (`editing` vs `writing to`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GateError {
+    /// Caller hit the gate before a Read in this session recorded
+    /// anything for the path.
+    NeverRead { purpose: GatePurpose },
+    /// Prior Read was ranged (offset / limit); the model never saw
+    /// the full file, so a modification can't be trusted.
+    PartialRead { purpose: GatePurpose },
+    /// Post-stat rehash confirmed the file bytes diverged from what
+    /// the model last observed.
+    ContentDrifted { purpose: GatePurpose },
+}
+
+impl fmt::Display for GateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let verb = match self.purpose() {
+            GatePurpose::Edit => "editing",
+            GatePurpose::Write => "writing to",
+        };
+        match self {
+            Self::NeverRead { .. } => write!(
+                f,
+                "File has not been read in this session. Use the Read tool first before {verb} it.",
+            ),
+            Self::PartialRead { .. } => write!(
+                f,
+                "File has only been read partially (with offset / limit). Read the full file before {verb} it.",
+            ),
+            Self::ContentDrifted { .. } => write!(
+                f,
+                "File has been modified externally since it was last read. Re-read it before {verb} it.",
+            ),
+        }
+    }
+}
+
+impl GateError {
+    fn purpose(&self) -> GatePurpose {
+        match self {
+            Self::NeverRead { purpose }
+            | Self::PartialRead { purpose }
+            | Self::ContentDrifted { purpose } => *purpose,
+        }
+    }
+}
 
 /// Stub returned to the model when a full Read finds the file
 /// unchanged since the last full Read in this session. Saves emitting
 /// the bytes again and signals that the prior Read is still authoritative.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
-
-fn message_no_entry(purpose: GatePurpose) -> String {
-    format!(
-        "File has not been read in this session. Use the Read tool first before {} it.",
-        verb(purpose),
-    )
-}
-
-fn message_partial(purpose: GatePurpose) -> String {
-    format!(
-        "File has only been read partially (with offset / limit). Read the full file before {} it.",
-        verb(purpose),
-    )
-}
-
-fn message_drift(purpose: GatePurpose) -> String {
-    format!(
-        "File has been modified externally since it was last read. Re-read it before {} it.",
-        verb(purpose),
-    )
-}
-
-fn verb(purpose: GatePurpose) -> &'static str {
-    match purpose {
-        GatePurpose::Edit => "editing",
-        GatePurpose::Write => "writing to",
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -467,36 +480,35 @@ mod tests {
         assert_eq!(next, RecordRead::CacheHit);
     }
 
-    // ── pre_modify_check ──
+    // ── check_stat ──
 
     #[test]
-    fn pre_modify_check_no_entry_rejects_with_must_read_first() {
+    fn check_stat_no_entry_errors_never_read() {
         let tracker = FileTracker::new();
         let path = Path::new("/tmp/a.rs");
-        let check = tracker.pre_modify_check(path, UNIX_EPOCH, 0, GatePurpose::Edit);
-        let PreModifyCheck::Reject(msg) = check else {
-            panic!("expected Reject, got {check:?}");
-        };
-        assert!(
-            msg.contains("not been read"),
-            "must-read-first message: {msg}",
+        let result = tracker.check_stat(path, UNIX_EPOCH, 0, GatePurpose::Edit);
+        assert_eq!(
+            result,
+            Err(GateError::NeverRead {
+                purpose: GatePurpose::Edit,
+            }),
         );
-        assert!(msg.contains("editing"), "verb is editing for Edit: {msg}");
     }
 
     #[test]
-    fn pre_modify_check_no_entry_uses_writing_verb_for_write_purpose() {
+    fn check_stat_no_entry_carries_write_purpose_for_write_gate() {
         let tracker = FileTracker::new();
-        let check =
-            tracker.pre_modify_check(Path::new("/tmp/a.rs"), UNIX_EPOCH, 0, GatePurpose::Write);
-        let PreModifyCheck::Reject(msg) = check else {
-            panic!("expected Reject, got {check:?}");
-        };
-        assert!(msg.contains("writing to"), "verb is writing to: {msg}");
+        let result = tracker.check_stat(Path::new("/tmp/a.rs"), UNIX_EPOCH, 0, GatePurpose::Write);
+        assert_eq!(
+            result,
+            Err(GateError::NeverRead {
+                purpose: GatePurpose::Write,
+            }),
+        );
     }
 
     #[test]
-    fn pre_modify_check_partial_view_rejects_with_full_read_required() {
+    fn check_stat_partial_view_errors_partial_read() {
         let tracker = FileTracker::new();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
@@ -509,81 +521,125 @@ mod tests {
                 limit: 1,
             },
         );
-        let check = tracker.pre_modify_check(path, UNIX_EPOCH, 5, GatePurpose::Edit);
-        let PreModifyCheck::Reject(msg) = check else {
-            panic!("expected Reject, got {check:?}");
-        };
-        assert!(msg.contains("partially"), "partial-view message: {msg}");
-        assert!(msg.contains("Read the full file"), "{msg}");
+        let result = tracker.check_stat(path, UNIX_EPOCH, 5, GatePurpose::Edit);
+        assert_eq!(
+            result,
+            Err(GateError::PartialRead {
+                purpose: GatePurpose::Edit,
+            }),
+        );
     }
 
     #[test]
-    fn pre_modify_check_stat_match_passes_without_drift() {
+    fn check_stat_full_match_passes() {
         let tracker = FileTracker::new();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
-        let check = tracker.pre_modify_check(path, mtime, 5, GatePurpose::Edit);
-        assert_eq!(check, PreModifyCheck::Pass);
+        let check = tracker.check_stat(path, mtime, 5, GatePurpose::Edit);
+        assert_eq!(check, Ok(StatCheck::Pass));
     }
 
     #[test]
-    fn pre_modify_check_mtime_drift_returns_stored_hash() {
+    fn check_stat_mtime_drift_returns_stored_hash() {
         let tracker = FileTracker::new();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
 
         let drifted_mtime = mtime + Duration::from_secs(1);
-        let check = tracker.pre_modify_check(path, drifted_mtime, 5, GatePurpose::Edit);
+        let check = tracker.check_stat(path, drifted_mtime, 5, GatePurpose::Edit);
 
         assert_eq!(
             check,
-            PreModifyCheck::Drift {
+            Ok(StatCheck::NeedsBytes {
                 stored_hash: xxh64(b"hello", HASH_SEED),
-            },
+            }),
             "mtime drift surfaces the stored hash for the caller to confirm",
         );
     }
 
     #[test]
-    fn pre_modify_check_size_drift_returns_stored_hash() {
+    fn check_stat_size_drift_returns_stored_hash() {
         let tracker = FileTracker::new();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
 
-        let check = tracker.pre_modify_check(path, mtime, 999, GatePurpose::Edit);
+        let check = tracker.check_stat(path, mtime, 999, GatePurpose::Edit);
 
-        assert!(
-            matches!(check, PreModifyCheck::Drift { .. }),
-            "size drift triggers Drift even when mtime matched: {check:?}",
+        assert_eq!(
+            check,
+            Ok(StatCheck::NeedsBytes {
+                stored_hash: xxh64(b"hello", HASH_SEED),
+            }),
+            "size drift surfaces the stored hash even when mtime matched",
         );
     }
 
-    // ── confirm_drift_unchanged ──
+    // ── verify_drift_bytes ──
 
     #[test]
-    fn confirm_drift_unchanged_matching_hash_passes() {
+    fn verify_drift_bytes_phantom_drift_passes() {
         // Stat said the file changed, but rehash matches — the mtime /
         // size touch was content-preserving (cloud-sync workaround).
-        let tracker = FileTracker::new();
         let stored = xxh64(b"hello", HASH_SEED);
-        let result = tracker.confirm_drift_unchanged(stored, stored, GatePurpose::Edit);
-        assert!(result.is_ok());
+        let result = FileTracker::verify_drift_bytes(b"hello", stored, GatePurpose::Edit);
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
-    fn confirm_drift_unchanged_differing_hash_rejects_with_modified_externally() {
-        let tracker = FileTracker::new();
-        let result = tracker.confirm_drift_unchanged(
-            xxh64(b"old", HASH_SEED),
-            xxh64(b"new", HASH_SEED),
-            GatePurpose::Edit,
+    fn verify_drift_bytes_divergent_rejects_content_drifted() {
+        let stored = xxh64(b"old", HASH_SEED);
+        let result = FileTracker::verify_drift_bytes(b"new", stored, GatePurpose::Edit);
+        assert_eq!(
+            result,
+            Err(GateError::ContentDrifted {
+                purpose: GatePurpose::Edit,
+            }),
         );
-        let err = result.expect_err("hash mismatch must reject");
-        assert!(err.contains("modified externally"), "wording: {err}");
-        assert!(err.contains("Re-read"), "{err}");
+    }
+
+    // ── GateError Display ──
+
+    #[test]
+    fn gate_error_never_read_renders_with_edit_verb() {
+        let err = GateError::NeverRead {
+            purpose: GatePurpose::Edit,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("not been read"));
+        assert!(msg.contains("editing"));
+    }
+
+    #[test]
+    fn gate_error_never_read_renders_with_write_verb() {
+        let err = GateError::NeverRead {
+            purpose: GatePurpose::Write,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("not been read"));
+        assert!(msg.contains("writing to"));
+    }
+
+    #[test]
+    fn gate_error_partial_read_renders_full_read_required() {
+        let err = GateError::PartialRead {
+            purpose: GatePurpose::Edit,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("partially"));
+        assert!(msg.contains("Read the full file"));
+    }
+
+    #[test]
+    fn gate_error_content_drifted_renders_modified_externally() {
+        let err = GateError::ContentDrifted {
+            purpose: GatePurpose::Edit,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("modified externally"));
+        assert!(msg.contains("Re-read"));
     }
 
     // ── record_modify ──
