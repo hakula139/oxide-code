@@ -107,6 +107,7 @@ ox                                          # Start an interactive session
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs                       # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
+│   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
 │   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)

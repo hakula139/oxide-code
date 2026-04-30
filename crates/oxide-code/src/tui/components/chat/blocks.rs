@@ -31,11 +31,6 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
-// ── Shared Glyphs ──
-
-/// Shared left-bar glyph for tool and thinking blocks.
-pub(super) const BAR: &str = "▎";
-
 // ── Trait ──
 
 /// Immutable context passed to [`ChatBlock::render`].

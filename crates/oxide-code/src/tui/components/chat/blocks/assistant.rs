@@ -4,21 +4,10 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{ChatBlock, RenderCtx, prepend_markdown_prefix};
+use crate::tui::glyphs::{ASSISTANT_CONT, ASSISTANT_PREFIX, THINKING_PREFIX};
 use crate::tui::markdown::render_markdown;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
-
-/// First-line prefix for assistant text — diamond + space. Continuation
-/// (and all lines when the streaming block is continuing a turn) uses a
-/// 2-column space indent.
-pub(super) const ASSISTANT_PREFIX: &str = "◉ ";
-
-/// Continuation prefix for assistant markdown — two spaces matching the
-/// visual width of [`ASSISTANT_PREFIX`].
-pub(super) const ASSISTANT_CONT: &str = "  ";
-
-/// Per-line prefix for thinking blocks — shares [`BAR`] so bars align.
-const THINKING_PREFIX: &str = "▎ ";
 
 /// Header label on the first line of a thinking block.
 const THINKING_LABEL: &str = "Thinking...";
@@ -150,7 +139,6 @@ fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static>
 mod tests {
     use indoc::indoc;
 
-    use super::super::BAR;
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -160,16 +148,6 @@ mod tests {
             theme,
             show_thinking: true,
         }
-    }
-
-    // ── THINKING_PREFIX ──
-
-    #[test]
-    fn thinking_prefix_shares_bar_glyph_with_tool_blocks() {
-        assert!(
-            THINKING_PREFIX.starts_with(BAR),
-            "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?})",
-        );
     }
 
     // ── AssistantText::render ──

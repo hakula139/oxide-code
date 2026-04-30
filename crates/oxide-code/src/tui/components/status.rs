@@ -9,10 +9,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::agent::event::UserAction;
 use crate::tui::component::Component;
+use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
-
-/// Braille spinner animation frames (~80 ms per frame at 60 FPS ticks).
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Number of 16 ms ticks between spinner frame advances (~80 ms).
 const TICKS_PER_FRAME: usize = 5;

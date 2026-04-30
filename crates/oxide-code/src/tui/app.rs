@@ -21,6 +21,7 @@ use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
@@ -455,7 +456,7 @@ fn preview_line(prompt: &str, theme: &Theme) -> ratatui::text::Line<'static> {
 
     // Replace newlines with a glyph so multi-line prompts collapse to
     // one row without losing the "this is more than it looks" hint.
-    let flat = prompt.replace('\n', " ⏎ ");
+    let flat = prompt.replace('\n', NEWLINE_GLYPH);
     let display = if flat.width() > PREVIEW_ROW_CHARS {
         let mut budget = PREVIEW_ROW_CHARS.saturating_sub(3);
         let mut truncated = String::new();
@@ -473,7 +474,7 @@ fn preview_line(prompt: &str, theme: &Theme) -> ratatui::text::Line<'static> {
         flat
     };
     Line::from(vec![
-        Span::styled("❯ ", theme.dim()),
+        Span::styled(USER_PROMPT_PREFIX, theme.dim()),
         Span::styled(display, theme.dim()),
     ])
 }

@@ -11,17 +11,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::agent::event::UserAction;
 use crate::tui::component::Component;
+use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
-
-/// Prompt marker rendered to the left of the textarea on the first
-/// row. Same chevron the chat history uses for user blocks, so the
-/// input reads as the same speaker mid-composition.
-const PROMPT_MARKER: &str = "❯ ";
-/// Display columns reserved for [`PROMPT_MARKER`].
-const PROMPT_WIDTH: u16 = 2;
 
 /// Placeholder copy keyed off `(enabled, has_queued)`. Visible only
 /// while the buffer is empty.
@@ -234,8 +228,11 @@ impl Component for InputArea {
         // textarea content aligns with chat-history user blocks. The
         // marker only paints the first visible row; subsequent wrapped
         // rows leave the prompt gutter blank (hanging indent).
-        let [prompt_area, textarea_area] =
-            Layout::horizontal([Constraint::Length(PROMPT_WIDTH), Constraint::Min(0)]).areas(inner);
+        let [prompt_area, textarea_area] = Layout::horizontal([
+            Constraint::Length(USER_PROMPT_PREFIX_WIDTH),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
 
         let marker_style = if self.enabled {
             self.theme.user()
@@ -243,7 +240,7 @@ impl Component for InputArea {
             self.theme.dim()
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(PROMPT_MARKER, marker_style))),
+            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, marker_style))),
             prompt_area,
         );
 
@@ -615,13 +612,13 @@ mod tests {
 
         let enabled_fg = render_to_backend(&input, 60, 3)
             .buffer()
-            .cell(Position::new(PROMPT_WIDTH, 1))
+            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
             .unwrap()
             .fg;
         input.set_enabled(false);
         let disabled_fg = render_to_backend(&input, 60, 3)
             .buffer()
-            .cell(Position::new(PROMPT_WIDTH, 1))
+            .cell(Position::new(USER_PROMPT_PREFIX_WIDTH, 1))
             .unwrap()
             .fg;
 

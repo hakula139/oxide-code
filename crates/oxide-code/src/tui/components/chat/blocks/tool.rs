@@ -27,8 +27,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{BAR, BlockKind, ChatBlock, RenderCtx};
+use super::{BlockKind, ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
+use crate::tui::glyphs::{BAR, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -183,9 +184,9 @@ fn render_status_line(
     is_error: bool,
 ) {
     let (indicator, indicator_style) = if is_error {
-        ("✗", ctx.theme.error())
+        (TOOL_ERROR, ctx.theme.error())
     } else {
-        ("✓", ctx.theme.success())
+        (TOOL_SUCCESS, ctx.theme.success())
     };
     let border_style = border_style_for(ctx.theme, is_error);
     let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
