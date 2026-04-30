@@ -420,7 +420,8 @@ async fn agent_loop_task(
                     TurnOutcome::Quit => break,
                 }
             }
-            UserAction::Cancel => {}
+            // `ConfirmExit` is a TUI-only signal (arms the exit hint).
+            UserAction::Cancel | UserAction::ConfirmExit => {}
             UserAction::Quit => break,
         }
     }
@@ -465,6 +466,9 @@ async fn drive_turn(
                 Some(UserAction::SubmitPrompt(_)) => {
                     warn!("ignoring submit during in-flight turn");
                 }
+                // Idle-state signal that shouldn't reach a busy turn,
+                // but the TUI may still forward it during teardown.
+                Some(UserAction::ConfirmExit) => {}
             },
         }
     }

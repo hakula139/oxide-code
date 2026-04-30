@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream};
@@ -30,6 +30,10 @@ use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Window in which a second Ctrl+C confirms exit. 1 s — comfortable for
+/// a deliberate double-tap, short enough that the hint doesn't linger.
+const EXIT_WINDOW: Duration = Duration::from_secs(1);
 
 /// Root application state. Owns all components and drives the render loop.
 pub(crate) struct App {
@@ -115,6 +119,9 @@ impl App {
                     if self.status_bar.tick() {
                         self.dirty = true;
                     }
+                    if self.expire_armed_exit() {
+                        self.dirty = true;
+                    }
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -166,10 +173,24 @@ impl App {
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Streaming);
             }
-            // The status / input transition back to idle is driven by
-            // the matching `AgentEvent::Cancelled` — no local state
-            // change here.
-            UserAction::Cancel => {}
+            // The matching `AgentEvent::Cancelled` returns the input to
+            // idle; the bar flips to `Cancelling` for the duration so
+            // the user sees the request was honored.
+            UserAction::Cancel => {
+                self.status_bar.set_status(Status::Cancelling);
+            }
+            // First press arms an exit hint; a second press inside the
+            // window confirms. The agent loop ignores this variant.
+            UserAction::ConfirmExit => {
+                if let Status::ExitArmed { until } = self.status_bar.status()
+                    && Instant::now() < until
+                {
+                    self.should_quit = true;
+                } else {
+                    let until = Instant::now() + EXIT_WINDOW;
+                    self.status_bar.set_status(Status::ExitArmed { until });
+                }
+            }
             UserAction::Quit => {
                 self.should_quit = true;
             }
@@ -262,6 +283,18 @@ impl App {
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
+    }
+
+    /// Returns `true` when an [`Status::ExitArmed`] window has elapsed
+    /// and the bar was reset to idle.
+    fn expire_armed_exit(&mut self) -> bool {
+        if let Status::ExitArmed { until } = self.status_bar.status()
+            && Instant::now() >= until
+        {
+            self.status_bar.set_status(Status::Idle);
+            return true;
+        }
+        false
     }
 
     // ── Rendering ──
@@ -404,11 +437,31 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_key_ctrl_c_idle_quits() {
+    fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
+        // First press arms; second press inside the window confirms.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit);
-        assert!(app.dirty);
+        assert!(!app.should_quit, "first press only arms");
+        assert!(matches!(app.status_bar.status(), Status::ExitArmed { .. }));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "second press within window confirms");
+    }
+
+    #[test]
+    fn expire_armed_exit_returns_to_idle_after_window() {
+        // After the 1 s window the armed state evaporates so the user
+        // isn't left staring at an exit hint they didn't act on.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::ConfirmExit);
+        // Force an expired deadline so the test doesn't sleep.
+        let until = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("monotonic clock has run for at least one second since boot");
+        app.status_bar.set_status(Status::ExitArmed { until });
+
+        assert!(app.expire_armed_exit(), "stale armed state must clear");
+        assert_eq!(app.status_bar.status(), Status::Idle);
     }
 
     #[tokio::test]
@@ -501,9 +554,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_cancel_forwards_action_without_local_state_changes() {
-        // Local state stays put — the matching `AgentEvent::Cancelled`
-        // drives the transition back to idle.
+    async fn dispatch_cancel_flips_status_to_cancelling_and_forwards() {
+        // Cancel acknowledges the user request immediately by flipping
+        // the status; the matching `AgentEvent::Cancelled` returns to
+        // idle once the agent loop has actually dropped the future.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         // Drain the SubmitPrompt to isolate the Cancel payload.
@@ -513,7 +567,7 @@ mod tests {
         app.dispatch_user_action(UserAction::Cancel);
 
         assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), Status::Cancelling);
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("Cancel forwarded");
         assert!(matches!(forwarded, UserAction::Cancel));

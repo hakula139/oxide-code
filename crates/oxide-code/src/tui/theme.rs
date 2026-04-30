@@ -193,16 +193,8 @@ impl Theme {
         self.success.style()
     }
 
-    /// Warning indicator — caution / non-fatal issues. No production
-    /// consumer yet; kept for API symmetry with the rest of the
-    /// status set so users can pre-style.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "API surface; consumed in tests until a runtime caller lands"
-        )
-    )]
+    /// Warning indicator — caution / non-fatal issues (e.g.
+    /// [`Status::ExitArmed`](super::components::status::Status::ExitArmed)).
     pub(crate) fn warning(&self) -> Style {
         self.warning.style()
     }

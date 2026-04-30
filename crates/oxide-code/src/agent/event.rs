@@ -63,7 +63,12 @@ pub(crate) enum UserAction {
     SubmitPrompt(String),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
-    /// User requested quit.
+    /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
+    /// second arm within the window flips to [`Self::Quit`]. The agent
+    /// loop ignores this variant; only the TUI consumes it.
+    ConfirmExit,
+    /// Hard quit (Ctrl+D, or confirmed exit). Both the TUI and the
+    /// agent loop tear down on this.
     Quit,
 }
 

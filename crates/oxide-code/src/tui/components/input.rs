@@ -23,11 +23,15 @@ const MAX_VISIBLE_LINES: u16 = 6;
 /// expands.
 ///
 /// Key bindings (idle):
+///
 /// - Enter: submit prompt
 /// - Shift+Enter: insert newline
-/// - Ctrl+C / Ctrl+D: quit
+/// - Ctrl+C: arm exit (second press within 1 s exits)
+/// - Ctrl+D: quit when the input is empty (POSIX EOF idiom);
+///   no-op when the input has content
 ///
 /// Key bindings (busy, i.e. disabled):
+///
 /// - Esc / Ctrl+C: cancel the in-flight turn
 /// - Ctrl+D: quit
 pub(crate) struct InputArea {
@@ -89,17 +93,26 @@ impl InputArea {
 
 impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
-        // Ctrl+D always quits — historical EOF semantics.
+        // Ctrl+D follows the POSIX EOF idiom: quit only when the input
+        // buffer is empty so a stray press while composing never
+        // discards work. The disabled (busy) buffer is empty by
+        // construction, so mid-turn Ctrl+D still exits.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,
             ..
         }) = event
         {
-            return Some(UserAction::Quit);
+            return if self.is_empty() {
+                Some(UserAction::Quit)
+            } else {
+                None
+            };
         }
 
-        // Ctrl+C: cancel mid-turn, quit when idle.
+        // Ctrl+C: cancel mid-turn; arm exit when idle. The arm-vs-exit
+        // decision lives in `App::dispatch_user_action` since it owns
+        // the [`Status::ExitArmed`] window.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
@@ -107,7 +120,7 @@ impl Component for InputArea {
         }) = event
         {
             return Some(if self.enabled {
-                UserAction::Quit
+                UserAction::ConfirmExit
             } else {
                 UserAction::Cancel
             });
@@ -252,12 +265,20 @@ impl InputArea {
             .max(1)
     }
 
+    /// Whether the buffer contains only whitespace. Drives the
+    /// POSIX-style Ctrl+D EOF gate (and short-circuits empty submits).
+    fn is_empty(&self) -> bool {
+        self.textarea
+            .lines()
+            .iter()
+            .all(|line| line.trim().is_empty())
+    }
+
     fn submit(&mut self) -> Option<UserAction> {
-        let content: String = self.textarea.lines().join("\n");
-        let trimmed = content.trim().to_owned();
-        if trimmed.is_empty() {
+        if self.is_empty() {
             return None;
         }
+        let trimmed = self.textarea.lines().join("\n").trim().to_owned();
 
         // Clear the textarea and reset scroll state.
         self.textarea.select_all();
@@ -327,15 +348,16 @@ mod tests {
     // ── handle_event ──
 
     #[test]
-    fn handle_event_ctrl_c_idle_returns_quit() {
+    fn handle_event_ctrl_c_idle_arms_exit() {
         let mut input = test_input();
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(UserAction::Quit)));
+        assert!(matches!(action, Some(UserAction::ConfirmExit)));
     }
 
     #[test]
-    fn handle_event_ctrl_d_returns_quit_in_any_state() {
-        // Ctrl+D is the historical EOF key; no busy-state override.
+    fn handle_event_ctrl_d_quits_when_empty_in_any_state() {
+        // POSIX EOF idiom: Ctrl+D on an empty buffer exits in both
+        // idle and busy states (busy buffer is empty by construction).
         let mut input = test_input();
         let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(matches!(idle_action, Some(UserAction::Quit)));
@@ -343,6 +365,20 @@ mod tests {
         input.set_enabled(false);
         let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(matches!(busy_action, Some(UserAction::Quit)));
+    }
+
+    #[test]
+    fn handle_event_ctrl_d_with_content_is_a_noop() {
+        // Pressing Ctrl+D mid-prompt must not discard the typed text —
+        // matches bash / zsh / Codex behaviour.
+        let mut input = test_input();
+        input.textarea.input(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
+        let action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["h"]);
     }
 
     #[test]

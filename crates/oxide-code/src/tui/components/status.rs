@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -47,6 +49,16 @@ pub(crate) enum Status {
     Idle,
     Streaming,
     ToolRunning,
+    /// User-issued `Cancel` is being honored — the partial turn is
+    /// being torn down, but [`crate::agent::event::AgentEvent::Cancelled`]
+    /// hasn't arrived yet.
+    Cancelling,
+    /// First Ctrl+C from idle armed an exit confirmation. A second
+    /// Ctrl+C before `until` exits; otherwise the timer expires and
+    /// the status returns to [`Self::Idle`] silently.
+    ExitArmed {
+        until: Instant,
+    },
 }
 
 impl StatusBar {
@@ -77,10 +89,9 @@ impl StatusBar {
         self.status = status;
     }
 
-    /// Current status. Exposed for observable state in sibling-module
-    /// tests (e.g., `tui::app`) so assertions don't have to reach
-    /// through private fields.
-    #[cfg(test)]
+    /// Current status. Used by [`App`](super::super::app::App) to
+    /// arm-or-exit on Ctrl+C and to clear an expired
+    /// [`Status::ExitArmed`] from the tick arm.
     pub(crate) fn status(&self) -> Status {
         self.status
     }
@@ -92,10 +103,11 @@ impl StatusBar {
         self.title.as_deref()
     }
 
-    /// Advances the spinner animation. Call on each tick when not idle.
-    /// Returns `true` if the spinner frame changed (caller should mark dirty).
+    /// Advances the spinner animation. Returns `true` if the frame
+    /// changed (caller should mark dirty). The non-spinner states
+    /// ([`Status::Idle`], [`Status::ExitArmed`]) short-circuit.
     pub(crate) fn tick(&mut self) -> bool {
-        if self.status == Status::Idle {
+        if !is_animated(self.status) {
             return false;
         }
         self.tick_counter += 1;
@@ -181,17 +193,30 @@ impl StatusBar {
     fn status_span(&self) -> Span<'static> {
         match self.status {
             Status::Idle => Span::styled("ready", self.theme.success()),
-            Status::Streaming | Status::ToolRunning => {
+            Status::Streaming | Status::ToolRunning | Status::Cancelling => {
                 let spinner = SPINNER_FRAMES[self.spinner_frame];
-                let label = if self.status == Status::Streaming {
-                    "streaming..."
-                } else {
-                    "running tool..."
+                let label = match self.status {
+                    Status::Streaming => "streaming...",
+                    Status::ToolRunning => "running tool...",
+                    Status::Cancelling => "cancelling...",
+                    _ => unreachable!(),
                 };
                 Span::styled(format!("{spinner} {label}"), self.theme.info())
             }
+            Status::ExitArmed { .. } => {
+                Span::styled("Press Ctrl+C again to exit", self.theme.warning())
+            }
         }
     }
+}
+
+/// Whether the status drives the braille spinner. Idle is at rest;
+/// [`Status::ExitArmed`] uses a static hint instead of an animation.
+fn is_animated(status: Status) -> bool {
+    matches!(
+        status,
+        Status::Streaming | Status::ToolRunning | Status::Cancelling,
+    )
 }
 
 /// Builds the `title │` insert. The leading `│` is provided by the separator
@@ -468,6 +493,22 @@ mod tests {
     fn render_tool_running_status() {
         let mut bar = bar_idle(None, "~/projects/demo");
         bar.set_status(Status::ToolRunning);
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_cancelling_shows_spinner_and_label() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::Cancelling);
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_exit_armed_shows_static_hint_without_spinner() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::ExitArmed {
+            until: Instant::now() + std::time::Duration::from_secs(1),
+        });
         insta::assert_snapshot!(render_status(&mut bar, 80));
     }
 
