@@ -6,8 +6,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use xxhash_rust::xxh64::xxh64;
 
-use super::tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
 use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
+use crate::file_tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
 
 pub(crate) struct WriteTool {
     tracker: Arc<FileTracker>,
@@ -164,8 +164,8 @@ async fn check_gate(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tracker::LastView;
     use super::*;
+    use crate::file_tracker::LastView;
 
     fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::new())

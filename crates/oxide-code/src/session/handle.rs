@@ -21,9 +21,9 @@ use super::store::{
     SessionData, SessionStore, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
+use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::tool::ToolMetadata;
-use crate::tool::tracker::{FileSnapshot, FileTracker};
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -809,9 +809,9 @@ mod tests {
             &path_a,
             meta.modified().unwrap(),
             meta.len(),
-            crate::tool::tracker::GatePurpose::Edit,
+            crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(matches!(check, crate::tool::tracker::PreModifyCheck::Pass));
+        assert!(matches!(check, crate::file_tracker::PreModifyCheck::Pass));
     }
 
     #[tokio::test]
@@ -841,10 +841,10 @@ mod tests {
             &path_a,
             meta.modified().unwrap(),
             meta.len(),
-            crate::tool::tracker::GatePurpose::Edit,
+            crate::file_tracker::GatePurpose::Edit,
         );
         assert!(
-            matches!(check, crate::tool::tracker::PreModifyCheck::Reject(_)),
+            matches!(check, crate::file_tracker::PreModifyCheck::Reject(_)),
             "drifted file must hit the must-read-first gate, got: {check:?}",
         );
     }
@@ -875,11 +875,11 @@ mod tests {
             &path_a,
             std::time::UNIX_EPOCH,
             0,
-            crate::tool::tracker::GatePurpose::Edit,
+            crate::file_tracker::GatePurpose::Edit,
         );
         assert!(matches!(
             by_path,
-            crate::tool::tracker::PreModifyCheck::Reject(_)
+            crate::file_tracker::PreModifyCheck::Reject(_)
         ));
     }
 

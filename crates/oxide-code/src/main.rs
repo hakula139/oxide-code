@@ -8,6 +8,7 @@
 mod agent;
 mod client;
 mod config;
+mod file_tracker;
 mod message;
 mod model;
 mod prompt;
@@ -29,6 +30,7 @@ use agent::agent_turn;
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 use client::anthropic::Client;
 use config::Config;
+use file_tracker::FileTracker;
 use message::Message;
 use prompt::environment::marketing_name;
 use session::handle::{ResumedSession, SessionHandle};
@@ -37,7 +39,7 @@ use session::resolver::resolve_session;
 use session::store::SessionStore;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
-    tracker::FileTracker, write::WriteTool,
+    write::WriteTool,
 };
 use util::path::tildify;
 

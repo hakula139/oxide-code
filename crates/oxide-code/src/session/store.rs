@@ -23,9 +23,9 @@ use uuid::Uuid;
 use super::chain::ChainBuilder;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
-use crate::tool::tracker::FileSnapshot;
 use crate::util::fs::create_private_dir_all;
 use crate::util::path::xdg_dir;
 
@@ -539,7 +539,7 @@ pub(crate) struct SessionData {
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Persisted file-tracker state collected from every
     /// [`Entry::FileSnapshot`](crate::session::entry::Entry) in the
-    /// file. Handed to [`FileTracker::restore_verified`][crate::tool::tracker::FileTracker::restore_verified]
+    /// file. Handed to [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
     /// before the agent loop runs so the gate clears for files that
     /// still match disk. Empty for pre-upgrade sessions and for any
     /// session that exited without writing a summary.

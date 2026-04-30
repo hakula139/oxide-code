@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter};
+use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::tracker::FileTracker;
 
 /// Maximum title length (in characters) derived from the first user prompt.
 ///

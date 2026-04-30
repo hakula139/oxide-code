@@ -14,7 +14,7 @@ use tracing::debug;
 
 use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
-use crate::tool::tracker::FileTracker;
+use crate::file_tracker::FileTracker;
 
 /// Normalized form of the CLI `--continue` argument. Built by
 /// [`normalize_resume_arg`] and consumed by [`resolve_session`].

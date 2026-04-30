@@ -199,9 +199,9 @@ mod tests {
     use super::super::handle::SharedState;
     use super::super::store::test_store;
     use super::*;
+    use crate::file_tracker::FileTracker;
     use crate::message::Message;
     use crate::session::state::SessionState;
-    use crate::tool::tracker::FileTracker;
 
     fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::new())

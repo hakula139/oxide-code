@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
-use crate::tool::tracker::FileSnapshot;
 
 /// Current session file format version. Bump on incompatible changes.
 pub(crate) const CURRENT_VERSION: u32 = 1;
@@ -99,7 +99,7 @@ pub(crate) enum Entry {
     /// [`super::state::SessionState::finish_entries`] at session end so
     /// resume can skip the cold-tracker re-Read on every previously-
     /// observed file. The shape is wire-stable; see
-    /// [`FileSnapshot`][crate::tool::tracker::FileSnapshot].
+    /// [`FileSnapshot`][crate::file_tracker::FileSnapshot].
     FileSnapshot {
         #[serde(flatten)]
         snapshot: FileSnapshot,
@@ -419,7 +419,7 @@ mod tests {
             content_hash: 0xDEAD_BEEF,
             mtime: datetime!(2026-04-29 12:00:00 UTC),
             size: 7,
-            last_view: crate::tool::tracker::LastView::Full,
+            last_view: crate::file_tracker::LastView::Full,
             recorded_at: datetime!(2026-04-29 12:34:56 UTC),
         };
         let entry = Entry::FileSnapshot {

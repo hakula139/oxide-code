@@ -211,9 +211,9 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::Auth;
+    use crate::file_tracker::FileTracker;
     use crate::message::Message;
     use crate::session::store::test_store;
-    use crate::tool::tracker::FileTracker;
 
     // ── Fixtures ──
 

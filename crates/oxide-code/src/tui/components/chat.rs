@@ -502,8 +502,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
+    use crate::file_tracker::FileTracker;
     use crate::message::{ContentBlock, Role};
-    use crate::tool::tracker::FileTracker;
 
     // ── Fixtures ──
 

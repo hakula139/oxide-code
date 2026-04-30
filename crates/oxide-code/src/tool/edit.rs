@@ -7,11 +7,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use xxhash_rust::xxh64::xxh64;
 
-use super::tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
 use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
 };
+use crate::file_tracker::{FileTracker, GatePurpose, HASH_SEED, PreModifyCheck};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
@@ -463,8 +463,8 @@ fn apply_eol(content: String, eol: &str) -> String {
 mod tests {
     use indoc::indoc;
 
-    use super::super::tracker::LastView;
     use super::*;
+    use crate::file_tracker::LastView;
 
     fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::new())

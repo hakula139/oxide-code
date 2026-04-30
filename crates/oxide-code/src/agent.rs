@@ -411,10 +411,10 @@ mod tests {
         ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
     };
     use crate::config::Auth;
+    use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
-    use crate::tool::tracker::FileTracker;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
     // ── agent_turn ──

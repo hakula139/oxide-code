@@ -11,7 +11,6 @@ pub(crate) mod edit;
 pub(crate) mod glob;
 pub(crate) mod grep;
 pub(crate) mod read;
-pub(crate) mod tracker;
 pub(crate) mod write;
 
 use std::borrow::Cow;
@@ -675,9 +674,9 @@ mod tests {
     use super::glob::GlobTool;
     use super::grep::GrepTool;
     use super::read::ReadTool;
-    use super::tracker::FileTracker;
     use super::write::WriteTool;
     use super::*;
+    use crate::file_tracker::FileTracker;
 
     /// Every registered tool, to parameterize trait-contract tests.
     fn all_tools() -> Vec<Box<dyn Tool>> {

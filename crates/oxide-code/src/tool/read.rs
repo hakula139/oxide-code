@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use super::tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
 use super::{
     ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
     extract_input_field, summarize_path_call,
 };
+use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
 /// Per-file size cap for `read` (10 MB). Accommodates typical large
@@ -338,9 +338,9 @@ mod tests {
             &path,
             meta.modified().unwrap(),
             meta.len(),
-            super::super::tracker::GatePurpose::Edit,
+            crate::file_tracker::GatePurpose::Edit,
         );
-        assert!(matches!(check, super::super::tracker::PreModifyCheck::Pass));
+        assert!(matches!(check, crate::file_tracker::PreModifyCheck::Pass));
     }
 
     #[tokio::test]
