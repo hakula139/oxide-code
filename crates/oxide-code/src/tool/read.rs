@@ -12,10 +12,13 @@ use super::{
 };
 use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
 
+/// Default line cap when the caller doesn't pass `limit`.
 const DEFAULT_LINE_LIMIT: usize = 2000;
-/// Per-file size cap for `read` (10 MB). Accommodates typical large
-/// config / log files while rejecting accidental binary dumps.
+
+/// Per-file size cap (10 MB). Fits typical large config / log
+/// files; rejects accidental binary dumps.
 const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Stand-in content for a zero-byte file. The producer writes it; the
 /// `read_excerpt_view` consumer compares against it to render an empty
 /// excerpt — the two paths must agree on the exact string.

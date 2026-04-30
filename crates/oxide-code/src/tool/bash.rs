@@ -8,6 +8,9 @@ use tokio::process::Command;
 
 use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
+/// Default per-command timeout — two minutes covers typical
+/// compile / test cycles without letting a runaway command hold
+/// the agent loop indefinitely.
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Stand-in content when a command produced no stdout / stderr.

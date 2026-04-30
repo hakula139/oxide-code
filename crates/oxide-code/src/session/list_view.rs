@@ -17,6 +17,30 @@ use super::store::SessionStore;
 use crate::util::path::tildify;
 use crate::util::text::truncate_to_width;
 
+/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
+/// prefix every row shares before `--all` inserts its optional Project
+/// column and the row finally reaches `Title`.
+const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
+
+/// Smallest title-column width we will truncate to. Below this, the
+/// output is so narrow that truncation destroys almost all signal, so
+/// we skip it and let the terminal wrap instead.
+const MIN_TITLE_BUDGET: usize = 12;
+
+/// Minimum width for the `Project` column — at least wide enough to
+/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
+const PROJECT_COL_MIN: usize = 8;
+
+/// Upper cap on the `Project` column width. A session started from a
+/// pathologically deep path should not squeeze the `Title` column into
+/// oblivion; the value overflows its padding when a row exceeds the
+/// cap (one-off alignment hiccup rather than hiding the title column
+/// for the entire listing).
+const PROJECT_COL_MAX: usize = 40;
+
+/// Title-column fallback when a session has no recorded title yet.
+const UNTITLED_MARKER: &str = "(untitled)";
+
 /// Render `--list` output to `out`.
 ///
 /// `all` selects the store scope: `false` lists only the current
@@ -133,30 +157,6 @@ fn render_sessions(
     }
     Ok(())
 }
-
-/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
-/// prefix every row shares before `--all` inserts its optional Project
-/// column and the row finally reaches `Title`.
-const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
-
-/// Title column fallback when a session has no recorded title yet.
-const UNTITLED_MARKER: &str = "(untitled)";
-
-/// Smallest title-column width we will truncate to. Below this, the
-/// output is so narrow that truncation destroys almost all signal, so
-/// we skip it and let the terminal wrap instead.
-const MIN_TITLE_BUDGET: usize = 12;
-
-/// Minimum width for the `Project` column — at least wide enough to
-/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
-const PROJECT_COL_MIN: usize = 8;
-
-/// Upper cap on the `Project` column width. A session started from a
-/// pathologically deep path should not squeeze the `Title` column into
-/// oblivion; the value overflows its padding when a row exceeds the
-/// cap (one-off alignment hiccup rather than hiding the title column
-/// for the entire listing).
-const PROJECT_COL_MAX: usize = 40;
 
 #[cfg(test)]
 mod tests {
