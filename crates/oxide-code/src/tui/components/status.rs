@@ -11,6 +11,7 @@ use crate::agent::event::UserAction;
 use crate::tui::component::Component;
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
+use crate::util::text::truncate_to_width;
 
 /// Number of 16 ms ticks between spinner frame advances (~80 ms).
 const TICKS_PER_FRAME: usize = 5;
@@ -20,9 +21,6 @@ const TICKS_PER_FRAME: usize = 5;
 /// terminals: core left (`  ox │ model │ streaming...`) is ~30 columns, 40
 /// leaves breathing room for cwd on the right.
 const MAX_TITLE_WIDTH: usize = 40;
-
-/// Visual width of the `...` truncation marker (three ASCII dots).
-const ELLIPSIS_WIDTH: usize = 3;
 
 /// Status bar at the top of the TUI.
 ///
@@ -233,7 +231,7 @@ fn title_slot_spans<'a>(
     style: ratatui::style::Style,
 ) -> Vec<Span<'a>> {
     vec![
-        Span::styled(truncate_title(title, MAX_TITLE_WIDTH), style),
+        Span::styled(truncate_to_width(title, MAX_TITLE_WIDTH), style),
         sep.clone(),
     ]
 }
@@ -242,31 +240,6 @@ fn title_slot_spans<'a>(
 /// and the final insert share the same measurement.
 fn slot_width(slot: &Vec<Span<'_>>) -> usize {
     slot.iter().map(Span::width).sum()
-}
-
-/// Truncates `title` to `max_width` columns, appending `...` when shortened.
-/// CJK / emoji are billed at their rendered width via `unicode-width`.
-fn truncate_title(title: &str, max_width: usize) -> String {
-    if title.width() <= max_width {
-        return title.to_owned();
-    }
-    let (budget, tail) = if max_width >= ELLIPSIS_WIDTH {
-        (max_width - ELLIPSIS_WIDTH, "...")
-    } else {
-        (max_width, "")
-    };
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in title.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push_str(tail);
-    out
 }
 
 /// Greedy fit: which optional slots can we afford? Returns
@@ -600,27 +573,6 @@ mod tests {
             !output.contains('~'),
             "no tildified path should appear: {output:?}",
         );
-    }
-
-    // ── truncate_title ──
-
-    #[test]
-    fn truncate_title_short_unchanged() {
-        assert_eq!(truncate_title("hello", 20), "hello");
-    }
-
-    #[test]
-    fn truncate_title_adds_ellipsis_when_over() {
-        assert_eq!(truncate_title("abcdefghij", 5), "ab...");
-    }
-
-    #[test]
-    fn truncate_title_respects_cjk_width() {
-        // 4 CJK chars * 2 cols = 8 cols total. Budget 5 → keep 1 CJK (2
-        // cols) + ellipsis (3 cols) = 5 cols.
-        let out = truncate_title("测试文本", 5);
-        assert_eq!(out, "测...");
-        assert_eq!(out.width(), 5);
     }
 
     // ── fit_layout ──

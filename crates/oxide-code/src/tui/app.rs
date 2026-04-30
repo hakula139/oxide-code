@@ -452,27 +452,11 @@ impl App {
 /// truncation budget matches what the user actually sees.
 fn preview_line(prompt: &str, theme: &Theme) -> ratatui::text::Line<'static> {
     use ratatui::text::{Line, Span};
-    use unicode_width::UnicodeWidthStr;
 
     // Replace newlines with a glyph so multi-line prompts collapse to
     // one row without losing the "this is more than it looks" hint.
     let flat = prompt.replace('\n', NEWLINE_GLYPH);
-    let display = if flat.width() > PREVIEW_ROW_CHARS {
-        let mut budget = PREVIEW_ROW_CHARS.saturating_sub(3);
-        let mut truncated = String::new();
-        for ch in flat.chars() {
-            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if w > budget {
-                break;
-            }
-            truncated.push(ch);
-            budget -= w;
-        }
-        truncated.push_str("...");
-        truncated
-    } else {
-        flat
-    };
+    let display = crate::util::text::truncate_to_width(&flat, PREVIEW_ROW_CHARS);
     Line::from(vec![
         Span::styled(USER_PROMPT_PREFIX, theme.dim()),
         Span::styled(display, theme.dim()),

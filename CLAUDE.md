@@ -120,7 +120,8 @@ ox                                          # Start an interactive session
     ├── fs.rs                               # Filesystem helpers — `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
-    └── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
+    ├── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
+    └── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
 ```
 
 ## Coding Conventions
