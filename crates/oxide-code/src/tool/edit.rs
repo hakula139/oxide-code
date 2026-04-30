@@ -237,7 +237,7 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
     if let StatCheck::NeedsBytes { stored_hash } = stat_check {
-        FileTracker::verify_drift_bytes(&content_bytes, stored_hash, GatePurpose::Edit)
+        FileTracker::verify_drift_bytes(file_path, &content_bytes, stored_hash, GatePurpose::Edit)
             .map_err(|e| e.to_string())?;
     }
     let content =

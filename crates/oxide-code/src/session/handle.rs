@@ -841,6 +841,7 @@ mod tests {
         assert_eq!(
             check,
             Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
                 purpose: crate::file_tracker::GatePurpose::Edit,
             }),
             "drifted file must hit the must-read-first gate",
@@ -878,6 +879,7 @@ mod tests {
         assert_eq!(
             check,
             Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
                 purpose: crate::file_tracker::GatePurpose::Edit,
             }),
         );

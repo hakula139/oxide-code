@@ -153,7 +153,7 @@ async fn check_gate(
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| format!("Error reading {path}: {e}"))?;
-        FileTracker::verify_drift_bytes(&bytes, stored_hash, GatePurpose::Write)
+        FileTracker::verify_drift_bytes(file_path, &bytes, stored_hash, GatePurpose::Write)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
