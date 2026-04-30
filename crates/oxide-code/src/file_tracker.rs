@@ -47,13 +47,26 @@ pub(crate) struct FileTracker {
 
 /// Per-file disk state captured at the most recent Read / Write / Edit.
 /// Compared against `stat()` on subsequent gate checks.
+///
+/// The two timestamp fields use different types intentionally:
+/// `mtime` is `SystemTime` because that's what
+/// [`std::fs::Metadata::modified`] hands back — comparing the in-
+/// memory entry to a fresh stat skips a conversion on every gate
+/// check. `recorded_at` is `OffsetDateTime` because it ends up in the
+/// JSONL as RFC3339 alongside `Header::created_at`,
+/// `Title::updated_at`, etc., and the infallible
+/// `OffsetDateTime ↔ SystemTime` conversions in the `time` crate
+/// only fire at the persistence boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileState {
     /// xxh64 of the file bytes the model last observed (Read) or
     /// produced (Edit / Write).
     content_hash: u64,
-    /// `metadata.modified()` at capture. Compared against the current
-    /// mtime to short-circuit the rehash path.
+    /// `metadata.modified()` at capture, kept as `SystemTime` so the
+    /// hot-path gate compares against fresh `stat()` output without
+    /// any conversion. Round-tripped through
+    /// [`FileSnapshot::mtime`]'s `OffsetDateTime` representation only
+    /// at session-finish / resume boundaries.
     mtime: SystemTime,
     /// `metadata.len()` at capture. Same role as `mtime` but cheaper
     /// to flip — drift in either field triggers the rehash.
@@ -306,6 +319,14 @@ impl FileTracker {
 /// Persisted on-disk shape of one tracker entry. Wire-stable: the
 /// session JSONL carries this as
 /// [`Entry::FileSnapshot`][crate::session::entry::Entry::FileSnapshot].
+///
+/// `mtime` is `OffsetDateTime` here (whereas
+/// [`FileState`] keeps `SystemTime`) so the JSONL stays human-
+/// readable RFC3339 — same convention as `Header::created_at` and
+/// the other entry-level timestamps. The `time` crate's
+/// `OffsetDateTime ↔ SystemTime` conversions are infallible, so
+/// `FileTracker::snapshot_all` and `restore_verified` cross the
+/// boundary without a `Result`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
