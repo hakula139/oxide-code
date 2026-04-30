@@ -65,10 +65,11 @@ pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 // ── Status spinner ──
 
-/// Braille spinner frames for the streaming / running-tool status.
+/// 8-dot Braille rotation spinner (`cli-spinners` `dots2`). Each
+/// frame omits one dot which rotates clockwise, so the spin reads
+/// as centered without the bottom-row padding 6-dot variants leave.
 /// Cycle by index — `SPINNER_FRAMES[(tick / period) % len()]`.
-pub(crate) const SPINNER_FRAMES: &[char] =
-    &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+pub(crate) const SPINNER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
 
 #[cfg(test)]
 mod tests {
