@@ -73,6 +73,7 @@ ox                                          # Start an interactive session
 │   ├── glob.rs                             # File pattern matching (glob)
 │   ├── grep.rs                             # Content search via regex
 │   ├── read.rs                             # File reading with line numbers and pagination
+│   ├── tracker.rs                          # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
 │   └── write.rs                            # File writing with directory creation
 ├── tui.rs                                  # TUI module root
 ├── tui/
