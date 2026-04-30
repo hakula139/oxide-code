@@ -94,12 +94,16 @@ async fn write_file(
     tracker: &FileTracker,
 ) -> (Result<String, String>, bool) {
     let file_path = Path::new(path);
-    let pre_meta = tokio::fs::metadata(path).await;
-    let is_new = matches!(&pre_meta, Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    let pre_meta = match tokio::fs::metadata(path).await {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return (Err(format!("Error reading {path}: {e}")), false),
+    };
+    let is_new = pre_meta.is_none();
 
     // Existing files run the strict gate; new files bypass — there is
     // nothing to clobber.
-    if let Ok(meta) = &pre_meta
+    if let Some(meta) = &pre_meta
         && let Err(msg) = check_gate(file_path, meta, path, tracker).await
     {
         return (Err(msg), is_new);
@@ -141,7 +145,7 @@ async fn check_gate(
 ) -> Result<(), String> {
     let mtime = meta
         .modified()
-        .map_err(|_| format!("Failed to read metadata for {path}"))?;
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
     match tracker.pre_modify_check(file_path, mtime, meta.len(), GatePurpose::Write) {
         PreModifyCheck::Pass => Ok(()),
         PreModifyCheck::Reject(msg) => Err(msg),
@@ -299,13 +303,25 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_fails_when_parent_is_a_file() {
+        // The parent component is a regular file, so `metadata()`
+        // returns ENOTDIR. The stat error is surfaced via the same
+        // `Error reading {path}: {e}` shape as edit.rs.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "I am a file").unwrap();
 
         let path = blocker.join("child.txt");
-        let (result, _) = write_file(path.to_str().unwrap(), "content", &FileTracker::new()).await;
-        assert!(result.unwrap_err().contains("Failed to create directory"));
+        let path_str = path.to_str().unwrap();
+        let (result, is_new) = write_file(path_str, "content", &FileTracker::new()).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("Error reading ") && err.contains(path_str),
+            "expected stat error to mention the path, got: {err}",
+        );
+        assert!(
+            !is_new,
+            "ENOTDIR should not be classified as a new-file case"
+        );
     }
 
     #[tokio::test]
