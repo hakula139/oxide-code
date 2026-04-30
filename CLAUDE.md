@@ -92,6 +92,7 @@ ox                                          # Start an interactive session
 │   │   │   └── blocks/
 │   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
 │   │   │       ├── error.rs                # ErrorBlock
+│   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/

@@ -12,12 +12,14 @@
 
 mod assistant;
 mod error;
+mod interrupted;
 mod streaming;
 mod tool;
 mod user;
 
 pub(super) use assistant::{AssistantText, AssistantThinking};
 pub(super) use error::ErrorBlock;
+pub(super) use interrupted::InterruptedMarker;
 pub(super) use streaming::StreamingAssistant;
 pub(super) use tool::{ToolCallBlock, ToolResultBlock};
 pub(super) use user::UserMessage;

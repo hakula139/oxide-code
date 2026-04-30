@@ -23,8 +23,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, RenderCtx,
-    StreamingAssistant, ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
+    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, InterruptedMarker,
+    RenderCtx, StreamingAssistant, ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
@@ -244,6 +244,13 @@ impl ChatView {
     /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
+    }
+
+    /// Appends a dim italic `(interrupted)` marker. Pair with
+    /// [`commit_streaming`](Self::commit_streaming) on cancel so the
+    /// transcript shows where the user dropped the turn.
+    pub(crate) fn push_interrupted_marker(&mut self) {
+        self.blocks.push(Box::new(InterruptedMarker));
     }
 
     /// Number of committed chat blocks. Exposed for observable state in

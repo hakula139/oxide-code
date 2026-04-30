@@ -215,12 +215,12 @@ impl App {
         match event {
             AgentEvent::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
-                self.status_bar.set_status(Status::Streaming);
+                self.set_active_status(Status::Streaming);
                 self.input.set_enabled(false);
             }
             AgentEvent::ThinkingToken(token) => {
                 self.chat.append_thinking_token(&token);
-                self.status_bar.set_status(Status::Streaming);
+                self.set_active_status(Status::Streaming);
             }
             AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
@@ -231,7 +231,7 @@ impl App {
                 self.chat.push_tool_call(icon, &label);
                 self.pending_calls
                     .insert(id, PendingCall { label, name, input });
-                self.status_bar.set_status(Status::ToolRunning);
+                self.set_active_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
                 id,
@@ -259,8 +259,14 @@ impl App {
             AgentEvent::TurnComplete => {
                 self.finish_turn();
             }
-            // Same teardown as `TurnComplete` — partial buffer commits as-is.
-            AgentEvent::Cancelled => self.finish_turn(),
+            // Same teardown as `TurnComplete`, plus a trailing
+            // `(interrupted)` marker so the transcript shows where
+            // the user dropped the turn.
+            AgentEvent::Cancelled => {
+                self.chat.commit_streaming();
+                self.chat.push_interrupted_marker();
+                self.finalize_idle();
+            }
             AgentEvent::SessionTitleUpdated(title) => {
                 self.status_bar.set_title(Some(title));
             }
@@ -274,6 +280,12 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        self.finalize_idle();
+    }
+
+    /// Shared tail for every turn-end path (normal, error, cancelled):
+    /// drop orphan tool calls, drop the spinner, re-enable input.
+    fn finalize_idle(&mut self) {
         // A tool call whose matching `ToolCallEnd` didn't arrive by
         // turn end is orphaned — either the agent loop dropped the
         // pairing (bug) or the tool crashed before emitting a result.
@@ -283,6 +295,16 @@ impl App {
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
+    }
+
+    /// Sets a busy status only when the bar isn't already in
+    /// [`Status::Cancelling`] — otherwise late events buffered in the
+    /// agent channel would overwrite the cancel acknowledgment before
+    /// the matching [`AgentEvent::Cancelled`] arrives.
+    fn set_active_status(&mut self, status: Status) {
+        if !matches!(self.status_bar.status(), Status::Cancelling) {
+            self.status_bar.set_status(status);
+        }
     }
 
     /// Returns `true` when an [`Status::ExitArmed`] window has elapsed
@@ -671,17 +693,67 @@ mod tests {
     }
 
     #[test]
-    fn handle_cancelled_returns_to_idle_and_reenables_input() {
-        // Cancelled shares the teardown shape of TurnComplete: the
-        // partial stream commits and idle state returns.
+    fn handle_cancelled_commits_partial_stream_with_marker_and_returns_idle() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
-        app.handle_agent_event(AgentEvent::StreamToken("part".into()));
+        app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
+        let entries_before = app.chat.entry_count();
         assert_eq!(app.status_bar.status(), Status::Streaming);
 
         app.handle_agent_event(AgentEvent::Cancelled);
+
         assert_eq!(app.status_bar.status(), Status::Idle);
         assert!(app.input.is_enabled());
+        // commit_streaming pushes the partial text as an AssistantText
+        // block; push_interrupted_marker pushes the marker — two new
+        // entries on top of whatever was there.
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before + 2,
+            "partial assistant text + interrupted marker",
+        );
+        let text = rendered_text(&mut app, 60, 12);
+        assert!(text.contains("partial answer"), "stream tail kept: {text}");
+        assert!(text.contains("(interrupted)"), "marker present: {text}");
+    }
+
+    #[test]
+    fn cancelling_status_is_sticky_against_late_buffered_events() {
+        // After the user dispatches Cancel, the agent channel may still
+        // have queued StreamToken / ToolCallStart events the agent emitted
+        // before its select arm dropped the turn future. Those buffered
+        // events must not flip the bar back to Streaming / ToolRunning —
+        // otherwise the cancel acknowledgement flickers off until
+        // `Cancelled` finally arrives.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.dispatch_user_action(UserAction::Cancel);
+        assert_eq!(app.status_bar.status(), Status::Cancelling);
+
+        app.handle_agent_event(AgentEvent::StreamToken("late".into()));
+        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "t-late".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(app.status_bar.status(), Status::Cancelling);
+    }
+
+    #[test]
+    fn handle_cancelled_with_no_stream_still_pushes_marker() {
+        // Cancel during a tool call (or before any stream tokens) —
+        // commit_streaming is a no-op, but the marker still lands so
+        // the user sees where the cancel hit.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        let entries_before = app.chat.entry_count();
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+
+        assert_eq!(app.chat.entry_count(), entries_before + 1);
+        let text = rendered_text(&mut app, 60, 8);
+        assert!(text.contains("(interrupted)"), "marker present: {text}");
     }
 
     #[test]
