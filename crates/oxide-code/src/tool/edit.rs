@@ -119,45 +119,6 @@ impl Tool for EditTool {
     }
 }
 
-// ── Result View ──
-
-/// Parses the replacement count from the success-path output returned
-/// by [`edit_file`] when `replace_all` hits multiple matches — a
-/// `"Replaced N occurrences in <path>."` string. Returns `None` for
-/// the single-match shape (`"Successfully edited ..."`), in which case
-/// the caller defaults to 1. Used only as a final fallback for resumed
-/// sessions whose JSONL predates structured metadata.
-///
-/// The content-format contract this parser relies on is pinned by
-/// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
-/// test so rewording the success string in `edit_file` breaks the
-/// test, not the renderer silently.
-fn parse_replacement_count(content: &str) -> Option<usize> {
-    content
-        .strip_prefix("Replaced ")?
-        .split_ascii_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// Builds a single best-effort chunk from raw input strings.
-///
-/// Used by [`EditTool::result_view`] when the resumed session JSONL
-/// carries no structured `diff_chunks`. Line numbers start at 1 —
-/// they're the best we have without re-reading the (possibly already
-/// mutated) file. Exposed `pub(crate)` so TUI snapshot tests can
-/// build the same shape as the production resume path without
-/// duplicating the trim policy.
-pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
-    let mut chunk = DiffChunk {
-        old: split_into_diff_lines(old, 1),
-        new: split_into_diff_lines(new, 1),
-    };
-    trim_chunk(&mut chunk);
-    chunk
-}
-
 // ── Input ──
 
 #[derive(Deserialize)]
@@ -451,6 +412,45 @@ fn apply_eol(content: String, eol: &str) -> String {
     } else {
         content
     }
+}
+
+// ── Result View ──
+
+/// Parses the replacement count from the success-path output returned
+/// by [`edit_file`] when `replace_all` hits multiple matches — a
+/// `"Replaced N occurrences in <path>."` string. Returns `None` for
+/// the single-match shape (`"Successfully edited ..."`), in which case
+/// the caller defaults to 1. Used only as a final fallback for resumed
+/// sessions whose JSONL predates structured metadata.
+///
+/// The content-format contract this parser relies on is pinned by
+/// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
+/// test so rewording the success string in `edit_file` breaks the
+/// test, not the renderer silently.
+fn parse_replacement_count(content: &str) -> Option<usize> {
+    content
+        .strip_prefix("Replaced ")?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Builds a single best-effort chunk from raw input strings.
+///
+/// Used by [`EditTool::result_view`] when the resumed session JSONL
+/// carries no structured `diff_chunks`. Line numbers start at 1 —
+/// they're the best we have without re-reading the (possibly already
+/// mutated) file. Exposed `pub(crate)` so TUI snapshot tests can
+/// build the same shape as the production resume path without
+/// duplicating the trim policy.
+pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+    let mut chunk = DiffChunk {
+        old: split_into_diff_lines(old, 1),
+        new: split_into_diff_lines(new, 1),
+    };
+    trim_chunk(&mut chunk);
+    chunk
 }
 
 #[cfg(test)]
