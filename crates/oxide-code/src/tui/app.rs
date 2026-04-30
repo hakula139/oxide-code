@@ -458,8 +458,8 @@ fn preview_line(prompt: &str, theme: &Theme) -> ratatui::text::Line<'static> {
     let flat = prompt.replace('\n', NEWLINE_GLYPH);
     let display = crate::util::text::truncate_to_width(&flat, PREVIEW_ROW_CHARS);
     Line::from(vec![
-        Span::styled(USER_PROMPT_PREFIX, theme.dim()),
-        Span::styled(display, theme.dim()),
+        Span::styled(USER_PROMPT_PREFIX, theme.queued()),
+        Span::styled(display, theme.queued()),
     ])
 }
 

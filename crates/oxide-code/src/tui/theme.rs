@@ -57,6 +57,7 @@ macro_rules! for_each_slot {
             // Semantic accents
             (accent, "Highlights, active borders (bold by default)"),
             (user, "User messages and icon"),
+            (queued, "Queued user prompts in the preview panel"),
             (assistant, "Assistant messages and icon"),
 
             // Status indicators (ascending severity)
@@ -174,6 +175,11 @@ impl Theme {
     /// User message bar and icon
     pub(crate) fn user(&self) -> Style {
         self.user.style()
+    }
+
+    /// Queued user prompts in the preview panel between chat and input
+    pub(crate) fn queued(&self) -> Style {
+        self.queued.style()
     }
 
     /// Assistant message bar and icon

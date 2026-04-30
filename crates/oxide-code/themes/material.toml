@@ -18,6 +18,7 @@ surface = { bg = "#121212" }
 # Semantic accents (M2 dark theme baseline primary, Material 200-tone)
 accent = { fg = "#bb86fc", bold = true }
 user = "#ffab91"
+queued = "#f48fb1"
 assistant = "#ce93d8"
 
 # Status indicators (Material 200-tone palette + M2 dark error)
