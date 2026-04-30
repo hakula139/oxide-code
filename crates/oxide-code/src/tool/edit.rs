@@ -290,11 +290,9 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
-    if let Ok(meta) = tokio::fs::metadata(path).await
-        && let Ok(mtime) = meta.modified()
-    {
-        tracker.record_modify(file_path, updated.as_bytes(), mtime, meta.len());
-    }
+    tracker
+        .record_modify_after_write(file_path, updated.as_bytes())
+        .await;
 
     let message = if replace_all && match_count > 1 {
         format!("Replaced {match_count} occurrences in {path}.")

@@ -122,11 +122,9 @@ async fn write_file(
         return (Err(format!("Failed to write file: {e}")), is_new);
     }
 
-    if let Ok(meta) = tokio::fs::metadata(path).await
-        && let Ok(mtime) = meta.modified()
-    {
-        tracker.record_modify(file_path, content.as_bytes(), mtime, meta.len());
-    }
+    tracker
+        .record_modify_after_write(file_path, content.as_bytes())
+        .await;
 
     let msg = if is_new {
         format!("Successfully created {path}.")

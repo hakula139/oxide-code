@@ -227,6 +227,20 @@ impl FileTracker {
         );
     }
 
+    /// Re-`stat()`s `path` after a successful Edit / Write and records
+    /// the resulting state. Best-effort: a stat or `modified()` failure
+    /// silently skips the record so a successful disk write isn't
+    /// reported back as failed; the next gate check will rehash if
+    /// needed. Combines the post-write dance Edit and Write previously
+    /// duplicated.
+    pub(crate) async fn record_modify_after_write(&self, path: &Path, bytes: &[u8]) {
+        if let Ok(meta) = tokio::fs::metadata(path).await
+            && let Ok(mtime) = meta.modified()
+        {
+            self.record_modify(path, bytes, mtime, meta.len());
+        }
+    }
+
     /// Snapshot every tracked file for persistence. Used by
     /// [`SessionState::finish_entries`][crate::session::state::SessionState]
     /// at session end — the actor batches the resulting entries into
@@ -784,6 +798,44 @@ mod tests {
         );
         tracker.record_modify(path, b"world", UNIX_EPOCH, 5);
         assert_eq!(tracker.lock().get(path).unwrap().last_view, LastView::Full);
+    }
+
+    // ── record_modify_after_write ──
+
+    #[tokio::test]
+    async fn record_modify_after_write_records_disk_state() {
+        // The post-write helper re-stats the file and records the new
+        // hash, mtime, and size against the bytes the caller just
+        // wrote. A subsequent gate check must `Pass` without rehash.
+        let tracker = FileTracker::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"updated").unwrap();
+        tracker.record_modify_after_write(&path, b"updated").await;
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let check = tracker.check_stat(
+            &path,
+            meta.modified().unwrap(),
+            meta.len(),
+            GatePurpose::Edit,
+        );
+        assert_eq!(check, Ok(StatCheck::Pass));
+    }
+
+    #[tokio::test]
+    async fn record_modify_after_write_swallows_stat_failure_silently() {
+        // Stat failures (typically because the caller passed a path
+        // the OS can't see) must not panic — the helper is best-effort
+        // so a successful disk write isn't reported as failed. The
+        // tracker simply records nothing.
+        let tracker = FileTracker::new();
+        let path = Path::new("/nonexistent/never-here.rs");
+        tracker.record_modify_after_write(path, b"bytes").await;
+        assert!(
+            tracker.lock().get(path).is_none(),
+            "stat failure must not insert anything",
+        );
     }
 
     // ── snapshot_all ──
