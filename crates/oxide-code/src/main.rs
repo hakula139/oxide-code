@@ -26,8 +26,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agent::agent_turn;
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use agent::{TurnOutcome, agent_turn};
 use client::anthropic::Client;
 use config::Config;
 use file_tracker::FileTracker;
@@ -390,7 +390,7 @@ async fn agent_loop_task(
                 }
 
                 let prompt = prompt::build_prompt(client.model()).await;
-                let outcome = drive_turn(
+                let outcome = agent_turn(
                     &client,
                     &tools,
                     &mut messages,
@@ -401,10 +401,14 @@ async fn agent_loop_task(
                 )
                 .await;
                 match outcome {
-                    TurnOutcome::Completed(Ok(())) => {
+                    Ok(TurnOutcome::Completed) => {
                         _ = sink.send(AgentEvent::TurnComplete);
                     }
-                    TurnOutcome::Completed(Err(e)) => {
+                    Ok(TurnOutcome::Cancelled) => {
+                        _ = sink.send(AgentEvent::Cancelled);
+                    }
+                    Ok(TurnOutcome::Quit) => break,
+                    Err(e) => {
                         // `{e:#}` flattens the anyhow cause chain into one
                         // string ("stream error: API error (HTTP 503): ...").
                         // Plain `Display` would drop everything below the
@@ -414,10 +418,6 @@ async fn agent_loop_task(
                         _ = sink.send(AgentEvent::Error(format!("{e:#}")));
                         _ = sink.send(AgentEvent::TurnComplete);
                     }
-                    TurnOutcome::Cancelled => {
-                        _ = sink.send(AgentEvent::Cancelled);
-                    }
-                    TurnOutcome::Quit => break,
                 }
             }
             // `ConfirmExit` is a TUI-only signal (arms the exit hint).
@@ -429,49 +429,6 @@ async fn agent_loop_task(
     // Summary is written by the caller (run_tui) to guarantee it runs
     // regardless of how this task exits.
     Ok(())
-}
-
-/// Outcome of one [`drive_turn`] call. `Cancelled` drops the future,
-/// relying on reqwest's stream-close-on-drop and `kill_on_drop(true)`
-/// to reap in-flight work. `Quit` ends the agent loop.
-enum TurnOutcome {
-    Completed(Result<()>),
-    Cancelled,
-    Quit,
-}
-
-/// Run one turn while watching `user_rx` for cancel / quit so an Esc /
-/// Ctrl+C from the TUI can drop the future. Submits during a busy turn
-/// are not expected — the TUI disables its input — but a stray one is
-/// logged and ignored rather than dropped silently.
-async fn drive_turn(
-    client: &Client,
-    tools: &Arc<ToolRegistry>,
-    messages: &mut Vec<Message>,
-    prompt: &prompt::PromptParts,
-    sink: &tui::event::ChannelSink,
-    session: &SessionHandle,
-    user_rx: &mut mpsc::Receiver<UserAction>,
-) -> TurnOutcome {
-    let turn = agent_turn(client, tools, messages, prompt, sink, session);
-    tokio::pin!(turn);
-
-    loop {
-        tokio::select! {
-            result = &mut turn => return TurnOutcome::Completed(result),
-            action = user_rx.recv() => match action {
-                Some(UserAction::Cancel) => return TurnOutcome::Cancelled,
-                // `None`: every sender dropped — TUI is gone, exit.
-                Some(UserAction::Quit) | None => return TurnOutcome::Quit,
-                Some(UserAction::SubmitPrompt(_)) => {
-                    warn!("ignoring submit during in-flight turn");
-                }
-                // Idle-state signal that shouldn't reach a busy turn,
-                // but the TUI may still forward it during teardown.
-                Some(UserAction::ConfirmExit) => {}
-            },
-        }
-    }
 }
 
 // ── Bare REPL Mode ──
@@ -493,6 +450,12 @@ async fn bare_repl(
     // (as opposed to EOF / error). See the post-`finish()` exit note
     // below for why we care.
     let mut shutdown_fired = false;
+    // Bare REPL has no in-process source of `UserAction`s — Ctrl+C
+    // arrives via `shutdown_signal()` and drops the turn future from
+    // the outer `select!`. Keep `_user_tx` alive so `user_rx.recv()`
+    // inside `agent_turn` stays pending instead of returning `None`
+    // (which would terminate the turn as `TurnOutcome::Quit`).
+    let (_user_tx, mut user_rx) = mpsc::channel::<UserAction>(1);
 
     let result: Result<()> = async {
         loop {
@@ -527,7 +490,15 @@ async fn bare_repl(
             // Allow the in-flight turn to be interrupted too; the
             // session state that's already been written persists and
             // resume-side sanitization heals any dangling tool_use.
-            let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
+            let turn = agent_turn(
+                client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut user_rx,
+            );
             let turn_result = tokio::select! {
                 r = turn => r,
                 () = shutdown_signal() => {
@@ -536,6 +507,12 @@ async fn bare_repl(
                     break;
                 }
             };
+            // Ignore the `TurnOutcome` discriminant in bare REPL — Ctrl+C is
+            // routed via `shutdown_signal()` (which drops the turn future
+            // from the outer `select!`), not via `UserAction::Cancel`. So
+            // a `TurnOutcome::Cancelled` here would only fire if the test
+            // harness pushed one on the channel; treat it the same as
+            // `Completed` for shell purposes.
             turn_result?;
             _ = sink.send(AgentEvent::TurnComplete);
         }
@@ -582,9 +559,23 @@ async fn headless(
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
-    let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
-    let result = tokio::select! {
-        r = turn => r,
+    // Headless has no in-process `UserAction` source — keep a sender
+    // alive so `agent_turn`'s race against `user_rx.recv()` stays
+    // pending until shutdown drops the future externally.
+    let (_user_tx, mut user_rx) = mpsc::channel::<UserAction>(1);
+    let turn = agent_turn(
+        client,
+        &tools,
+        &mut messages,
+        &prompt,
+        &sink,
+        &session,
+        &mut user_rx,
+    );
+    let result: Result<()> = tokio::select! {
+        // Discard the `TurnOutcome`: headless has no follow-up surface,
+        // so Cancelled / Quit / Completed are all the same exit signal.
+        r = turn => r.map(|_| ()),
         () = shutdown_signal() => {
             eprintln!();
             shutdown_fired = true;

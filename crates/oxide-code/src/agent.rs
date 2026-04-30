@@ -9,12 +9,13 @@ pub(crate) mod event;
 pub(crate) mod pending_calls;
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::agent::event::{AgentEvent, AgentSink};
+use crate::agent::event::{AgentEvent, AgentSink, UserAction};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
@@ -23,6 +24,30 @@ use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
+
+// ── Turn Outcome ──
+
+/// Result of one [`agent_turn`] call.
+///
+/// `Cancelled` and `Quit` are user-initiated terminations: the caller
+/// observes them by returning, then drops the future. Drop cleans up
+/// the in-flight HTTP stream (reqwest closes on drop) and any tool
+/// subprocesses (`tokio::process::Child` is `kill_on_drop(true)`).
+/// Errors bubble through `Result::Err`.
+#[derive(Debug)]
+pub(crate) enum TurnOutcome {
+    /// The model produced a text-only response and the turn ended
+    /// naturally (or [`MAX_TOOL_ROUNDS`] tripped — the safety-cap
+    /// `bail!` branch surfaces as `Err`, not `Completed`).
+    Completed,
+    /// The user pressed Esc / Ctrl+C — drop the future and tell the
+    /// TUI to render an `(interrupted)` marker.
+    Cancelled,
+    /// The user requested quit (Ctrl+D, confirmed exit, or the TUI
+    /// dropped the action channel). The agent loop returns to its
+    /// outer driver, which exits.
+    Quit,
+}
 
 // ── Agent Client ──
 
@@ -58,6 +83,13 @@ impl AgentClient for Client {
 /// emits and looping until the model produces a text-only response or the
 /// safety cap [`MAX_TOOL_ROUNDS`] is exceeded. Records each assistant /
 /// tool-result message to `session` as it completes.
+///
+/// Long-running awaits inside the loop (the SSE stream and each tool's
+/// execution) race against `user_rx` so a TUI-side Esc / Ctrl+C can
+/// drop the future cleanly. Mid-turn [`UserAction::SubmitPrompt`] is
+/// observed but currently dropped with a warn — the next commit
+/// replaces this with accumulation into a per-turn pending buffer
+/// drained at each round boundary.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -65,7 +97,8 @@ pub(crate) async fn agent_turn(
     prompt: &PromptParts,
     sink: &dyn AgentSink,
     session: &SessionHandle,
-) -> Result<()> {
+    user_rx: &mut mpsc::Receiver<UserAction>,
+) -> Result<TurnOutcome> {
     let tool_defs = tools.definitions();
 
     for _ in 0..MAX_TOOL_ROUNDS {
@@ -73,7 +106,15 @@ pub(crate) async fn agent_turn(
         let StreamOutcome {
             blocks,
             parse_errors,
-        } = stream_response(client, messages, &tool_defs, prompt, sink).await?;
+        } = match await_unless_aborted(
+            stream_response(client, messages, &tool_defs, prompt, sink),
+            user_rx,
+        )
+        .await
+        {
+            Ok(r) => r?,
+            Err(outcome) => return Ok(outcome),
+        };
 
         let tool_uses: Vec<_> = blocks
             .iter()
@@ -95,7 +136,7 @@ pub(crate) async fn agent_turn(
             // and return.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(());
+            return Ok(TurnOutcome::Completed);
         }
 
         let mut results = Vec::new();
@@ -116,7 +157,10 @@ pub(crate) async fn agent_turn(
                     metadata: ToolMetadata::default(),
                 }
             } else {
-                tools.run(&name, input).await
+                match await_unless_aborted(tools.run(&name, input), user_rx).await {
+                    Ok(out) => out,
+                    Err(outcome) => return Ok(outcome),
+                }
             };
 
             _ = sink.send(AgentEvent::ToolCallEnd {
@@ -165,6 +209,41 @@ pub(crate) async fn agent_turn(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )
+}
+
+/// Race `fut` against user actions on `user_rx`. Returns the future's
+/// output on completion, or a terminal [`TurnOutcome`] when the user
+/// cancels or quits — `Err(outcome)` so the caller can `?`-style
+/// short-circuit out of the round loop.
+///
+/// Mid-turn [`UserAction::SubmitPrompt`] is observed but dropped with
+/// a `warn!`. The next commit replaces this with accumulation into a
+/// per-turn buffer.
+async fn await_unless_aborted<F, T>(
+    fut: F,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+) -> std::result::Result<T, TurnOutcome>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            output = &mut fut => return Ok(output),
+            action = user_rx.recv() => match action {
+                Some(UserAction::Cancel) => return Err(TurnOutcome::Cancelled),
+                // `None` means every sender dropped — the TUI is gone, treat
+                // it as a quit so the agent loop exits cleanly.
+                Some(UserAction::Quit) | None => return Err(TurnOutcome::Quit),
+                Some(UserAction::SubmitPrompt(_)) => {
+                    warn!("ignoring submit during in-flight turn");
+                }
+                // Idle-state signal that shouldn't reach a busy turn,
+                // but the TUI may still forward it during teardown.
+                Some(UserAction::ConfirmExit) => {}
+            },
+        }
+    }
 }
 
 /// Surfaces the first I/O failure on `sink`; drops the AI-title seed
@@ -530,6 +609,17 @@ mod tests {
         }
     }
 
+    /// Returns a `UserAction` channel whose sender is leaked, so the
+    /// receiver's `recv()` future stays pending for the lifetime of
+    /// the test. `agent_turn` callers that don't drive cancellation /
+    /// quit / submit signals (every test in this module) use this to
+    /// satisfy the `user_rx` parameter without coordinating signals.
+    fn inert_user_rx() -> mpsc::Receiver<UserAction> {
+        let (tx, rx) = mpsc::channel(1);
+        std::mem::forget(tx);
+        rx
+    }
+
     fn empty_prompt() -> PromptParts {
         PromptParts {
             system_sections: vec![],
@@ -565,6 +655,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -605,6 +696,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -637,6 +729,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -676,6 +769,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -733,6 +827,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -773,6 +868,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -827,6 +923,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .expect_err("cap must trip");
@@ -859,6 +956,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .expect_err("api error must propagate");
@@ -903,6 +1001,7 @@ mod tests {
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();
@@ -962,6 +1061,7 @@ data: {"type":"message_stop"}
             &empty_prompt(),
             &sink,
             &session,
+            &mut inert_user_rx(),
         )
         .await
         .unwrap();

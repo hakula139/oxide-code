@@ -232,7 +232,10 @@ impl Component for InputArea {
         .areas(inner);
 
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(USER_PROMPT_PREFIX, self.theme.user()))),
+            Paragraph::new(Line::from(Span::styled(
+                USER_PROMPT_PREFIX,
+                self.theme.user(),
+            ))),
             prompt_area,
         );
 

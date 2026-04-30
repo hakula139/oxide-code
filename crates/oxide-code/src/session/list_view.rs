@@ -138,7 +138,10 @@ fn render_sessions(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = s.title.as_ref().map_or(UNTITLED_MARKER, |t| t.title.as_str());
+        let raw_title = s
+            .title
+            .as_ref()
+            .map_or(UNTITLED_MARKER, |t| t.title.as_str());
         let title = match title_budget {
             Some(budget) => truncate_to_width(raw_title, budget),
             None => raw_title.to_owned(),
@@ -373,5 +376,4 @@ mod tests {
             "full title should render when budget too small: {out}",
         );
     }
-
 }
