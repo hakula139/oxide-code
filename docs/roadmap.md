@@ -68,6 +68,7 @@ The direction is simple:
 
 ### Terminal UI
 
+- Turn interruption and queued input — Esc / Ctrl+C cancels an in-flight stream or tool, double-press Ctrl+C exits from idle, typed prompts during streaming queue and fire after the current turn (see [Cancellation and Queued Input](research/design/cancellation-and-queued-input.md)).
 - Viewport virtualization for long conversations after the richer result views and block measurement hooks are in place.
 
 ### Tool & Prompt Enhancements

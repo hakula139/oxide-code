@@ -15,9 +15,10 @@ Architecture research and API reference notes for oxide-code development. Split 
 
 ## Design surveys
 
-| Document                                             | Description                                                           |
-| ---------------------------------------------------- | --------------------------------------------------------------------- |
-| [Session Persistence](design/session-persistence.md) | Session persistence: JSONL format, storage layout, listing strategy   |
-| [Terminal UI](design/tui.md)                         | TUI research: reference projects, flickering prevention, crate stack  |
-| [Tool Output Truncation](design/tool-truncation.md)  | Tool dispatcher truncation: per-tool vs central, caps and spillover   |
-| [File Change Tracking](design/file-tracking.md)      | Read-before-Edit gate, staleness detection, persistence across resume |
+| Document                                                                 | Description                                                           |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| [Session Persistence](design/session-persistence.md)                     | Session persistence: JSONL format, storage layout, listing strategy   |
+| [Terminal UI](design/tui.md)                                             | TUI research: reference projects, flickering prevention, crate stack  |
+| [Tool Output Truncation](design/tool-truncation.md)                      | Tool dispatcher truncation: per-tool vs central, caps and spillover   |
+| [File Change Tracking](design/file-tracking.md)                          | Read-before-Edit gate, staleness detection, persistence across resume |
+| [Cancellation and Queued Input](design/cancellation-and-queued-input.md) | Esc / Ctrl+C cancel, double-press exit, queued prompts, run-state UX  |
