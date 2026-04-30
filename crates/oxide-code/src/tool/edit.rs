@@ -1059,8 +1059,8 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_after_external_modification_is_rejected() {
-        // Read at one mtime, then overwrite the bytes so pre_modify_check
-        // returns Drift; the rehash catches the new bytes.
+        // Read at one mtime, then overwrite the bytes so check_stat
+        // returns NeedsBytes; the rehash catches the new bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1074,6 +1074,36 @@ mod tests {
             err.contains("modified externally"),
             "drift error expected, got: {err}",
         );
+    }
+
+    #[tokio::test]
+    async fn edit_file_phantom_drift_passes_via_hash_match() {
+        // Cloud-sync touch shape: the stat moved (mtime / size) but the
+        // bytes are identical to what was last Read. Without the rehash
+        // fallback the gate would over-reject. Forcing the drift path
+        // by handing `record_read` a fake older mtime keeps the test
+        // hermetic — the gate check sees a stat mismatch and falls
+        // through to verify_drift_bytes, which matches.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "old content").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
+
+        let tracker = FileTracker::default();
+        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
+
+        let result = edit_file(
+            path.to_str().unwrap(),
+            "old content",
+            "new content",
+            false,
+            &tracker,
+        )
+        .await;
+        result.expect("phantom drift must not block edit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
     }
 
     #[tokio::test]

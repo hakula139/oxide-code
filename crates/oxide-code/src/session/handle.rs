@@ -743,6 +743,10 @@ mod tests {
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
+        // Three tracked files in → three FileSnapshot lines on disk,
+        // each pinning the actual path the gate observed. Counting
+        // strings would pass even if every snapshot pointed at the
+        // same file, so parse the JSONL and assert the path set.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -751,20 +755,31 @@ mod tests {
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("trigger")).await;
-        for name in ["a.rs", "b.rs", "c.rs"] {
-            record_tracked_file(&tracker, &files_dir.path().join(name), name.as_bytes());
-        }
+        let expected_paths: std::collections::HashSet<std::path::PathBuf> = ["a.rs", "b.rs", "c.rs"]
+            .into_iter()
+            .map(|name| {
+                let path = files_dir.path().join(name);
+                record_tracked_file(&tracker, &path, name.as_bytes());
+                path
+            })
+            .collect();
 
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        let path = test_session_file(dir.path(), &sid);
-        let content = std::fs::read_to_string(path).unwrap();
-        let snapshot_count = content
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
             .lines()
             .filter(|l| l.contains(r#""type":"file_snapshot""#))
-            .count();
-        assert_eq!(snapshot_count, 3);
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                std::path::PathBuf::from(v["path"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            snapshot_paths, expected_paths,
+            "every tracked file lands as its own FileSnapshot",
+        );
     }
 
     #[tokio::test]

@@ -164,6 +164,7 @@ async fn check_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_tracker::LastView;
     use crate::file_tracker::testing::{seed_full_read, tracker};
 
     // ── run ──
@@ -260,6 +261,28 @@ mod tests {
             "drift error expected, got: {err}",
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+    }
+
+    #[tokio::test]
+    async fn write_file_phantom_drift_passes_via_hash_match() {
+        // Cloud-sync touch on the write side: stat says the file
+        // changed, but the bytes haven't. The gate must rehash and
+        // accept; without the fallback the write would be rejected
+        // even though no real conflict exists.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "stable content").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
+
+        let tracker = FileTracker::default();
+        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
+
+        let (result, is_new) = write_file(path.to_str().unwrap(), "fresh content", &tracker).await;
+        result.expect("phantom drift must not block write");
+        assert!(!is_new);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh content");
     }
 
     #[tokio::test]

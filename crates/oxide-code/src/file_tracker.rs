@@ -950,6 +950,34 @@ mod tests {
     }
 
     #[test]
+    fn restore_verified_mtime_drift_drops_snapshot() {
+        // Companion to the size-drift test: the size still matches but
+        // mtime moved (someone edited the file between sessions). The
+        // snapshot must drop so the next Edit re-Reads instead of
+        // trusting the stale hash.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"alpha").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: xxh64(b"alpha", HASH_SEED),
+            mtime: OffsetDateTime::from(meta.modified().unwrap()) - Duration::from_mins(1),
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::default();
+        tracker.restore_verified(vec![snap]);
+        assert!(
+            tracker.lock().get(&path).is_none(),
+            "mtime mismatch must drop the snapshot even when size matches",
+        );
+    }
+
+    #[test]
     fn restore_verified_missing_file_drops_snapshot() {
         let snap = FileSnapshot {
             path: PathBuf::from("/nonexistent/path/a.rs"),

@@ -442,6 +442,31 @@ mod tests {
         assert_eq!(parsed, snapshot);
     }
 
+    #[test]
+    fn file_snapshot_unknown_field_is_ignored_for_forward_compat() {
+        // A newer writer may grow new fields on the snapshot; older
+        // readers must keep parsing the entry by ignoring unknown
+        // keys (the implicit serde default since no
+        // `#[serde(deny_unknown_fields)]` is set). Pin so a future
+        // tightening regresses noisily here, not at resume time.
+        let json = serde_json::json!({
+            "type": "file_snapshot",
+            "path": "/tmp/a.rs",
+            "content_hash": 1_u64,
+            "mtime": "2026-04-29T12:00:00Z",
+            "size": 5,
+            "last_view": {"kind": "full"},
+            "recorded_at": "2026-04-29T12:00:00Z",
+            "future_field": "from a newer writer",
+        });
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::FileSnapshot { snapshot } = parsed else {
+            panic!("expected FileSnapshot, got {parsed:?}");
+        };
+        assert_eq!(snapshot.path, std::path::PathBuf::from("/tmp/a.rs"));
+        assert_eq!(snapshot.content_hash, 1);
+    }
+
     // ── Entry::Unknown ──
 
     #[test]
