@@ -79,17 +79,19 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
-/// Drives one user → assistant turn, executing any tool calls the model
-/// emits and looping until the model produces a text-only response or the
-/// safety cap [`MAX_TOOL_ROUNDS`] is exceeded. Records each assistant /
-/// tool-result message to `session` as it completes.
+/// Drives one user → assistant turn until the model produces a
+/// text-only response or [`MAX_TOOL_ROUNDS`] trips. Records each
+/// assistant / tool-result message to `session` as it completes.
 ///
-/// Long-running awaits inside the loop (the SSE stream and each tool's
-/// execution) race against `user_rx` so a TUI-side Esc / Ctrl+C can
-/// drop the future cleanly. Mid-turn [`UserAction::SubmitPrompt`] is
-/// observed but currently dropped with a warn — the next commit
-/// replaces this with accumulation into a per-turn pending buffer
-/// drained at each round boundary.
+/// Long-running awaits race against `user_rx` for three signals:
+///
+/// 1. Esc / Ctrl+C → [`TurnOutcome::Cancelled`]; drop unwinds the SSE
+///    stream and any tool subprocesses.
+/// 2. TUI sender drop → [`TurnOutcome::Quit`].
+/// 3. Mid-turn [`UserAction::SubmitPrompt`] → buffered into
+///    `pending_user_text`, drained at the next round boundary as a
+///    trailing user message so the queued text lands in the very next
+///    API request without aborting in-flight work.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -100,6 +102,9 @@ pub(crate) async fn agent_turn(
     user_rx: &mut mpsc::Receiver<UserAction>,
 ) -> Result<TurnOutcome> {
     let tool_defs = tools.definitions();
+    // SubmitPrompts observed during stream / tool races; drained at
+    // the round boundary into trailing user messages.
+    let mut pending_user_text: Vec<String> = Vec::new();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
@@ -109,6 +114,7 @@ pub(crate) async fn agent_turn(
         } = match await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
+            &mut pending_user_text,
         )
         .await
         {
@@ -116,93 +122,44 @@ pub(crate) async fn agent_turn(
             Err(outcome) => return Ok(outcome),
         };
 
-        let tool_uses: Vec<_> = blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((id.clone(), name.clone(), input.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-
+        let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
             role: Role::Assistant,
             content: blocks,
         };
 
         if tool_uses.is_empty() {
-            // Text-only turn: nothing else to coalesce with, so record
-            // and return.
+            // Text-only turn: no round boundary to drain queued text
+            // into, so any `pending_user_text` instead falls through
+            // to the TUI's turn-end drain in `App::finalize_idle`,
+            // which dispatches it as a fresh `SubmitPrompt`.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
             return Ok(TurnOutcome::Completed);
         }
 
-        let mut results = Vec::new();
-        let mut sidecars: Vec<(String, ToolMetadata)> = Vec::new();
-        for (id, name, input) in tool_uses {
-            _ = sink.send(AgentEvent::ToolCallStart {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            });
-
-            let output = if let Some(err) = parse_errors.get(&id) {
-                ToolOutput {
-                    content: format!(
-                        "tool input JSON failed to parse: {err}; retry with a valid object",
-                    ),
-                    is_error: true,
-                    metadata: ToolMetadata::default(),
-                }
-            } else {
-                match await_unless_aborted(tools.run(&name, input), user_rx).await {
-                    Ok(out) => out,
-                    Err(outcome) => return Ok(outcome),
-                }
-            };
-
-            _ = sink.send(AgentEvent::ToolCallEnd {
-                id: id.clone(),
-                content: output.content.clone(),
-                is_error: output.is_error,
-                metadata: output.metadata.clone(),
-            });
-
-            sidecars.push((id.clone(), output.metadata));
-            results.push(ContentBlock::ToolResult {
-                tool_use_id: id,
-                content: output.content,
-                is_error: output.is_error,
-            });
-        }
-
+        let (results, sidecars) = match run_tool_round(
+            tools,
+            tool_uses,
+            &parse_errors,
+            sink,
+            user_rx,
+            &mut pending_user_text,
+        )
+        .await
+        {
+            Ok(round) => round,
+            Err(outcome) => return Ok(outcome),
+        };
         let tool_result_msg = Message {
             role: Role::User,
             content: results,
         };
 
-        // Send all three writes concurrently so they queue in the actor's
-        // mpsc channel before its `try_recv` runs — receive-and-drain
-        // then coalesces the assistant message, the tool-result message,
-        // and the sidecar batch into a single absorb pass and a single
-        // buffered flush. Sending serially with awaits between would
-        // block each cmd's caller on the prior flush, defeating the
-        // batching. Iteration-atomic: a crash mid-tool leaves the
-        // session at the previous turn's tail, and resume sees no
-        // half-written tool round.
-        let assistant_fut = session.record_message(assistant_msg.clone());
-        let tool_result_fut = session.record_message(tool_result_msg.clone());
-        let metadata_fut = session.record_tool_metadata_batch(sidecars);
-        let (assistant_outcome, tool_result_outcome, metadata_outcome) =
-            tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
-        sink.session_write_error(assistant_outcome.failure.as_deref());
-        sink.session_write_error(tool_result_outcome.failure.as_deref());
-        sink.session_write_error(metadata_outcome.failure.as_deref());
-
+        commit_round_writes(session, sink, &assistant_msg, &tool_result_msg, sidecars).await;
         messages.push(assistant_msg);
         messages.push(tool_result_msg);
+        record_drained_prompts(pending_user_text.drain(..), messages, session, sink).await;
     }
 
     bail!(
@@ -211,17 +168,153 @@ pub(crate) async fn agent_turn(
     )
 }
 
+/// Extract the `(id, name, input)` triples from each `ToolUse` block in
+/// the assistant response, preserving order.
+fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, input } => {
+                Some((id.clone(), name.clone(), input.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Dispatch every tool call in the round, returning the matching
+/// `tool_result` blocks and per-call metadata sidecars. Each call
+/// races against `user_rx` so cancel / quit / mid-turn submit signals
+/// land without polling seams.
+async fn run_tool_round(
+    tools: &ToolRegistry,
+    tool_uses: Vec<(String, String, serde_json::Value)>,
+    parse_errors: &HashMap<String, String>,
+    sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+) -> std::result::Result<(Vec<ContentBlock>, Vec<(String, ToolMetadata)>), TurnOutcome> {
+    let mut results = Vec::with_capacity(tool_uses.len());
+    let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
+    for (id, name, input) in tool_uses {
+        _ = sink.send(AgentEvent::ToolCallStart {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        });
+
+        let output =
+            dispatch_tool_call(tools, &name, input, parse_errors.get(&id), user_rx, pending)
+                .await?;
+
+        _ = sink.send(AgentEvent::ToolCallEnd {
+            id: id.clone(),
+            content: output.content.clone(),
+            is_error: output.is_error,
+            metadata: output.metadata.clone(),
+        });
+
+        sidecars.push((id.clone(), output.metadata));
+        results.push(ContentBlock::ToolResult {
+            tool_use_id: id,
+            content: output.content,
+            is_error: output.is_error,
+        });
+    }
+    Ok((results, sidecars))
+}
+
+/// Persist the assistant message, tool-result message, and metadata
+/// sidecars concurrently. Sending all three before any `await` queues
+/// them in the session actor's mpsc before its `try_recv` runs, so
+/// receive-and-drain coalesces them into one absorb pass and one
+/// buffered flush. Iteration-atomic: a crash mid-write leaves the
+/// session at the previous round's tail, and resume sees no
+/// half-written round.
+async fn commit_round_writes(
+    session: &SessionHandle,
+    sink: &dyn AgentSink,
+    assistant_msg: &Message,
+    tool_result_msg: &Message,
+    sidecars: Vec<(String, ToolMetadata)>,
+) {
+    let assistant_fut = session.record_message(assistant_msg.clone());
+    let tool_result_fut = session.record_message(tool_result_msg.clone());
+    let metadata_fut = session.record_tool_metadata_batch(sidecars);
+    let (assistant_outcome, tool_result_outcome, metadata_outcome) =
+        tokio::join!(assistant_fut, tool_result_fut, metadata_fut);
+    sink.session_write_error(assistant_outcome.failure.as_deref());
+    sink.session_write_error(tool_result_outcome.failure.as_deref());
+    sink.session_write_error(metadata_outcome.failure.as_deref());
+}
+
+/// Synthesize the `tool_result` content for one tool call. When the
+/// model emitted malformed input JSON the agent doesn't run the tool —
+/// instead it short-circuits to a synthetic error result so the model
+/// learns its JSON was bad on the next round. Otherwise the tool runs,
+/// racing against `user_rx` so an Esc / Ctrl+C / mid-turn submit lands
+/// without a polling seam in the tool itself.
+async fn dispatch_tool_call(
+    tools: &ToolRegistry,
+    name: &str,
+    input: serde_json::Value,
+    parse_error: Option<&String>,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+) -> std::result::Result<ToolOutput, TurnOutcome> {
+    if let Some(err) = parse_error {
+        return Ok(ToolOutput {
+            content: format!("tool input JSON failed to parse: {err}; retry with a valid object"),
+            is_error: true,
+            metadata: ToolMetadata::default(),
+        });
+    }
+    await_unless_aborted(tools.run(name, input), user_rx, pending).await
+}
+
+/// Splice each queued mid-turn submit into the conversation as a
+/// trailing User message, persist it, and emit a `PromptDrained`
+/// event so the TUI can promote the matching preview-queue head to
+/// a chat-history user-message block.
+///
+/// Anthropic accepts consecutive same-role messages, so the request
+/// shape `[..., User(tool_results), User(text_1), ...]` is valid;
+/// persisting per-prompt (rather than collapsing) keeps resume-side
+/// rendering trivial — each drained prompt round-trips as the same
+/// `UserMessage` block the TUI already renders for fresh prompts.
+///
+/// Sequential, in dispatch order: the TUI's preview-queue is FIFO and
+/// matches `PromptDrained` events to its head by position.
+async fn record_drained_prompts(
+    texts: impl IntoIterator<Item = String>,
+    messages: &mut Vec<Message>,
+    session: &SessionHandle,
+    sink: &dyn AgentSink,
+) {
+    for text in texts {
+        let queued_msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.clone() }],
+        };
+        record_message(session, queued_msg.clone(), sink).await;
+        messages.push(queued_msg);
+        _ = sink.send(AgentEvent::PromptDrained(text));
+    }
+}
+
 /// Race `fut` against user actions on `user_rx`. Returns the future's
 /// output on completion, or a terminal [`TurnOutcome`] when the user
 /// cancels or quits — `Err(outcome)` so the caller can `?`-style
 /// short-circuit out of the round loop.
 ///
-/// Mid-turn [`UserAction::SubmitPrompt`] is observed but dropped with
-/// a `warn!`. The next commit replaces this with accumulation into a
-/// per-turn buffer.
+/// Mid-turn [`UserAction::SubmitPrompt`]s are appended to `pending` —
+/// the calling round drains the buffer into trailing user messages
+/// alongside the tool results, splicing the queued text into the same
+/// turn without aborting the in-flight work.
 async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
 ) -> std::result::Result<T, TurnOutcome>
 where
     F: Future<Output = T>,
@@ -229,19 +322,24 @@ where
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            output = &mut fut => return Ok(output),
+            // Biased so a queued user action is observed before a
+            // future that is also ready in the same poll. Without
+            // this, an already-buffered `SubmitPrompt` competing
+            // with a synchronously-resolving stream / tool future
+            // can lose the random select pick and never make it
+            // into `pending`. Cancel responsiveness benefits too.
+            biased;
             action = user_rx.recv() => match action {
                 Some(UserAction::Cancel) => return Err(TurnOutcome::Cancelled),
                 // `None` means every sender dropped — the TUI is gone, treat
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnOutcome::Quit),
-                Some(UserAction::SubmitPrompt(_)) => {
-                    warn!("ignoring submit during in-flight turn");
-                }
+                Some(UserAction::SubmitPrompt(text)) => pending.push(text),
                 // Idle-state signal that shouldn't reach a busy turn,
                 // but the TUI may still forward it during teardown.
                 Some(UserAction::ConfirmExit) => {}
             },
+            output = &mut fut => return Ok(output),
         }
     }
 }
@@ -806,6 +904,71 @@ mod tests {
             AgentEvent::ToolCallEnd { id, metadata, is_error: false, .. }
                 if id == "tool_1" && metadata.title.as_deref() == Some("echoed"),
         )));
+    }
+
+    #[tokio::test]
+    async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
+        // Round 1 emits a tool_use; we pre-load the user channel with a
+        // SubmitPrompt so `await_unless_aborted` consumes it during the
+        // round (either while the SSE stream produces frames or while
+        // the tool runs). At the round boundary the agent must splice
+        // the queued text into `messages` as a trailing user message
+        // and emit a `PromptDrained` event, then proceed to round 2
+        // which is text-only.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
+            text_turn("done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("kick off")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(4);
+        // Hold the sender until the test ends so `recv()` after the
+        // queued submit stays pending instead of resolving to `None`.
+        tx.send(UserAction::SubmitPrompt("follow up".into()))
+            .await
+            .unwrap();
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("turn must complete");
+
+        // user → assistant(tool_use) → user(tool_result) → user("follow up") → assistant("done").
+        assert_eq!(
+            messages.len(),
+            5,
+            "expected 5 messages including the drained prompt: {messages:#?}",
+        );
+        assert_eq!(messages[3].role, Role::User);
+        assert!(
+            matches!(
+                &messages[3].content[0],
+                ContentBlock::Text { text } if text == "follow up",
+            ),
+            "drained prompt must land between tool_result and round 2: {:?}",
+            messages[3],
+        );
+
+        let drained_count = sink
+            .events()
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::PromptDrained(t) if t == "follow up"))
+            .count();
+        assert_eq!(
+            drained_count, 1,
+            "exactly one PromptDrained event for the queued prompt",
+        );
+        drop(tx);
     }
 
     #[tokio::test]

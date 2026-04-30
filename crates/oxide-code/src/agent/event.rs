@@ -49,6 +49,11 @@ pub(crate) enum AgentEvent {
         is_error: bool,
         metadata: crate::tool::ToolMetadata,
     },
+    /// A queued mid-turn submit was spliced into the conversation as a
+    /// trailing user message at the round boundary. The TUI pops the
+    /// matching head from its preview queue (FIFO) and renders the
+    /// drained prompt as a regular user message in chat history.
+    PromptDrained(String),
     /// The current assistant turn is complete (text-only response, no more
     /// tool calls).
     TurnComplete,
@@ -161,6 +166,9 @@ impl AgentSink for StdioSink {
                 }
                 eprintln!();
             }
+            // Both are TUI-only affordances (queued-prompt preview /
+            // header title); stdio has no surface to update.
+            AgentEvent::PromptDrained(_) | AgentEvent::SessionTitleUpdated(_) => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 println!();
@@ -169,10 +177,6 @@ impl AgentSink for StdioSink {
                 // Marker on stderr so captured stdout (`-p`) stays reproducible.
                 println!();
                 eprintln!("{INTERRUPTED_MARKER}");
-            }
-            AgentEvent::SessionTitleUpdated(_) => {
-                // Titles are a TUI-only affordance; the stdio sink has no
-                // persistent header to rewrite.
             }
             AgentEvent::Error(msg) => {
                 eprintln!("Error: {msg}");

@@ -205,18 +205,21 @@ impl App {
     fn dispatch_user_action(&mut self, action: UserAction) {
         match &action {
             UserAction::SubmitPrompt(text) => {
-                if !self.input.is_enabled() {
-                    // Busy — defer until the current turn ends. The
-                    // dispatch path also short-circuits the user_tx
-                    // forward so the agent loop only sees the prompt
-                    // when `drain_pending_prompt` releases it.
+                if self.input.is_enabled() {
+                    self.chat.push_user_message(text.clone());
+                    self.input.set_enabled(false);
+                    self.status_bar.set_status(Status::Streaming);
+                } else {
+                    // Busy: buffer for the preview pane and forward on
+                    // `user_tx` so `agent_turn` drains it at the next
+                    // round boundary. `AgentEvent::PromptDrained` later
+                    // pops `pending_prompts` FIFO and promotes the
+                    // entry to a chat-history `UserMessage`. Tool-less
+                    // turns lack a round boundary, so any straggler
+                    // falls through to `finalize_idle`'s turn-end drain.
                     self.pending_prompts.push_back(text.clone());
                     self.sync_input_queue_hint();
-                    return;
                 }
-                self.chat.push_user_message(text.clone());
-                self.input.set_enabled(false);
-                self.status_bar.set_status(Status::Streaming);
             }
             // The matching `AgentEvent::Cancelled` returns the input to
             // idle; the bar flips to `Cancelling` for the duration so
@@ -300,6 +303,15 @@ impl App {
                 );
                 let header = result_header(&metadata, pending.as_ref().map(|p| p.label.as_str()));
                 self.chat.push_tool_result_view(&header, view, is_error);
+            }
+            // Round boundary drained one queued prompt: pop the FIFO
+            // head and promote it to a chat-history user message so
+            // the preview entry "graduates" into the conversation.
+            AgentEvent::PromptDrained(text) => {
+                self.pending_prompts.pop_front();
+                self.chat.commit_streaming();
+                self.chat.push_user_message(text);
+                self.sync_input_queue_hint();
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -901,20 +913,50 @@ mod tests {
     // ── pending prompt queue ──
 
     #[tokio::test]
-    async fn dispatch_submit_during_busy_queues_without_forwarding() {
+    async fn dispatch_submit_during_busy_queues_and_forwards_for_mid_turn_drain() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
         rx.recv().await.expect("first submit forwarded");
 
         app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
 
-        // Queued — chat untouched, agent loop didn't see it.
+        // Buffered for the preview pane AND forwarded so `agent_turn`
+        // can splice it into the same multi-step turn at the next
+        // round boundary. The chat history stays untouched until the
+        // matching `PromptDrained` event lands.
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["queued".to_owned()],
         );
         assert_eq!(app.status_bar.status(), Status::Streaming);
-        assert!(rx.try_recv().is_err(), "queued submit must not forward");
+        let forwarded = rx.recv().await.expect("queued submit forwarded");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
+    }
+
+    #[tokio::test]
+    async fn prompt_drained_pops_queue_head_and_pushes_user_message() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued-a".to_owned()));
+        rx.recv().await.expect("queued-a submit forwarded");
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued-b".to_owned()));
+        rx.recv().await.expect("queued-b submit forwarded");
+
+        let chat_before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::PromptDrained("queued-a".to_owned()));
+
+        // Head pops in dispatch order regardless of the event payload —
+        // the `text` is for display and never reorders the FIFO.
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued-b".to_owned()],
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            chat_before + 1,
+            "drained prompt must push exactly one new user-message block",
+        );
     }
 
     #[tokio::test]
