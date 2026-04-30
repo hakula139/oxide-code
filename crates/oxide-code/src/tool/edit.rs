@@ -33,7 +33,10 @@ impl Tool for EditTool {
 
     fn description(&self) -> &'static str {
         "Perform exact string replacement in a file. \
-         The old_string must be unique in the file unless replace_all is true."
+         The old_string must be unique in the file unless replace_all is true. \
+         The file must have been Read fully in this session first; \
+         a Read-before-Edit gate refuses edits to files the model hasn't seen \
+         and to files that changed externally since the last Read."
     }
 
     fn input_schema(&self) -> serde_json::Value {

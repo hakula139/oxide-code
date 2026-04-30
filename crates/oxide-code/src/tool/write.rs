@@ -24,7 +24,11 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a file, creating it if it does not exist or overwriting if it does."
+        "Write content to a file, creating it if it does not exist or overwriting if it does. \
+         Overwriting an existing file requires that file to have been Read fully in this session \
+         first; the same Read-before-Edit gate that protects the Edit tool refuses writes to files \
+         the model hasn't seen and to files that changed externally since the last Read. \
+         Creating a brand-new file bypasses the gate."
     }
 
     fn input_schema(&self) -> serde_json::Value {
