@@ -42,6 +42,7 @@ ox                                          # Start an interactive session
 ├── config/
 │   ├── file.rs                             # TOML config file discovery, parsing, and merge (user + project)
 │   └── oauth.rs                            # Claude Code OAuth credentials (macOS Keychain + file), token refresh, directory-based advisory lock
+├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                              # Conversation message types
 ├── model.rs                                # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)

@@ -113,6 +113,9 @@ impl ChatBlock for AssistantThinking {
         out.extend(wrap_line(header, width, bar_width, Some(&bar_spans)));
 
         if !self.text.trim().is_empty() {
+            // Blank gutter line between header and body — keeps the
+            // bar continuous while giving the prose breathing room.
+            out.push(Line::from(Span::styled(THINKING_PREFIX, style)));
             let rendered = render_markdown(&self.text, theme, md_width);
             for line in rendered.lines {
                 let dimmed = apply_thinking_style(line, theme);
@@ -203,6 +206,21 @@ mod tests {
         let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header.starts_with(THINKING_PREFIX));
         assert!(header.contains("Thinking..."));
+    }
+
+    #[test]
+    fn render_inserts_gutter_line_between_header_and_body() {
+        // Visual breathing room: a bar-only line separates the header
+        // from the prose so the bar stays continuous without crowding.
+        let theme = Theme::default();
+        let block = AssistantThinking::new("hello");
+        let lines = block.render(&ctx_at(60, &theme));
+        assert!(lines.len() >= 3, "header + gutter + body: {lines:?}");
+        let gutter: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            gutter, THINKING_PREFIX,
+            "gutter line carries only the bar prefix",
+        );
     }
 
     #[test]

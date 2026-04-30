@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -8,12 +10,21 @@ use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
 };
+use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
 
 /// Per-file size cap for `edit` (10 MB). Generous because legitimate
 /// edits sometimes target large config or data files.
 const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-pub(crate) struct EditTool;
+pub(crate) struct EditTool {
+    tracker: Arc<FileTracker>,
+}
+
+impl EditTool {
+    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
@@ -22,7 +33,10 @@ impl Tool for EditTool {
 
     fn description(&self) -> &'static str {
         "Perform exact string replacement in a file. \
-         The old_string must be unique in the file unless replace_all is true."
+         The old_string must be unique in the file unless replace_all is true. \
+         The file must have been Read fully in this session first; \
+         a Read-before-Edit gate refuses edits to files the model hasn't seen \
+         and to files that changed externally since the last Read."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -74,11 +88,10 @@ impl Tool for EditTool {
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // Live path uses `metadata.diff_chunks` for real line numbers.
-        // Resume path falls back to an input-derived synthesized chunk
-        // (line 1) and recovers the count from `metadata.replacements`
-        // or, for the oldest sessions, the success-message prose.
-        // Empty `Some(vec![])` is treated as absent so a zero-chunks
+        // Live: `metadata.diff_chunks` carries real line numbers.
+        // Resume: synthesize a (line 1) chunk and recover the count
+        // from `metadata.replacements` or the success-message prose.
+        // Empty `Some(vec![])` counts as absent so a zero-chunks
         // regression doesn't surface as `(no change)`.
         let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
         let chunks = live_chunks
@@ -100,47 +113,9 @@ impl Tool for EditTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        let tracker = Arc::clone(&self.tracker);
+        Box::pin(run(input, tracker))
     }
-}
-
-// ── Result View ──
-
-/// Parses the replacement count from the success-path output returned
-/// by [`edit_file`] when `replace_all` hits multiple matches — a
-/// `"Replaced N occurrences in <path>."` string. Returns `None` for
-/// the single-match shape (`"Successfully edited ..."`), in which case
-/// the caller defaults to 1. Used only as a final fallback for resumed
-/// sessions whose JSONL predates structured metadata.
-///
-/// The content-format contract this parser relies on is pinned by
-/// the `edit_file_replace_all_pins_replaced_n_occurrences_format`
-/// test so rewording the success string in `edit_file` breaks the
-/// test, not the renderer silently.
-fn parse_replacement_count(content: &str) -> Option<usize> {
-    content
-        .strip_prefix("Replaced ")?
-        .split_ascii_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// Builds a single best-effort chunk from raw input strings.
-///
-/// Used by [`EditTool::result_view`] when the resumed session JSONL
-/// carries no structured `diff_chunks`. Line numbers start at 1 —
-/// they're the best we have without re-reading the (possibly already
-/// mutated) file. Exposed `pub(crate)` so TUI snapshot tests can
-/// build the same shape as the production resume path without
-/// duplicating the trim policy.
-pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
-    let mut chunk = DiffChunk {
-        old: split_into_diff_lines(old, 1),
-        new: split_into_diff_lines(new, 1),
-    };
-    trim_chunk(&mut chunk);
-    chunk
 }
 
 // ── Input ──
@@ -156,7 +131,7 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
@@ -168,6 +143,7 @@ async fn run(raw: serde_json::Value) -> ToolOutput {
         &input.old_string,
         &input.new_string,
         input.replace_all,
+        &tracker,
     )
     .await
     {
@@ -187,6 +163,7 @@ async fn edit_file(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
+    tracker: &FileTracker,
 ) -> Result<(String, usize, Vec<DiffChunk>), String> {
     if old_string.is_empty() {
         return Err("old_string must not be empty.".into());
@@ -196,6 +173,7 @@ async fn edit_file(
         return Err("old_string and new_string are identical. No changes to make.".into());
     }
 
+    let file_path = Path::new(path);
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -209,9 +187,24 @@ async fn edit_file(
         ));
     }
 
-    let content = tokio::fs::read_to_string(path)
+    // Strict gate: stat-match short-circuits, drift falls through to a
+    // rehash against the bytes we're about to read anyway.
+    let pre_mtime = metadata
+        .modified()
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let stat_check = tracker
+        .check_stat(file_path, pre_mtime, metadata.len(), GatePurpose::Edit)
+        .map_err(|e| e.to_string())?;
+
+    let content_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
+    if let StatCheck::NeedsBytes { stored_hash } = stat_check {
+        FileTracker::verify_drift_bytes(file_path, &content_bytes, stored_hash, GatePurpose::Edit)
+            .map_err(|e| e.to_string())?;
+    }
+    let content =
+        String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
 
     let eol = dominant_eol(&content);
     let content = normalize_eol(&content);
@@ -257,6 +250,10 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Failed to write {path}: {e}"))?;
 
+    tracker
+        .record_modify_after_write(file_path, updated.as_bytes())
+        .await;
+
     let message = if replace_all && match_count > 1 {
         format!("Replaced {match_count} occurrences in {path}.")
     } else {
@@ -273,10 +270,10 @@ async fn edit_file(
 /// otherwise. Each chunk carries real file line numbers (post-edit
 /// positions on the `+` side) with common anchors trimmed.
 ///
-/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts at < 2^24, so
-/// the running shift fits in `isize` and the post-edit line stays
-/// positive. The `checked_*` calls below surface any overflow as a
-/// panic — a wrong-but-plausible line number would be worse.
+/// [`MAX_EDIT_FILE_SIZE`] caps both line counts and per-match shifts
+/// well inside `isize` on every supported target; the `checked_*`
+/// calls below panic on overflow rather than silently emitting a
+/// wrong-but-plausible line number.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
@@ -416,22 +413,65 @@ fn apply_eol(content: String, eol: &str) -> String {
     }
 }
 
+// ── Result View ──
+
+/// Parses `N` out of `"Replaced N occurrences in <path>."`. `None`
+/// for the single-match shape (`"Successfully edited ..."`), where
+/// the caller defaults to 1. Final fallback for resumed sessions
+/// whose JSONL predates structured metadata; the content-format
+/// contract is pinned by
+/// `edit_file_replace_all_pins_replaced_n_occurrences_format`.
+fn parse_replacement_count(content: &str) -> Option<usize> {
+    content
+        .strip_prefix("Replaced ")?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Single best-effort chunk from raw input strings, used by
+/// [`EditTool::result_view`] when the resumed JSONL has no
+/// `diff_chunks`. Line numbers start at 1 — best we have without
+/// re-reading the (possibly already mutated) file. `pub(crate)` so
+/// TUI snapshot tests can build the same shape as the resume path.
+pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
+    let mut chunk = DiffChunk {
+        old: split_into_diff_lines(old, 1),
+        new: split_into_diff_lines(new, 1),
+    };
+    trim_chunk(&mut chunk);
+    chunk
+}
+
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::file_tracker::LastView;
+    use crate::file_tracker::testing::{tracker, tracker_seeded};
 
     // ── result_view ──
 
     #[test]
+    fn result_view_returns_none_when_new_string_missing_with_old_string_present() {
+        // `_required_inputs_missing` short-circuits at `old_string`;
+        // this case is the only way to reach the `new_string` guard.
+        let tool = EditTool::new(Arc::new(FileTracker::default()));
+        let view = tool.result_view(
+            &serde_json::json!({"old_string": "x"}),
+            "Successfully edited /tmp/x.",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
     fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
-        // Live path: `run` attaches `metadata.diff_chunks` via
-        // `with_diff_chunks`, so the renderer gets real file line
-        // numbers. The chunks must win over input-based synthesis,
-        // and `replacements` is derived from `chunks.len()` so a stale
-        // legacy `metadata.replacements` cannot disagree with the
-        // structural source of truth.
+        // Live `metadata.diff_chunks` must win over input-derived
+        // synthesis; `replacements` derives from `chunks.len()` so a
+        // stale legacy `metadata.replacements` can't disagree.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -466,7 +506,11 @@ mod tests {
             replacements: Some(99),
             ..ToolMetadata::default()
         };
-        let view = EditTool.result_view(&input, "Replaced 2 occurrences in /tmp/f.rs.", &metadata);
+        let view = EditTool::new(tracker()).result_view(
+            &input,
+            "Replaced 2 occurrences in /tmp/f.rs.",
+            &metadata,
+        );
         assert_eq!(
             view,
             Some(ToolResultView::Diff {
@@ -488,7 +532,7 @@ mod tests {
             "old_string": "fn foo()",
             "new_string": "fn bar()",
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -524,7 +568,7 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Replaced 7 occurrences in /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -558,7 +602,7 @@ mod tests {
             "new_string": "b",
             "replace_all": true,
         });
-        let view = EditTool.result_view(
+        let view = EditTool::new(tracker()).result_view(
             &input,
             "Successfully edited /tmp/f.rs.",
             &ToolMetadata::default(),
@@ -589,7 +633,7 @@ mod tests {
         // than panicking.
         let input = serde_json::json!({"file_path": "/tmp/x"});
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&input, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -607,7 +651,7 @@ mod tests {
             "new_string": "b",
         });
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&bad_old, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -617,7 +661,7 @@ mod tests {
             "new_string": 42,
         });
         assert!(
-            EditTool
+            EditTool::new(tracker())
                 .result_view(&bad_new, "edited", &ToolMetadata::default())
                 .is_none(),
         );
@@ -649,6 +693,13 @@ mod tests {
         assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
     }
 
+    #[test]
+    fn parse_replacement_count_returns_none_when_only_prefix_present() {
+        // Pin the empty-token `?` so a future "default to 0 / 1"
+        // regression doesn't slip.
+        assert_eq!(parse_replacement_count("Replaced "), None);
+    }
+
     // ── run ──
 
     #[tokio::test]
@@ -657,11 +708,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "old_string": "hello",
-            "new_string": "goodbye"
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye"
+            }),
+            Arc::new(tracker_seeded(&path)),
+        )
         .await;
 
         assert!(!output.is_error);
@@ -675,13 +729,42 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_required_fields() {
-        let output = run(serde_json::json!({
-            "file_path": "/tmp/x",
-            "old_string": "a"
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": "/tmp/x",
+                "old_string": "a"
+            }),
+            tracker(),
+        )
         .await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_without_prior_read_is_rejected() {
+        // Strict gate fires before any rewrite.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }),
+            tracker(),
+        )
+        .await;
+
+        assert!(output.is_error);
+        assert!(
+            output.content.contains("not been read"),
+            "expected must-read-first rejection, got: {}",
+            output.content,
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
     }
 
     #[tokio::test]
@@ -694,11 +777,14 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "old_string": "not present",
-            "new_string": "x",
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "not present",
+                "new_string": "x",
+            }),
+            Arc::new(tracker_seeded(&path)),
+        )
         .await;
 
         assert!(output.is_error);
@@ -706,6 +792,28 @@ mod tests {
             output.metadata.title, None,
             "error path must not claim the edit happened",
         );
+    }
+
+    #[tokio::test]
+    async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
+        // Pin the trait shim so the `Arc::clone` it does on the
+        // tracker doesn't silently regress.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tracker = Arc::new(tracker_seeded(&path));
+        let tool = EditTool::new(Arc::clone(&tracker));
+
+        let output = tool
+            .run(serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }))
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
     // ── edit_file ──
@@ -728,6 +836,7 @@ mod tests {
             "fn foo() {}",
             "fn foo() -> i32 { 42 }",
             false,
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -748,9 +857,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let (msg, replacements, chunks) = edit_file(path.to_str().unwrap(), "aaa", "ccc", true)
-            .await
-            .unwrap();
+        let (msg, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "ccc",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         assert!(msg.contains("2 occurrences"));
         assert_eq!(replacements, 2);
@@ -769,9 +884,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
-        let (msg, replacements, _chunks) = edit_file(path.to_str().unwrap(), "a", "b", true)
-            .await
-            .unwrap();
+        let (msg, replacements, _chunks) = edit_file(
+            path.to_str().unwrap(),
+            "a",
+            "b",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             msg,
             format!("Replaced 3 occurrences in {}.", path.display())
@@ -785,10 +906,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let (msg, replacements, chunks) =
-            edit_file(path.to_str().unwrap(), "hello", "goodbye", true)
-                .await
-                .unwrap();
+        let (msg, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "goodbye",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         assert!(msg.contains("Successfully edited"));
         assert_eq!(
@@ -805,9 +931,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\r\nline2\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "line1\nline2", "a\nb", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "line1\nline2",
+            "a\nb",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(bytes, b"a\r\nb\r\n");
@@ -820,9 +952,15 @@ mod tests {
         std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
 
         // new_string contains \r\n — should be normalized before apply_eol.
-        edit_file(path.to_str().unwrap(), "aaa", "x\r\ny", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "x\r\ny",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // \r\n in new_string is normalized to \n, then restored to \r\n — not \r\r\n.
@@ -836,9 +974,15 @@ mod tests {
         // 2 CRLF, 1 LF → dominant is CRLF.
         std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "replace_me", "replaced", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "replace_me",
+            "replaced",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // All line endings normalized to the dominant style (CRLF).
@@ -852,9 +996,15 @@ mod tests {
         // LF between first two lines, CRLF after — previously failed to match.
         std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
 
-        edit_file(path.to_str().unwrap(), "foo\nbar", "a\nb", false)
-            .await
-            .unwrap();
+        edit_file(
+            path.to_str().unwrap(),
+            "foo\nbar",
+            "a\nb",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
         // Dominant is CRLF (2 vs 1), so all newlines become CRLF.
@@ -867,9 +1017,17 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "", "x", false)
-            .await
-            .unwrap_err();
+        // Empty `old_string` is rejected before the gate fires, so an
+        // empty tracker is fine.
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "",
+            "x",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("must not be empty"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
@@ -880,9 +1038,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "hello", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "hello",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("identical"));
     }
 
@@ -892,18 +1056,157 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "nonexistent", "replacement", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "nonexistent",
+            "replacement",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("not found"));
     }
 
     #[tokio::test]
-    async fn edit_file_rejects_nonexistent_file() {
-        let err = edit_file("/nonexistent/file.txt", "a", "b", false)
+    async fn edit_file_without_prior_read_is_rejected() {
+        // Strict gate: existing file but no Read entry → must read first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "hello",
+            "goodbye",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not been read"),
+            "expected must-read-first rejection, got: {err}",
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_after_external_modification_is_rejected() {
+        // Read, then overwrite so check_stat returns NeedsBytes
+        // and the rehash catches the new bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tracker = tracker_seeded(&path);
+        std::fs::write(&path, "external edit").unwrap();
+
+        let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &tracker)
             .await
             .unwrap_err();
+        assert!(
+            err.contains("modified externally"),
+            "drift error expected, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_phantom_drift_passes_via_hash_match() {
+        // Cloud-sync shape: stat moved but bytes match. A fake older
+        // mtime forces the drift path hermetically — without the
+        // rehash fallback the gate would over-reject.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.rs");
+        std::fs::write(&path, "old content").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
+
+        let tracker = FileTracker::default();
+        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
+
+        let result = edit_file(
+            path.to_str().unwrap(),
+            "old content",
+            "new content",
+            false,
+            &tracker,
+        )
+        .await;
+        result.expect("phantom drift must not block edit");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn edit_file_partial_read_is_rejected() {
+        // Ranged Read never satisfies the gate, even on matching
+        // bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let tracker = FileTracker::default();
+        tracker.record_read(
+            &path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Partial {
+                offset: 1,
+                limit: 1,
+            },
+        );
+
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("partially"),
+            "expected partial-view rejection, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_nonexistent_file() {
+        let err = edit_file(
+            "/nonexistent/file.txt",
+            "a",
+            "b",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("Error reading"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_non_utf8_content() {
+        // The gate is bytes-only, so a session that bypassed Read
+        // (which rejects binary) could still hit `edit_file` on a
+        // non-UTF8 file. Surface the decode error, don't panic.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        let bytes = [0xff_u8, 0xfe, 0xfd];
+        std::fs::write(&path, bytes).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let tracker = FileTracker::default();
+        tracker.record_read(
+            &path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Full,
+        );
+
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("Error reading") && err.contains("utf-8"),
+            "expected utf-8 decode failure, got: {err}",
+        );
     }
 
     #[tokio::test]
@@ -912,9 +1215,15 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa bbb aaa").unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "aaa", "ccc", false)
-            .await
-            .unwrap_err();
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "aaa",
+            "ccc",
+            false,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("2 occurrences"));
     }
 
@@ -925,12 +1234,20 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "a", "b", false)
-            .await
-            .unwrap_err();
+        // Size cap fires before the gate, so an empty tracker is fine.
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "a",
+            "b",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("too large"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn edit_file_fails_if_write_is_rejected() {
         use std::os::unix::fs::PermissionsExt;
@@ -938,12 +1255,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("readonly.txt");
         std::fs::write(&path, "hello world").unwrap();
+        let tracker = tracker_seeded(&path);
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o444);
         std::fs::set_permissions(&path, perms).unwrap();
 
-        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false)
+        let err = edit_file(path.to_str().unwrap(), "hello", "goodbye", false, &tracker)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to write"));
@@ -961,9 +1279,15 @@ mod tests {
         let path = dir.path().join("multi.txt");
         std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
 
-        let (_, replacements, chunks) = edit_file(path.to_str().unwrap(), "B", "X", true)
-            .await
-            .unwrap();
+        let (_, replacements, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "B",
+            "X",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(replacements, 2);
         assert_eq!(chunks.len(), 2);
@@ -1009,9 +1333,15 @@ mod tests {
         std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
 
         // "B" → "X\nY" adds one line per replacement.
-        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "B", "X\nY", true)
-            .await
-            .unwrap();
+        let (_, _, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "B",
+            "X\nY",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(chunks.len(), 2);
         // Match 0: original line 2 unaffected by prior shifts.
@@ -1058,9 +1388,15 @@ mod tests {
         std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
 
         // "X\nY" → "Z" drops one line per replacement.
-        let (_, _, chunks) = edit_file(path.to_str().unwrap(), "X\nY", "Z", true)
-            .await
-            .unwrap();
+        let (_, _, chunks) = edit_file(
+            path.to_str().unwrap(),
+            "X\nY",
+            "Z",
+            true,
+            &tracker_seeded(&path),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].old[0].number, 1);

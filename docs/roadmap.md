@@ -58,6 +58,12 @@ The direction is simple:
 - `ox -c` resumes the most recent session; `ox -c <id-prefix>` picks one by prefix; `ox -c <path.jsonl>` resumes from an external path.
 - AI-generated titles (3-7 words) land shortly after the first prompt.
 
+### File-Change Tracking
+
+- Per-session tracker records every Read so re-reads of unchanged files return a cache-hit stub instead of the full body.
+- Edit and Write require a prior full Read of the file and refuse if the on-disk bytes have drifted since (xxh64 fallback for cloud-sync mtime touches).
+- Tracker state persists into the session JSONL on clean exit and restores stat-verified entries on resume — no forced re-Read across sessions.
+
 ## Current Focus
 
 ### Terminal UI
@@ -66,7 +72,6 @@ The direction is simple:
 
 ### Tool & Prompt Enhancements
 
-- File-change tracking — skip re-reads when content hasn't changed, and guard against blind overwrites.
 - Configurable instruction directories beyond `.claude/`.
 
 ### Context Compression

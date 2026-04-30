@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::chain::ChainBuilder;
 use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 use crate::util::fs::create_private_dir_all;
@@ -275,6 +276,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let mut chain = ChainBuilder::new();
     let mut latest_title: Option<TitleInfo> = None;
     let mut tool_result_metadata: HashMap<String, ToolMetadata> = HashMap::new();
+    let mut file_snapshots: Vec<FileSnapshot> = Vec::new();
     let mut buf = Vec::new();
     let mut line_no: u32 = 0;
 
@@ -349,6 +351,9 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
             } => {
                 tool_result_metadata.insert(tool_use_id, metadata);
             }
+            Entry::FileSnapshot { snapshot } => {
+                file_snapshots.push(snapshot);
+            }
             _ => {}
         }
     }
@@ -359,6 +364,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
         last_uuid,
         title: latest_title,
         tool_result_metadata,
+        file_snapshots,
     })
 }
 
@@ -531,6 +537,12 @@ pub(crate) struct SessionData {
     /// Empty for pre-upgrade sessions — the TUI falls back to its
     /// existing content-derived defaults.
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
+    /// Tracker snapshots harvested from every
+    /// [`Entry::FileSnapshot`](crate::session::entry::Entry) in the
+    /// file. Handed to [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
+    /// before the agent loop runs. Empty for pre-upgrade sessions
+    /// and for any session that exited without a summary.
+    pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── File Opening ──

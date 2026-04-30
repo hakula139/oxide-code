@@ -19,6 +19,7 @@ use tracing::warn;
 use super::entry::Entry;
 use super::handle::{Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
@@ -44,6 +45,10 @@ pub(super) enum SessionCmd {
         ack: oneshot::Sender<Outcome>,
     },
     Finish {
+        /// Snapshots drained from the shared file tracker just before
+        /// the cmd was sent; written as one `Entry::FileSnapshot` per
+        /// snapshot followed by the `Entry::Summary` marker.
+        snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
     /// Drains pending writes, acks, then exits the actor loop. Lets
@@ -51,9 +56,7 @@ pub(super) enum SessionCmd {
     /// orphaned clones (e.g., the detached title-generator task) still
     /// hold a sender — a bare clone-drop wait would block on whichever
     /// HTTP timeout the orphan is racing.
-    Shutdown {
-        ack: oneshot::Sender<()>,
-    },
+    Shutdown { ack: oneshot::Sender<()> },
 }
 
 /// One absorbed cmd whose ack fires once the batch flush returns. Held
@@ -144,10 +147,8 @@ fn absorb(
             });
             acks.push(PendingAck::Outcome(ack));
         }
-        SessionCmd::Finish { ack } => {
-            if let Some(entry) = state.finish_entry(now) {
-                entries.push(entry);
-            }
+        SessionCmd::Finish { snapshots, ack } => {
+            entries.extend(state.finish_entries(snapshots, now));
             acks.push(PendingAck::Outcome(ack));
         }
         SessionCmd::Shutdown { ack } => {
@@ -232,7 +233,13 @@ mod tests {
 
     fn finish_cmd() -> (SessionCmd, oneshot::Receiver<Outcome>) {
         let (ack, rx) = oneshot::channel();
-        (SessionCmd::Finish { ack }, rx)
+        (
+            SessionCmd::Finish {
+                snapshots: Vec::new(),
+                ack,
+            },
+            rx,
+        )
     }
 
     fn shutdown_cmd() -> (SessionCmd, oneshot::Receiver<()>) {

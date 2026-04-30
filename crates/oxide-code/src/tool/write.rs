@@ -1,11 +1,22 @@
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::Deserialize;
 
 use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
+use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
 
-pub(crate) struct WriteTool;
+pub(crate) struct WriteTool {
+    tracker: Arc<FileTracker>,
+}
+
+impl WriteTool {
+    pub(crate) fn new(tracker: Arc<FileTracker>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Tool for WriteTool {
     fn name(&self) -> &'static str {
@@ -13,7 +24,11 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a file, creating it if it does not exist or overwriting if it does."
+        "Write content to a file, creating it if it does not exist or overwriting if it does. \
+         Overwriting an existing file requires that file to have been Read fully in this session \
+         first; the same Read-before-Edit gate that protects the Edit tool refuses writes to files \
+         the model hasn't seen and to files that changed externally since the last Read. \
+         Creating a brand-new file bypasses the gate."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -49,7 +64,8 @@ impl Tool for WriteTool {
         &self,
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolOutput> + Send + '_>> {
-        Box::pin(run(input))
+        let tracker = Arc::clone(&self.tracker);
+        Box::pin(run(input, tracker))
     }
 }
 
@@ -63,24 +79,38 @@ struct Input {
 
 // ── Execution ──
 
-async fn run(raw: serde_json::Value) -> ToolOutput {
+async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     let input: Input = match super::parse_input(raw) {
         Ok(v) => v,
         Err(e) => return e,
     };
 
-    let (result, is_new) = write_file(&input.file_path, &input.content).await;
+    let (result, is_new) = write_file(&input.file_path, &input.content, &tracker).await;
     let name = super::file_name(&input.file_path);
     let verb = if is_new { "Created" } else { "Updated" };
     ToolOutput::from_result(result).with_title(format!("{verb} {name}"))
 }
 
-async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool) {
-    let file_path = std::path::Path::new(path);
-    let is_new = matches!(
-        tokio::fs::metadata(path).await,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound
-    );
+async fn write_file(
+    path: &str,
+    content: &str,
+    tracker: &FileTracker,
+) -> (Result<String, String>, bool) {
+    let file_path = Path::new(path);
+    let pre_meta = match tokio::fs::metadata(path).await {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return (Err(format!("Error reading {path}: {e}")), false),
+    };
+    let is_new = pre_meta.is_none();
+
+    // Existing files run the strict gate; new files bypass — nothing
+    // to clobber.
+    if let Some(meta) = &pre_meta
+        && let Err(msg) = check_gate(file_path, meta, path, tracker).await
+    {
+        return (Err(msg), is_new);
+    }
 
     if let Some(parent) = file_path.parent()
         && let Err(e) = tokio::fs::create_dir_all(parent).await
@@ -92,6 +122,10 @@ async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool)
         return (Err(format!("Failed to write file: {e}")), is_new);
     }
 
+    tracker
+        .record_modify_after_write(file_path, content.as_bytes())
+        .await;
+
     let msg = if is_new {
         format!("Successfully created {path}.")
     } else {
@@ -100,9 +134,37 @@ async fn write_file(path: &str, content: &str) -> (Result<String, String>, bool)
     (Ok(msg), is_new)
 }
 
+/// Existing-file gate. Stat-match short-circuits; on drift the file
+/// is read once to confirm a content-preserving touch before letting
+/// the write proceed. Structural rejects (never-read, partial-view)
+/// surface as a model-facing `GateError` via `Display`.
+async fn check_gate(
+    file_path: &Path,
+    meta: &std::fs::Metadata,
+    path: &str,
+    tracker: &FileTracker,
+) -> Result<(), String> {
+    let mtime = meta
+        .modified()
+        .map_err(|e| format!("Error reading {path}: {e}"))?;
+    let stat_check = tracker
+        .check_stat(file_path, mtime, meta.len(), GatePurpose::Write)
+        .map_err(|e| e.to_string())?;
+    if let StatCheck::NeedsBytes { stored_hash } = stat_check {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("Error reading {path}: {e}"))?;
+        FileTracker::verify_drift_bytes(file_path, &bytes, stored_hash, GatePurpose::Write)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_tracker::LastView;
+    use crate::file_tracker::testing::{seed_full_read, tracker};
 
     // ── run ──
 
@@ -111,10 +173,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
 
-        let output = run(serde_json::json!({
-            "file_path": path.to_str().unwrap(),
-            "content": "hello world"
-        }))
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "hello world"
+            }),
+            tracker(),
+        )
         .await;
 
         assert!(!output.is_error);
@@ -124,9 +189,57 @@ mod tests {
 
     #[tokio::test]
     async fn run_missing_required_fields() {
-        let output = run(serde_json::json!({"file_path": "/tmp/x"})).await;
+        let output = run(serde_json::json!({"file_path": "/tmp/x"}), tracker()).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_overwrites_existing_file_uses_updated_verb() {
+        // Pins the `Updated` arm of the verb branch; the `Created`
+        // arm is covered by `run_creates_file`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "old").unwrap();
+        let tracker_arc = Arc::new(FileTracker::default());
+        seed_full_read(&tracker_arc, &path);
+
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "new",
+            }),
+            tracker_arc,
+        )
+        .await;
+
+        assert!(!output.is_error);
+        assert_eq!(
+            output.metadata.title.as_deref(),
+            Some("Updated existing.txt"),
+            "overwrite must surface as Updated, not Created",
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn write_tool_run_dispatches_through_trait_to_inner_run() {
+        // Mirror of `edit_tool_run_dispatches_through_trait_to_inner_run`
+        // — pin the trait shim's `Arc::clone` of the tracker.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let tracker_arc = Arc::new(FileTracker::default());
+        let tool = WriteTool::new(Arc::clone(&tracker_arc));
+
+        let output = tool
+            .run(serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "hello",
+            }))
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
     // ── write_file ──
@@ -136,22 +249,88 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
 
-        let (result, is_new) = write_file(path.to_str().unwrap(), "content").await;
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
         assert!(result.unwrap().contains("created"));
         assert!(is_new);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content");
     }
 
     #[tokio::test]
-    async fn write_file_overwrites_existing() {
+    async fn write_file_existing_without_read_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
 
-        let (result, is_new) = write_file(path.to_str().unwrap(), "new content").await;
+        let (result, is_new) = write_file(
+            path.to_str().unwrap(),
+            "new content",
+            &FileTracker::default(),
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not been read"),
+            "expected must-read-first error, got: {err}",
+        );
+        assert!(!is_new);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old content");
+    }
+
+    #[tokio::test]
+    async fn write_file_after_read_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "old content").unwrap();
+
+        let tracker = FileTracker::default();
+        seed_full_read(&tracker, &path);
+
+        let (result, is_new) = write_file(path.to_str().unwrap(), "new content", &tracker).await;
         assert!(result.unwrap().contains("updated"));
         assert!(!is_new);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn write_file_after_external_modification_is_rejected() {
+        // Read, then overwrite to simulate an external editor; the
+        // drift rehash surfaces "modified externally".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "old content").unwrap();
+
+        let tracker = FileTracker::default();
+        seed_full_read(&tracker, &path);
+        std::fs::write(&path, "external edit").unwrap();
+
+        let (result, _) = write_file(path.to_str().unwrap(), "our edit", &tracker).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("modified externally"),
+            "drift error expected, got: {err}",
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external edit");
+    }
+
+    #[tokio::test]
+    async fn write_file_phantom_drift_passes_via_hash_match() {
+        // Cloud-sync shape on Write: stat moved but bytes match —
+        // the rehash fallback must accept.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "stable content").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let stale_mtime = meta.modified().unwrap() - std::time::Duration::from_mins(1);
+
+        let tracker = FileTracker::default();
+        tracker.record_read(&path, &bytes, stale_mtime, meta.len(), LastView::Full);
+
+        let (result, is_new) = write_file(path.to_str().unwrap(), "fresh content", &tracker).await;
+        result.expect("phantom drift must not block write");
+        assert!(!is_new);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh content");
     }
 
     #[tokio::test]
@@ -159,7 +338,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a").join("b").join("c.txt");
 
-        let (result, _) = write_file(path.to_str().unwrap(), "deep").await;
+        let (result, _) = write_file(path.to_str().unwrap(), "deep", &FileTracker::default()).await;
         result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "deep");
     }
@@ -169,27 +348,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
 
-        let (result, _) = write_file(path.to_str().unwrap(), "").await;
+        let (result, _) = write_file(path.to_str().unwrap(), "", &FileTracker::default()).await;
         result.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
     #[tokio::test]
     async fn write_file_fails_when_parent_is_a_file() {
+        // Parent is a regular file → `metadata()` returns ENOTDIR;
+        // surfaced via the same `Error reading {path}: {e}` shape
+        // as edit.rs.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "I am a file").unwrap();
 
         let path = blocker.join("child.txt");
-        let (result, _) = write_file(path.to_str().unwrap(), "content").await;
-        assert!(result.unwrap_err().contains("Failed to create directory"));
+        let path_str = path.to_str().unwrap();
+        let (result, is_new) = write_file(path_str, "content", &FileTracker::default()).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("Error reading ") && err.contains(path_str),
+            "expected stat error to mention the path, got: {err}",
+        );
+        assert!(
+            !is_new,
+            "ENOTDIR should not be classified as a new-file case"
+        );
     }
 
     #[tokio::test]
-    async fn write_file_fails_when_path_is_a_directory() {
+    async fn write_file_unread_directory_hits_strict_gate() {
+        // No Read entry → the gate fires before the OS would
+        // reject the write on the directory.
         let dir = tempfile::tempdir().unwrap();
-        let (result, _) = write_file(dir.path().to_str().unwrap(), "content").await;
-        assert!(result.unwrap_err().contains("Failed to write file"));
+        let (result, _) = write_file(
+            dir.path().to_str().unwrap(),
+            "content",
+            &FileTracker::default(),
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not been read"),
+            "expected must-read-first rejection for unread directory, got: {err}",
+        );
     }
 
     #[cfg(unix)]
@@ -200,9 +402,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("locked.txt");
         std::fs::write(&path, "original").unwrap();
+        let tracker = FileTracker::default();
+        seed_full_read(&tracker, &path);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        let (result, _) = write_file(path.to_str().unwrap(), "overwrite").await;
+        let (result, _) = write_file(path.to_str().unwrap(), "overwrite", &tracker).await;
         let err = result.unwrap_err();
         assert!(
             err.contains("Failed to write file"),
@@ -210,5 +414,34 @@ mod tests {
         );
         // Permission denial did not corrupt the original bytes.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_fails_when_parent_creation_is_denied() {
+        // Missing parent under a read-only ancestor: pre-stat hits
+        // ENOENT (walks into the missing component) so control
+        // reaches `create_dir_all`, which then denies. Ancestor
+        // stays empty so tempdir can rmdir it during cleanup.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let readonly = dir.path().join("readonly");
+        std::fs::create_dir(&readonly).unwrap();
+        let path = readonly.join("nested").join("file.txt");
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("Failed to create directory:"),
+            "expected mkdir denial, got: {err}",
+        );
+        assert!(
+            is_new,
+            "missing parent path is still classified as a new-file case",
+        );
     }
 }

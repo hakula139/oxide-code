@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter};
+use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 
 /// Maximum title length (in characters) derived from the first user prompt.
@@ -34,7 +35,7 @@ pub(super) struct SessionState {
     /// `parent_uuid` for the next recorded message.
     last_message_uuid: Option<Uuid>,
     /// Loaded message count for resumed sessions; `0` for fresh.
-    /// `finish_entry` skips the summary when nothing was added.
+    /// `finish_entries` skips the summary when nothing was added.
     initial_message_count: u32,
     message_count: u32,
     /// Latched the first time a user-text message lands so we don't
@@ -135,27 +136,41 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Build the summary entry, or `None` for a no-op finish (already
-    /// finished, nothing recorded, or resumed session that added
-    /// nothing). Latches `finished = true` either way.
-    pub(super) fn finish_entry(&mut self, now: OffsetDateTime) -> Option<Entry> {
+    /// Builds the closing entries (one [`Entry::FileSnapshot`] per
+    /// supplied snapshot, then an [`Entry::Summary`]) or an empty vec
+    /// for a no-op finish. Latches `finished = true` either way.
+    /// Snapshots precede the summary so the summary stays the final
+    /// clean-exit marker; the caller (typically `main.rs` via
+    /// [`SessionHandle::finish`]) drains the tracker just before
+    /// sending the cmd, keeping `SessionState` free of any
+    /// `Arc<FileTracker>` coupling.
+    pub(super) fn finish_entries(
+        &mut self,
+        snapshots: Vec<FileSnapshot>,
+        now: OffsetDateTime,
+    ) -> Vec<Entry> {
         if self.finished {
-            return None;
+            return Vec::new();
         }
         self.finished = true;
         // Check `message_count`, not `writer_status`: a `Record + Finish`
         // batch defers materialization to `flush_entries`, so the writer
         // is still `Pending` when this runs.
         if self.message_count == 0 {
-            return None;
+            return Vec::new();
         }
         if self.initial_message_count > 0 && self.message_count == self.initial_message_count {
-            return None;
+            return Vec::new();
         }
-        Some(Entry::Summary {
+        let mut entries: Vec<Entry> = snapshots
+            .into_iter()
+            .map(|snapshot| Entry::FileSnapshot { snapshot })
+            .collect();
+        entries.push(Entry::Summary {
             message_count: self.message_count,
             updated_at: now,
-        })
+        });
+        entries
     }
 
     /// Buffer every entry then flush once. Materializes or reopens the
@@ -269,6 +284,7 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 mod tests {
     use super::super::store::test_store;
     use super::*;
+    use crate::file_tracker::FileTracker;
 
     // ── queue_message_entries ──
 
@@ -357,24 +373,24 @@ mod tests {
         assert!(!state.first_user_prompt_seen);
     }
 
-    // ── finish_entry ──
+    // ── finish_entries ──
 
     #[test]
-    fn finish_entry_pending_writer_returns_none_and_marks_finished() {
+    fn finish_entries_pending_writer_returns_empty_and_marks_finished() {
         // Nothing recorded → nothing to summarize, but `finished` still
         // latches so a later record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
 
-        let entry = state.finish_entry(OffsetDateTime::now_utc());
+        let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
 
-        assert!(entry.is_none());
+        assert!(entries.is_empty());
         assert!(state.finished);
     }
 
     #[test]
-    fn finish_entry_after_record_returns_summary_with_count() {
+    fn finish_entries_after_record_returns_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -382,31 +398,65 @@ mod tests {
         let (entries, _) = state.queue_message_entries(&Message::user("hello"), now);
         state.flush_entries(&entries).unwrap();
 
-        let entry = state.finish_entry(now).expect("Some(Summary)");
-        let Entry::Summary { message_count, .. } = entry else {
-            panic!("expected Summary, got {entry:?}");
+        let entries = state.finish_entries(Vec::new(), now);
+        let Some(Entry::Summary { message_count, .. }) = entries.last() else {
+            panic!("expected trailing Summary, got {entries:?}");
         };
-        assert_eq!(message_count, 1);
+        assert_eq!(*message_count, 1);
     }
 
     #[test]
-    fn finish_entry_is_idempotent() {
+    fn finish_entries_emits_one_file_snapshot_per_tracked_file() {
+        // Three snapshots in → three FileSnapshot entries out, ahead
+        // of the trailing Summary. The caller drains the tracker
+        // before sending the cmd; the actor only writes them to disk.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now);
+        state.flush_entries(&msgs).unwrap();
+
+        for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+            tracker.record_modify(
+                std::path::Path::new(name),
+                name.as_bytes(),
+                std::time::UNIX_EPOCH,
+                3,
+            );
+        }
+
+        let entries = state.finish_entries(tracker.snapshot_all(), now);
+        let snapshot_count = entries
+            .iter()
+            .filter(|e| matches!(e, Entry::FileSnapshot { .. }))
+            .count();
+        assert_eq!(snapshot_count, 3);
+        assert!(
+            matches!(entries.last(), Some(Entry::Summary { .. })),
+            "summary must come after every snapshot",
+        );
+    }
+
+    #[test]
+    fn finish_entries_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
         state.flush_entries(&entries).unwrap();
-        let _first = state.finish_entry(now);
+        let _first = state.finish_entries(Vec::new(), now);
 
-        let second = state.finish_entry(now);
+        let second = state.finish_entries(Vec::new(), now);
 
-        assert!(second.is_none(), "second call short-circuits");
+        assert!(second.is_empty(), "second call short-circuits");
         assert!(state.finished);
     }
 
     #[test]
-    fn finish_entry_skips_summary_on_empty_resume() {
+    fn finish_entries_skips_summary_on_empty_resume() {
         // A summary per noisy resume would accumulate one line per cycle.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -421,9 +471,9 @@ mod tests {
         let writer = store.open_append(&session_id).unwrap();
         let mut resumed = SessionState::resumed(store, session_id, writer, parent, 1, true);
 
-        let entry = resumed.finish_entry(now);
+        let entries = resumed.finish_entries(Vec::new(), now);
 
-        assert!(entry.is_none(), "no new messages → no summary");
+        assert!(entries.is_empty(), "no new messages → no summary");
     }
 
     // ── flush_entries ──

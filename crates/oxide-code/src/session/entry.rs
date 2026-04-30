@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
@@ -93,6 +94,14 @@ pub(crate) enum Entry {
         metadata: ToolMetadata,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
+    },
+    /// One persisted tracker entry per tracked file, written at
+    /// session finish so resume can skip cold-tracker re-Reads on
+    /// previously-observed files. Wire-stable; see
+    /// [`FileSnapshot`][crate::file_tracker::FileSnapshot].
+    FileSnapshot {
+        #[serde(flatten)]
+        snapshot: FileSnapshot,
     },
     /// Catch-all for unrecognized entry types. Preserves parse
     /// compatibility when a newer writer emits a type this reader
@@ -393,6 +402,64 @@ mod tests {
         assert_eq!(reserialized["metadata"]["title"], "t");
         // Unknown field is silently dropped on re-serialization.
         assert!(reserialized["metadata"].get("future_field").is_none());
+    }
+
+    // ── Entry::FileSnapshot ──
+
+    #[test]
+    fn file_snapshot_round_trips_with_inlined_payload_fields() {
+        // `#[serde(flatten)]` inlines the payload directly under
+        // `type`, not under a `snapshot` key. Pin the layout so a
+        // refactor can't silently change the wire format.
+        let snapshot = FileSnapshot {
+            path: std::path::PathBuf::from("/tmp/a.rs"),
+            content_hash: 0xDEAD_BEEF,
+            mtime: datetime!(2026-04-29 12:00:00 UTC),
+            size: 7,
+            last_view: crate::file_tracker::LastView::Full,
+            recorded_at: datetime!(2026-04-29 12:34:56 UTC),
+        };
+        let entry = Entry::FileSnapshot {
+            snapshot: snapshot.clone(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "file_snapshot");
+        assert_eq!(json["path"], "/tmp/a.rs");
+        assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
+        assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
+        assert!(
+            json.get("snapshot").is_none(),
+            "payload must flatten, not nest under `snapshot`",
+        );
+
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::FileSnapshot { snapshot: parsed } = parsed else {
+            panic!("expected FileSnapshot");
+        };
+        assert_eq!(parsed, snapshot);
+    }
+
+    #[test]
+    fn file_snapshot_unknown_field_is_ignored_for_forward_compat() {
+        // Older readers must ignore unknown fields a newer writer
+        // may grow (no `#[serde(deny_unknown_fields)]`). Pin here
+        // so a future tightening fails this test, not resume.
+        let json = serde_json::json!({
+            "type": "file_snapshot",
+            "path": "/tmp/a.rs",
+            "content_hash": 1_u64,
+            "mtime": "2026-04-29T12:00:00Z",
+            "size": 5,
+            "last_view": {"kind": "full"},
+            "recorded_at": "2026-04-29T12:00:00Z",
+            "future_field": "from a newer writer",
+        });
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::FileSnapshot { snapshot } = parsed else {
+            panic!("expected FileSnapshot, got {parsed:?}");
+        };
+        assert_eq!(snapshot.path, std::path::PathBuf::from("/tmp/a.rs"));
+        assert_eq!(snapshot.content_hash, 1);
     }
 
     // ── Entry::Unknown ──

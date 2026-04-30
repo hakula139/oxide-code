@@ -65,6 +65,7 @@ pub(crate) async fn resolve_session(
             messages: Vec::new(),
             title: None,
             tool_result_metadata: std::collections::HashMap::new(),
+            file_snapshots: Vec::new(),
         });
     }
 
@@ -220,7 +221,7 @@ mod tests {
         // on "no sessions" instead of testing the no-match path.
         let s = handle::start(&store, "m");
         s.record_message(Message::user("noop")).await;
-        s.finish().await;
+        s.finish(Vec::new()).await;
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
@@ -245,7 +246,7 @@ mod tests {
         for _ in 0..20 {
             let s = handle::start(&store, "m");
             s.record_message(Message::user("noop")).await;
-            s.finish().await;
+            s.finish(Vec::new()).await;
         }
 
         let listed = store.list().unwrap();
@@ -281,7 +282,7 @@ mod tests {
         original
             .record_message(Message::user("external path test"))
             .await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         let path = test_session_file(dir.path(), &full_id);
         drop(original);
 
@@ -320,7 +321,7 @@ mod tests {
         let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         // A 10-char UUID prefix is vanishingly unlikely to collide.
@@ -346,7 +347,7 @@ mod tests {
         let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("all scope")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let arg = Some(full_id[..10].to_owned());

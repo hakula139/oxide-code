@@ -8,6 +8,7 @@
 mod agent;
 mod client;
 mod config;
+mod file_tracker;
 mod message;
 mod model;
 mod prompt;
@@ -29,6 +30,7 @@ use agent::agent_turn;
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
 use client::anthropic::Client;
 use config::Config;
+use file_tracker::FileTracker;
 use message::Message;
 use prompt::environment::marketing_name;
 use session::handle::{ResumedSession, SessionHandle};
@@ -128,10 +130,15 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
+    let file_tracker = Arc::new(FileTracker::default());
+    let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
+    // Restore before the agent loop so resumed Reads clear the gate
+    // without forcing a re-Read.
+    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
-    let tools = Arc::new(create_tool_registry());
+    let tools = Arc::new(create_tool_registry(&file_tracker));
 
     if let Some(prompt_text) = cli.prompt {
         return headless(
@@ -141,6 +148,7 @@ async fn async_main() -> Result<()> {
             show_thinking,
             &prompt_text,
             resumed.handle,
+            file_tracker,
         )
         .await;
     }
@@ -153,11 +161,21 @@ async fn async_main() -> Result<()> {
             show_thinking,
             resumed.handle,
             resumed.messages,
+            file_tracker,
         )
         .await;
     }
 
-    run_tui(&client, &model, show_thinking, &theme, tools, resumed).await
+    run_tui(
+        &client,
+        &model,
+        show_thinking,
+        &theme,
+        tools,
+        resumed,
+        file_tracker,
+    )
+    .await
 }
 
 // ── Session Helpers ──
@@ -190,12 +208,12 @@ fn detect_terminal_width() -> Option<usize> {
         .map(|(cols, _)| usize::from(cols))
 }
 
-fn create_tool_registry() -> ToolRegistry {
+fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
     ToolRegistry::new(vec![
         Box::new(BashTool),
-        Box::new(ReadTool),
-        Box::new(WriteTool),
-        Box::new(EditTool),
+        Box::new(ReadTool::new(Arc::clone(tracker))),
+        Box::new(WriteTool::new(Arc::clone(tracker))),
+        Box::new(EditTool::new(Arc::clone(tracker))),
         Box::new(GlobTool),
         Box::new(GrepTool),
     ])
@@ -250,12 +268,15 @@ async fn run_tui(
     theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let ResumedSession {
         handle: session,
         messages: resumed_messages,
         title: resumed_title,
         tool_result_metadata: resumed_tool_metadata,
+        // Snapshots were already drained into the tracker by the caller.
+        file_snapshots: _,
     } = resumed;
     tui::terminal::install_panic_hook();
 
@@ -329,7 +350,7 @@ async fn run_tui(
 
     // Summary write after abort, no sink available — actor warn-logs
     // the cause.
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     if let Some(msg) = outcome.failure {
         warn!("session finish failed: {msg}");
     }
@@ -400,6 +421,7 @@ async fn bare_repl(
     show_thinking: bool,
     session: SessionHandle,
     resumed_messages: Vec<Message>,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let stdin = BufReader::new(tokio::io::stdin());
@@ -459,7 +481,7 @@ async fn bare_repl(
     }
     .await;
 
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 
@@ -486,6 +508,7 @@ async fn headless(
     show_thinking: bool,
     prompt_text: &str,
     session: SessionHandle,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let user_msg = Message::user(prompt_text);
@@ -506,7 +529,7 @@ async fn headless(
             Ok(())
         }
     };
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 

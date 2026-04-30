@@ -21,6 +21,7 @@ use super::store::{
     SessionData, SessionStore, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
@@ -166,9 +167,16 @@ impl SessionHandle {
 
     /// Write the session summary and finalize. Idempotent; no-op on
     /// fresh sessions that never recorded anything.
-    pub(crate) async fn finish(&self) -> Outcome {
+    ///
+    /// `snapshots` is drained from the shared
+    /// [`FileTracker`][crate::file_tracker::FileTracker] just before
+    /// the call — one `Entry::FileSnapshot` lands per snapshot, ahead
+    /// of the `Entry::Summary`. An empty `Vec` finalizes with no
+    /// tracker entries.
+    pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
-        self.dispatch_outcome(SessionCmd::Finish { ack }, rx).await
+        self.dispatch_outcome(SessionCmd::Finish { snapshots, ack }, rx)
+            .await
     }
 
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
@@ -245,6 +253,11 @@ pub(crate) struct ResumedSession {
     pub(crate) messages: Vec<Message>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
+    /// Persisted tracker snapshots. The caller passes these to
+    /// [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
+    /// before the agent loop runs so the gate clears for previously-
+    /// observed files that still match disk.
+    pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── Constructors ──
@@ -303,6 +316,7 @@ fn from_resumed_data(
         messages: data.messages,
         title,
         tool_result_metadata: data.tool_result_metadata,
+        file_snapshots: data.file_snapshots,
     })
 }
 
@@ -324,6 +338,8 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
 mod tests {
     use super::super::store::{test_session_file, test_store};
     use super::*;
+    use crate::file_tracker::FileTracker;
+    use crate::file_tracker::testing::record_tracked_file;
     use crate::message::{ContentBlock, Role};
 
     // ── record_message ──
@@ -336,7 +352,7 @@ mod tests {
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("First prompt")).await;
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
@@ -415,7 +431,7 @@ mod tests {
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let resumed = resume(&store, &session_id).unwrap().handle;
@@ -455,7 +471,7 @@ mod tests {
         let handle = testing::acks_then_drops("acks-then-drops", 3);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
-        let finish = handle.finish().await;
+        let finish = handle.finish(Vec::new()).await;
         let batch_ok = handle
             .record_tool_metadata_batch(vec![(
                 "t1".to_owned(),
@@ -512,7 +528,7 @@ mod tests {
                 ),
             ])
             .await;
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         assert!(outcome.failure.is_none());
@@ -550,7 +566,7 @@ mod tests {
                 ("t2".to_owned(), ToolMetadata::default()),
             ])
             .await;
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         assert!(outcome.failure.is_none());
@@ -585,7 +601,7 @@ mod tests {
         handle
             .append_ai_title("Fix auth flow for mobile".to_owned())
             .await;
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         let sessions = store.list().unwrap();
@@ -602,8 +618,8 @@ mod tests {
     async fn finish_actor_gone_surfaces_failure_once_then_silences() {
         let handle = testing::dead("dead");
 
-        let first = handle.finish().await;
-        let second = handle.finish().await;
+        let first = handle.finish(Vec::new()).await;
+        let second = handle.finish(Vec::new()).await;
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
@@ -619,7 +635,7 @@ mod tests {
         handle
             .record_message(Message::user("Fix the auth bug"))
             .await;
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         let sessions = store.list().unwrap();
@@ -634,7 +650,7 @@ mod tests {
         let store = test_store(dir.path());
         let handle = start(&store, "m");
         let _sid = handle.session_id().to_owned();
-        handle.finish().await;
+        handle.finish(Vec::new()).await;
         drop(handle);
 
         let project_dir = super::super::store::test_project_dir(dir.path());
@@ -655,11 +671,11 @@ mod tests {
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let resumed = resume(&store, &session_id).unwrap().handle;
-        resumed.finish().await;
+        resumed.finish(Vec::new()).await;
         drop(resumed);
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();
@@ -721,6 +737,153 @@ mod tests {
         );
     }
 
+    // ── file-snapshot persistence ──
+
+    #[tokio::test]
+    async fn finish_persists_one_file_snapshot_per_tracked_file() {
+        // Three tracked files in → three FileSnapshot lines on disk
+        // with the right paths. Counting strings would pass even if
+        // every snapshot pointed at the same file; parse and assert
+        // the path set instead.
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("trigger")).await;
+        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
+            ["a.rs", "b.rs", "c.rs"]
+                .into_iter()
+                .map(|name| {
+                    let path = files_dir.path().join(name);
+                    record_tracked_file(&tracker, &path, name.as_bytes());
+                    path
+                })
+                .collect();
+
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"file_snapshot""#))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                std::path::PathBuf::from(v["path"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            snapshot_paths, expected_paths,
+            "every tracked file lands as its own FileSnapshot",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_restores_unchanged_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
+    }
+
+    #[tokio::test]
+    async fn resume_drops_drifted_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        // Bump mtime / size before resume so the snapshot stat
+        // mismatches and the entry drops.
+        std::fs::write(&path_a, b"externally edited bytes").unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+            "drifted file must hit the must-read-first gate",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_drops_snapshots_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        std::fs::remove_file(&path_a).unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        // restore_verified must drop silently; the tracker should
+        // end up empty for this path rather than panic.
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            std::time::UNIX_EPOCH,
+            0,
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+        );
+    }
+
     // ── resume ──
 
     #[tokio::test]
@@ -731,7 +894,7 @@ mod tests {
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let ResumedSession {
@@ -763,7 +926,7 @@ mod tests {
         let store = test_store(dir.path());
         let original = start(&store, "m");
         let session_id = original.session_id().to_owned();
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         assert!(resume(&store, &session_id).is_err());
@@ -834,12 +997,12 @@ mod tests {
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let resumed = resume(&store, &session_id).unwrap().handle;
         resumed.record_message(Message::user("follow up")).await;
-        resumed.finish().await;
+        resumed.finish(Vec::new()).await;
         drop(resumed);
 
         let content = std::fs::read_to_string(test_session_file(dir.path(), &session_id)).unwrap();

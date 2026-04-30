@@ -493,6 +493,8 @@ fn push_welcome(lines: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use indoc::indoc;
     use ratatui::Terminal;
@@ -500,6 +502,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
+    use crate::file_tracker::testing::tracker;
     use crate::message::{ContentBlock, Role};
 
     // ── Fixtures ──
@@ -509,11 +512,12 @@ mod tests {
     }
 
     fn test_tools() -> ToolRegistry {
+        let tracker = tracker();
         ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
-            Box::new(crate::tool::read::ReadTool),
-            Box::new(crate::tool::write::WriteTool),
-            Box::new(crate::tool::edit::EditTool),
+            Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),
+            Box::new(crate::tool::write::WriteTool::new(Arc::clone(&tracker))),
+            Box::new(crate::tool::edit::EditTool::new(tracker)),
             Box::new(crate::tool::glob::GlobTool),
             Box::new(crate::tool::grep::GrepTool),
         ])
