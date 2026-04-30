@@ -41,6 +41,11 @@ pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
     enabled: bool,
+    /// Whether the surrounding [`App`](super::super::app::App) has any
+    /// queued prompts pending dispatch — drives the idle footer's
+    /// hint text. Set explicitly because the input has no view of
+    /// app-level queue state.
+    has_queued: bool,
     /// Last render width for visual line count estimation. Updated each
     /// frame by `render()`, used by `height()` on the *next* frame.
     /// `Cell` because `render(&self)` is immutable.
@@ -65,9 +70,16 @@ impl InputArea {
             theme: theme.clone(),
             textarea,
             enabled: true,
+            has_queued: false,
             last_width: Cell::new(0),
             scroll_top: Cell::new(0),
         }
+    }
+
+    /// Sets whether the parent has queued prompts; only affects the
+    /// rendered footer.
+    pub(crate) fn set_has_queued(&mut self, has_queued: bool) {
+        self.has_queued = has_queued;
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
@@ -242,18 +254,42 @@ impl Component for InputArea {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
 
-        // Hint line.
-        let hint = Line::from(vec![
-            Span::styled("Enter", self.theme.dim()),
-            Span::styled(": send", self.theme.dim()),
-            self.theme.separator_span(),
-            Span::styled("Shift+Enter", self.theme.dim()),
-            Span::styled(": newline", self.theme.dim()),
-            self.theme.separator_span(),
-            Span::styled("Ctrl+C", self.theme.dim()),
-            Span::styled(": quit", self.theme.dim()),
-        ]);
-        frame.render_widget(Paragraph::new(hint), chunks[1]);
+        frame.render_widget(Paragraph::new(self.hint_line()), chunks[1]);
+    }
+}
+
+// ── Render Helpers ──
+
+impl InputArea {
+    /// Footer hint, dispatched on `(enabled, has_queued)`. Up-arrow
+    /// queue-pop affordance is deferred (textarea cursor conflict),
+    /// so the queued-idle row only advertises Esc.
+    fn hint_line(&self) -> Line<'static> {
+        let dim = self.theme.dim();
+        let sep = || self.theme.separator_span();
+        let key = |label: &str, after: &str| -> Vec<Span<'static>> {
+            vec![
+                Span::styled(label.to_owned(), dim),
+                Span::styled(after.to_owned(), dim),
+            ]
+        };
+        let mut spans = Vec::new();
+        if !self.enabled {
+            spans.extend(key("Esc / Ctrl+C", ": interrupt"));
+            spans.push(sep());
+            spans.extend(key("Enter", ": queue prompt"));
+        } else if self.has_queued {
+            spans.extend(key("Esc", ": edit queued"));
+            spans.push(sep());
+            spans.extend(key("Enter", ": send"));
+        } else {
+            spans.extend(key("Enter", ": send"));
+            spans.push(sep());
+            spans.extend(key("Shift+Enter", ": newline"));
+            spans.push(sep());
+            spans.extend(key("Ctrl+C", ": quit"));
+        }
+        Line::from(spans)
     }
 }
 
@@ -602,6 +638,61 @@ mod tests {
             "a long input that overflows a narrow terminal and forces the textarea to wrap",
         );
         insta::assert_snapshot!(render_to_backend(&input, 30, 5));
+    }
+
+    // ── hint_line ──
+
+    fn hint_text(input: &InputArea) -> String {
+        input
+            .hint_line()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn hint_line_idle_empty_queue_shows_send_newline_quit() {
+        let input = test_input();
+        let text = hint_text(&input);
+        assert!(text.contains("Enter: send"), "missing send: {text}");
+        assert!(
+            text.contains("Shift+Enter: newline"),
+            "missing newline: {text}",
+        );
+        assert!(text.contains("Ctrl+C: quit"), "missing quit: {text}");
+    }
+
+    #[test]
+    fn hint_line_busy_shows_interrupt_and_queue_hint() {
+        let mut input = test_input();
+        input.set_enabled(false);
+        let text = hint_text(&input);
+        assert!(
+            text.contains("Esc / Ctrl+C: interrupt"),
+            "missing interrupt: {text}",
+        );
+        assert!(
+            text.contains("Enter: queue prompt"),
+            "missing queue: {text}",
+        );
+        assert!(!text.contains("Ctrl+C: quit"), "stale quit hint: {text}");
+    }
+
+    #[test]
+    fn hint_line_idle_with_queue_shows_edit_queued() {
+        let mut input = test_input();
+        input.set_has_queued(true);
+        let text = hint_text(&input);
+        assert!(
+            text.contains("Esc: edit queued"),
+            "missing edit-queued: {text}",
+        );
+        assert!(text.contains("Enter: send"), "missing send: {text}");
+        assert!(
+            !text.contains("Ctrl+C"),
+            "no quit hint while queued: {text}"
+        );
     }
 
     // ── visual_line_count ──

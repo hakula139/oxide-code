@@ -191,6 +191,7 @@ impl App {
             self.dispatch_user_action(UserAction::Cancel);
         } else if let Some(prompt) = self.pending_prompts.pop_back() {
             self.input.set_text(&prompt);
+            self.sync_input_queue_hint();
         }
     }
 
@@ -209,6 +210,7 @@ impl App {
                     // forward so the agent loop only sees the prompt
                     // when `drain_pending_prompt` releases it.
                     self.pending_prompts.push_back(text.clone());
+                    self.sync_input_queue_hint();
                     return;
                 }
                 self.chat.push_user_message(text.clone());
@@ -350,6 +352,13 @@ impl App {
         if let Some(prompt) = self.pending_prompts.pop_front() {
             self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
         }
+        self.sync_input_queue_hint();
+    }
+
+    /// Mirrors [`Self::pending_prompts`] non-emptiness onto the input
+    /// area so its footer hint can swap to the queue-aware row.
+    fn sync_input_queue_hint(&mut self) {
+        self.input.set_has_queued(!self.pending_prompts.is_empty());
     }
 
     /// Sets a busy status only when the bar isn't already in
