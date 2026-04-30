@@ -38,7 +38,7 @@ The direction is simple:
 ### Turn Interruption & Queueing
 
 - Esc / Ctrl+C while busy interrupts the in-flight turn; partial output is preserved with a clear `(interrupted)` marker.
-- Type during a busy turn to queue prompts; queued prompts dispatch in FIFO order at each turn boundary.
+- Type during a busy turn to queue prompts; queued prompts splice into the same multi-step turn at the next round boundary (between tool calls), so follow-ups land without aborting in-flight work. Tool-less turns drain queued prompts at the turn boundary instead.
 - Esc on idle pops the most recent queued prompt back into the input for editing.
 - Idle Ctrl+C arms a 1-second exit confirmation; a second press confirms.
 
