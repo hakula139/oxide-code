@@ -40,7 +40,11 @@ type FileState = {
 
 **Concurrency:** single-threaded JavaScript with the LRU cache as implicit serialization point. No `Mutex` / `Semaphore`.
 
-**Sources:** `claude-code/src/tools/FileEditTool/FileEditTool.ts:275-311` (Edit-time gate + mtime / content fallback), `claude-code/src/utils/fileStateCache.ts` (LRU cache shape, eviction), `claude-code/src/utils/queryHelpers.ts:346-501` (resume rehydration via message history — the approach we explicitly do **not** take).
+**Sources:**
+
+- `claude-code/src/tools/FileEditTool/FileEditTool.ts:275-311` — Edit-time gate + mtime / content fallback.
+- `claude-code/src/utils/fileStateCache.ts` — LRU cache shape, eviction.
+- `claude-code/src/utils/queryHelpers.ts:346-501` — resume rehydration via message history — the approach we explicitly do **not** take.
 
 ### OpenAI Codex (Rust)
 
@@ -56,7 +60,9 @@ There is no "must Read first" rule. Code can be edited that the model has never 
 
 **Concurrency:** per-session `Mutex<SessionState>`; no per-file lock.
 
-**Sources:** `codex-rs/core/src/tools/handlers/apply_patch.rs:340-464` (deferred apply-time validation).
+**Sources:**
+
+- `codex-rs/core/src/tools/handlers/apply_patch.rs:340-464` — deferred apply-time validation.
 
 ### opencode (TypeScript)
 
@@ -79,7 +85,10 @@ A stale `oldString` triggers a "string not found" error — the model must adjus
 
 **Concurrency:** per-file `Semaphore` from `effect` library (`withPermits(1)`). Different files edit in parallel; same file serializes.
 
-**Sources:** `opencode/packages/opencode/src/tool/edit.ts:36-46` (per-file `Semaphore`), `opencode/packages/opencode/src/tool/edit.ts:115-118` (disk re-read on every Edit).
+**Sources:**
+
+- `opencode/packages/opencode/src/tool/edit.ts:36-46` — per-file `Semaphore`.
+- `opencode/packages/opencode/src/tool/edit.ts:115-118` — disk re-read on every Edit.
 
 ## Comparison
 
