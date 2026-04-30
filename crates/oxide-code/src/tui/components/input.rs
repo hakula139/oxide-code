@@ -2,10 +2,9 @@ use std::cell::Cell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
@@ -16,11 +15,19 @@ use crate::tui::theme::Theme;
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
 
+/// Placeholder copy keyed off `(enabled, has_queued)`. Visible only
+/// while the buffer is empty.
+const PLACEHOLDER_IDLE: &str = "Ask anything...";
+const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
+const PLACEHOLDER_IDLE_QUEUED: &str = "Press Esc to edit queued, Enter to send";
+
 /// Multi-line input area at the bottom of the TUI.
 ///
 /// Wraps [`ratatui_textarea::TextArea`] for multi-line editing with
 /// dynamic height. Grows from 1 to [`MAX_VISIBLE_LINES`] as content
-/// expands.
+/// expands. The placeholder text (visible only when the buffer is
+/// empty) is the inline hint surface; mid-turn / interrupt hints
+/// live on the status bar so they survive past the first keystroke.
 ///
 /// Key bindings (idle):
 ///
@@ -61,25 +68,30 @@ impl InputArea {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
-        textarea.set_placeholder_text("Ask anything...");
         textarea.set_placeholder_style(theme.dim());
         textarea.set_wrap_mode(WrapMode::Word);
         textarea.set_block(Block::default());
 
-        Self {
+        let mut input = Self {
             theme: theme.clone(),
             textarea,
             enabled: true,
             has_queued: false,
             last_width: Cell::new(0),
             scroll_top: Cell::new(0),
-        }
+        };
+        input.refresh_placeholder();
+        input
     }
 
-    /// Sets whether the parent has queued prompts; only affects the
-    /// rendered footer.
+    /// Mirrors the parent's queue non-emptiness onto the placeholder
+    /// so an empty buffer shows the queue hint instead of the default.
     pub(crate) fn set_has_queued(&mut self, has_queued: bool) {
+        if self.has_queued == has_queued {
+            return;
+        }
         self.has_queued = has_queued;
+        self.refresh_placeholder();
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
@@ -92,6 +104,7 @@ impl InputArea {
         } else {
             self.textarea.set_style(self.theme.dim());
         }
+        self.refresh_placeholder();
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -123,11 +136,12 @@ impl InputArea {
         self.scroll_top.set(0);
     }
 
-    /// Returns the height this component needs (content lines + border + hint).
+    /// Returns the height this component needs (content lines + top
+    /// border).
     pub(crate) fn height(&self) -> u16 {
         let content_lines = self.visual_line_count();
-        // content + top border (1) + hint line (1)
-        content_lines.min(MAX_VISIBLE_LINES) + 2
+        // content + top border (1)
+        content_lines.min(MAX_VISIBLE_LINES) + 1
     }
 }
 
@@ -209,16 +223,10 @@ impl Component for InputArea {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let chunks = Layout::vertical([
-            Constraint::Min(1),    // textarea
-            Constraint::Length(1), // hint line
-        ])
-        .split(inner);
-
-        frame.render_widget(&self.textarea, chunks[0]);
+        frame.render_widget(&self.textarea, inner);
 
         // Store width for visual line count estimation on the next frame.
-        self.last_width.set(chunks[0].width);
+        self.last_width.set(inner.width);
 
         if self.enabled {
             // screen_cursor().row is an absolute screen-line index across
@@ -231,7 +239,7 @@ impl Component for InputArea {
                 reason = "cursor position fits in u16 for terminal widths"
             )]
             let cursor_row = sc.row as u16;
-            let height = chunks[0].height;
+            let height = inner.height;
             let prev = self.scroll_top.get();
             let top = if cursor_row < prev {
                 cursor_row
@@ -246,50 +254,30 @@ impl Component for InputArea {
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
-            let cursor_x = chunks[0]
+            let cursor_x = inner
                 .x
                 .saturating_add(sc.col as u16)
-                .min(chunks[0].right().saturating_sub(1));
-            let cursor_y = chunks[0].y + cursor_row - top;
+                .min(inner.right().saturating_sub(1));
+            let cursor_y = inner.y + cursor_row - top;
             frame.set_cursor_position((cursor_x, cursor_y));
         }
-
-        frame.render_widget(Paragraph::new(self.hint_line()), chunks[1]);
     }
 }
 
 // ── Render Helpers ──
 
 impl InputArea {
-    /// Footer hint, dispatched on `(enabled, has_queued)`. Up-arrow
-    /// queue-pop affordance is deferred (textarea cursor conflict),
-    /// so the queued-idle row only advertises Esc.
-    fn hint_line(&self) -> Line<'static> {
-        let dim = self.theme.dim();
-        let sep = || self.theme.separator_span();
-        let key = |label: &str, after: &str| -> Vec<Span<'static>> {
-            vec![
-                Span::styled(label.to_owned(), dim),
-                Span::styled(after.to_owned(), dim),
-            ]
-        };
-        let mut spans = Vec::new();
-        if !self.enabled {
-            spans.extend(key("Esc / Ctrl+C", ": interrupt"));
-            spans.push(sep());
-            spans.extend(key("Enter", ": queue prompt"));
+    /// Picks the placeholder copy for the current `(enabled, has_queued)`
+    /// combo. Visible only while the buffer is empty.
+    fn refresh_placeholder(&mut self) {
+        let text = if !self.enabled {
+            PLACEHOLDER_BUSY
         } else if self.has_queued {
-            spans.extend(key("Esc", ": edit queued"));
-            spans.push(sep());
-            spans.extend(key("Enter", ": send"));
+            PLACEHOLDER_IDLE_QUEUED
         } else {
-            spans.extend(key("Enter", ": send"));
-            spans.push(sep());
-            spans.extend(key("Shift+Enter", ": newline"));
-            spans.push(sep());
-            spans.extend(key("Ctrl+C", ": quit"));
-        }
-        Line::from(spans)
+            PLACEHOLDER_IDLE
+        };
+        self.textarea.set_placeholder_text(text);
     }
 }
 
@@ -399,9 +387,9 @@ mod tests {
     // ── height ──
 
     #[test]
-    fn height_empty_input_is_three() {
+    fn height_empty_input_is_two() {
         let input = test_input();
-        assert_eq!(input.height(), 3); // 1 content + 1 border + 1 hint
+        assert_eq!(input.height(), 2); // 1 content + 1 top border
     }
 
     #[test]
@@ -409,7 +397,7 @@ mod tests {
         let mut input = test_input();
         input.textarea.insert_newline();
         input.textarea.insert_newline();
-        assert_eq!(input.height(), 5); // 3 content + 1 border + 1 hint
+        assert_eq!(input.height(), 4); // 3 content + 1 top border
     }
 
     #[test]
@@ -418,7 +406,7 @@ mod tests {
         for _ in 0..10 {
             input.textarea.insert_newline();
         }
-        assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
+        assert_eq!(input.height(), MAX_VISIBLE_LINES + 1);
     }
 
     // ── handle_event ──
@@ -580,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn render_empty_shows_placeholder_and_hint_line() {
+    fn render_empty_shows_placeholder() {
         let input = test_input();
         insta::assert_snapshot!(render_to_backend(&input, 60, 3));
     }
@@ -640,59 +628,41 @@ mod tests {
         insta::assert_snapshot!(render_to_backend(&input, 30, 5));
     }
 
-    // ── hint_line ──
+    // ── refresh_placeholder ──
 
-    fn hint_text(input: &InputArea) -> String {
-        input
-            .hint_line()
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect()
+    fn placeholder_text(input: &InputArea) -> String {
+        input.textarea.placeholder_text().to_owned()
     }
 
     #[test]
-    fn hint_line_idle_empty_queue_shows_send_newline_quit() {
+    fn refresh_placeholder_idle_empty_queue_shows_default() {
         let input = test_input();
-        let text = hint_text(&input);
-        assert!(text.contains("Enter: send"), "missing send: {text}");
-        assert!(
-            text.contains("Shift+Enter: newline"),
-            "missing newline: {text}",
-        );
-        assert!(text.contains("Ctrl+C: quit"), "missing quit: {text}");
+        assert_eq!(placeholder_text(&input), PLACEHOLDER_IDLE);
     }
 
     #[test]
-    fn hint_line_busy_shows_interrupt_and_queue_hint() {
+    fn refresh_placeholder_busy_shows_queue_follow_up_copy() {
         let mut input = test_input();
         input.set_enabled(false);
-        let text = hint_text(&input);
-        assert!(
-            text.contains("Esc / Ctrl+C: interrupt"),
-            "missing interrupt: {text}",
-        );
-        assert!(
-            text.contains("Enter: queue prompt"),
-            "missing queue: {text}",
-        );
-        assert!(!text.contains("Ctrl+C: quit"), "stale quit hint: {text}");
+        assert_eq!(placeholder_text(&input), PLACEHOLDER_BUSY);
     }
 
     #[test]
-    fn hint_line_idle_with_queue_shows_edit_queued() {
+    fn refresh_placeholder_idle_with_queue_shows_edit_hint() {
         let mut input = test_input();
         input.set_has_queued(true);
-        let text = hint_text(&input);
-        assert!(
-            text.contains("Esc: edit queued"),
-            "missing edit-queued: {text}",
-        );
-        assert!(text.contains("Enter: send"), "missing send: {text}");
-        assert!(
-            !text.contains("Ctrl+C"),
-            "no quit hint while queued: {text}"
-        );
+        assert_eq!(placeholder_text(&input), PLACEHOLDER_IDLE_QUEUED);
+    }
+
+    #[test]
+    fn refresh_placeholder_busy_takes_precedence_over_queue() {
+        // Busy + queue (the user typed a follow-up while a turn is
+        // running): the placeholder still encourages queueing rather
+        // than the idle-queue copy that suggests editing.
+        let mut input = test_input();
+        input.set_has_queued(true);
+        input.set_enabled(false);
+        assert_eq!(placeholder_text(&input), PLACEHOLDER_BUSY);
     }
 
     // ── visual_line_count ──
@@ -754,8 +724,8 @@ mod tests {
                 KeyModifiers::NONE,
             )));
         }
-        // 3 content + 1 border + 1 hint = 5
-        assert_eq!(input.height(), 5);
+        // 3 content + 1 top border = 4
+        assert_eq!(input.height(), 4);
     }
 
     // ── submit ──

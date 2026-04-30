@@ -2,9 +2,10 @@
 source: crates/oxide-code/src/tui/app.rs
 expression: "render_app(&mut app, 60, 14)"
 ---
-"  ox │ test-model │ ⠋ streaming...                  ~/test  "
+"  ox │ test-model │ ⠋ streaming... · Esc to interrupt       "
 "────────────────────────────────────────────────────────────"
 "❯ active                                                    "
+"                                                            "
 "                                                            "
 "                                                            "
 "                                                            "
@@ -14,5 +15,4 @@ expression: "render_app(&mut app, 60, 14)"
 "❯ queued 2                                                  "
 "  +2 more                                                   "
 "────────────────────────────────────────────────────────────"
-" Ask anything...                                            "
-"Esc / Ctrl+C: interrupt │ Enter: queue prompt               "
+" Type to queue a follow-up...                               "

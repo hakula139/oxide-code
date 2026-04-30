@@ -4,4 +4,4 @@ expression: "render_to_backend(&input, 60, 3)"
 ---
 "────────────────────────────────────────────────────────────"
 "hello world                                                 "
-"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit           "
+"                                                            "
