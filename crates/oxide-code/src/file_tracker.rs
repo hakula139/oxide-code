@@ -363,7 +363,7 @@ pub(crate) enum StatCheck {
 /// Structural rejection from the gate. Rendered via `Display` into
 /// the model-facing tool error; each variant carries the offending
 /// `path` so the rendered message names the file (matches the
-/// codebase-wide `Error reading {path}: …` convention) and the
+/// codebase-wide `Error reading {path}: ...` convention) and the
 /// `GatePurpose` so the verb swaps (`editing` vs `writing to`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GateError {
