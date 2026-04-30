@@ -754,7 +754,35 @@ mod tests {
         assert_eq!(stored.content_hash, 2, "older does not displace newer");
     }
 
-    // ── FileSnapshot serde round-trip ──
+    // ── Concurrency ──
+
+    #[test]
+    fn concurrent_record_read_does_not_corrupt_map() {
+        // Eight threads each insert 100 unique paths. The mutex
+        // serializes inserts; the test catches any future migration
+        // to a non-thread-safe representation.
+        let tracker = Arc::new(FileTracker::new());
+        thread::scope(|s| {
+            for t in 0..8u32 {
+                let tracker = Arc::clone(&tracker);
+                s.spawn(move || {
+                    for i in 0..100u32 {
+                        let path = PathBuf::from(format!("/tmp/t{t}/p{i}"));
+                        _ = tracker.record_read(
+                            &path,
+                            &t.to_le_bytes(),
+                            UNIX_EPOCH,
+                            4,
+                            LastView::Full,
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(tracker.lock().len(), 8 * 100);
+    }
+
+    // ── FileSnapshot ──
 
     #[test]
     fn file_snapshot_round_trips_through_json() {
@@ -786,35 +814,7 @@ mod tests {
         assert_eq!(parsed, snap);
     }
 
-    // ── Concurrency ──
-
-    #[test]
-    fn concurrent_record_read_does_not_corrupt_map() {
-        // Eight threads each insert 100 unique paths. The mutex
-        // serializes inserts; the test catches any future migration
-        // to a non-thread-safe representation.
-        let tracker = Arc::new(FileTracker::new());
-        thread::scope(|s| {
-            for t in 0..8u32 {
-                let tracker = Arc::clone(&tracker);
-                s.spawn(move || {
-                    for i in 0..100u32 {
-                        let path = PathBuf::from(format!("/tmp/t{t}/p{i}"));
-                        _ = tracker.record_read(
-                            &path,
-                            &t.to_le_bytes(),
-                            UNIX_EPOCH,
-                            4,
-                            LastView::Full,
-                        );
-                    }
-                });
-            }
-        });
-        assert_eq!(tracker.lock().len(), 8 * 100);
-    }
-
-    // ── LastView serde round-trip ──
+    // ── LastView ──
 
     #[test]
     fn last_view_full_serializes_kind_only() {

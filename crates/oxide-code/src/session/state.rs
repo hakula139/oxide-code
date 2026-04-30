@@ -380,7 +380,7 @@ mod tests {
         assert!(!state.first_user_prompt_seen);
     }
 
-    // ── finish_entry ──
+    // ── finish_entries ──
 
     #[test]
     fn finish_entries_pending_writer_returns_empty_and_marks_finished() {

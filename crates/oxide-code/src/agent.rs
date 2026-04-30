@@ -398,7 +398,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use serde_json::json;
     use wiremock::matchers::{method, path as wm_path};
@@ -414,6 +414,7 @@ mod tests {
     use crate::message::Role;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
+    use crate::tool::tracker::FileTracker;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
     // ── agent_turn ──
@@ -539,7 +540,7 @@ mod tests {
 
     fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        let tracker = std::sync::Arc::new(crate::tool::tracker::FileTracker::new());
+        let tracker = Arc::new(FileTracker::new());
         handle::start(&store, "claude-sonnet-4-6", tracker)
     }
 
