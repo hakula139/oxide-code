@@ -466,6 +466,24 @@ mod tests {
     // ── result_view ──
 
     #[test]
+    fn result_view_returns_none_when_new_string_missing_with_old_string_present() {
+        // The two `?` chains on `old_string` and `new_string` are
+        // sequential, so an input that satisfies the first guard but
+        // omits the second is the only way to land on the
+        // `new_string` `?` before falling through. The bare-bones
+        // `result_view_returns_none_when_required_inputs_missing`
+        // short-circuits at the first guard and doesn't reach this
+        // branch.
+        let tool = EditTool::new(Arc::new(FileTracker::default()));
+        let view = tool.result_view(
+            &serde_json::json!({"old_string": "x"}),
+            "Successfully edited /tmp/x.",
+            &ToolMetadata::default(),
+        );
+        assert!(view.is_none());
+    }
+
+    #[test]
     fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
         // Live path: `run` attaches `metadata.diff_chunks` via
         // `with_diff_chunks`, so the renderer gets real file line
@@ -694,6 +712,14 @@ mod tests {
         assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
     }
 
+    #[test]
+    fn parse_replacement_count_returns_none_when_only_prefix_present() {
+        // `"Replaced "` strips to `""`, which yields no whitespace-
+        // separated token. Pinning the `?` propagation on the empty
+        // case so a future "default to 0 / 1" regression doesn't slip.
+        assert_eq!(parse_replacement_count("Replaced "), None);
+    }
+
     // ── run ──
 
     #[tokio::test]
@@ -786,6 +812,32 @@ mod tests {
             output.metadata.title, None,
             "error path must not claim the edit happened",
         );
+    }
+
+    #[tokio::test]
+    async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
+        // The trait shim is a four-line `Box::pin(run(...))`, but it
+        // owns the `Arc::clone` that hands the per-tool tracker to the
+        // future. Pinning the shim guarantees the tracker plumbing
+        // doesn't silently regress when callers move from the inner
+        // `run` (used in unit tests) to the `Tool::run` surface (used
+        // by the dispatcher).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let tracker = Arc::new(tracker_seeded(&path));
+        let tool = EditTool::new(Arc::clone(&tracker));
+
+        let output = tool
+            .run(serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "goodbye",
+            }))
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "goodbye world");
     }
 
     // ── edit_file ──
@@ -1154,6 +1206,36 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("Error reading"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_non_utf8_content() {
+        // Edit operates on text. The model wouldn't normally reach this
+        // for binary files (Read rejects them first), but the gate is
+        // bytes-only — `record_read` accepts arbitrary bytes — so a
+        // session that bypassed Read could still arrive here. Surface
+        // the decode failure rather than panicking.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        let bytes = [0xff_u8, 0xfe, 0xfd];
+        std::fs::write(&path, bytes).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let tracker = FileTracker::default();
+        tracker.record_read(
+            &path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Full,
+        );
+
+        let err = edit_file(path.to_str().unwrap(), "a", "b", false, &tracker)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("Error reading") && err.contains("utf-8"),
+            "expected utf-8 decode failure, got: {err}",
+        );
     }
 
     #[tokio::test]

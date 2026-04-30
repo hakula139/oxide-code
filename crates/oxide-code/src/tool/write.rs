@@ -195,6 +195,57 @@ mod tests {
         assert!(output.content.contains("Invalid input"));
     }
 
+    #[tokio::test]
+    async fn run_overwrites_existing_file_uses_updated_verb() {
+        // The new-vs-existing branch picks the title verb, so a fresh
+        // `run` against an existing file pins the `Updated` arm — the
+        // "Created" branch is already pinned by `run_creates_file`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "old").unwrap();
+        let tracker_arc = Arc::new(FileTracker::default());
+        seed_full_read(&tracker_arc, &path);
+
+        let output = run(
+            serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "new",
+            }),
+            tracker_arc,
+        )
+        .await;
+
+        assert!(!output.is_error);
+        assert_eq!(
+            output.metadata.title.as_deref(),
+            Some("Updated existing.txt"),
+            "overwrite must surface as Updated, not Created",
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn write_tool_run_dispatches_through_trait_to_inner_run() {
+        // Mirrors `edit_tool_run_dispatches_through_trait_to_inner_run`:
+        // the trait shim is a four-line `Box::pin(run(...))`, but it
+        // owns the `Arc::clone` that hands the tracker to the future,
+        // so the wiring still deserves a coverage anchor.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let tracker_arc = Arc::new(FileTracker::default());
+        let tool = WriteTool::new(Arc::clone(&tracker_arc));
+
+        let output = tool
+            .run(serde_json::json!({
+                "file_path": path.to_str().unwrap(),
+                "content": "hello",
+            }))
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
     // ── write_file ──
 
     #[tokio::test]
@@ -370,5 +421,37 @@ mod tests {
         );
         // Permission denial did not corrupt the original bytes.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_fails_when_parent_creation_is_denied() {
+        // Pin the create_dir_all failure branch: parent is missing AND
+        // its ancestor is read-only, so mkdir denies. The pre-stat
+        // returns NotFound (ENOENT walks past read-only into the
+        // missing component), letting control reach the create_dir_all
+        // call rather than short-circuiting at the metadata read. The
+        // ancestor stays empty so tempdir cleanup can rmdir it without
+        // re-chmod gymnastics.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let readonly = dir.path().join("readonly");
+        std::fs::create_dir(&readonly).unwrap();
+        let path = readonly.join("nested").join("file.txt");
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("Failed to create directory:"),
+            "expected mkdir denial, got: {err}",
+        );
+        assert!(
+            is_new,
+            "missing parent path is still classified as a new-file case",
+        );
     }
 }

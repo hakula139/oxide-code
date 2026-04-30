@@ -882,13 +882,13 @@ mod tests {
         assert_eq!(snaps[0].last_view, LastView::Full);
         assert_eq!(snaps[1].path, Path::new("/tmp/b"));
         assert_eq!(snaps[1].size, 3);
-        assert!(matches!(
+        assert_eq!(
             snaps[1].last_view,
             LastView::Partial {
                 offset: 0,
                 limit: 2,
             },
-        ));
+        );
     }
 
     #[test]
