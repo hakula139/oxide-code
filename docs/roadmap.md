@@ -114,6 +114,11 @@ Interactive commands typed in the REPL / TUI, processed locally before reaching 
 - Auth slash commands: `/login`, `/logout`.
 - Configurable instruction directories beyond `.claude/`.
 
+### Welcome Screen
+
+- Richer first-impression banner for empty sessions — name + version, active model and effort, working directory, and starter slash commands.
+- Pairs with Slash Commands (the welcome is where they get advertised); not blocking anything else.
+
 ## Not the Goal Right Now
 
 - Multi-provider LLM support (Anthropic only to start).
