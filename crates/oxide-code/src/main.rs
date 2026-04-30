@@ -131,14 +131,7 @@ async fn async_main() -> Result<()> {
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::new());
-    let mut resumed = resolve_session(
-        &store,
-        &model,
-        &file_tracker,
-        cli.r#continue.as_ref(),
-        cli.all,
-    )
-    .await?;
+    let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
     // Restore tracked-file state before the agent loop runs so cleanly-
     // resumed Reads pass the gate without forcing the model to re-Read.
     file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
@@ -155,6 +148,7 @@ async fn async_main() -> Result<()> {
             show_thinking,
             &prompt_text,
             resumed.handle,
+            file_tracker,
         )
         .await;
     }
@@ -167,11 +161,21 @@ async fn async_main() -> Result<()> {
             show_thinking,
             resumed.handle,
             resumed.messages,
+            file_tracker,
         )
         .await;
     }
 
-    run_tui(&client, &model, show_thinking, &theme, tools, resumed).await
+    run_tui(
+        &client,
+        &model,
+        show_thinking,
+        &theme,
+        tools,
+        resumed,
+        file_tracker,
+    )
+    .await
 }
 
 // ── Session Helpers ──
@@ -264,6 +268,7 @@ async fn run_tui(
     theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let ResumedSession {
         handle: session,
@@ -345,7 +350,7 @@ async fn run_tui(
 
     // Summary write after abort, no sink available — actor warn-logs
     // the cause.
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     if let Some(msg) = outcome.failure {
         warn!("session finish failed: {msg}");
     }
@@ -416,6 +421,7 @@ async fn bare_repl(
     show_thinking: bool,
     session: SessionHandle,
     resumed_messages: Vec<Message>,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let stdin = BufReader::new(tokio::io::stdin());
@@ -475,7 +481,7 @@ async fn bare_repl(
     }
     .await;
 
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 
@@ -502,6 +508,7 @@ async fn headless(
     show_thinking: bool,
     prompt_text: &str,
     session: SessionHandle,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let sink = StdioSink::new(show_thinking, Arc::clone(&tools));
     let user_msg = Message::user(prompt_text);
@@ -522,7 +529,7 @@ async fn headless(
             Ok(())
         }
     };
-    let outcome = session.finish().await;
+    let outcome = session.finish(file_tracker.snapshot_all()).await;
     sink.session_write_error(outcome.failure.as_deref());
     session.shutdown().await;
 

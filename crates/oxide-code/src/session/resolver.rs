@@ -7,14 +7,12 @@
 //! can be exercised by unit tests.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
 use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
-use crate::file_tracker::FileTracker;
 
 /// Normalized form of the CLI `--continue` argument. Built by
 /// [`normalize_resume_arg`] and consumed by [`resolve_session`].
@@ -48,7 +46,6 @@ pub(crate) enum ResumeMode<'a> {
 pub(crate) async fn resolve_session(
     store: &SessionStore,
     model: &str,
-    tracker: &Arc<FileTracker>,
     resume: Option<&Option<String>>,
     all: bool,
 ) -> Result<ResumedSession> {
@@ -57,14 +54,14 @@ pub(crate) async fn resolve_session(
     // Path resumes bypass the store's project-subdir lookup entirely and
     // can be resolved without listing anything.
     if let ResumeMode::Path(path) = mode {
-        let resumed = handle::resume_from_path(store, path, tracker)?;
+        let resumed = handle::resume_from_path(store, path)?;
         debug!("resuming session from {}", path.display());
         return Ok(resumed);
     }
 
     if matches!(mode, ResumeMode::Fresh) {
         return Ok(ResumedSession {
-            handle: handle::start(store, model, Arc::clone(tracker)),
+            handle: handle::start(store, model),
             messages: Vec::new(),
             title: None,
             tool_result_metadata: std::collections::HashMap::new(),
@@ -113,7 +110,7 @@ pub(crate) async fn resolve_session(
         }
     };
 
-    let resumed = handle::resume(store, &session_id, tracker)?;
+    let resumed = handle::resume(store, &session_id)?;
     debug!("resuming session {session_id}");
     Ok(resumed)
 }
@@ -183,19 +180,13 @@ mod tests {
     use super::*;
     use crate::message::Message;
 
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
-
     // ── resolve_session ──
 
     #[tokio::test]
     async fn resolve_session_starts_fresh_when_no_continue_flag() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let resumed = resolve_session(&store, "m", &tracker(), None, false)
-            .await
-            .unwrap();
+        let resumed = resolve_session(&store, "m", None, false).await.unwrap();
         assert!(resumed.messages.is_empty());
         assert!(resumed.title.is_none());
         assert!(resumed.tool_result_metadata.is_empty());
@@ -212,7 +203,7 @@ mod tests {
     async fn resolve_session_bare_continue_errors_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let err = resolve_session(&store, "m", &tracker(), Some(&None), false)
+        let err = resolve_session(&store, "m", Some(&None), false)
             .await
             .err()
             .unwrap()
@@ -228,13 +219,13 @@ mod tests {
         // non-empty; without `record_message` the lazy creation
         // never touches disk and the prefix lookup would short-circuit
         // on "no sessions" instead of testing the no-match path.
-        let s = handle::start(&store, "m", tracker());
+        let s = handle::start(&store, "m");
         s.record_message(Message::user("noop")).await;
-        s.finish().await;
+        s.finish(Vec::new()).await;
         let prefix_arg = Some("zzzz".to_owned());
         drop(s);
 
-        let err = resolve_session(&store, "m", &tracker(), Some(&prefix_arg), false)
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
@@ -253,9 +244,9 @@ mod tests {
         let store = test_store(dir.path());
 
         for _ in 0..20 {
-            let s = handle::start(&store, "m", tracker());
+            let s = handle::start(&store, "m");
             s.record_message(Message::user("noop")).await;
-            s.finish().await;
+            s.finish(Vec::new()).await;
         }
 
         let listed = store.list().unwrap();
@@ -270,7 +261,7 @@ mod tests {
         let prefix = prefix_char.to_string();
 
         let prefix_arg = Some(prefix.clone());
-        let err = resolve_session(&store, "m", &tracker(), Some(&prefix_arg), false)
+        let err = resolve_session(&store, "m", Some(&prefix_arg), false)
             .await
             .err()
             .unwrap()
@@ -286,12 +277,12 @@ mod tests {
         // and session_id recorded in the header.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m", tracker());
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original
             .record_message(Message::user("external path test"))
             .await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         let path = test_session_file(dir.path(), &full_id);
         drop(original);
 
@@ -302,7 +293,7 @@ mod tests {
         std::fs::copy(&path, &external_path).unwrap();
 
         let arg = Some(external_path.to_string_lossy().into_owned());
-        let resumed = resolve_session(&store, "m", &tracker(), Some(&arg), false)
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -315,7 +306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let arg = Some("/does/not/exist.jsonl".to_owned());
-        let err = resolve_session(&store, "m", &tracker(), Some(&arg), false)
+        let err = resolve_session(&store, "m", Some(&arg), false)
             .await
             .err()
             .unwrap()
@@ -327,16 +318,16 @@ mod tests {
     async fn resolve_session_prefix_resumes_single_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m", tracker());
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         // A 10-char UUID prefix is vanishingly unlikely to collide.
         let prefix = full_id[..10].to_owned();
         let arg = Some(prefix);
-        let resumed = resolve_session(&store, "m", &tracker(), Some(&arg), false)
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -353,14 +344,14 @@ mod tests {
         // here also covers the empty `scope_hint`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = handle::start(&store, "m", tracker());
+        let original = handle::start(&store, "m");
         let full_id = original.session_id().to_owned();
         original.record_message(Message::user("all scope")).await;
-        original.finish().await;
+        original.finish(Vec::new()).await;
         drop(original);
 
         let arg = Some(full_id[..10].to_owned());
-        let resumed = resolve_session(&store, "m", &tracker(), Some(&arg), true)
+        let resumed = resolve_session(&store, "m", Some(&arg), true)
             .await
             .unwrap();
         assert_eq!(resumed.handle.session_id(), full_id);
@@ -369,7 +360,7 @@ mod tests {
 
         // Error path under `all = true` omits the "use --all" hint.
         let missing = Some("zzzz".to_owned());
-        let err = resolve_session(&store, "m", &tracker(), Some(&missing), true)
+        let err = resolve_session(&store, "m", Some(&missing), true)
             .await
             .err()
             .unwrap()

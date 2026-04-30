@@ -19,6 +19,7 @@ use tracing::warn;
 use super::entry::Entry;
 use super::handle::{Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
+use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
@@ -44,6 +45,10 @@ pub(super) enum SessionCmd {
         ack: oneshot::Sender<Outcome>,
     },
     Finish {
+        /// Snapshots drained from the shared file tracker just before
+        /// the cmd was sent; written as one `Entry::FileSnapshot` per
+        /// snapshot followed by the `Entry::Summary` marker.
+        snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
     /// Drains pending writes, acks, then exits the actor loop. Lets
@@ -51,9 +56,7 @@ pub(super) enum SessionCmd {
     /// orphaned clones (e.g., the detached title-generator task) still
     /// hold a sender — a bare clone-drop wait would block on whichever
     /// HTTP timeout the orphan is racing.
-    Shutdown {
-        ack: oneshot::Sender<()>,
-    },
+    Shutdown { ack: oneshot::Sender<()> },
 }
 
 /// One absorbed cmd whose ack fires once the batch flush returns. Held
@@ -144,8 +147,8 @@ fn absorb(
             });
             acks.push(PendingAck::Outcome(ack));
         }
-        SessionCmd::Finish { ack } => {
-            entries.extend(state.finish_entries(now));
+        SessionCmd::Finish { snapshots, ack } => {
+            entries.extend(state.finish_entries(snapshots, now));
             acks.push(PendingAck::Outcome(ack));
         }
         SessionCmd::Shutdown { ack } => {
@@ -199,13 +202,8 @@ mod tests {
     use super::super::handle::SharedState;
     use super::super::store::test_store;
     use super::*;
-    use crate::file_tracker::FileTracker;
     use crate::message::Message;
     use crate::session::state::SessionState;
-
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
 
     /// Run the actor against an in-memory state until the receiver
     /// closes (caller drops `tx`), then return the final state for
@@ -235,7 +233,13 @@ mod tests {
 
     fn finish_cmd() -> (SessionCmd, oneshot::Receiver<Outcome>) {
         let (ack, rx) = oneshot::channel();
-        (SessionCmd::Finish { ack }, rx)
+        (
+            SessionCmd::Finish {
+                snapshots: Vec::new(),
+                ack,
+            },
+            rx,
+        )
     }
 
     fn shutdown_cmd() -> (SessionCmd, oneshot::Receiver<()>) {
@@ -250,7 +254,7 @@ mod tests {
         // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
 
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -269,7 +273,7 @@ mod tests {
     async fn run_record_then_finish_writes_header_message_summary_in_order() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hello");
         let (fin, _fin_rx) = finish_cmd();
@@ -288,7 +292,7 @@ mod tests {
     async fn run_first_record_seeds_ai_title_and_subsequent_does_not() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m", tracker());
+        let state = SessionState::fresh(store, "m");
         let (cmd_a, rx_a) = record_cmd("Fix login bug");
         let (cmd_b, rx_b) = record_cmd("follow up");
 
@@ -306,7 +310,7 @@ mod tests {
         // send order — single-batch coalescing is implicit.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (a, _ra) = record_cmd("one");
         let (b, _rb) = record_cmd("two");
@@ -324,7 +328,7 @@ mod tests {
         // would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("trigger");
         let (meta_ack, meta_rx) = oneshot::channel();
@@ -349,7 +353,7 @@ mod tests {
     async fn run_appends_ai_title_after_record() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("Fix login");
         let (ai_ack, _ai_rx) = oneshot::channel();
@@ -381,7 +385,7 @@ mod tests {
         // through the whole HTTP timeout.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m", tracker());
+        let state = SessionState::fresh(store, "m");
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel::<SessionCmd>(4);
         let _orphan_clone = tx.clone();
@@ -404,7 +408,7 @@ mod tests {
         // disk; the actor only breaks after the batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("flush before exit");
         let (shut, _shut_rx) = shutdown_cmd();
@@ -419,7 +423,7 @@ mod tests {
     async fn run_finish_idempotent_writes_one_summary() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hi");
         let (f1, _r1) = finish_cmd();
@@ -442,7 +446,7 @@ mod tests {
         // masked for stability) so a stray field rename would fail.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m", tracker());
+        let state = SessionState::fresh(store.clone(), "m");
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("Edit something");
         let (meta_ack, _meta_rx) = oneshot::channel();

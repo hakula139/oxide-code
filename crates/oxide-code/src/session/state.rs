@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter};
-use crate::file_tracker::FileTracker;
+use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 
 /// Maximum title length (in characters) derived from the first user prompt.
@@ -41,9 +41,6 @@ pub(super) struct SessionState {
     /// Latched the first time a user-text message lands so we don't
     /// re-promote a later user message to a duplicate title.
     first_user_prompt_seen: bool,
-    /// Drained by `finish_entries` into one [`Entry::FileSnapshot`] per
-    /// tracked file so resume can restore the gate without re-reading.
-    tracker: Arc<FileTracker>,
     finished: bool,
 }
 
@@ -63,7 +60,7 @@ enum WriterStatus {
 }
 
 impl SessionState {
-    pub(super) fn fresh(store: SessionStore, model: &str, tracker: Arc<FileTracker>) -> Self {
+    pub(super) fn fresh(store: SessionStore, model: &str) -> Self {
         let (session_id, header) = new_header(model);
         Self {
             session_id: Arc::from(session_id),
@@ -73,7 +70,6 @@ impl SessionState {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt_seen: false,
-            tracker,
             finished: false,
         }
     }
@@ -87,7 +83,6 @@ impl SessionState {
         last_message_uuid: Option<Uuid>,
         initial_message_count: u32,
         first_user_prompt_seen: bool,
-        tracker: Arc<FileTracker>,
     ) -> Self {
         Self {
             session_id: Arc::from(session_id),
@@ -97,7 +92,6 @@ impl SessionState {
             initial_message_count,
             message_count: initial_message_count,
             first_user_prompt_seen,
-            tracker,
             finished: false,
         }
     }
@@ -143,14 +137,21 @@ impl SessionState {
     }
 
     /// Build the closing entries (one [`Entry::FileSnapshot`] per
-    /// tracked file followed by an [`Entry::Summary`]) or an empty vec
-    /// for a no-op finish (already finished, nothing recorded, or
+    /// supplied snapshot followed by an [`Entry::Summary`]) or an empty
+    /// vec for a no-op finish (already finished, nothing recorded, or
     /// resumed session that added nothing). Latches `finished = true`
     /// either way.
     ///
     /// Snapshots come before the summary so the summary remains the
-    /// final marker that the session exited cleanly.
-    pub(super) fn finish_entries(&mut self, now: OffsetDateTime) -> Vec<Entry> {
+    /// final marker that the session exited cleanly. The caller —
+    /// typically `main.rs` via [`SessionHandle::finish`] — drains the
+    /// tracker just before sending the cmd; this keeps
+    /// `SessionState` free of any `Arc<FileTracker>` coupling.
+    pub(super) fn finish_entries(
+        &mut self,
+        snapshots: Vec<FileSnapshot>,
+        now: OffsetDateTime,
+    ) -> Vec<Entry> {
         if self.finished {
             return Vec::new();
         }
@@ -164,9 +165,7 @@ impl SessionState {
         if self.initial_message_count > 0 && self.message_count == self.initial_message_count {
             return Vec::new();
         }
-        let mut entries: Vec<Entry> = self
-            .tracker
-            .snapshot_all()
+        let mut entries: Vec<Entry> = snapshots
             .into_iter()
             .map(|snapshot| Entry::FileSnapshot { snapshot })
             .collect();
@@ -288,10 +287,7 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 mod tests {
     use super::super::store::test_store;
     use super::*;
-
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
+    use crate::file_tracker::FileTracker;
 
     // ── queue_message_entries ──
 
@@ -299,7 +295,7 @@ mod tests {
     fn queue_message_entries_first_user_text_emits_title_then_message_and_seeds_ai_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
         let (entries, seed) = state.queue_message_entries(&Message::user("Fix the auth bug"), now);
@@ -320,7 +316,7 @@ mod tests {
     fn queue_message_entries_subsequent_user_message_skips_title_and_chains_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         _ = state.queue_message_entries(&Message::user("first"), now);
         let first_tip = state.last_message_uuid.unwrap();
@@ -344,7 +340,7 @@ mod tests {
     fn queue_message_entries_tool_result_only_user_does_not_seed_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let msg = Message {
             role: Role::User,
@@ -370,7 +366,7 @@ mod tests {
     fn queue_message_entries_assistant_message_skips_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
         let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now);
@@ -388,9 +384,9 @@ mod tests {
         // latches so a later record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
 
-        let entries = state.finish_entries(OffsetDateTime::now_utc());
+        let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
 
         assert!(entries.is_empty());
         assert!(state.finished);
@@ -400,12 +396,12 @@ mod tests {
     fn finish_entries_after_record_returns_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hello"), now);
         state.flush_entries(&entries).unwrap();
 
-        let entries = state.finish_entries(now);
+        let entries = state.finish_entries(Vec::new(), now);
         let Some(Entry::Summary { message_count, .. }) = entries.last() else {
             panic!("expected trailing Summary, got {entries:?}");
         };
@@ -414,12 +410,14 @@ mod tests {
 
     #[test]
     fn finish_entries_emits_one_file_snapshot_per_tracked_file() {
-        // record_modify on three files → finish_entries must emit
-        // three FileSnapshot entries before the trailing Summary.
+        // Three FileSnapshots in → three FileSnapshot entries out, ahead
+        // of the trailing Summary. The caller — typically `main.rs` via
+        // `SessionHandle::finish` — drains the tracker before sending
+        // the cmd; the actor's only job is to lay them down on disk.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let tracker = Arc::new(FileTracker::new());
-        let mut state = SessionState::fresh(store, "m", Arc::clone(&tracker));
+        let tracker = FileTracker::new();
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now);
         state.flush_entries(&msgs).unwrap();
@@ -433,7 +431,7 @@ mod tests {
             );
         }
 
-        let entries = state.finish_entries(now);
+        let entries = state.finish_entries(tracker.snapshot_all(), now);
         let snapshot_count = entries
             .iter()
             .filter(|e| matches!(e, Entry::FileSnapshot { .. }))
@@ -449,13 +447,13 @@ mod tests {
     fn finish_entries_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
         state.flush_entries(&entries).unwrap();
-        let _first = state.finish_entries(now);
+        let _first = state.finish_entries(Vec::new(), now);
 
-        let second = state.finish_entries(now);
+        let second = state.finish_entries(Vec::new(), now);
 
         assert!(second.is_empty(), "second call short-circuits");
         assert!(state.finished);
@@ -466,7 +464,7 @@ mod tests {
         // A summary per noisy resume would accumulate one line per cycle.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut original = SessionState::fresh(store.clone(), "m", tracker());
+        let mut original = SessionState::fresh(store.clone(), "m");
         let now = OffsetDateTime::now_utc();
         let (entries, _) = original.queue_message_entries(&Message::user("hi"), now);
         original.flush_entries(&entries).unwrap();
@@ -475,10 +473,9 @@ mod tests {
         drop(original);
 
         let writer = store.open_append(&session_id).unwrap();
-        let mut resumed =
-            SessionState::resumed(store, session_id, writer, parent, 1, true, tracker());
+        let mut resumed = SessionState::resumed(store, session_id, writer, parent, 1, true);
 
-        let entries = resumed.finish_entries(now);
+        let entries = resumed.finish_entries(Vec::new(), now);
 
         assert!(entries.is_empty(), "no new messages → no summary");
     }
@@ -494,7 +491,7 @@ mod tests {
     fn flush_entries_active_writer_flush_failure_transitions_to_broken() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let writer = super::super::store::open_append_at(std::path::Path::new("/dev/full"))
             .expect("/dev/full must be openable on Linux");
@@ -515,7 +512,7 @@ mod tests {
         // Reopen must hit the existing file, not create a fresh one.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store.clone(), "m", tracker());
+        let mut state = SessionState::fresh(store.clone(), "m");
         let now = OffsetDateTime::now_utc();
         let session_id = state.session_id.to_string();
 
@@ -550,7 +547,7 @@ mod tests {
         // file that was never created.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m", tracker());
+        let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();

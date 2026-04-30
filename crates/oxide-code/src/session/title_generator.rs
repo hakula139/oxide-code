@@ -202,7 +202,6 @@ struct TitleEnvelope {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::Arc;
 
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -211,7 +210,6 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::{completion_body, test_client};
     use crate::config::Auth;
-    use crate::file_tracker::FileTracker;
     use crate::message::Message;
     use crate::session::store::test_store;
 
@@ -237,8 +235,7 @@ mod tests {
     /// materialized when `append_ai_title` runs.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
-        let tracker = Arc::new(FileTracker::new());
-        let handle = crate::session::handle::start(&store, HAIKU_MODEL, tracker);
+        let handle = crate::session::handle::start(&store, HAIKU_MODEL);
         handle.record_message(Message::user("first prompt")).await;
         handle
     }

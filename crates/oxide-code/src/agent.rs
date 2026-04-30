@@ -398,7 +398,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
     use wiremock::matchers::{method, path as wm_path};
@@ -411,7 +411,6 @@ mod tests {
         ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
     };
     use crate::config::Auth;
-    use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
@@ -540,8 +539,7 @@ mod tests {
 
     fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        let tracker = Arc::new(FileTracker::new());
-        handle::start(&store, "claude-sonnet-4-6", tracker)
+        handle::start(&store, "claude-sonnet-4-6")
     }
 
     /// Handle whose actor channel is already closed; every write
