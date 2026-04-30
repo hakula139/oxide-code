@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::message::Message;
 use crate::tool::ToolMetadata;
+use crate::tool::tracker::FileSnapshot;
 
 /// Current session file format version. Bump on incompatible changes.
 pub(crate) const CURRENT_VERSION: u32 = 1;
@@ -93,6 +94,15 @@ pub(crate) enum Entry {
         metadata: ToolMetadata,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
+    },
+    /// Persisted file-tracker state, one per tracked file. Written by
+    /// [`super::state::SessionState::finish_entries`] at session end so
+    /// resume can skip the cold-tracker re-Read on every previously-
+    /// observed file. The shape is wire-stable; see
+    /// [`FileSnapshot`][crate::tool::tracker::FileSnapshot].
+    FileSnapshot {
+        #[serde(flatten)]
+        snapshot: FileSnapshot,
     },
     /// Catch-all for unrecognized entry types. Preserves parse
     /// compatibility when a newer writer emits a type this reader
@@ -393,6 +403,43 @@ mod tests {
         assert_eq!(reserialized["metadata"]["title"], "t");
         // Unknown field is silently dropped on re-serialization.
         assert!(reserialized["metadata"].get("future_field").is_none());
+    }
+
+    // ── Entry::FileSnapshot ──
+
+    #[test]
+    fn file_snapshot_round_trips_with_inlined_payload_fields() {
+        // The variant uses `#[serde(flatten)]` so the JSON shape is
+        // `{"type":"file_snapshot","path":...,"content_hash":...,...}`,
+        // not nested under a `snapshot` key. Pin the flattened layout
+        // so a future inline-table refactor can't silently change the
+        // wire format.
+        let snapshot = FileSnapshot {
+            path: std::path::PathBuf::from("/tmp/a.rs"),
+            content_hash: 0xDEAD_BEEF,
+            mtime: datetime!(2026-04-29 12:00:00 UTC),
+            size: 7,
+            last_view: crate::tool::tracker::LastView::Full,
+            recorded_at: datetime!(2026-04-29 12:34:56 UTC),
+        };
+        let entry = Entry::FileSnapshot {
+            snapshot: snapshot.clone(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "file_snapshot");
+        assert_eq!(json["path"], "/tmp/a.rs");
+        assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
+        assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
+        assert!(
+            json.get("snapshot").is_none(),
+            "payload must flatten, not nest under `snapshot`",
+        );
+
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::FileSnapshot { snapshot: parsed } = parsed else {
+            panic!("expected FileSnapshot");
+        };
+        assert_eq!(parsed, snapshot);
     }
 
     // ── Entry::Unknown ──

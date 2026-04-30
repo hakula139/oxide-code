@@ -235,7 +235,8 @@ mod tests {
     /// materialized when `append_ai_title` runs.
     async fn prepared_session(dir: &Path) -> SessionHandle {
         let store = test_store(dir);
-        let handle = crate::session::handle::start(&store, HAIKU_MODEL);
+        let tracker = std::sync::Arc::new(crate::tool::tracker::FileTracker::new());
+        let handle = crate::session::handle::start(&store, HAIKU_MODEL, tracker);
         handle.record_message(Message::user("first prompt")).await;
         handle
     }

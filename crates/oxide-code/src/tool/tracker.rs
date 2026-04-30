@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use xxhash_rust::xxh64::xxh64;
 
 /// Seed for `xxh64` over file bytes. Zero is the convention used
@@ -61,6 +62,10 @@ struct FileState {
     size: u64,
     /// Full reads gate Edit through; partial reads gate it shut.
     last_view: LastView,
+    /// Wall-clock time the entry was inserted. Persisted in
+    /// [`FileSnapshot::recorded_at`] so resume can pick the newest
+    /// survivor when the same path appears more than once.
+    recorded_at: OffsetDateTime,
 }
 
 /// Distinguishes a full file Read from a ranged Read. Edit and Write
@@ -109,6 +114,7 @@ impl FileTracker {
         view: LastView,
     ) -> RecordRead {
         let content_hash = xxh64(bytes, HASH_SEED);
+        let now = OffsetDateTime::now_utc();
         let path_buf = path.to_path_buf();
         let mut by_path = self.lock();
         let cache_hit = matches!(view, LastView::Full)
@@ -122,6 +128,7 @@ impl FileTracker {
                 mtime,
                 size,
                 last_view: view,
+                recorded_at: now,
             },
         );
         if cache_hit {
@@ -196,6 +203,7 @@ impl FileTracker {
     /// every Edit / Write writes a complete file body.
     pub(crate) fn record_modify(&self, path: &Path, bytes: &[u8], mtime: SystemTime, size: u64) {
         let content_hash = xxh64(bytes, HASH_SEED);
+        let now = OffsetDateTime::now_utc();
         self.lock().insert(
             path.to_path_buf(),
             FileState {
@@ -203,13 +211,92 @@ impl FileTracker {
                 mtime,
                 size,
                 last_view: LastView::Full,
+                recorded_at: now,
             },
         );
+    }
+
+    /// Snapshot every tracked file for persistence. Used by
+    /// [`SessionState::finish_entries`][crate::session::state::SessionState]
+    /// at session end — the actor batches the resulting entries into
+    /// the same flush as the `Summary`.
+    pub(crate) fn snapshot_all(&self) -> Vec<FileSnapshot> {
+        self.lock()
+            .iter()
+            .map(|(path, state)| FileSnapshot {
+                path: path.clone(),
+                content_hash: state.content_hash,
+                mtime: OffsetDateTime::from(state.mtime),
+                size: state.size,
+                last_view: state.last_view,
+                recorded_at: state.recorded_at,
+            })
+            .collect()
+    }
+
+    /// Restores tracker state from session JSONL. For each snapshot,
+    /// re-`stat()`s the file: survivors (mtime + size match) reload
+    /// into the in-memory map; mismatches and missing files drop
+    /// silently so the model re-Reads on first access.
+    ///
+    /// Re-hashing every recently-edited file at session start would
+    /// dominate startup on large repos, so we compare stat-only. The
+    /// "false-negative drops the entry" worst case degrades to cold-
+    /// start behavior, which is correct.
+    pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) {
+        let mut by_path = self.lock();
+        for snap in snapshots {
+            let Ok(meta) = std::fs::metadata(&snap.path) else {
+                continue;
+            };
+            let Ok(current_mtime) = meta.modified() else {
+                continue;
+            };
+            let stored_mtime = SystemTime::from(snap.mtime);
+            if meta.len() != snap.size || current_mtime != stored_mtime {
+                continue;
+            }
+            // Latest-recorded wins on duplicate path: an existing
+            // entry could be a later observation if this process
+            // populated one before resume, so we keep the newer.
+            let keep = by_path
+                .get(&snap.path)
+                .is_none_or(|cur| snap.recorded_at >= cur.recorded_at);
+            if keep {
+                by_path.insert(
+                    snap.path,
+                    FileState {
+                        content_hash: snap.content_hash,
+                        mtime: current_mtime,
+                        size: snap.size,
+                        last_view: snap.last_view,
+                        recorded_at: snap.recorded_at,
+                    },
+                );
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, FileState>> {
         self.by_path.lock().expect("FileTracker mutex poisoned")
     }
+}
+
+/// Persisted on-disk shape of one tracker entry. Wire-stable: the
+/// session JSONL carries this as
+/// [`Entry::FileSnapshot`][crate::session::entry::Entry::FileSnapshot].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FileSnapshot {
+    pub(crate) path: PathBuf,
+    pub(crate) content_hash: u64,
+    /// Round-tripped as RFC3339; matches every other timestamp in the
+    /// JSONL (`Header::created_at`, `Title::updated_at`, ...).
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) mtime: OffsetDateTime,
+    pub(crate) size: u64,
+    pub(crate) last_view: LastView,
+    #[serde(with = "time::serde::rfc3339")]
+    pub(crate) recorded_at: OffsetDateTime,
 }
 
 /// Outcome of [`FileTracker::record_read`]. Distinct enum (not `bool`)
@@ -513,6 +600,190 @@ mod tests {
         );
         tracker.record_modify(path, b"world", UNIX_EPOCH, 5);
         assert_eq!(tracker.lock().get(path).unwrap().last_view, LastView::Full);
+    }
+
+    // ── snapshot_all ──
+
+    #[test]
+    fn snapshot_all_collects_every_tracked_file() {
+        let tracker = FileTracker::new();
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", mtime, 1, LastView::Full);
+        _ = tracker.record_read(
+            Path::new("/tmp/b"),
+            b"bbb",
+            mtime,
+            3,
+            LastView::Partial {
+                offset: 0,
+                limit: 2,
+            },
+        );
+
+        let mut snaps = tracker.snapshot_all();
+        snaps.sort_by(|a, b| a.path.cmp(&b.path));
+
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].path, Path::new("/tmp/a"));
+        assert_eq!(snaps[0].size, 1);
+        assert_eq!(snaps[0].last_view, LastView::Full);
+        assert_eq!(snaps[1].path, Path::new("/tmp/b"));
+        assert_eq!(snaps[1].size, 3);
+        assert!(matches!(
+            snaps[1].last_view,
+            LastView::Partial {
+                offset: 0,
+                limit: 2,
+            },
+        ));
+    }
+
+    #[test]
+    fn snapshot_all_empty_tracker_returns_empty_vec() {
+        let snaps = FileTracker::new().snapshot_all();
+        assert!(snaps.is_empty());
+    }
+
+    // ── restore_verified ──
+
+    #[test]
+    fn restore_verified_matching_stat_repopulates_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"persisted bytes").unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: xxh64(b"persisted bytes", HASH_SEED),
+            mtime: OffsetDateTime::from(meta.modified().unwrap()),
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::new();
+        tracker.restore_verified(vec![snap.clone()]);
+
+        let stored = tracker.lock().get(&path).cloned();
+        let stored = stored.expect("matching stat restores the entry");
+        assert_eq!(stored.content_hash, snap.content_hash);
+        assert_eq!(stored.size, snap.size);
+        assert_eq!(stored.last_view, LastView::Full);
+    }
+
+    #[test]
+    fn restore_verified_size_drift_drops_snapshot() {
+        // File on disk has different size than the snapshot: drop
+        // silently. Subsequent Edit through a cold tracker fires the
+        // standard "must read first" gate — that's the correct
+        // degradation, not a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"now this is longer").unwrap();
+
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: xxh64(b"old", HASH_SEED),
+            mtime: OffsetDateTime::from(std::fs::metadata(&path).unwrap().modified().unwrap()),
+            size: 3,
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::new();
+        tracker.restore_verified(vec![snap]);
+        assert!(tracker.lock().get(&path).is_none());
+    }
+
+    #[test]
+    fn restore_verified_missing_file_drops_snapshot() {
+        let snap = FileSnapshot {
+            path: PathBuf::from("/nonexistent/path/a.rs"),
+            content_hash: 0,
+            mtime: OffsetDateTime::UNIX_EPOCH,
+            size: 0,
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::new();
+        tracker.restore_verified(vec![snap]);
+        assert!(tracker.lock().is_empty());
+    }
+
+    #[test]
+    fn restore_verified_keeps_newer_recorded_at_on_duplicate_path() {
+        // Two snapshots for the same file (e.g., the file was written
+        // twice across separate sessions and both shipped FileSnapshot
+        // entries). Verify the later `recorded_at` wins so the model
+        // sees the most recent observation when both still match disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"x").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime_dt = OffsetDateTime::from(meta.modified().unwrap());
+
+        let older = FileSnapshot {
+            path: path.clone(),
+            content_hash: 1,
+            mtime: mtime_dt,
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let newer = FileSnapshot {
+            path: path.clone(),
+            content_hash: 2,
+            mtime: mtime_dt,
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::UNIX_EPOCH + Duration::from_mins(1),
+        };
+
+        // Order older-then-newer to exercise the "incoming wins" branch;
+        // newer-then-older is covered by the symmetric guard.
+        let tracker = FileTracker::new();
+        tracker.restore_verified(vec![older.clone(), newer.clone()]);
+        let stored = tracker.lock().get(&path).cloned().unwrap();
+        assert_eq!(stored.content_hash, 2, "newer recorded_at wins");
+
+        let tracker = FileTracker::new();
+        tracker.restore_verified(vec![newer, older]);
+        let stored = tracker.lock().get(&path).cloned().unwrap();
+        assert_eq!(stored.content_hash, 2, "older does not displace newer");
+    }
+
+    // ── FileSnapshot serde round-trip ──
+
+    #[test]
+    fn file_snapshot_round_trips_through_json() {
+        // Wire-stable shape — change here means an existing JSONL
+        // becomes unreadable. Pin the discriminator and the field
+        // shape (path-as-string, RFC3339 timestamps, kind tag).
+        let snap = FileSnapshot {
+            path: PathBuf::from("/tmp/a.rs"),
+            content_hash: 0xDEAD_BEEF,
+            mtime: time::macros::datetime!(2026-04-29 12:00:00 UTC),
+            size: 42,
+            last_view: LastView::Partial {
+                offset: 0,
+                limit: 5,
+            },
+            recorded_at: time::macros::datetime!(2026-04-29 12:34:56 UTC),
+        };
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["path"], "/tmp/a.rs");
+        assert_eq!(json["content_hash"], 0xDEAD_BEEF_u64);
+        assert_eq!(json["mtime"], "2026-04-29T12:00:00Z");
+        assert_eq!(json["size"], 42);
+        assert_eq!(json["last_view"]["kind"], "partial");
+        assert_eq!(json["last_view"]["offset"], 0);
+        assert_eq!(json["last_view"]["limit"], 5);
+        assert_eq!(json["recorded_at"], "2026-04-29T12:34:56Z");
+
+        let parsed: FileSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, snap);
     }
 
     // ── Concurrency ──

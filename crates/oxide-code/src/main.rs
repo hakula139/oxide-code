@@ -128,10 +128,21 @@ async fn async_main() -> Result<()> {
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
-    let resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
+    let file_tracker = Arc::new(FileTracker::new());
+    let mut resumed = resolve_session(
+        &store,
+        &model,
+        &file_tracker,
+        cli.r#continue.as_ref(),
+        cli.all,
+    )
+    .await?;
+    // Restore tracked-file state before the agent loop runs so cleanly-
+    // resumed Reads pass the gate without forcing the model to re-Read.
+    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
-    let file_tracker = Arc::new(FileTracker::new());
     let tools = Arc::new(create_tool_registry(&file_tracker));
 
     if let Some(prompt_text) = cli.prompt {
@@ -257,6 +268,8 @@ async fn run_tui(
         messages: resumed_messages,
         title: resumed_title,
         tool_result_metadata: resumed_tool_metadata,
+        // Snapshots were already drained into the tracker by the caller.
+        file_snapshots: _,
     } = resumed;
     tui::terminal::install_panic_hook();
 

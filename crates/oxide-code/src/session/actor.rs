@@ -145,9 +145,7 @@ fn absorb(
             acks.push(PendingAck::Outcome(ack));
         }
         SessionCmd::Finish { ack } => {
-            if let Some(entry) = state.finish_entry(now) {
-                entries.push(entry);
-            }
+            entries.extend(state.finish_entries(now));
             acks.push(PendingAck::Outcome(ack));
         }
         SessionCmd::Shutdown { ack } => {
@@ -203,6 +201,11 @@ mod tests {
     use super::*;
     use crate::message::Message;
     use crate::session::state::SessionState;
+    use crate::tool::tracker::FileTracker;
+
+    fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
+    }
 
     /// Run the actor against an in-memory state until the receiver
     /// closes (caller drops `tx`), then return the final state for
@@ -247,7 +250,7 @@ mod tests {
         // Force store.create() to fail by removing its parent dir.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
 
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
@@ -266,7 +269,7 @@ mod tests {
     async fn run_record_then_finish_writes_header_message_summary_in_order() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hello");
         let (fin, _fin_rx) = finish_cmd();
@@ -285,7 +288,7 @@ mod tests {
     async fn run_first_record_seeds_ai_title_and_subsequent_does_not() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", tracker());
         let (cmd_a, rx_a) = record_cmd("Fix login bug");
         let (cmd_b, rx_b) = record_cmd("follow up");
 
@@ -303,7 +306,7 @@ mod tests {
         // send order — single-batch coalescing is implicit.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (a, _ra) = record_cmd("one");
         let (b, _rb) = record_cmd("two");
@@ -321,7 +324,7 @@ mod tests {
         // would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("trigger");
         let (meta_ack, meta_rx) = oneshot::channel();
@@ -346,7 +349,7 @@ mod tests {
     async fn run_appends_ai_title_after_record() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("Fix login");
         let (ai_ack, _ai_rx) = oneshot::channel();
@@ -378,7 +381,7 @@ mod tests {
         // through the whole HTTP timeout.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store, "m");
+        let state = SessionState::fresh(store, "m", tracker());
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel::<SessionCmd>(4);
         let _orphan_clone = tx.clone();
@@ -401,7 +404,7 @@ mod tests {
         // disk; the actor only breaks after the batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("flush before exit");
         let (shut, _shut_rx) = shutdown_cmd();
@@ -416,7 +419,7 @@ mod tests {
     async fn run_finish_idempotent_writes_one_summary() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("hi");
         let (f1, _r1) = finish_cmd();
@@ -439,7 +442,7 @@ mod tests {
         // masked for stability) so a stray field rename would fail.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
+        let state = SessionState::fresh(store.clone(), "m", tracker());
         let session_id = state.session_id.to_string();
         let (rec, _rec_rx) = record_cmd("Edit something");
         let (meta_ack, _meta_rx) = oneshot::channel();

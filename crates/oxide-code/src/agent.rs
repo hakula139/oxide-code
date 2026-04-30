@@ -539,7 +539,8 @@ mod tests {
 
     fn test_session(dir: &std::path::Path) -> SessionHandle {
         let store = test_store(dir);
-        handle::start(&store, "claude-sonnet-4-6")
+        let tracker = std::sync::Arc::new(crate::tool::tracker::FileTracker::new());
+        handle::start(&store, "claude-sonnet-4-6", tracker)
     }
 
     /// Handle whose actor channel is already closed; every write

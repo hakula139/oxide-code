@@ -23,6 +23,7 @@ use super::store::{
 };
 use crate::message::Message;
 use crate::tool::ToolMetadata;
+use crate::tool::tracker::{FileSnapshot, FileTracker};
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -245,31 +246,45 @@ pub(crate) struct ResumedSession {
     pub(crate) messages: Vec<Message>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
+    /// Persisted file-tracker snapshots. The caller passes these to
+    /// [`FileTracker::restore_verified`] before the agent loop runs so
+    /// the strict gate clears for previously-observed files that still
+    /// match disk; the actor doesn't repopulate the tracker itself.
+    pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── Constructors ──
 
 /// Start a fresh session and spawn its actor. The file materializes
-/// lazily on the first record cmd.
-pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
-    spawn_actor(SessionState::fresh(store.clone(), model))
+/// lazily on the first record cmd. The tracker is shared with whichever
+/// tools the caller is also wiring it into.
+pub(crate) fn start(store: &SessionStore, model: &str, tracker: Arc<FileTracker>) -> SessionHandle {
+    spawn_actor(SessionState::fresh(store.clone(), model, tracker))
 }
 
 /// Resume by session ID — loads, sanitizes, opens for append, spawns
 /// the actor.
-pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
+pub(crate) fn resume(
+    store: &SessionStore,
+    session_id: &str,
+    tracker: &Arc<FileTracker>,
+) -> Result<ResumedSession> {
     let data = store.load_session_data(session_id)?;
     let writer = store.open_append(session_id)?;
-    from_resumed_data(store, session_id.to_owned(), data, writer)
+    from_resumed_data(store, session_id.to_owned(), data, writer, tracker)
 }
 
 /// Resume by explicit path, bypassing the XDG project lookup. Used by
 /// `ox -c <path.jsonl>` for sessions copied between machines.
-pub(crate) fn resume_from_path(store: &SessionStore, path: &Path) -> Result<ResumedSession> {
+pub(crate) fn resume_from_path(
+    store: &SessionStore,
+    path: &Path,
+    tracker: &Arc<FileTracker>,
+) -> Result<ResumedSession> {
     let session_id = read_session_id_from_path(path)?;
     let data = load_session_data_from_path(path)?;
     let writer = open_append_at(path)?;
-    from_resumed_data(store, session_id, data, writer)
+    from_resumed_data(store, session_id, data, writer, tracker)
 }
 
 fn from_resumed_data(
@@ -277,6 +292,7 @@ fn from_resumed_data(
     session_id: String,
     mut data: SessionData,
     writer: super::store::SessionWriter,
+    tracker: &Arc<FileTracker>,
 ) -> Result<ResumedSession> {
     sanitize_resumed_messages(&mut data.messages);
     // Bail rather than chain the next record onto a `last_message_uuid`
@@ -296,6 +312,7 @@ fn from_resumed_data(
         data.last_uuid,
         message_count,
         first_user_prompt_seen,
+        Arc::clone(tracker),
     );
     let handle = spawn_actor(state);
     Ok(ResumedSession {
@@ -303,6 +320,7 @@ fn from_resumed_data(
         messages: data.messages,
         title,
         tool_result_metadata: data.tool_result_metadata,
+        file_snapshots: data.file_snapshots,
     })
 }
 
@@ -326,13 +344,17 @@ mod tests {
     use super::*;
     use crate::message::{ContentBlock, Role};
 
+    fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
+    }
+
     // ── record_message ──
 
     #[tokio::test]
     async fn record_message_writes_title_before_first_user_message() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("First prompt")).await;
@@ -350,7 +372,7 @@ mod tests {
     async fn record_message_returns_ai_title_seed_only_for_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
 
         let outcome_first = handle.record_message(Message::user("Fix login bug")).await;
         let outcome_second = handle.record_message(Message::user("follow up")).await;
@@ -412,13 +434,13 @@ mod tests {
         // Resumed sessions inherit the original first-prompt title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.finish().await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume(&store, &session_id, &tracker()).unwrap().handle;
         let outcome = resumed.record_message(Message::user("more text")).await;
         assert!(outcome.ai_title_seed.is_none());
     }
@@ -489,7 +511,7 @@ mod tests {
         // each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("trigger")).await;
 
@@ -540,7 +562,7 @@ mod tests {
     async fn record_tool_metadata_batch_all_default_acks_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("trigger")).await;
 
@@ -578,7 +600,7 @@ mod tests {
     async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
         handle.record_message(Message::user("Fix login bug")).await;
 
@@ -613,7 +635,7 @@ mod tests {
     async fn finish_writes_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
 
         handle
@@ -632,7 +654,7 @@ mod tests {
     async fn finish_empty_session_leaves_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let _sid = handle.session_id().to_owned();
         handle.finish().await;
         drop(handle);
@@ -652,13 +674,13 @@ mod tests {
     async fn finish_skips_summary_on_empty_resume() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.finish().await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume(&store, &session_id, &tracker()).unwrap().handle;
         resumed.finish().await;
         drop(resumed);
 
@@ -678,7 +700,7 @@ mod tests {
         // the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "m");
+        let handle = start(&store, "m", tracker());
         let sid = handle.session_id().to_owned();
 
         handle.record_message(Message::user("hello")).await;
@@ -705,7 +727,7 @@ mod tests {
     async fn start_does_not_materialize_file_until_first_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let handle = start(&store, "test-model");
+        let handle = start(&store, "test-model", tracker());
 
         let project_dir = super::super::store::test_project_dir(dir.path());
         assert!(
@@ -721,13 +743,153 @@ mod tests {
         );
     }
 
+    // ── file-snapshot persistence ──
+
+    /// Path / bytes of one tracked file, recorded into `tracker` at the
+    /// returned mtime / size.
+    fn record_tracked_file(
+        tracker: &FileTracker,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> (std::time::SystemTime, u64) {
+        std::fs::write(path, bytes).unwrap();
+        let meta = std::fs::metadata(path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let size = meta.len();
+        tracker.record_modify(path, bytes, mtime, size);
+        (mtime, size)
+    }
+
+    #[tokio::test]
+    async fn finish_persists_one_file_snapshot_per_tracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = Arc::new(FileTracker::new());
+        let handle = start(&store, "m", Arc::clone(&tracker));
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("trigger")).await;
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            record_tracked_file(&tracker, &files_dir.path().join(name), name.as_bytes());
+        }
+
+        handle.finish().await;
+        drop(handle);
+
+        let path = test_session_file(dir.path(), &sid);
+        let content = std::fs::read_to_string(path).unwrap();
+        let snapshot_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"file_snapshot""#))
+            .count();
+        assert_eq!(snapshot_count, 3);
+    }
+
+    #[tokio::test]
+    async fn resume_restores_unchanged_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = Arc::new(FileTracker::new());
+        let handle = start(&store, "m", Arc::clone(&tracker));
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish().await;
+        drop(handle);
+
+        let resumed_tracker = Arc::new(FileTracker::new());
+        let resumed = resume(&store, &session_id, &resumed_tracker).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.pre_modify_check(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::tool::tracker::GatePurpose::Edit,
+        );
+        assert!(matches!(check, crate::tool::tracker::PreModifyCheck::Pass));
+    }
+
+    #[tokio::test]
+    async fn resume_drops_drifted_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = Arc::new(FileTracker::new());
+        let handle = start(&store, "m", Arc::clone(&tracker));
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish().await;
+        drop(handle);
+
+        // Bump the mtime / size before resume so the snapshot stat
+        // mismatches and the entry drops.
+        std::fs::write(&path_a, b"externally edited bytes").unwrap();
+
+        let resumed_tracker = Arc::new(FileTracker::new());
+        let resumed = resume(&store, &session_id, &resumed_tracker).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.pre_modify_check(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::tool::tracker::GatePurpose::Edit,
+        );
+        assert!(
+            matches!(check, crate::tool::tracker::PreModifyCheck::Reject(_)),
+            "drifted file must hit the must-read-first gate, got: {check:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_handles_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = Arc::new(FileTracker::new());
+        let handle = start(&store, "m", Arc::clone(&tracker));
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish().await;
+        drop(handle);
+
+        std::fs::remove_file(&path_a).unwrap();
+
+        let resumed_tracker = Arc::new(FileTracker::new());
+        let resumed = resume(&store, &session_id, &resumed_tracker).unwrap();
+        // restore_verified must silently drop the snapshot rather than
+        // panic; assertion is that the call returns and the tracker
+        // ends up empty.
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+        let by_path = resumed_tracker.pre_modify_check(
+            &path_a,
+            std::time::UNIX_EPOCH,
+            0,
+            crate::tool::tracker::GatePurpose::Edit,
+        );
+        assert!(matches!(
+            by_path,
+            crate::tool::tracker::PreModifyCheck::Reject(_)
+        ));
+    }
+
     // ── resume ──
 
     #[tokio::test]
     async fn resume_loads_messages_and_keeps_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
@@ -738,7 +900,7 @@ mod tests {
             handle: resumed,
             messages,
             ..
-        } = resume(&store, &session_id).unwrap();
+        } = resume(&store, &session_id, &tracker()).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(messages.len(), 2);
     }
@@ -747,13 +909,13 @@ mod tests {
     async fn resume_works_on_unfinished_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         // Skip finish — `shutdown` drains the queued record cmd anyway.
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        let ResumedSession { messages, .. } = resume(&store, &session_id, &tracker()).unwrap();
         assert_eq!(messages.len(), 1);
     }
 
@@ -761,12 +923,12 @@ mod tests {
     async fn resume_empty_session_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.finish().await;
         drop(original);
 
-        assert!(resume(&store, &session_id).is_err());
+        assert!(resume(&store, &session_id, &tracker()).is_err());
     }
 
     #[tokio::test]
@@ -775,7 +937,7 @@ mod tests {
         // empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original
             .record_message(Message {
@@ -789,7 +951,7 @@ mod tests {
             .await;
         drop(original);
 
-        let err = resume(&store, &session_id)
+        let err = resume(&store, &session_id, &tracker())
             .err()
             .expect("all messages sanitized must be an error");
         assert!(
@@ -802,7 +964,7 @@ mod tests {
     async fn resume_drops_assistant_message_with_only_unresolved_tool_use() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("do X")).await;
         original
@@ -817,7 +979,7 @@ mod tests {
             .await;
         original.shutdown().await;
 
-        let ResumedSession { messages, .. } = resume(&store, &session_id).unwrap();
+        let ResumedSession { messages, .. } = resume(&store, &session_id, &tracker()).unwrap();
         assert_eq!(
             messages.len(),
             1,
@@ -830,14 +992,14 @@ mod tests {
     async fn resume_preserves_parent_chain_on_next_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        let original = start(&store, "m");
+        let original = start(&store, "m", tracker());
         let session_id = original.session_id().to_owned();
         original.record_message(Message::user("hello")).await;
         original.record_message(Message::assistant("hi")).await;
         original.finish().await;
         drop(original);
 
-        let resumed = resume(&store, &session_id).unwrap().handle;
+        let resumed = resume(&store, &session_id, &tracker()).unwrap().handle;
         resumed.record_message(Message::user("follow up")).await;
         resumed.finish().await;
         drop(resumed);
