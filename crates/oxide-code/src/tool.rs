@@ -676,11 +676,11 @@ mod tests {
     use super::read::ReadTool;
     use super::write::WriteTool;
     use super::*;
-    use crate::file_tracker::FileTracker;
+    use crate::file_tracker::testing::tracker;
 
     /// Every registered tool, to parameterize trait-contract tests.
     fn all_tools() -> Vec<Box<dyn Tool>> {
-        let tracker = Arc::new(FileTracker::new());
+        let tracker = tracker();
         vec![
             Box::new(BashTool),
             Box::new(EditTool::new(Arc::clone(&tracker))),
@@ -992,8 +992,7 @@ mod tests {
     #[tokio::test]
     async fn run_dispatches_and_caps_byte_overflow() {
         let (_dir, path) = write_oversize_file();
-        let registry =
-            ToolRegistry::new(vec![Box::new(ReadTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
         let output = registry
             .run(
                 "read",
@@ -1014,8 +1013,7 @@ mod tests {
         let path = dir.path().join("small.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();
 
-        let registry =
-            ToolRegistry::new(vec![Box::new(ReadTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
         let output = registry
             .run(
                 "read",
@@ -1036,8 +1034,7 @@ mod tests {
         // `result_view` must drop to `Text` instead of panicking or
         // mis-rendering.
         let (_dir, path) = write_oversize_file();
-        let registry =
-            ToolRegistry::new(vec![Box::new(ReadTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
         let input = serde_json::json!({"file_path": path.to_str().unwrap()});
         let output = registry.run("read", input.clone()).await;
 
@@ -1068,8 +1065,7 @@ mod tests {
         // the registry must produce the same `Diff` the tool owns —
         // including the field values, so a mutation returning an
         // empty diff wouldn't pass.
-        let registry =
-            ToolRegistry::new(vec![Box::new(EditTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -1127,8 +1123,7 @@ mod tests {
 
     #[test]
     fn result_view_delegates_read_excerpt() {
-        let registry =
-            ToolRegistry::new(vec![Box::new(ReadTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
         let input = serde_json::json!({"file_path": "/tmp/lib.rs"});
         let metadata = ToolMetadata::default();
         let view = registry.result_view("read", &input, "1\tmod foo;", &metadata, false);
@@ -1167,8 +1162,7 @@ mod tests {
         // Error outputs are prose ("old_string not found ..."); rendering
         // them as a diff would hide the failure. The short-circuit lives
         // in the registry so individual tools don't each re-implement it.
-        let registry =
-            ToolRegistry::new(vec![Box::new(EditTool::new(Arc::new(FileTracker::new())))]);
+        let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",

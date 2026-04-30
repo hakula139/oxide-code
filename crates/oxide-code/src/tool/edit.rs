@@ -461,26 +461,7 @@ mod tests {
 
     use super::*;
     use crate::file_tracker::LastView;
-
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
-
-    /// Records a full Read of `path` so the gate has a baseline entry,
-    /// mirroring what a real Read turn would have stored.
-    fn seeded_tracker(path: &Path) -> FileTracker {
-        let tracker = FileTracker::new();
-        let bytes = std::fs::read(path).unwrap();
-        let meta = std::fs::metadata(path).unwrap();
-        tracker.record_read(
-            path,
-            &bytes,
-            meta.modified().unwrap(),
-            meta.len(),
-            LastView::Full,
-        );
-        tracker
-    }
+    use crate::file_tracker::testing::{tracker, tracker_seeded};
 
     // ── result_view ──
 
@@ -727,7 +708,7 @@ mod tests {
                 "old_string": "hello",
                 "new_string": "goodbye"
             }),
-            Arc::new(seeded_tracker(&path)),
+            Arc::new(tracker_seeded(&path)),
         )
         .await;
 
@@ -796,7 +777,7 @@ mod tests {
                 "old_string": "not present",
                 "new_string": "x",
             }),
-            Arc::new(seeded_tracker(&path)),
+            Arc::new(tracker_seeded(&path)),
         )
         .await;
 
@@ -827,7 +808,7 @@ mod tests {
             "fn foo() {}",
             "fn foo() -> i32 { 42 }",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -853,7 +834,7 @@ mod tests {
             "aaa",
             "ccc",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -880,7 +861,7 @@ mod tests {
             "a",
             "b",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -902,7 +883,7 @@ mod tests {
             "hello",
             "goodbye",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -927,7 +908,7 @@ mod tests {
             "line1\nline2",
             "a\nb",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -948,7 +929,7 @@ mod tests {
             "aaa",
             "x\r\ny",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -970,7 +951,7 @@ mod tests {
             "replace_me",
             "replaced",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -992,7 +973,7 @@ mod tests {
             "foo\nbar",
             "a\nb",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -1046,7 +1027,7 @@ mod tests {
             "nonexistent",
             "replacement",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap_err();
@@ -1083,7 +1064,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = seeded_tracker(&path);
+        let tracker = tracker_seeded(&path);
         std::fs::write(&path, "external edit").unwrap();
 
         let err = edit_file(path.to_str().unwrap(), "external", "ours", false, &tracker)
@@ -1150,7 +1131,7 @@ mod tests {
             "aaa",
             "ccc",
             false,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap_err();
@@ -1179,7 +1160,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("readonly.txt");
         std::fs::write(&path, "hello world").unwrap();
-        let tracker = seeded_tracker(&path);
+        let tracker = tracker_seeded(&path);
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o444);
@@ -1208,7 +1189,7 @@ mod tests {
             "B",
             "X",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -1262,7 +1243,7 @@ mod tests {
             "B",
             "X\nY",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();
@@ -1317,7 +1298,7 @@ mod tests {
             "X\nY",
             "Z",
             true,
-            &seeded_tracker(&path),
+            &tracker_seeded(&path),
         )
         .await
         .unwrap();

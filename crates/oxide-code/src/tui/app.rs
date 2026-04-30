@@ -314,7 +314,7 @@ mod tests {
     /// `ToolCallStart` label lookups match what production would render.
     /// Used by tool-event tests that exercise the Start → End flow.
     fn test_app_with_tools() -> (App, mpsc::Receiver<UserAction>, mpsc::Sender<AgentEvent>) {
-        let tracker = Arc::new(crate::file_tracker::FileTracker::new());
+        let tracker = crate::file_tracker::testing::tracker();
         let tools = ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
             Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),

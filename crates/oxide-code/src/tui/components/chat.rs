@@ -502,7 +502,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::*;
-    use crate::file_tracker::FileTracker;
+    use crate::file_tracker::testing::tracker;
     use crate::message::{ContentBlock, Role};
 
     // ── Fixtures ──
@@ -512,7 +512,7 @@ mod tests {
     }
 
     fn test_tools() -> ToolRegistry {
-        let tracker = Arc::new(FileTracker::new());
+        let tracker = tracker();
         ToolRegistry::new(vec![
             Box::new(crate::tool::bash::BashTool),
             Box::new(crate::tool::read::ReadTool::new(Arc::clone(&tracker))),

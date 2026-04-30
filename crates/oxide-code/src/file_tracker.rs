@@ -395,6 +395,66 @@ impl GateError {
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
 
+/// Shared test helpers for materializing tracker state. Lives here
+/// rather than alongside the tool tests so the five callers (tool /
+/// session integration tests) don't each grow their own near-duplicate
+/// fixtures with subtly different shapes.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use super::{FileTracker, LastView};
+
+    /// Fresh `Arc<FileTracker>`. Tools that take ownership of the
+    /// tracker (`ReadTool::new`, `EditTool::new`, `WriteTool::new`)
+    /// reach for this; the bare-`FileTracker` callers go through
+    /// `FileTracker::new()` directly.
+    pub(crate) fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
+    }
+
+    /// Seeds `tracker` with a full Read of `path` from disk, mirroring
+    /// what a real Read turn would have stored.
+    pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
+        let bytes = std::fs::read(path).unwrap();
+        let meta = std::fs::metadata(path).unwrap();
+        tracker.record_read(
+            path,
+            &bytes,
+            meta.modified().unwrap(),
+            meta.len(),
+            LastView::Full,
+        );
+    }
+
+    /// Convenience wrapper: fresh tracker pre-seeded with a full Read
+    /// of `path`. Most edit-tool tests want exactly this shape.
+    pub(crate) fn tracker_seeded(path: &Path) -> FileTracker {
+        let tracker = FileTracker::new();
+        seed_full_read(&tracker, path);
+        tracker
+    }
+
+    /// Writes `bytes` to disk at `path` and records the resulting
+    /// state in `tracker` as a successful Edit / Write. Returns the
+    /// captured `(mtime, size)` for callers that want to assert on
+    /// them.
+    pub(crate) fn record_tracked_file(
+        tracker: &FileTracker,
+        path: &Path,
+        bytes: &[u8],
+    ) -> (SystemTime, u64) {
+        std::fs::write(path, bytes).unwrap();
+        let meta = std::fs::metadata(path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let size = meta.len();
+        tracker.record_modify(path, bytes, mtime, size);
+        (mtime, size)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

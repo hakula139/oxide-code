@@ -166,25 +166,7 @@ async fn check_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_tracker::LastView;
-
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
-
-    /// Records a full Read of `path` so the gate has a baseline entry,
-    /// mirroring what a real Read turn would have stored.
-    fn seed_full_read(tracker: &FileTracker, path: &Path) {
-        let bytes = std::fs::read(path).unwrap();
-        let meta = std::fs::metadata(path).unwrap();
-        tracker.record_read(
-            path,
-            &bytes,
-            meta.modified().unwrap(),
-            meta.len(),
-            LastView::Full,
-        );
-    }
+    use crate::file_tracker::testing::{seed_full_read, tracker};
 
     // ── run ──
 

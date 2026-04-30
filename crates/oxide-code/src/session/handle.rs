@@ -341,6 +341,7 @@ mod tests {
     use super::super::store::{test_session_file, test_store};
     use super::*;
     use crate::file_tracker::FileTracker;
+    use crate::file_tracker::testing::record_tracked_file;
     use crate::message::{ContentBlock, Role};
 
     // ── record_message ──
@@ -739,21 +740,6 @@ mod tests {
     }
 
     // ── file-snapshot persistence ──
-
-    /// Path / bytes of one tracked file, recorded into `tracker` at the
-    /// returned mtime / size.
-    fn record_tracked_file(
-        tracker: &FileTracker,
-        path: &std::path::Path,
-        bytes: &[u8],
-    ) -> (std::time::SystemTime, u64) {
-        std::fs::write(path, bytes).unwrap();
-        let meta = std::fs::metadata(path).unwrap();
-        let mtime = meta.modified().unwrap();
-        let size = meta.len();
-        tracker.record_modify(path, bytes, mtime, size);
-        (mtime, size)
-    }
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {

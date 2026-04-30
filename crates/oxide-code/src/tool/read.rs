@@ -294,10 +294,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-
-    fn tracker() -> Arc<FileTracker> {
-        Arc::new(FileTracker::new())
-    }
+    use crate::file_tracker::testing::tracker;
 
     // ── run ──
 
