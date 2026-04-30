@@ -10,6 +10,9 @@ use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 
+/// Stand-in content when a command produced no stdout / stderr.
+const NO_OUTPUT_MARKER: &str = "(no output)";
+
 pub(crate) struct BashTool;
 
 impl Tool for BashTool {
@@ -165,14 +168,13 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     }
     if !output.status.success() {
         let code = exit_code.unwrap_or(-1);
-        if content.is_empty() {
-            _ = write!(content, "(exit code {code})");
-        } else {
-            _ = write!(content, "\n\n(exit code {code})");
+        if !content.is_empty() {
+            content.push_str("\n\n");
         }
+        let _ = write!(content, "(exit code {code})");
     }
     if content.is_empty() {
-        content.push_str("(no output)");
+        content.push_str(NO_OUTPUT_MARKER);
     }
 
     // Only flag execution failures (timeout, spawn error) as is_error.

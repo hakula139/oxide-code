@@ -5,6 +5,10 @@ use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
 use crate::util::env;
 
+/// Fallback used in the `# Environment` prompt section when a value
+/// (cwd, shell, OS version) couldn't be detected.
+const UNKNOWN_MARKER: &str = "(unknown)";
+
 /// Detected runtime environment for the system prompt.
 ///
 /// Each field maps to one or more bullets in the `# Environment` section.
@@ -25,7 +29,7 @@ impl Environment {
     /// than errors, so the system prompt is always constructible.
     pub(super) fn detect(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> Self {
         let cwd_str = cwd.map_or_else(
-            || "(unknown)".to_owned(),
+            || UNKNOWN_MARKER.to_owned(),
             |p| p.to_string_lossy().into_owned(),
         );
         let is_git = git_root.is_some();

@@ -114,7 +114,7 @@ fn render_sessions(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
+        let raw_title = s.title.as_ref().map_or(UNTITLED_MARKER, |t| t.title.as_str());
         let title = match title_budget {
             Some(budget) => truncate_to_width(raw_title, budget),
             None => raw_title.to_owned(),
@@ -138,6 +138,9 @@ fn render_sessions(
 /// prefix every row shares before `--all` inserts its optional Project
 /// column and the row finally reaches `Title`.
 const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
+
+/// Title column fallback when a session has no recorded title yet.
+const UNTITLED_MARKER: &str = "(untitled)";
 
 /// Smallest title-column width we will truncate to. Below this, the
 /// output is so narrow that truncation destroys almost all signal, so
