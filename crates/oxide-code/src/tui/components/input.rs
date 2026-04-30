@@ -2,9 +2,10 @@ use std::cell::Cell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
@@ -14,6 +15,13 @@ use crate::tui::theme::Theme;
 
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
+
+/// Prompt marker rendered to the left of the textarea on the first
+/// row. Same chevron the chat history uses for user blocks, so the
+/// input reads as the same speaker mid-composition.
+const PROMPT_MARKER: &str = "❯ ";
+/// Display columns reserved for [`PROMPT_MARKER`].
+const PROMPT_WIDTH: u16 = 2;
 
 /// Placeholder copy keyed off `(enabled, has_queued)`. Visible only
 /// while the buffer is empty.
@@ -49,8 +57,8 @@ pub(crate) struct InputArea {
     textarea: TextArea<'static>,
     enabled: bool,
     /// Whether the surrounding [`App`](super::super::app::App) has any
-    /// queued prompts pending dispatch — drives the idle footer's
-    /// hint text. Set explicitly because the input has no view of
+    /// queued prompts pending dispatch — drives the idle placeholder
+    /// copy. Set explicitly because the input has no view of
     /// app-level queue state.
     has_queued: bool,
     /// Last render width for visual line count estimation. Updated each
@@ -136,12 +144,11 @@ impl InputArea {
         self.scroll_top.set(0);
     }
 
-    /// Returns the height this component needs (content lines + top
-    /// border).
+    /// Returns the height this component needs (content lines + top +
+    /// bottom borders).
     pub(crate) fn height(&self) -> u16 {
         let content_lines = self.visual_line_count();
-        // content + top border (1)
-        content_lines.min(MAX_VISIBLE_LINES) + 1
+        content_lines.min(MAX_VISIBLE_LINES) + 2
     }
 }
 
@@ -217,16 +224,33 @@ impl Component for InputArea {
         };
 
         let block = Block::default()
-            .borders(Borders::TOP)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(border_style)
             .style(self.theme.surface());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        frame.render_widget(&self.textarea, inner);
+        // Reserve the leftmost columns for the prompt marker so the
+        // textarea content aligns with chat-history user blocks. The
+        // marker only paints the first visible row; subsequent wrapped
+        // rows leave the prompt gutter blank (hanging indent).
+        let [prompt_area, textarea_area] =
+            Layout::horizontal([Constraint::Length(PROMPT_WIDTH), Constraint::Min(0)]).areas(inner);
+
+        let marker_style = if self.enabled {
+            self.theme.user()
+        } else {
+            self.theme.dim()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(PROMPT_MARKER, marker_style))),
+            prompt_area,
+        );
+
+        frame.render_widget(&self.textarea, textarea_area);
 
         // Store width for visual line count estimation on the next frame.
-        self.last_width.set(inner.width);
+        self.last_width.set(textarea_area.width);
 
         if self.enabled {
             // screen_cursor().row is an absolute screen-line index across
@@ -239,7 +263,7 @@ impl Component for InputArea {
                 reason = "cursor position fits in u16 for terminal widths"
             )]
             let cursor_row = sc.row as u16;
-            let height = inner.height;
+            let height = textarea_area.height;
             let prev = self.scroll_top.get();
             let top = if cursor_row < prev {
                 cursor_row
@@ -254,11 +278,11 @@ impl Component for InputArea {
                 clippy::cast_possible_truncation,
                 reason = "cursor position fits in u16 for terminal widths"
             )]
-            let cursor_x = inner
+            let cursor_x = textarea_area
                 .x
                 .saturating_add(sc.col as u16)
-                .min(inner.right().saturating_sub(1));
-            let cursor_y = inner.y + cursor_row - top;
+                .min(textarea_area.right().saturating_sub(1));
+            let cursor_y = textarea_area.y + cursor_row - top;
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
@@ -387,9 +411,9 @@ mod tests {
     // ── height ──
 
     #[test]
-    fn height_empty_input_is_two() {
+    fn height_empty_input_is_three() {
         let input = test_input();
-        assert_eq!(input.height(), 2); // 1 content + 1 top border
+        assert_eq!(input.height(), 3); // 1 content + 2 borders
     }
 
     #[test]
@@ -397,7 +421,7 @@ mod tests {
         let mut input = test_input();
         input.textarea.insert_newline();
         input.textarea.insert_newline();
-        assert_eq!(input.height(), 4); // 3 content + 1 top border
+        assert_eq!(input.height(), 5); // 3 content + 2 borders
     }
 
     #[test]
@@ -406,7 +430,7 @@ mod tests {
         for _ in 0..10 {
             input.textarea.insert_newline();
         }
-        assert_eq!(input.height(), MAX_VISIBLE_LINES + 1);
+        assert_eq!(input.height(), MAX_VISIBLE_LINES + 2);
     }
 
     // ── handle_event ──
@@ -583,10 +607,35 @@ mod tests {
     #[test]
     fn render_disabled_applies_dim_foreground_to_text() {
         // Enable/disable only changes per-cell styling, which a text-only
-        // snapshot collapses. Inspect the buffer directly instead.
+        // snapshot collapses. Sample the first textarea cell (cols 0..2
+        // hold the prompt marker, so step past them).
         let theme = Theme::default();
         let mut input = InputArea::new(&theme);
         type_text(&mut input, "pending");
+
+        let enabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(PROMPT_WIDTH, 1))
+            .unwrap()
+            .fg;
+        input.set_enabled(false);
+        let disabled_fg = render_to_backend(&input, 60, 3)
+            .buffer()
+            .cell(Position::new(PROMPT_WIDTH, 1))
+            .unwrap()
+            .fg;
+
+        assert_eq!(enabled_fg, theme.text().fg.unwrap());
+        assert_eq!(disabled_fg, theme.dim().fg.unwrap());
+        assert_ne!(enabled_fg, disabled_fg);
+    }
+
+    #[test]
+    fn render_prompt_marker_uses_user_color_when_idle_and_dim_when_busy() {
+        // Pin the marker style so the disabled state visibly mutes the
+        // prompt — not just the textarea content.
+        let theme = Theme::default();
+        let mut input = InputArea::new(&theme);
 
         let enabled_fg = render_to_backend(&input, 60, 3)
             .buffer()
@@ -600,9 +649,8 @@ mod tests {
             .unwrap()
             .fg;
 
-        assert_eq!(enabled_fg, theme.text().fg.unwrap());
+        assert_eq!(enabled_fg, theme.user().fg.unwrap());
         assert_eq!(disabled_fg, theme.dim().fg.unwrap());
-        assert_ne!(enabled_fg, disabled_fg);
     }
 
     #[test]
@@ -724,8 +772,8 @@ mod tests {
                 KeyModifiers::NONE,
             )));
         }
-        // 3 content + 1 top border = 4
-        assert_eq!(input.height(), 4);
+        // 3 content + 2 borders
+        assert_eq!(input.height(), 5);
     }
 
     // ── submit ──
