@@ -4,6 +4,15 @@ use anyhow::Result;
 
 use crate::tool::ToolRegistry;
 
+// ── Visible Markers ──
+
+/// User-facing string surfaced when a turn is dropped via
+/// [`UserAction::Cancel`]. Both the TUI's [`InterruptedMarker`] block
+/// and [`StdioSink::send`] emit this verbatim, so they stay in sync.
+///
+/// [`InterruptedMarker`]: crate::tui::components::chat::blocks::InterruptedMarker
+pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
+
 // ── Agent Events ──
 
 /// Events emitted by the agent loop for display.
@@ -159,7 +168,7 @@ impl AgentSink for StdioSink {
             AgentEvent::Cancelled => {
                 // Marker on stderr so captured stdout (`-p`) stays reproducible.
                 println!();
-                eprintln!("(interrupted)");
+                eprintln!("{INTERRUPTED_MARKER}");
             }
             AgentEvent::SessionTitleUpdated(_) => {
                 // Titles are a TUI-only affordance; the stdio sink has no
