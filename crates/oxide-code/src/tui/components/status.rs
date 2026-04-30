@@ -189,26 +189,18 @@ impl StatusBar {
     fn status_span(&self) -> Span<'static> {
         match self.status {
             Status::Idle => Span::styled("ready", self.theme.success()),
-            Status::Streaming | Status::ToolRunning => {
-                let spinner = SPINNER_FRAMES[self.spinner_frame];
-                let label = match self.status {
-                    Status::Streaming => "streaming",
-                    Status::ToolRunning => "running tool",
-                    _ => unreachable!(),
-                };
-                Span::styled(
-                    format!("{spinner} {label}... · Esc to interrupt"),
-                    self.theme.info(),
-                )
-            }
-            Status::Cancelling => {
-                let spinner = SPINNER_FRAMES[self.spinner_frame];
-                Span::styled(format!("{spinner} cancelling..."), self.theme.info())
-            }
+            Status::Streaming => self.busy_span("streaming... · Esc to interrupt"),
+            Status::ToolRunning => self.busy_span("running tool... · Esc to interrupt"),
+            Status::Cancelling => self.busy_span("cancelling..."),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
             }
         }
+    }
+
+    fn busy_span(&self, label: &str) -> Span<'static> {
+        let spinner = SPINNER_FRAMES[self.spinner_frame];
+        Span::styled(format!("{spinner} {label}"), self.theme.info())
     }
 }
 
