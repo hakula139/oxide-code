@@ -59,6 +59,7 @@ rsplit
 rustls
 serde
 serie
+sess
 swatinem
 syntect
 sysname
