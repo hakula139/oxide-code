@@ -166,6 +166,10 @@ impl App {
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Streaming);
             }
+            // The status / input transition back to idle is driven by
+            // the matching `AgentEvent::Cancelled` — no local state
+            // change here.
+            UserAction::Cancel => {}
             UserAction::Quit => {
                 self.should_quit = true;
             }
@@ -234,6 +238,8 @@ impl App {
             AgentEvent::TurnComplete => {
                 self.finish_turn();
             }
+            // Same teardown as `TurnComplete` — partial buffer commits as-is.
+            AgentEvent::Cancelled => self.finish_turn(),
             AgentEvent::SessionTitleUpdated(title) => {
                 self.status_bar.set_title(Some(title));
             }
@@ -398,11 +404,38 @@ mod tests {
     }
 
     #[test]
-    fn handle_crossterm_key_ctrl_c_triggers_quit_from_any_mode() {
+    fn handle_crossterm_key_ctrl_c_idle_quits() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
         assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
+        // Mid-turn Ctrl+C must reach the agent loop as `Cancel` so it
+        // can drop the future, not flip `should_quit` and tear down
+        // the TUI. Drive the app into the streaming state first to
+        // mirror production: input disabled => cancel branch fires.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        assert!(!app.input.is_enabled());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.should_quit, "busy Ctrl+C must not exit");
+        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_esc_busy_forwards_cancel() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
+        assert!(matches!(forwarded, UserAction::Cancel));
     }
 
     #[test]
@@ -465,6 +498,25 @@ mod tests {
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_cancel_forwards_action_without_local_state_changes() {
+        // Local state stays put — the matching `AgentEvent::Cancelled`
+        // drives the transition back to idle.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        // Drain the SubmitPrompt to isolate the Cancel payload.
+        rx.recv().await.expect("submit forwarded");
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::Cancel);
+
+        assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Cancel forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
     }
 
     #[test]
@@ -562,6 +614,20 @@ mod tests {
             1,
             "tool call renders one chat entry",
         );
+    }
+
+    #[test]
+    fn handle_cancelled_returns_to_idle_and_reenables_input() {
+        // Cancelled shares the teardown shape of TurnComplete: the
+        // partial stream commits and idle state returns.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.handle_agent_event(AgentEvent::StreamToken("part".into()));
+        assert_eq!(app.status_bar.status(), Status::Streaming);
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert!(app.input.is_enabled());
     }
 
     #[test]

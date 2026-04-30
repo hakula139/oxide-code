@@ -22,10 +22,14 @@ const MAX_VISIBLE_LINES: u16 = 6;
 /// dynamic height. Grows from 1 to [`MAX_VISIBLE_LINES`] as content
 /// expands.
 ///
-/// Key bindings:
+/// Key bindings (idle):
 /// - Enter: submit prompt
 /// - Shift+Enter: insert newline
 /// - Ctrl+C / Ctrl+D: quit
+///
+/// Key bindings (busy, i.e. disabled):
+/// - Esc / Ctrl+C: cancel the in-flight turn
+/// - Ctrl+D: quit
 pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
@@ -85,14 +89,37 @@ impl InputArea {
 
 impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
-        // Ctrl+C / Ctrl+D always quits, even when disabled.
+        // Ctrl+D always quits — historical EOF semantics.
         if let Event::Key(KeyEvent {
-            code: KeyCode::Char('c' | 'd'),
+            code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,
             ..
         }) = event
         {
             return Some(UserAction::Quit);
+        }
+
+        // Ctrl+C: cancel mid-turn, quit when idle.
+        if let Event::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }) = event
+        {
+            return Some(if self.enabled {
+                UserAction::Quit
+            } else {
+                UserAction::Cancel
+            });
+        }
+
+        // Esc only acts mid-turn — idle Esc has no meaning in the prompt.
+        if let Event::Key(KeyEvent {
+            code: KeyCode::Esc, ..
+        }) = event
+            && !self.enabled
+        {
+            return Some(UserAction::Cancel);
         }
 
         if !self.enabled {
@@ -300,25 +327,45 @@ mod tests {
     // ── handle_event ──
 
     #[test]
-    fn handle_event_ctrl_c_returns_quit() {
+    fn handle_event_ctrl_c_idle_returns_quit() {
         let mut input = test_input();
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(action, Some(UserAction::Quit)));
     }
 
     #[test]
-    fn handle_event_ctrl_d_returns_quit() {
+    fn handle_event_ctrl_d_returns_quit_in_any_state() {
+        // Ctrl+D is the historical EOF key; no busy-state override.
         let mut input = test_input();
-        let action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(UserAction::Quit)));
+        let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(matches!(idle_action, Some(UserAction::Quit)));
+
+        input.set_enabled(false);
+        let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(matches!(busy_action, Some(UserAction::Quit)));
     }
 
     #[test]
-    fn handle_event_ctrl_c_quits_even_when_disabled() {
+    fn handle_event_ctrl_c_busy_returns_cancel() {
         let mut input = test_input();
         input.set_enabled(false);
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(action, Some(UserAction::Quit)));
+        assert!(matches!(action, Some(UserAction::Cancel)));
+    }
+
+    #[test]
+    fn handle_event_esc_busy_returns_cancel() {
+        let mut input = test_input();
+        input.set_enabled(false);
+        let action = input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UserAction::Cancel)));
+    }
+
+    #[test]
+    fn handle_event_esc_idle_is_silent() {
+        let mut input = test_input();
+        let action = input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(action.is_none());
     }
 
     #[test]

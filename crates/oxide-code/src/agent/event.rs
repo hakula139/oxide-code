@@ -43,6 +43,10 @@ pub(crate) enum AgentEvent {
     /// The current assistant turn is complete (text-only response, no more
     /// tool calls).
     TurnComplete,
+    /// Mid-flight turn was dropped in response to a [`UserAction::Cancel`].
+    /// Same teardown as [`Self::TurnComplete`] plus an `(interrupted)`
+    /// marker on the partial assistant block.
+    Cancelled,
     /// A newly-generated session title (e.g., AI-generated via Haiku). The
     /// TUI updates the status bar slot; other sinks ignore it.
     SessionTitleUpdated(String),
@@ -57,6 +61,8 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),
+    /// Cancel the in-flight turn. No-op when the agent is idle.
+    Cancel,
     /// User requested quit.
     Quit,
 }
@@ -144,6 +150,11 @@ impl AgentSink for StdioSink {
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 println!();
+            }
+            AgentEvent::Cancelled => {
+                // Marker on stderr so captured stdout (`-p`) stays reproducible.
+                println!();
+                eprintln!("(interrupted)");
             }
             AgentEvent::SessionTitleUpdated(_) => {
                 // Titles are a TUI-only affordance; the stdio sink has no
@@ -268,6 +279,11 @@ mod tests {
     #[test]
     fn send_turn_complete_emits_trailing_newline_without_error() {
         test_sink(false).send(AgentEvent::TurnComplete).unwrap();
+    }
+
+    #[test]
+    fn send_cancelled_emits_marker_without_error() {
+        test_sink(false).send(AgentEvent::Cancelled).unwrap();
     }
 
     #[test]

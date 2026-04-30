@@ -390,19 +390,37 @@ async fn agent_loop_task(
                 }
 
                 let prompt = prompt::build_prompt(client.model()).await;
-                let turn_result =
-                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;
-                if let Err(e) = turn_result {
-                    // `{e:#}` flattens the anyhow cause chain into one
-                    // string ("stream error: API error (HTTP 503): ...").
-                    // Plain `Display` would drop everything below the
-                    // outermost context and surface only "stream error",
-                    // which doesn't distinguish a transient gateway 5xx
-                    // from a permanent config error.
-                    _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                let outcome = drive_turn(
+                    &client,
+                    &tools,
+                    &mut messages,
+                    &prompt,
+                    &sink,
+                    &session,
+                    &mut user_rx,
+                )
+                .await;
+                match outcome {
+                    TurnOutcome::Completed(Ok(())) => {
+                        _ = sink.send(AgentEvent::TurnComplete);
+                    }
+                    TurnOutcome::Completed(Err(e)) => {
+                        // `{e:#}` flattens the anyhow cause chain into one
+                        // string ("stream error: API error (HTTP 503): ...").
+                        // Plain `Display` would drop everything below the
+                        // outermost context and surface only "stream error",
+                        // which doesn't distinguish a transient gateway 5xx
+                        // from a permanent config error.
+                        _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                        _ = sink.send(AgentEvent::TurnComplete);
+                    }
+                    TurnOutcome::Cancelled => {
+                        _ = sink.send(AgentEvent::Cancelled);
+                    }
+                    TurnOutcome::Quit => break,
                 }
-                _ = sink.send(AgentEvent::TurnComplete);
             }
+            UserAction::Cancel => {}
             UserAction::Quit => break,
         }
     }
@@ -410,6 +428,46 @@ async fn agent_loop_task(
     // Summary is written by the caller (run_tui) to guarantee it runs
     // regardless of how this task exits.
     Ok(())
+}
+
+/// Outcome of one [`drive_turn`] call. `Cancelled` drops the future,
+/// relying on reqwest's stream-close-on-drop and `kill_on_drop(true)`
+/// to reap in-flight work. `Quit` ends the agent loop.
+enum TurnOutcome {
+    Completed(Result<()>),
+    Cancelled,
+    Quit,
+}
+
+/// Run one turn while watching `user_rx` for cancel / quit so an Esc /
+/// Ctrl+C from the TUI can drop the future. Submits during a busy turn
+/// are not expected — the TUI disables its input — but a stray one is
+/// logged and ignored rather than dropped silently.
+async fn drive_turn(
+    client: &Client,
+    tools: &Arc<ToolRegistry>,
+    messages: &mut Vec<Message>,
+    prompt: &prompt::PromptParts,
+    sink: &tui::event::ChannelSink,
+    session: &SessionHandle,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+) -> TurnOutcome {
+    let turn = agent_turn(client, tools, messages, prompt, sink, session);
+    tokio::pin!(turn);
+
+    loop {
+        tokio::select! {
+            result = &mut turn => return TurnOutcome::Completed(result),
+            action = user_rx.recv() => match action {
+                Some(UserAction::Cancel) => return TurnOutcome::Cancelled,
+                // `None`: every sender dropped — TUI is gone, exit.
+                Some(UserAction::Quit) | None => return TurnOutcome::Quit,
+                Some(UserAction::SubmitPrompt(_)) => {
+                    warn!("ignoring submit during in-flight turn");
+                }
+            },
+        }
+    }
 }
 
 // ── Bare REPL Mode ──
