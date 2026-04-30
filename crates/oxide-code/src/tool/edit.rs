@@ -271,10 +271,12 @@ async fn edit_file(
 /// otherwise. Each chunk carries real file line numbers (post-edit
 /// positions on the `+` side) with common anchors trimmed.
 ///
-/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts at < 2^24, so
-/// the running shift fits in `isize` and the post-edit line stays
-/// positive. The `checked_*` calls below surface any overflow as a
-/// panic — a wrong-but-plausible line number would be worse.
+/// The [`MAX_EDIT_FILE_SIZE`] cap bounds line counts (one byte per
+/// line is the floor), and the cumulative shift per match is bounded
+/// by that line count; both products fit comfortably in `isize` on
+/// every supported target. The `checked_*` calls below surface any
+/// overflow as a panic — a wrong-but-plausible line number would be
+/// worse.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
