@@ -203,6 +203,8 @@ fn parse_range_extent(s: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -290,20 +292,26 @@ mod tests {
 
     #[test]
     fn render_emits_path_header_then_hunk_then_body_rows() {
+        // Use `indoc!` so the single leading space on " context" survives
+        // — `\<newline>` line continuation would strip it and route the
+        // line through the defensive branch instead of strip_prefix(' ').
         let theme = Theme::default();
-        let block = GitDiffBlock::new(
-            "diff --git a/foo.rs b/foo.rs\n\
-             index abc..def 100644\n\
-             --- a/foo.rs\n\
-             +++ b/foo.rs\n\
-             @@ -1,3 +1,3 @@\n\
-             -old line\n\
-             +new line\n\
-              context\n",
-        );
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/foo.rs b/foo.rs
+            index abc..def 100644
+            --- a/foo.rs
+            +++ b/foo.rs
+            @@ -1,3 +1,3 @@
+            -old line
+            +new line
+             context
+        "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Path header (1) + hunk header (1) + del (1) + add (1) + ctx (1) = 5
+        // path + hunk header + del + add + ctx = 5
         assert_eq!(lines.len(), 5, "{lines:#?}");
+        let ctx_row = &lines[4];
+        let body: String = ctx_row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(body.contains("context"), "ctx row missing body: {body:?}");
     }
 
     #[test]
@@ -311,12 +319,12 @@ mod tests {
         // `index ...`, `--- a/path`, `+++ b/path` are all noise; the
         // path header from `diff --git` already names the file.
         let theme = Theme::default();
-        let block = GitDiffBlock::new(
-            "diff --git a/foo.rs b/foo.rs\n\
-             index abc..def 100644\n\
-             --- a/foo.rs\n\
-             +++ b/foo.rs\n",
-        );
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/foo.rs b/foo.rs
+            index abc..def 100644
+            --- a/foo.rs
+            +++ b/foo.rs
+        "});
         let lines = block.render(&ctx_at(80, &theme));
         assert_eq!(lines.len(), 1, "only path header should remain: {lines:#?}");
     }
@@ -384,19 +392,16 @@ mod tests {
     #[test]
     fn render_truncation_footer_after_hunks_renders_dim() {
         // The producer appends "(truncated: N KB more)" as a separate
-        // paragraph. It must read as a dim footer, not as an add / del
-        // / context row.
+        // paragraph. It must read as a dim footer, not a +/-/ctx row.
         let theme = Theme::default();
-        let block = GitDiffBlock::new(
-            "diff --git a/x b/x\n\
-             @@ -1 +1 @@\n\
-             +added\n\
-             \n\
-             (truncated: 12.3 KB more)\n"
-                .to_owned(),
-        );
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -1 +1 @@
+            +added
+
+            (truncated: 12.3 KB more)
+        "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Last non-empty line is the footer.
         let footer = lines.last().expect("non-empty render");
         let text: String = footer.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("truncated"), "footer text: {text:?}");
@@ -408,15 +413,14 @@ mod tests {
         // chunk index. A hunk starting at -27 / +27 must render `27`
         // for the first - and + lines, then `28` for the second, etc.
         let theme = Theme::default();
-        let block = GitDiffBlock::new(
-            "diff --git a/x b/x\n\
-             @@ -27,2 +27,2 @@\n\
-             -alpha\n\
-             -beta\n\
-             +gamma\n\
-             +delta\n"
-                .to_owned(),
-        );
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -27,2 +27,2 @@
+            -alpha
+            -beta
+            +gamma
+            +delta
+        "});
         let lines = block.render(&ctx_at(80, &theme));
         // Body rows are after path header + hunk header (2 entries).
         let body = &lines[2..];
@@ -425,5 +429,56 @@ mod tests {
             .map(|line| line.spans[1].content.trim().to_owned())
             .collect();
         assert_eq!(numbers, vec!["27", "28", "27", "28"]);
+    }
+
+    #[test]
+    fn render_corrupt_hunk_body_falls_through_to_defensive_row() {
+        // Inside a hunk, a line without `+`, `-`, or ` ` is malformed.
+        // It must render as a plain bordered row (no number gutter, no
+        // add / del bg) and must not bump line numbers — otherwise the
+        // gutter drifts on the rest of the hunk.
+        let theme = Theme::default();
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -1,2 +1,2 @@
+            +real add
+            corrupt-no-marker
+            +second add
+        "});
+        let lines = block.render(&ctx_at(80, &theme));
+        let body = &lines[2..];
+        assert_eq!(body.len(), 3, "{body:#?}");
+
+        let corrupt_row = &body[1];
+        let body_text: String = corrupt_row
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(body_text.contains("corrupt-no-marker"), "{body_text:?}");
+        for span in &corrupt_row.spans {
+            assert!(
+                span.style.bg != theme.diff_add.bg && span.style.bg != theme.diff_del.bg,
+                "defensive row must not paint diff bgs: {corrupt_row:?}",
+            );
+        }
+
+        // Surrounding `+` rows keep numbers 1 and 2 — the corrupt line
+        // consumed no slot on either side.
+        let plus_numbers: Vec<String> = [&body[0], &body[2]]
+            .iter()
+            .map(|line| line.spans[1].content.trim().to_owned())
+            .collect();
+        assert_eq!(plus_numbers, vec!["1", "2"]);
+    }
+
+    // ── block_kind ──
+
+    #[test]
+    fn block_kind_is_other() {
+        // `Result` kind forces blank-before spacing in chat view; pin
+        // `Other` so a copy-paste from `ToolResultBlock` doesn't drift.
+        let block = GitDiffBlock::new("diff --git a/x b/x\n");
+        assert!(matches!(block.block_kind(), BlockKind::Other));
     }
 }

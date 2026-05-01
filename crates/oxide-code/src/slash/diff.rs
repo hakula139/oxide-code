@@ -201,6 +201,25 @@ mod tests {
         (dir, path)
     }
 
+    // ── execute ──
+
+    #[test]
+    fn execute_forwards_process_cwd_through_execute_in() {
+        // `cargo test` runs with the workspace root as cwd — itself a
+        // git repo — so the wrapper round-trips through `current_dir`
+        // and `execute_in` without error. No test mutates cwd.
+        use crate::slash::test_session_info;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info));
+        assert_eq!(result, Ok(()));
+        assert_eq!(chat.entry_count(), 1);
+        assert!(!chat.last_is_error());
+    }
+
     // ── execute_in ──
 
     #[test]

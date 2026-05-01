@@ -102,7 +102,7 @@ ox                                          # Start an interactive session
 │   │   │   └── blocks/
 │   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
 │   │   │       ├── error.rs                # ErrorBlock
-│   │   │       ├── git_diff.rs             # GitDiffBlock — render `git diff` output with the same red/green row-bg + numbered gutter as the Edit-tool diff body (parses unified-diff format, reuses `tool::numbered_row` / `bordered_row`)
+│   │   │       ├── git_diff.rs             # GitDiffBlock — unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
 │   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
 │   │   │       ├── system.rs               # SystemMessageBlock — left-bar accent + body text for slash-command output
