@@ -19,6 +19,7 @@ crossterm
 dedupe
 deque
 deserialize
+desync
 disambiguable
 dtolnay
 frappe
