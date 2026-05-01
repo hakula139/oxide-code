@@ -222,92 +222,64 @@ mod tests {
 
     // ── StdioSink::send ──
     //
-    // `send` writes to stdout/stderr, which cargo's test harness captures and
-    // discards on success — so these tests exercise the match-arm dispatch
-    // and the Result contract rather than asserting on rendered bytes.
-    // Formatting-assertion tests belong behind an extracted rendering helper
-    // (see `docs/roadmap.md` → Test Coverage).
+    // `send` writes to stdout/stderr, which cargo's test harness captures
+    // and discards on success — so the test suite covers the match-arm
+    // dispatch and the Result contract rather than asserting on rendered
+    // bytes. Formatting-assertion tests belong behind an extracted
+    // rendering helper (see `docs/roadmap.md` → Test Coverage).
 
     fn test_sink(show_thinking: bool) -> StdioSink {
         StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
     }
 
-    #[test]
-    fn send_session_title_updated_is_silent_ok() {
-        // AI-generated titles are a TUI-only affordance; the stdio path has
-        // no persistent header to rewrite, so the arm must no-op cleanly.
-        let sink = test_sink(false);
-        sink.send(AgentEvent::SessionTitleUpdated("New title".to_owned()))
-            .unwrap();
-    }
-
-    #[test]
-    fn send_stream_token_writes_body_without_error() {
-        let sink = test_sink(false);
-        sink.send(AgentEvent::StreamToken("hello".to_owned()))
-            .unwrap();
-    }
-
-    #[test]
-    fn send_thinking_token_respects_show_thinking_flag() {
-        // show_thinking = false must swallow the block entirely, not just
-        // strip the dim escape codes — otherwise the stream lines bleed
-        // into the transcript unformatted.
-        test_sink(false)
-            .send(AgentEvent::ThinkingToken("muted".to_owned()))
-            .unwrap();
-        test_sink(true)
-            .send(AgentEvent::ThinkingToken("visible".to_owned()))
-            .unwrap();
-    }
-
-    #[test]
-    fn send_tool_call_start_renders_label_and_falls_back_to_name() {
-        let sink = test_sink(false);
-        sink.send(AgentEvent::ToolCallStart {
-            id: "t1".to_owned(),
-            name: "unregistered".to_owned(),
-            input: serde_json::Value::Null,
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn send_tool_call_end_handles_every_field_nullability() {
-        let sink = test_sink(false);
-        sink.send(AgentEvent::ToolCallEnd {
-            id: "t1".to_owned(),
-            content: "file1\nfile2\n".to_owned(),
-            is_error: false,
-            metadata: crate::tool::ToolMetadata {
-                title: Some("ls".to_owned()),
-                ..crate::tool::ToolMetadata::default()
+    /// Every `AgentEvent` shape the TUI emits, including the variants
+    /// that branch on field nullability inside `StdioSink::send`.
+    fn dispatch_cases() -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::StreamToken("hello".to_owned()),
+            AgentEvent::ThinkingToken("plan".to_owned()),
+            // Unregistered tool name exercises the label fallback path.
+            AgentEvent::ToolCallStart {
+                id: "t1".to_owned(),
+                name: "unregistered".to_owned(),
+                input: serde_json::Value::Null,
             },
-        })
-        .unwrap();
-        sink.send(AgentEvent::ToolCallEnd {
-            id: "t2".to_owned(),
-            content: "   \n".to_owned(),
-            is_error: true,
-            metadata: crate::tool::ToolMetadata::default(),
-        })
-        .unwrap();
+            // metadata.title = Some — title prints, content prints.
+            AgentEvent::ToolCallEnd {
+                id: "t1".to_owned(),
+                content: "file1\nfile2\n".to_owned(),
+                is_error: false,
+                metadata: crate::tool::ToolMetadata {
+                    title: Some("ls".to_owned()),
+                    ..crate::tool::ToolMetadata::default()
+                },
+            },
+            // metadata.title = None + whitespace-only content — both
+            // print arms short-circuit.
+            AgentEvent::ToolCallEnd {
+                id: "t2".to_owned(),
+                content: "   \n".to_owned(),
+                is_error: true,
+                metadata: crate::tool::ToolMetadata::default(),
+            },
+            AgentEvent::PromptDrained("queued".to_owned()),
+            AgentEvent::TurnComplete,
+            AgentEvent::Cancelled,
+            AgentEvent::SessionTitleUpdated("New title".to_owned()),
+            AgentEvent::Error("boom".to_owned()),
+        ]
     }
 
     #[test]
-    fn send_turn_complete_emits_trailing_newline_without_error() {
-        test_sink(false).send(AgentEvent::TurnComplete).unwrap();
-    }
-
-    #[test]
-    fn send_cancelled_emits_marker_without_error() {
-        test_sink(false).send(AgentEvent::Cancelled).unwrap();
-    }
-
-    #[test]
-    fn send_error_routes_message_to_stderr() {
-        test_sink(false)
-            .send(AgentEvent::Error("boom".to_owned()))
-            .unwrap();
+    fn send_dispatches_every_variant_in_both_thinking_modes() {
+        // Walks every match arm in `send`, including the
+        // `show_thinking` branch on `ThinkingToken` (false swallows
+        // the block entirely; true wraps it in dim escape codes).
+        for show_thinking in [false, true] {
+            let sink = test_sink(show_thinking);
+            for event in dispatch_cases() {
+                sink.send(event).expect("dispatch returns Ok");
+            }
+        }
     }
 }

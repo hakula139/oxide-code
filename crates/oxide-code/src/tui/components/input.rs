@@ -435,9 +435,9 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_ctrl_d_quits_when_empty_in_any_state() {
+    fn handle_event_ctrl_d_empty_buffer_quits_in_idle_and_busy() {
         // POSIX EOF idiom: Ctrl+D on an empty buffer exits in both
-        // idle and busy states (busy buffer is empty by construction).
+        // idle and busy states.
         let mut input = test_input();
         let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(matches!(idle_action, Some(UserAction::Quit)));
@@ -448,16 +448,23 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_ctrl_d_with_content_is_a_noop() {
+    fn handle_event_ctrl_d_with_content_is_a_noop_in_idle_and_busy() {
         // Pressing Ctrl+D mid-prompt must not discard the typed text —
-        // matches bash / zsh / Codex behaviour.
+        // matches bash / zsh / Codex behaviour. Applies in both idle
+        // and busy states since typing flows into the buffer in both
+        // (busy presses queue a follow-up).
         let mut input = test_input();
         input.textarea.input(Event::Key(KeyEvent::new(
             KeyCode::Char('h'),
             KeyModifiers::NONE,
         )));
-        let action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(action.is_none());
+        let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(idle_action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["h"]);
+
+        input.set_enabled(false);
+        let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(busy_action.is_none());
         assert_eq!(input.textarea.lines(), vec!["h"]);
     }
 

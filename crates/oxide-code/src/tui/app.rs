@@ -827,20 +827,14 @@ mod tests {
     // ── handle_agent_event ──
 
     #[test]
-    fn handle_session_title_updated_refreshes_status_bar() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated("Fix auth flow".to_owned()));
-        assert_eq!(app.status_bar.title(), Some("Fix auth flow"));
-        assert!(app.dirty);
-    }
-
-    #[test]
-    fn handle_session_title_updated_replaces_existing_title() {
-        // AI titles arrive after the first-prompt title is already shown;
-        // the bar must accept the overwrite instead of ignoring the event.
+    fn handle_session_title_updated_overwrites_existing_title() {
+        // AI titles arrive after the first-prompt title is already
+        // showing in the bar — the handler must overwrite, not append
+        // or silently ignore.
         let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
         app.handle_agent_event(AgentEvent::SessionTitleUpdated("AI-generated".to_owned()));
         assert_eq!(app.status_bar.title(), Some("AI-generated"));
+        assert!(app.dirty);
     }
 
     #[test]
@@ -1014,6 +1008,21 @@ mod tests {
             chat_before + 1,
             "drained prompt must push exactly one new user-message block",
         );
+    }
+
+    #[test]
+    fn prompt_drained_with_empty_queue_still_pushes_chat_entry() {
+        // Defensive: post-cancel-window-fix the agent never emits
+        // `PromptDrained` for items the TUI's mirror lacks, but if it
+        // ever did (agent / TUI desync), the handler must still
+        // surface the text instead of swallowing the event silently.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let chat_before = app.chat.entry_count();
+
+        app.handle_agent_event(AgentEvent::PromptDrained("orphan".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.chat.entry_count(), chat_before + 1);
     }
 
     #[tokio::test]
