@@ -7,32 +7,44 @@
 //! redraw work proportional to state change rather than event
 //! throughput.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream};
-use futures::StreamExt;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
+use futures::{Stream, StreamExt};
 use ratatui::layout::{Constraint, Layout};
+use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
+use crate::util::text::truncate_to_width;
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Window in which a second Ctrl+C confirms exit. 1 s — comfortable for
+/// a deliberate double-tap, short enough that the hint doesn't linger.
+const EXIT_WINDOW: Duration = Duration::from_secs(1);
+
+/// Maximum queued prompts shown in the preview before the row collapses
+/// into a `+N more` overflow tag. The full FIFO drains regardless.
+const PREVIEW_VISIBLE: usize = 3;
+
 /// Root application state. Owns all components and drives the render loop.
 pub(crate) struct App {
+    theme: Theme,
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
@@ -44,6 +56,10 @@ pub(crate) struct App {
     /// `input` to build a structured [`ToolResultView`] and falls
     /// back to `label` when the tool emits `title: None`.
     pending_calls: PendingCalls,
+    /// Prompts the user submitted while a turn was in flight. Drained
+    /// in FIFO order at each turn boundary; Esc on idle pops the most
+    /// recent entry back into the input for editing.
+    pending_prompts: VecDeque<String>,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -71,6 +87,7 @@ impl App {
         let mut status_bar = StatusBar::new(theme, model, cwd);
         status_bar.set_title(title);
         Self {
+            theme: theme.clone(),
             status_bar,
             chat,
             input: InputArea::new(theme),
@@ -78,6 +95,7 @@ impl App {
             user_tx,
             tools,
             pending_calls: PendingCalls::new(),
+            pending_prompts: VecDeque::new(),
             should_quit: false,
             dirty: true,
         }
@@ -85,7 +103,18 @@ impl App {
 
     /// Main event loop. Runs until the user quits or the agent channel closes.
     pub(crate) async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
-        let mut crossterm_events = EventStream::new();
+        self.run_with_events(terminal, EventStream::new()).await
+    }
+
+    async fn run_with_events<W, S>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+        mut crossterm_events: S,
+    ) -> Result<()>
+    where
+        W: std::io::Write,
+        S: Stream<Item = std::io::Result<Event>> + Unpin,
+    {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -115,6 +144,9 @@ impl App {
                     if self.status_bar.tick() {
                         self.dirty = true;
                     }
+                    if self.expire_armed_exit() {
+                        self.dirty = true;
+                    }
                     if self.dirty {
                         self.render(terminal)?;
                         self.dirty = false;
@@ -134,6 +166,11 @@ impl App {
 
     fn handle_crossterm_event(&mut self, event: &Event) {
         match event {
+            // Esc routes through `App` because its meaning depends on
+            // queue / run-state — InputArea has no view of either.
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc, ..
+            }) => self.handle_esc(),
             Event::Key(..) => {
                 // Input area handles typing, submit, and quit.
                 if let Some(action) = self.input.handle_event(event) {
@@ -153,6 +190,25 @@ impl App {
         self.dirty = true;
     }
 
+    /// Esc routing:
+    ///
+    /// - busy → cancel the in-flight turn
+    /// - idle with a non-empty queue AND empty input → pop the most
+    ///   recent queued prompt back into the input for editing
+    /// - idle with content already in the input → no-op (refuse to
+    ///   clobber the user's draft; they must clear it first)
+    /// - idle with an empty queue → no-op (textarea has no use for Esc)
+    fn handle_esc(&mut self) {
+        if !self.input.is_enabled() {
+            self.dispatch_user_action(UserAction::Cancel);
+        } else if self.input.is_empty()
+            && let Some(prompt) = self.pending_prompts.pop_back()
+        {
+            self.input.set_text(&prompt);
+            self.sync_input_queue_hint();
+        }
+    }
+
     /// Translate a user action into UI state changes, then forward it to the
     /// agent loop over the bounded channel. A `Closed` error means the agent
     /// task has died; surface that so the user isn't left staring at a
@@ -160,15 +216,8 @@ impl App {
     /// while streaming, so at most one in-flight action at a time), but
     /// worth treating symmetrically if it ever trips.
     fn dispatch_user_action(&mut self, action: UserAction) {
-        match &action {
-            UserAction::SubmitPrompt(text) => {
-                self.chat.push_user_message(text.clone());
-                self.input.set_enabled(false);
-                self.status_bar.set_status(Status::Streaming);
-            }
-            UserAction::Quit => {
-                self.should_quit = true;
-            }
+        if !self.apply_action_locally(&action) {
+            return;
         }
         if let Err(e) = self.user_tx.try_send(action) {
             match e {
@@ -186,16 +235,69 @@ impl App {
         }
     }
 
+    /// Apply the UI-state side of an action and report whether it
+    /// should also be forwarded to the agent loop. Mid-turn submits
+    /// during a `Cancelling` acknowledgement window stay local —
+    /// forwarding them would race the cancel signal and let a
+    /// fresh prompt jump ahead of `pending_prompts`'s existing head
+    /// when the agent's outer `recv` picks it up before
+    /// `AgentEvent::Cancelled` reaches `finalize_idle`.
+    fn apply_action_locally(&mut self, action: &UserAction) -> bool {
+        match action {
+            UserAction::SubmitPrompt(text) => {
+                if self.input.is_enabled() {
+                    self.chat.push_user_message(text.clone());
+                    self.input.set_enabled(false);
+                    self.status_bar.set_status(Status::Streaming);
+                    true
+                } else {
+                    // Busy: buffer for the preview pane. On a clean
+                    // round boundary the agent emits `PromptDrained`
+                    // and the TUI pops `pending_prompts` FIFO,
+                    // promoting the entry to a chat-history block.
+                    // Tool-less turns drain via `finalize_idle`.
+                    self.pending_prompts.push_back(text.clone());
+                    self.sync_input_queue_hint();
+                    !matches!(self.status_bar.status(), Status::Cancelling)
+                }
+            }
+            // The matching `AgentEvent::Cancelled` returns the input to
+            // idle; the bar flips to `Cancelling` for the duration so
+            // the user sees the request was honored.
+            UserAction::Cancel => {
+                self.status_bar.set_status(Status::Cancelling);
+                true
+            }
+            // First press arms an exit hint; a second press inside the
+            // window confirms. TUI-only — no agent-side consumer.
+            UserAction::ConfirmExit => {
+                if let Status::ExitArmed { until } = self.status_bar.status()
+                    && Instant::now() < *until
+                {
+                    self.should_quit = true;
+                } else {
+                    let until = Instant::now() + EXIT_WINDOW;
+                    self.status_bar.set_status(Status::ExitArmed { until });
+                }
+                false
+            }
+            UserAction::Quit => {
+                self.should_quit = true;
+                true
+            }
+        }
+    }
+
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::StreamToken(token) => {
                 self.chat.append_stream_token(&token);
-                self.status_bar.set_status(Status::Streaming);
+                self.set_active_status(Status::Streaming);
                 self.input.set_enabled(false);
             }
             AgentEvent::ThinkingToken(token) => {
                 self.chat.append_thinking_token(&token);
-                self.status_bar.set_status(Status::Streaming);
+                self.set_active_status(Status::Streaming);
             }
             AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
@@ -204,9 +306,9 @@ impl App {
                 // streaming assistant text — no explicit
                 // `commit_streaming` side channel needed.
                 self.chat.push_tool_call(icon, &label);
+                self.set_active_status(Status::ToolRunning { name: name.clone() });
                 self.pending_calls
                     .insert(id, PendingCall { label, name, input });
-                self.status_bar.set_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
                 id,
@@ -231,8 +333,25 @@ impl App {
                 let header = result_header(&metadata, pending.as_ref().map(|p| p.label.as_str()));
                 self.chat.push_tool_result_view(&header, view, is_error);
             }
+            // Round boundary drained one queued prompt: pop the FIFO
+            // head and promote it to a chat-history user message so
+            // the preview entry "graduates" into the conversation.
+            AgentEvent::PromptDrained(text) => {
+                self.pending_prompts.pop_front();
+                self.chat.push_user_message(text);
+                self.sync_input_queue_hint();
+            }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
+            }
+            // Same teardown as `TurnComplete`, plus a trailing
+            // `(interrupted)` marker so the transcript shows where
+            // the user dropped the turn.
+            AgentEvent::Cancelled => {
+                // `push_interrupted_marker` flushes any in-flight
+                // streaming text first, mirroring `push_tool_call`.
+                self.chat.push_interrupted_marker();
+                self.finalize_idle();
             }
             AgentEvent::SessionTitleUpdated(title) => {
                 self.status_bar.set_title(Some(title));
@@ -247,6 +366,14 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        self.finalize_idle();
+    }
+
+    /// Shared tail for every turn-end path (normal, error, cancelled):
+    /// drop orphan tool calls, drop the spinner, re-enable input,
+    /// then dispatch any queued follow-up so the next turn fires
+    /// without waiting on the user.
+    fn finalize_idle(&mut self) {
         // A tool call whose matching `ToolCallEnd` didn't arrive by
         // turn end is orphaned — either the agent loop dropped the
         // pairing (bug) or the tool crashed before emitting a result.
@@ -256,11 +383,58 @@ impl App {
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
+        self.drain_pending_prompt();
+    }
+
+    /// Pops the front of [`Self::pending_prompts`] (FIFO) and dispatches
+    /// it as a fresh submit. Cancellation does not auto-clear the
+    /// queue: a user who interrupted typically still wants their
+    /// planned follow-up.
+    fn drain_pending_prompt(&mut self) {
+        if let Some(prompt) = self.pending_prompts.pop_front() {
+            self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
+        }
+        self.sync_input_queue_hint();
+    }
+
+    /// Mirrors [`Self::pending_prompts`] non-emptiness onto the input
+    /// area so its footer hint can swap to the queue-aware row.
+    fn sync_input_queue_hint(&mut self) {
+        self.input.set_has_queued(!self.pending_prompts.is_empty());
+    }
+
+    /// Sets a busy status only when the bar isn't already showing a
+    /// terminal user-acknowledgement (`Cancelling`, `ExitArmed`) —
+    /// otherwise a late stream / tool event buffered in the agent
+    /// channel would overwrite the hint before the user has had time
+    /// to react.
+    fn set_active_status(&mut self, status: Status) {
+        if !matches!(
+            self.status_bar.status(),
+            Status::Cancelling | Status::ExitArmed { .. },
+        ) {
+            self.status_bar.set_status(status);
+        }
+    }
+
+    /// Returns `true` when an [`Status::ExitArmed`] window has elapsed
+    /// and the bar was reset to idle.
+    fn expire_armed_exit(&mut self) -> bool {
+        if let Status::ExitArmed { until } = self.status_bar.status()
+            && Instant::now() >= *until
+        {
+            self.status_bar.set_status(Status::Idle);
+            return true;
+        }
+        false
     }
 
     // ── Rendering ──
 
-    fn render(&mut self, terminal: &mut Tui) -> Result<()> {
+    fn render<W: std::io::Write>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+    ) -> Result<()> {
         let mut chat_area = ratatui::layout::Rect::default();
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
@@ -274,32 +448,98 @@ impl App {
     /// tests share the live-crossterm layout path.
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
         let input_height = self.input.height();
+        let preview_height = self.preview_height();
         let chunks = Layout::vertical([
-            Constraint::Length(2),            // status bar (content + border)
-            Constraint::Min(1),               // chat view
-            Constraint::Length(input_height), // input area
+            Constraint::Length(2),              // status bar (content + border)
+            Constraint::Min(1),                 // chat view
+            Constraint::Length(preview_height), // queued-prompt preview (0 when empty)
+            Constraint::Length(input_height),   // input area
         ])
         .split(frame.area());
 
         self.status_bar.render(frame, chunks[0]);
         self.chat.render(frame, chunks[1]);
-        self.input.render(frame, chunks[2]);
+        if preview_height > 0 {
+            self.render_preview(frame, chunks[2]);
+        }
+        self.input.render(frame, chunks[3]);
         chunks[1]
     }
+
+    fn preview_height(&self) -> u16 {
+        if self.pending_prompts.is_empty() {
+            return 0;
+        }
+        let visible = self.pending_prompts.len().min(PREVIEW_VISIBLE);
+        let overflow = usize::from(self.pending_prompts.len() > PREVIEW_VISIBLE);
+        // Saturate well before u16 overflow: PREVIEW_VISIBLE + 1 fits.
+        u16::try_from(visible + overflow).unwrap_or(u16::MAX)
+    }
+
+    fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {
+        // Body width = area minus the chevron gutter on the left and a
+        // one-column right margin so the ellipsis tail never butts
+        // against the screen edge.
+        let body_width = usize::from(area.width)
+            .saturating_sub(usize::from(USER_PROMPT_PREFIX_WIDTH))
+            .saturating_sub(1);
+
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(PREVIEW_VISIBLE + 1);
+        for prompt in self.pending_prompts.iter().take(PREVIEW_VISIBLE) {
+            lines.push(preview_line(prompt, &self.theme, body_width));
+        }
+        if self.pending_prompts.len() > PREVIEW_VISIBLE {
+            let extra = self.pending_prompts.len() - PREVIEW_VISIBLE;
+            let gutter = " ".repeat(usize::from(USER_PROMPT_PREFIX_WIDTH));
+            lines.push(Line::from(Span::styled(
+                format!("{gutter}+{extra} more"),
+                self.theme.dim(),
+            )));
+        }
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(lines).style(self.theme.surface()),
+            area,
+        );
+    }
+}
+
+/// Renders a single queued prompt as a dim user-message ghost, capped
+/// at `body_width` columns (excluding the chevron gutter). CJK / emoji
+/// are billed at their display width via `unicode-width` so the
+/// truncation budget matches what the user actually sees.
+fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static> {
+    use ratatui::style::Modifier;
+
+    // Replace newlines with a glyph so multi-line prompts collapse to
+    // one row without losing the "this is more than it looks" hint.
+    let flat = prompt.replace('\n', NEWLINE_GLYPH);
+    let display = truncate_to_width(&flat, body_width);
+    // The DIM modifier renders the queued accent at reduced intensity
+    // so the rows read as "yours, in-waiting" rather than competing
+    // with the active input. The +N overflow row reuses theme.dim()
+    // (a different gray) — stylistically intentional: the rows speak
+    // for themselves in queued color, the count is a footnote.
+    let style = theme.queued().add_modifier(Modifier::DIM);
+    Line::from(vec![
+        Span::styled(USER_PROMPT_PREFIX, style),
+        Span::styled(display, style),
+    ])
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::prelude::CrosstermBackend;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::tool::ToolRegistry;
-
-    // `App::run` / `App::render` need a real terminal and stay untested.
 
     /// Fresh idle `App` plus the `user_tx` consumer (for forwarded-action
     /// assertions) and the `agent_tx` producer (kept alive so the
@@ -347,13 +587,42 @@ mod tests {
         (app, user_rx, agent_tx)
     }
 
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn crossterm_test_terminal(
+        width: u16,
+        height: u16,
+    ) -> (
+        Terminal<CrosstermBackend<SharedWriter>>,
+        Arc<Mutex<Vec<u8>>>,
+    ) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
+        let opts = TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
+        };
+        (Terminal::with_options(backend, opts).unwrap(), buf)
+    }
+
     // ── App::new ──
 
     #[test]
     fn new_plumbs_resumed_title_into_status_bar() {
         let (app, _rx, _agent_tx) = test_app(Some("Resumed title"));
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(app.chat.entry_count(), 0);
         assert!(app.input.is_enabled());
         assert!(!app.should_quit);
@@ -374,6 +643,35 @@ mod tests {
         assert!(app.status_bar.title().is_none());
     }
 
+    // ── run_with_events ──
+
+    #[tokio::test]
+    async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
+        let (mut app, _rx, agent_tx) = test_app(None);
+        let until = Instant::now()
+            .checked_sub(EXIT_WINDOW)
+            .expect("monotonic clock has run long enough for a test deadline");
+        app.status_bar.set_status(Status::ExitArmed { until });
+        app.dirty = false;
+
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let closer = tokio::spawn(async move {
+            tokio::time::sleep(TICK_INTERVAL * 2).await;
+            drop(agent_tx);
+        });
+
+        app.run_with_events(
+            &mut terminal,
+            futures::stream::pending::<std::io::Result<Event>>(),
+        )
+        .await
+        .unwrap();
+        closer.await.unwrap();
+
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.should_quit);
+    }
+
     // ── handle_crossterm_event ──
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -392,17 +690,48 @@ mod tests {
 
         assert!(app.dirty);
         assert_eq!(app.chat.entry_count(), 1);
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.unwrap();
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
     }
 
     #[test]
-    fn handle_crossterm_key_ctrl_c_triggers_quit_from_any_mode() {
+    fn handle_crossterm_key_ctrl_c_idle_arms_exit_then_confirms() {
+        // First press arms; second press inside the window confirms.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit);
-        assert!(app.dirty);
+        assert!(!app.should_quit, "first press only arms");
+        assert!(matches!(app.status_bar.status(), Status::ExitArmed { .. }));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "second press within window confirms");
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
+        // Mid-turn Ctrl+C must reach the agent loop as `Cancel` so it
+        // can drop the future, not flip `should_quit` and tear down
+        // the TUI. Drive the app into the streaming state first to
+        // mirror production: input disabled => cancel branch fires.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        assert!(!app.input.is_enabled());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.should_quit, "busy Ctrl+C must not exit");
+        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[tokio::test]
+    async fn handle_crossterm_key_esc_busy_forwards_cancel() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Cancel forwarded to agent loop");
+        assert!(matches!(forwarded, UserAction::Cancel));
     }
 
     #[test]
@@ -452,6 +781,62 @@ mod tests {
         assert!(app.dirty);
     }
 
+    // ── handle_esc ──
+
+    #[tokio::test]
+    async fn handle_esc_busy_dispatches_cancel() {
+        // Esc is routed by `App` because its meaning depends on queue
+        // state and run-state; the input component can't see those.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        let forwarded = rx.recv().await.expect("Cancel forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[test]
+    fn handle_esc_idle_with_empty_queue_is_silent() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
+        // The most-recent (back of the FIFO) returns to the input for
+        // editing; the rest stay queued so the user can keep peeling.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("first".into());
+        app.pending_prompts.push_back("second".into());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["second".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["first".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_idle_with_buffer_content_refuses_pop() {
+        // Esc must not clobber an in-progress draft. The user has to
+        // clear the buffer (or submit) before peeling a queued prompt.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.input.set_text("draft");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+        );
+    }
+
     // ── dispatch_user_action ──
 
     #[tokio::test]
@@ -461,10 +846,30 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), 1);
         assert!(!app.input.is_enabled(), "streaming disables input");
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_cancel_flips_status_to_cancelling_and_forwards() {
+        // Cancel acknowledges the user request immediately by flipping
+        // the status; the matching `AgentEvent::Cancelled` returns to
+        // idle once the agent loop has actually dropped the future.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        // Drain the SubmitPrompt to isolate the Cancel payload.
+        rx.recv().await.expect("submit forwarded");
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::Cancel);
+
+        assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        assert!(!app.should_quit);
+        let forwarded = rx.recv().await.expect("Cancel forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
     }
 
     #[test]
@@ -476,7 +881,7 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 0);
         // Status bar stays idle — Quit flows past the streaming setup so
         // the tear-down path doesn't have to un-spinner it.
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     #[test]
@@ -504,48 +909,60 @@ mod tests {
 
     #[test]
     fn dispatch_full_channel_surfaces_error_but_keeps_app_alive() {
-        // Fill the 8-slot channel without draining, then overflow. Full is
-        // implausible in production (input disables during streaming) but
-        // if it ever trips, the app must NOT tear down — just warn.
+        // Fill the 8-slot channel without draining, then overflow.
+        // `Cancel` still goes through `try_send` (the queue only routes
+        // submits) so it's the natural way to overflow now that submits
+        // during a busy turn buffer locally instead of forwarding.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        for _ in 0..8 {
-            app.dispatch_user_action(UserAction::SubmitPrompt("fill".to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        for _ in 0..7 {
+            app.dispatch_user_action(UserAction::Cancel);
         }
         let before_overflow = app.chat.entry_count();
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("overflow".to_owned()));
+        app.dispatch_user_action(UserAction::Cancel);
 
         assert!(!app.should_quit, "Full is not fatal");
-        // One more user message (pushed unconditionally) plus an error block.
-        assert_eq!(app.chat.entry_count(), before_overflow + 2);
+        assert_eq!(
+            app.chat.entry_count(),
+            before_overflow + 1,
+            "exactly one error block on overflow",
+        );
         assert!(app.chat.last_is_error());
     }
 
     // ── handle_agent_event ──
 
     #[test]
-    fn handle_session_title_updated_refreshes_status_bar() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated("Fix auth flow".to_owned()));
-        assert_eq!(app.status_bar.title(), Some("Fix auth flow"));
-        assert!(app.dirty);
-    }
-
-    #[test]
-    fn handle_session_title_updated_replaces_existing_title() {
-        // AI titles arrive after the first-prompt title is already shown;
-        // the bar must accept the overwrite instead of ignoring the event.
+    fn handle_session_title_updated_overwrites_existing_title() {
+        // AI titles arrive after the first-prompt title is already
+        // showing in the bar — the handler must overwrite, not append
+        // or silently ignore.
         let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
         app.handle_agent_event(AgentEvent::SessionTitleUpdated("AI-generated".to_owned()));
         assert_eq!(app.status_bar.title(), Some("AI-generated"));
+        assert!(app.dirty);
     }
 
     #[test]
     fn handle_stream_token_switches_to_streaming_and_disables_input() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::StreamToken("partial".to_owned()));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
+    }
+
+    #[test]
+    fn handle_thinking_token_routes_to_chat_and_marks_streaming() {
+        // Thinking tokens land in the chat view as a separate block
+        // (not interleaved with assistant text) and must flip the bar
+        // to Streaming so the user sees the agent is working even
+        // before any visible text arrives.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ThinkingToken("planning...".to_owned()));
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        // Unlike StreamToken, thinking does not disable input on its
+        // own — the matching SubmitPrompt already did that.
     }
 
     #[test]
@@ -556,7 +973,10 @@ mod tests {
             name: "bash".to_owned(),
             input: serde_json::json!({"command": "ls"}),
         });
-        assert_eq!(app.status_bar.status(), Status::ToolRunning);
+        assert!(matches!(
+            app.status_bar.status(),
+            Status::ToolRunning { .. }
+        ));
         assert_eq!(
             app.chat.entry_count(),
             1,
@@ -565,15 +985,311 @@ mod tests {
     }
 
     #[test]
+    fn handle_cancelled_commits_partial_stream_with_marker_and_returns_idle() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
+        let entries_before = app.chat.entry_count();
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled());
+        // commit_streaming pushes the partial text as an AssistantText
+        // block; push_interrupted_marker pushes the marker — two new
+        // entries on top of whatever was there.
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before + 2,
+            "partial assistant text + interrupted marker",
+        );
+        let text = rendered_text(&mut app, 60, 12);
+        assert!(text.contains("partial answer"), "stream tail kept: {text}");
+        assert!(
+            text.contains(crate::agent::event::INTERRUPTED_MARKER),
+            "marker present: {text}",
+        );
+    }
+
+    #[test]
+    fn cancelling_status_is_sticky_against_late_buffered_events() {
+        // After the user dispatches Cancel, the agent channel may still
+        // have queued StreamToken / ToolCallStart events the agent emitted
+        // before its select arm dropped the turn future. Those buffered
+        // events must not flip the bar back to Streaming / ToolRunning —
+        // otherwise the cancel acknowledgement flickers off until
+        // `Cancelled` finally arrives.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        app.dispatch_user_action(UserAction::Cancel);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+
+        app.handle_agent_event(AgentEvent::StreamToken("late".into()));
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        app.handle_agent_event(AgentEvent::ToolCallStart {
+            id: "t-late".to_owned(),
+            name: "bash".to_owned(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+    }
+
+    // ── pending prompt queue ──
+
+    #[tokio::test]
+    async fn dispatch_submit_during_busy_queues_and_forwards_for_mid_turn_drain() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("first".to_owned()));
+        rx.recv().await.expect("first submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued".to_owned()));
+
+        // Buffered for the preview pane AND forwarded so `agent_turn`
+        // can splice it into the same multi-step turn at the next
+        // round boundary. The chat history stays untouched until the
+        // matching `PromptDrained` event lands.
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+        );
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("queued submit forwarded");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
+    }
+
+    #[tokio::test]
+    async fn prompt_drained_pops_queue_head_and_pushes_user_message() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued-a".to_owned()));
+        rx.recv().await.expect("queued-a submit forwarded");
+        app.dispatch_user_action(UserAction::SubmitPrompt("queued-b".to_owned()));
+        rx.recv().await.expect("queued-b submit forwarded");
+
+        let chat_before = app.chat.entry_count();
+        app.handle_agent_event(AgentEvent::PromptDrained("queued-a".to_owned()));
+
+        // Head pops in dispatch order regardless of the event payload —
+        // the `text` is for display and never reorders the FIFO.
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued-b".to_owned()],
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            chat_before + 1,
+            "drained prompt must push exactly one new user-message block",
+        );
+    }
+
+    #[test]
+    fn prompt_drained_with_empty_queue_still_pushes_chat_entry() {
+        // Defensive: post-cancel-window-fix the agent never emits
+        // `PromptDrained` for items the TUI's mirror lacks, but if it
+        // ever did (agent / TUI desync), the handler must still
+        // surface the text instead of swallowing the event silently.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let chat_before = app.chat.entry_count();
+
+        app.handle_agent_event(AgentEvent::PromptDrained("orphan".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.chat.entry_count(), chat_before + 1);
+    }
+
+    #[tokio::test]
+    async fn turn_complete_drains_queue_head_and_dispatches() {
+        // FIFO: oldest queued prompt fires first; the rest stay queued
+        // for subsequent turn boundaries.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("a".into());
+        app.pending_prompts.push_back("b".into());
+
+        app.handle_agent_event(AgentEvent::TurnComplete);
+
+        let forwarded = rx.recv().await.expect("queued head forwarded");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "a"));
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["b".to_owned()],
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_drains_queue_head_to_match_completed_path() {
+        // Cancellation does not auto-clear the queue — a user who
+        // interrupts a stuck turn typically still wants their planned
+        // follow-up to fire.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("queued".into());
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+
+        let forwarded = rx.recv().await.expect("queued prompt forwarded");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
+    }
+
+    #[tokio::test]
+    async fn handle_error_drains_queue_head_only_once() {
+        // Single-drain contract: `Error` is the only teardown event
+        // a failed turn fires (no paired `TurnComplete`), so
+        // `finalize_idle` → `drain_pending_prompt` runs exactly once
+        // and pops one head — not two — when the queue is non-empty.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("first".into());
+        app.pending_prompts.push_back("second".into());
+
+        app.handle_agent_event(AgentEvent::Error("API failed".to_owned()));
+
+        let forwarded = rx.recv().await.expect("queue head forwarded");
+        assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "first"));
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["second".to_owned()],
+            "only the head fires; the tail stays queued for the next turn",
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_queue_survives_max_tool_rounds_bail_and_drains_serially() {
+        // When agent_turn hits MAX_TOOL_ROUNDS its per-turn pending
+        // buffer drops with the future, but the TUI mirror is the
+        // source of truth — every queued item must surface across
+        // subsequent turn boundaries via finalize_idle's drain. Pin
+        // it here so a future refactor that "fixes" the agent-side
+        // drop without re-firing PromptDrained gets caught.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("a".into());
+        app.pending_prompts.push_back("b".into());
+        app.pending_prompts.push_back("c".into());
+
+        // First turn dies (cap-bail surfaces as Error); head drains.
+        app.handle_agent_event(AgentEvent::Error(
+            "agent stopped after MAX_TOOL_ROUNDS".to_owned(),
+        ));
+        let first = rx.recv().await.expect("a re-fired as fresh turn");
+        assert!(matches!(first, UserAction::SubmitPrompt(s) if s == "a"));
+
+        // Subsequent terminal events keep peeling the queue.
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        let second = rx.recv().await.expect("b re-fired");
+        assert!(matches!(second, UserAction::SubmitPrompt(s) if s == "b"));
+
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        let third = rx.recv().await.expect("c re-fired");
+        assert!(matches!(third, UserAction::SubmitPrompt(s) if s == "c"));
+
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
+        // Cancel-window FIFO authority: between the user pressing Esc
+        // and the matching `AgentEvent::Cancelled` arriving, the
+        // agent's outer `recv` is racing for the next signal.
+        // Forwarding a fresh submit here lets it slip ahead of
+        // `pending_prompts`'s existing head — the agent picks it up
+        // and starts a new turn while older queued items fall behind.
+        // Hold mid-turn submits
+        // locally; `finalize_idle`'s drain re-fires them in order
+        // after `Cancelled` lands.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.dispatch_user_action(UserAction::Cancel);
+        rx.recv().await.expect("cancel forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("typed-during-cancel".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "submit during cancel must not reach the agent's user_rx",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-during-cancel".to_owned()],
+            "held locally; finalize_idle re-fires after Cancelled lands",
+        );
+    }
+
+    #[test]
+    fn preview_height_is_zero_when_queue_empty() {
+        let (app, _rx, _agent_tx) = test_app(None);
+        assert_eq!(app.preview_height(), 0);
+    }
+
+    #[test]
+    fn preview_height_caps_at_visible_plus_overflow_row() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        for i in 0..(PREVIEW_VISIBLE + 5) {
+            app.pending_prompts.push_back(format!("p{i}"));
+        }
+        assert_eq!(
+            app.preview_height(),
+            u16::try_from(PREVIEW_VISIBLE + 1).unwrap(),
+        );
+    }
+
+    #[test]
+    fn render_preview_overflow_appends_more_count_row() {
+        // A queue larger than `PREVIEW_VISIBLE` collapses the tail
+        // into a single "+N more" hint so the panel never grows past
+        // the cap; the user keeps the most recent items in view.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        let extra = 3;
+        for i in 0..(PREVIEW_VISIBLE + extra) {
+            app.pending_prompts.push_back(format!("queued-{i}"));
+        }
+
+        let text = rendered_text(&mut app, 60, 20);
+        assert!(
+            text.contains(&format!("+{extra} more")),
+            "overflow hint must show exact extra count: {text}",
+        );
+    }
+
+    #[test]
+    fn handle_cancelled_with_no_stream_still_pushes_marker() {
+        // Cancel during a tool call (or before any stream tokens) —
+        // commit_streaming is a no-op, but the marker still lands so
+        // the user sees where the cancel hit.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
+        let entries_before = app.chat.entry_count();
+
+        app.handle_agent_event(AgentEvent::Cancelled);
+
+        assert_eq!(app.chat.entry_count(), entries_before + 1);
+        let text = rendered_text(&mut app, 60, 8);
+        assert!(
+            text.contains(crate::agent::event::INTERRUPTED_MARKER),
+            "marker present: {text}",
+        );
+    }
+
+    #[test]
     fn handle_turn_complete_returns_to_idle_and_reenables_input() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         // Drive into streaming first so TurnComplete has state to tear down.
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
 
         app.handle_agent_event(AgentEvent::TurnComplete);
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
 
@@ -605,7 +1321,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::Error("API blew up".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
 
@@ -635,10 +1351,10 @@ mod tests {
         // `title: None` means the tool didn't set a result header —
         // typically a failure path (timeout, invalid input) that
         // aborted before `.with_title(...)`. The result must still be
-        // pushed (previously: silently swallowed, hiding the error
-        // body from the user) and the header must render the
-        // tool-call label stashed at `ToolCallStart`, not a blank
-        // string or the generic `(result)` fallback.
+        // pushed (silent swallow would hide the error body) and the
+        // header must render the tool-call label stashed at
+        // `ToolCallStart`, not a blank string or the generic
+        // `(result)` fallback.
         let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
@@ -693,6 +1409,61 @@ mod tests {
             text.contains("(result)"),
             "orphan End with no pending call should use the generic fallback, got:\n{text}",
         );
+    }
+
+    // ── expire_armed_exit ──
+
+    #[test]
+    fn expire_armed_exit_returns_to_idle_after_window() {
+        // After the 1 s window the armed state evaporates so the user
+        // isn't left staring at an exit hint they didn't act on.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::ConfirmExit);
+        // Force an expired deadline so the test doesn't sleep.
+        let until = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("monotonic clock has run for at least one second since boot");
+        app.status_bar.set_status(Status::ExitArmed { until });
+
+        assert!(app.expire_armed_exit(), "stale armed state must clear");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    #[test]
+    fn expire_armed_exit_when_not_armed_is_a_noop() {
+        // Tick path calls `expire_armed_exit` every frame regardless of
+        // status; the false branch must leave the bar untouched and
+        // skip the dirty bump that would otherwise wake the renderer.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+
+        assert!(
+            !app.expire_armed_exit(),
+            "no-op when status isn't ExitArmed",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    // ── render ──
+
+    const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+    const END_SYNC: &[u8] = b"\x1b[?2026l";
+
+    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn render_brackets_frame_with_sync_update_bytes() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+
+        app.render(&mut terminal).unwrap();
+
+        let bytes = buf.lock().unwrap();
+        let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
+        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
+        assert!(begin < end, "sync update must bracket the rendered frame");
     }
 
     // ── draw_frame ──
@@ -763,5 +1534,15 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(Some("narrow"));
         app.chat.push_user_message("hi".into());
         insta::assert_snapshot!(render_app(&mut app, 40, 8));
+    }
+
+    #[test]
+    fn draw_frame_preview_panel_renders_queued_prompts_and_overflow_tag() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".into()));
+        for i in 0..5 {
+            app.pending_prompts.push_back(format!("queued {i}"));
+        }
+        insta::assert_snapshot!(render_app(&mut app, 60, 14));
     }
 }

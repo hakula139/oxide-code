@@ -2,7 +2,7 @@
 source: crates/oxide-code/src/tui/app.rs
 expression: "render_app(&mut app, 80, 10)"
 ---
-"  ox │ test-model │ Session title │ ready                               ~/test  "
+"  ox │ test-model │ Session title │ Ready                               ~/test  "
 "────────────────────────────────────────────────────────────────────────────────"
 "                                                                                "
 "                                                                                "
@@ -10,5 +10,5 @@ expression: "render_app(&mut app, 80, 10)"
 "                             Ask anything to begin.                             "
 "                                                                                "
 "────────────────────────────────────────────────────────────────────────────────"
-" Ask anything...                                                                "
-"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit                               "
+"❯  Ask anything...                                                              "
+"────────────────────────────────────────────────────────────────────────────────"

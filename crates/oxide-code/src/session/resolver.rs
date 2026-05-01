@@ -13,6 +13,7 @@ use tracing::debug;
 
 use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
+use crate::util::text::ELLIPSIS;
 
 /// Normalized form of the CLI `--continue` argument. Built by
 /// [`normalize_resume_arg`] and consumed by [`resolve_session`].
@@ -169,7 +170,8 @@ fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
         .collect();
     let mut out = first_batch.join(", ");
     if iter.next().is_some() {
-        out.push_str(", ...");
+        out.push_str(", ");
+        out.push_str(ELLIPSIS);
     }
     out
 }

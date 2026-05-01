@@ -92,6 +92,7 @@ ox                                          # Start an interactive session
 │   │   │   └── blocks/
 │   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
 │   │   │       ├── error.rs                # ErrorBlock
+│   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
@@ -106,6 +107,7 @@ ox                                          # Start an interactive session
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea)
 │   │   └── status.rs                       # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
+│   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
 │   ├── markdown/
 │   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
@@ -118,7 +120,8 @@ ox                                          # Start an interactive session
     ├── fs.rs                               # Filesystem helpers — `create_private_dir_all` (0o700) + `atomic_write_private` (0o600 temp+rename)
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
-    └── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
+    ├── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
+    └── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
 ```
 
 ## Coding Conventions
@@ -137,6 +140,7 @@ ox                                          # Start an interactive session
 
 - Use `#[expect(lint)]` instead of `#[allow(lint)]`. `#[expect]` warns when the suppressed lint is no longer triggered, preventing stale suppressions from accumulating.
 - `#[expect]` reason strings must describe the current state, not future plans.
+- For complexity / size lints (`clippy::too_many_lines`, `clippy::too_many_arguments`, `clippy::cognitive_complexity`, etc.), the default response is to **extract a helper**, not to silence the warning. The lint is a signal that a natural seam exists. Reach for `#[expect]` only when the function is irreducibly cohesive and any extraction would be an artificial split that hurts readability — and say so in the reason string. Trimming a docstring or inlining a small helper to dodge a one-line overage is not a fix; it's noise.
 
 ### Section Dividers
 
@@ -145,6 +149,8 @@ ox                                          # Start an interactive session
 
 ### Comments
 
+- Comment the **why**, not the **what**. Clear naming, types, and structure already say what the code does; comments earn their place by explaining intent, trade-offs, invariants, magic numbers, or constraints the code can't convey on its own. Skip comments that restate the code, narrate the change ("now uses X" — belongs in the commit message), or carry commented-out code (version control exists).
+- Keep `//` comments tight — one line per thought, several lines only when the rationale genuinely needs them. Long structured prose belongs in `///` doc-comments, where rustdoc renders it; in-function `//` blocks should not grow into mini-essays.
 - Write `//` comments as prose, not structured markdown. If list structure is genuinely useful, promote the comment to `///` so rustdoc renders it. Either way, follow our `**/*.md` markdownlint conventions: blank line before the list, single space after the marker, incremental numbering for ordered lists, no leading-space indent.
 
 ### Blank Lines

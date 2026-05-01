@@ -12,6 +12,7 @@ surface = { bg = "reset" }
 # Semantic accents
 accent = { fg = "#89b4fa", bold = true }
 user = "#fab387"
+queued = "#cba6f7"
 assistant = "#b4befe"
 
 # Status indicators

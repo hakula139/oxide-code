@@ -28,6 +28,14 @@ pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    enter_tui_mode(&mut stdout)?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
@@ -35,10 +43,7 @@ pub(crate) fn init() -> Result<Tui> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         terminal::Clear(terminal::ClearType::All),
     )?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+    Ok(())
 }
 
 /// Restores the terminal to its original state.
@@ -50,14 +55,20 @@ pub(crate) fn init() -> Result<Tui> {
 ///
 /// Safe to call multiple times — each operation is idempotent.
 pub(crate) fn restore() {
-    _ = execute!(
-        io::stdout(),
+    let mut stdout = io::stdout();
+    _ = leave_tui_mode(&mut stdout);
+    _ = disable_raw_mode();
+}
+
+fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
+    execute!(
+        stdout,
         DisableMouseCapture,
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::cursor::Show,
-    );
-    _ = disable_raw_mode();
+    )?;
+    Ok(())
 }
 
 /// Wraps a render closure with synchronized output sequences.
@@ -102,12 +113,57 @@ mod tests {
 
     use super::*;
 
+    // ── enter_tui_mode ──
+    //
+    // `init` needs a real TTY for raw mode and terminal construction.
+    // The extracted command-emission helpers are testable with an
+    // in-memory writer, which pins the parts we own.
+
+    const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
+    const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
+
+    #[test]
+    fn enter_tui_mode_writes_setup_sequences() {
+        let mut buf = Vec::new();
+
+        enter_tui_mode(&mut buf).unwrap();
+
+        let enter = index_of(&buf, ENTER_ALT_SCREEN).expect("alternate screen entered");
+        let clear = index_of(&buf, CLEAR_SCREEN).expect("screen cleared");
+        assert!(
+            enter < clear,
+            "setup should enter alternate screen before clearing"
+        );
+    }
+
+    // ── leave_tui_mode ──
+    //
+    // `restore` also touches raw mode, so the byte-emission helper is
+    // the deterministic piece we can cover in-process.
+
+    const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+    #[test]
+    fn leave_tui_mode_writes_restore_sequences() {
+        let mut buf = Vec::new();
+
+        leave_tui_mode(&mut buf).unwrap();
+
+        let leave = index_of(&buf, LEAVE_ALT_SCREEN).expect("alternate screen left");
+        let show = index_of(&buf, SHOW_CURSOR).expect("cursor shown");
+        assert!(
+            leave < show,
+            "restore should leave alternate screen before showing cursor"
+        );
+    }
+
     // ── draw_sync ──
     //
-    // `init` / `restore` need a real TTY; `install_panic_hook` clobbers
-    // process-global panic state and cannot run cleanly under parallel
-    // tests. `draw_sync` is the one function whose behavior we can pin
-    // down in-process by swapping `Stdout` for an in-memory writer.
+    // `install_panic_hook` clobbers process-global panic state and
+    // cannot run cleanly under parallel tests. `draw_sync` is the
+    // remaining function whose behavior we can pin in-process by
+    // swapping `Stdout` for an in-memory writer.
 
     // DEC private mode 2026 on/off escape sequences emitted by
     // `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`.

@@ -26,8 +26,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agent::agent_turn;
-use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
+use agent::{TurnAbort, agent_turn};
 use client::anthropic::Client;
 use config::Config;
 use file_tracker::FileTracker;
@@ -359,6 +359,15 @@ async fn run_tui(
     result
 }
 
+/// Drives the TUI's agent loop: reads `UserAction`s from `user_rx`,
+/// runs each `SubmitPrompt` through [`agent_turn`], and forwards the
+/// outcome to the [`tui::event::ChannelSink`].
+///
+/// `Error` and `TurnComplete` are mutually exclusive — the TUI's
+/// `Error` handler runs the same teardown as `TurnComplete` (drain
+/// queue, re-enable input), so emitting both after a failed turn
+/// would double-drain `pending_prompts`'s head. Each [`TurnAbort`]
+/// arm emits exactly one terminal event.
 async fn agent_loop_task(
     client: Client,
     tools: Arc<ToolRegistry>,
@@ -390,19 +399,37 @@ async fn agent_loop_task(
                 }
 
                 let prompt = prompt::build_prompt(client.model()).await;
-                let turn_result =
-                    agent_turn(&client, &tools, &mut messages, &prompt, &sink, &session).await;
-                if let Err(e) = turn_result {
-                    // `{e:#}` flattens the anyhow cause chain into one
-                    // string ("stream error: API error (HTTP 503): ...").
-                    // Plain `Display` would drop everything below the
-                    // outermost context and surface only "stream error",
-                    // which doesn't distinguish a transient gateway 5xx
-                    // from a permanent config error.
-                    _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                let outcome = agent_turn(
+                    &client,
+                    &tools,
+                    &mut messages,
+                    &prompt,
+                    &sink,
+                    &session,
+                    &mut user_rx,
+                )
+                .await;
+                match outcome {
+                    Ok(()) => {
+                        _ = sink.send(AgentEvent::TurnComplete);
+                    }
+                    Err(TurnAbort::Cancelled) => {
+                        _ = sink.send(AgentEvent::Cancelled);
+                    }
+                    Err(TurnAbort::Quit) => break,
+                    Err(TurnAbort::Failed(e)) => {
+                        // `{e:#}` flattens the anyhow cause chain so the
+                        // user sees both the outer "stream error" and the
+                        // inner "HTTP 503" — plain `Display` would drop
+                        // every layer below the outermost context.
+                        _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                    }
                 }
-                _ = sink.send(AgentEvent::TurnComplete);
             }
+            // `ConfirmExit` is TUI-only — `apply_action_locally` no
+            // longer forwards it. `Cancel` arrives idle when the user
+            // hammered Esc / Ctrl+C with no turn in flight.
+            UserAction::Cancel | UserAction::ConfirmExit => {}
             UserAction::Quit => break,
         }
     }
@@ -431,6 +458,10 @@ async fn bare_repl(
     // (as opposed to EOF / error). See the post-`finish()` exit note
     // below for why we care.
     let mut shutdown_fired = false;
+    // Bare REPL has no in-process source of `UserAction`s — Ctrl+C
+    // arrives via `shutdown_signal()` and drops the turn future from
+    // the outer `select!`.
+    let (_user_tx, mut user_rx) = inert_user_action_channel();
 
     let result: Result<()> = async {
         loop {
@@ -465,7 +496,15 @@ async fn bare_repl(
             // Allow the in-flight turn to be interrupted too; the
             // session state that's already been written persists and
             // resume-side sanitization heals any dangling tool_use.
-            let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
+            let turn = agent_turn(
+                client,
+                &tools,
+                &mut messages,
+                &prompt,
+                &sink,
+                &session,
+                &mut user_rx,
+            );
             let turn_result = tokio::select! {
                 r = turn => r,
                 () = shutdown_signal() => {
@@ -474,7 +513,16 @@ async fn bare_repl(
                     break;
                 }
             };
-            turn_result?;
+            // Bare REPL routes Ctrl+C via `shutdown_signal()` (which
+            // drops the turn future from the outer `select!`), not via
+            // `UserAction::Cancel`, so `Cancelled` / `Quit` aborts only
+            // arrive in test harnesses; treat them the same as a
+            // completed turn for shell purposes. Real failures still
+            // propagate so the exit code reflects the result.
+            match turn_result {
+                Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
+                Err(TurnAbort::Failed(e)) => return Err(e),
+            }
             _ = sink.send(AgentEvent::TurnComplete);
         }
         Ok(())
@@ -520,9 +568,24 @@ async fn headless(
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
-    let turn = agent_turn(client, &tools, &mut messages, &prompt, &sink, &session);
-    let result = tokio::select! {
-        r = turn => r,
+    let (_user_tx, mut user_rx) = inert_user_action_channel();
+    let turn = agent_turn(
+        client,
+        &tools,
+        &mut messages,
+        &prompt,
+        &sink,
+        &session,
+        &mut user_rx,
+    );
+    let result: Result<()> = tokio::select! {
+        // Headless has no follow-up surface, so user-initiated aborts
+        // (Cancelled / Quit) collapse to a clean exit; only a real
+        // `Failed` propagates so the exit code reflects the failure.
+        r = turn => match r {
+            Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
+            Err(TurnAbort::Failed(e)) => Err(e),
+        },
         () = shutdown_signal() => {
             eprintln!();
             shutdown_fired = true;

@@ -20,7 +20,10 @@ Per-tool defaults are tightened by tool config; per-message budget overrides ind
 
 No per-line truncation in the dispatcher; that's the tool schema's responsibility.
 
-**Sources:** `claude-code/src/services/streamingToolExecutor.ts` (per-tool then per-message cap application), `claude-code/src/utils/toolLimits.ts` (tiered cap constants).
+**Sources:**
+
+- `claude-code/src/services/streamingToolExecutor.ts` — per-tool then per-message cap application.
+- `claude-code/src/utils/toolLimits.ts` — tiered cap constants.
 
 ### OpenAI Codex (Rust)
 
@@ -28,7 +31,9 @@ No system-wide cap. Tools either bound their own output (e.g., `MATCH_LIMIT = 50
 
 The implication: a `bash cat large.log` returns however many bytes ripgrep / cat printed. Codex relies on the model to ask for tighter ranges if a tool emits too much.
 
-**Sources:** `codex-rs/core/src/tools/handlers/fuzzy_file_search.rs` (`MATCH_LIMIT = 50`, per-tool with no central layer).
+**Sources:**
+
+- `codex-rs/core/src/tools/handlers/fuzzy_file_search.rs` — `MATCH_LIMIT = 50`, per-tool with no central layer.
 
 ### opencode (TypeScript)
 
@@ -48,7 +53,9 @@ When either limit trips, the service:
 
 The hint string adapts to agent capabilities — with a Task tool it reads `"Use the Task tool to have explore agent process this file..."`; without it, `"Use Grep / Read with offset/limit on the full content..."`.
 
-**Sources:** `opencode/packages/opencode/src/tool/truncate.ts` (`Truncate.Service`: `MAX_LINES = 2000`, `MAX_BYTES = 50 KB`, `RETENTION = 7 days`, head / tail + file spillover with adapted hint).
+**Sources:**
+
+- `opencode/packages/opencode/src/tool/truncate.ts` — `Truncate.Service`: `MAX_LINES = 2000`, `MAX_BYTES = 50 KB`, `RETENTION = 7 days`, head / tail + file spillover with adapted hint.
 
 ## Comparison
 

@@ -19,6 +19,7 @@ crossterm
 dedupe
 deque
 deserialize
+desync
 disambiguable
 dtolnay
 frappe
@@ -40,6 +41,7 @@ killpg
 latte
 macchiato
 misparse
+mplan
 mpsc
 mtimes
 nonewline
@@ -59,6 +61,7 @@ rsplit
 rustls
 serde
 serie
+sess
 swatinem
 syntect
 sysname

@@ -3,10 +3,7 @@
 use ratatui::text::Line;
 
 use super::{ChatBlock, RenderCtx, push_icon_wrapped};
-
-/// First-line prefix for errors — cross mark + space, rendered in the
-/// error color. Continuation wraps to a 2-column space indent.
-const ERROR_PREFIX: &str = "✗ ";
+use crate::tui::glyphs::ERROR_PREFIX;
 
 /// A fatal agent or API error, rendered as a single red line.
 pub(crate) struct ErrorBlock {

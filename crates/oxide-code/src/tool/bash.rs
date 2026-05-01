@@ -8,7 +8,13 @@ use tokio::process::Command;
 
 use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
+/// Default per-command timeout — two minutes covers typical
+/// compile / test cycles without letting a runaway command hold
+/// the agent loop indefinitely.
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Stand-in content when a command produced no stdout / stderr.
+const NO_OUTPUT_MARKER: &str = "(no output)";
 
 pub(crate) struct BashTool;
 
@@ -165,14 +171,13 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     }
     if !output.status.success() {
         let code = exit_code.unwrap_or(-1);
-        if content.is_empty() {
-            _ = write!(content, "(exit code {code})");
-        } else {
-            _ = write!(content, "\n\n(exit code {code})");
+        if !content.is_empty() {
+            content.push_str("\n\n");
         }
+        _ = write!(content, "(exit code {code})");
     }
     if content.is_empty() {
-        content.push_str("(no output)");
+        content.push_str(NO_OUTPUT_MARKER);
     }
 
     // Only flag execution failures (timeout, spawn error) as is_error.

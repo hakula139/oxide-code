@@ -57,6 +57,7 @@ macro_rules! for_each_slot {
             // Semantic accents
             (accent, "Highlights, active borders (bold by default)"),
             (user, "User messages and icon"),
+            (queued, "Queued user prompts in the preview panel"),
             (assistant, "Assistant messages and icon"),
 
             // Status indicators (ascending severity)
@@ -176,6 +177,11 @@ impl Theme {
         self.user.style()
     }
 
+    /// Queued user prompts in the preview panel between chat and input
+    pub(crate) fn queued(&self) -> Style {
+        self.queued.style()
+    }
+
     /// Assistant message bar and icon
     pub(crate) fn assistant(&self) -> Style {
         self.assistant.style()
@@ -193,16 +199,8 @@ impl Theme {
         self.success.style()
     }
 
-    /// Warning indicator — caution / non-fatal issues. No production
-    /// consumer yet; kept for API symmetry with the rest of the
-    /// status set so users can pre-style.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "API surface; consumed in tests until a runtime caller lands"
-        )
-    )]
+    /// Warning indicator — caution / non-fatal issues (e.g.
+    /// [`Status::ExitArmed`](super::components::status::Status::ExitArmed)).
     pub(crate) fn warning(&self) -> Style {
         self.warning.style()
     }

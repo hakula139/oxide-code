@@ -10,11 +10,36 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use time::UtcOffset;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::entry::SessionInfo;
 use super::store::SessionStore;
 use crate::util::path::tildify;
+use crate::util::text::truncate_to_width;
+
+/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
+/// prefix every row shares before `--all` inserts its optional Project
+/// column and the row finally reaches `Title`.
+const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
+
+/// Smallest title-column width we will truncate to. Below this, the
+/// output is so narrow that truncation destroys almost all signal, so
+/// we skip it and let the terminal wrap instead.
+const MIN_TITLE_BUDGET: usize = 12;
+
+/// Minimum width for the `Project` column — at least wide enough to
+/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
+const PROJECT_COL_MIN: usize = 8;
+
+/// Upper cap on the `Project` column width. A session started from a
+/// pathologically deep path should not squeeze the `Title` column into
+/// oblivion; the value overflows its padding when a row exceeds the
+/// cap (one-off alignment hiccup rather than hiding the title column
+/// for the entire listing).
+const PROJECT_COL_MAX: usize = 40;
+
+/// Title-column fallback when a session has no recorded title yet.
+const UNTITLED_MARKER: &str = "(untitled)";
 
 /// Render `--list` output to `out`.
 ///
@@ -113,7 +138,10 @@ fn render_sessions(
             .exit
             .as_ref()
             .map_or("-".to_owned(), |e| e.message_count.to_string());
-        let raw_title = s.title.as_ref().map_or("(untitled)", |t| t.title.as_str());
+        let raw_title = s
+            .title
+            .as_ref()
+            .map_or(UNTITLED_MARKER, |t| t.title.as_str());
         let title = match title_budget {
             Some(budget) => truncate_to_width(raw_title, budget),
             None => raw_title.to_owned(),
@@ -132,66 +160,6 @@ fn render_sessions(
     }
     Ok(())
 }
-
-/// Truncates `s` to fit within `max_width` visual columns, appending
-/// `...` when truncation occurs. Width accounting uses
-/// [`UnicodeWidthChar`] so CJK / emoji are billed at their rendered
-/// width. Returns `s` unchanged when it already fits, or an empty
-/// string when `max_width` is 0.
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if s.width() <= max_width {
-        return s.to_owned();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-
-    // Normal callers guard with MIN_TITLE_BUDGET so `max_width` is
-    // comfortably above `ELLIPSIS_WIDTH`; the fallback exists for
-    // pathological widths (exercised mainly by unit tests) where we'd
-    // otherwise overflow by emitting "..." into a 1- or 2-col slot.
-    let (budget, tail) = if max_width >= ELLIPSIS_WIDTH {
-        (max_width - ELLIPSIS_WIDTH, "...")
-    } else {
-        (max_width, "")
-    };
-    let mut acc = 0;
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if acc + w > budget {
-            break;
-        }
-        out.push(ch);
-        acc += w;
-    }
-    out.push_str(tail);
-    out
-}
-
-/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
-/// prefix every row shares before `--all` inserts its optional Project
-/// column and the row finally reaches `Title`.
-const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
-
-/// Smallest title-column width we will truncate to. Below this, the
-/// output is so narrow that truncation destroys almost all signal, so
-/// we skip it and let the terminal wrap instead.
-const MIN_TITLE_BUDGET: usize = 12;
-
-/// Visual width of the `...` truncation marker (three ASCII dots).
-const ELLIPSIS_WIDTH: usize = 3;
-
-/// Minimum width for the `Project` column — at least wide enough to
-/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
-const PROJECT_COL_MIN: usize = 8;
-
-/// Upper cap on the `Project` column width. A session started from a
-/// pathologically deep path should not squeeze the `Title` column into
-/// oblivion; the value overflows its padding when a row exceeds the
-/// cap (one-off alignment hiccup rather than hiding the title column
-/// for the entire listing).
-const PROJECT_COL_MAX: usize = 40;
 
 #[cfg(test)]
 mod tests {
@@ -407,38 +375,5 @@ mod tests {
             out.contains(full_title),
             "full title should render when budget too small: {out}",
         );
-    }
-
-    // ── truncate_to_width ──
-
-    #[test]
-    fn truncate_to_width_passes_through_strings_that_fit() {
-        assert_eq!(truncate_to_width("short", 10), "short");
-    }
-
-    #[test]
-    fn truncate_to_width_appends_ellipsis_on_ascii_overflow() {
-        assert_eq!(truncate_to_width("abcdefghij", 5), "ab...");
-    }
-
-    #[test]
-    fn truncate_to_width_accounts_for_cjk_double_width() {
-        // "测试文本" → 4 CJK chars × width 2 = width 8. Budget 5 minus
-        // the 3-col ellipsis leaves 2 cols for content, so exactly one
-        // CJK char fits and we emit "测..." (width 5).
-        assert_eq!(truncate_to_width("测试文本", 5), "测...");
-    }
-
-    #[test]
-    fn truncate_to_width_zero_produces_empty() {
-        assert_eq!(truncate_to_width("anything", 0), "");
-    }
-
-    #[test]
-    fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
-        // `...` doesn't fit in 1- or 2-col budgets, so fall back to a
-        // raw truncation and return whatever content does fit.
-        assert_eq!(truncate_to_width("abc", 1), "a");
-        assert_eq!(truncate_to_width("abc", 2), "ab");
     }
 }

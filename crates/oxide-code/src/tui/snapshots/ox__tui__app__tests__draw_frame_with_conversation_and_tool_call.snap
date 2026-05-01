@@ -1,9 +1,8 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
-assertion_line: 547
 expression: "render_app(&mut app, 60, 12)"
 ---
-"  ox │ test-model │ ready                           ~/test  "
+"  ox │ test-model │ Ready                           ~/test  "
 "────────────────────────────────────────────────────────────"
 "❯ what files are here?                                      "
 "                                                            "
@@ -13,5 +12,5 @@ expression: "render_app(&mut app, 60, 12)"
 "▎   Cargo.toml                                              "
 "                                                            "
 "────────────────────────────────────────────────────────────"
-" Ask anything...                                            "
-"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit           "
+"❯  Ask anything...                                          "
+"────────────────────────────────────────────────────────────"

@@ -15,6 +15,7 @@ use super::entry::{CURRENT_VERSION, Entry, TitleSource};
 use super::store::{SessionStore, SessionWriter};
 use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
+use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
 
 /// Maximum title length (in characters) derived from the first user prompt.
 ///
@@ -260,23 +261,27 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     })
 }
 
-/// Truncates a title to `max_len` characters, adding "..." if truncated.
+/// Truncates a title to `max_len` characters, appending [`ELLIPSIS`]
+/// when truncated.
 ///
-/// `max_len` must be at least 4 (three for the ellipsis, one for at least one
-/// character of the title). Only internal callers drive this with
-/// [`MAX_TITLE_LEN`] = 80, so the precondition is a sanity check, not user
-/// input handling.
+/// `max_len` must be at least `ELLIPSIS_WIDTH + 1` (room for the marker
+/// plus at least one character of the title). Only internal callers
+/// drive this with [`MAX_TITLE_LEN`] = 80, so the precondition is a
+/// sanity check, not user input handling.
 fn truncate_title(s: &str, max_len: usize) -> String {
-    debug_assert!(max_len >= 4, "truncate_title: max_len must be >= 4");
+    debug_assert!(
+        max_len > ELLIPSIS_WIDTH,
+        "truncate_title: max_len must exceed ELLIPSIS_WIDTH",
+    );
     let trimmed = s.lines().next().unwrap_or(s).trim();
     if trimmed.chars().count() <= max_len {
         trimmed.to_owned()
     } else {
         let boundary = trimmed
             .char_indices()
-            .nth(max_len - 3)
+            .nth(max_len - ELLIPSIS_WIDTH)
             .map_or(trimmed.len(), |(i, _)| i);
-        format!("{}...", &trimmed[..boundary])
+        format!("{}{ELLIPSIS}", &trimmed[..boundary])
     }
 }
 

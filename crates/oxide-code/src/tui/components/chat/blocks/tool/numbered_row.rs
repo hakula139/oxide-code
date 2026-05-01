@@ -13,8 +13,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::super::{BAR, RenderCtx};
+use super::super::RenderCtx;
 use super::{MAX_TOOL_OUTPUT_LINE_BYTES, STATUS_LINE_CONT, truncate_to_bytes};
+use crate::tui::glyphs::BAR;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
 /// Default separator between the line-number column and the text. Read

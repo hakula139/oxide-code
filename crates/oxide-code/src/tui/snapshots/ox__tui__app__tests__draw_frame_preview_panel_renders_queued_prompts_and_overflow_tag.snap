@@ -1,12 +1,18 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
-expression: "render_app(&mut app, 60, 8)"
+expression: "render_app(&mut app, 60, 14)"
 ---
 "  ox │ test-model │ ⣷ Streaming · Esc to interrupt  ~/test  "
 "────────────────────────────────────────────────────────────"
-"❯ working...                                                "
+"❯ active                                                    "
 "                                                            "
-"◉ part                                                      "
+"                                                            "
+"                                                            "
+"                                                            "
+"❯ queued 0                                                  "
+"❯ queued 1                                                  "
+"❯ queued 2                                                  "
+"  +2 more                                                   "
 "────────────────────────────────────────────────────────────"
 "❯  Type to queue a follow-up...                             "
 "────────────────────────────────────────────────────────────"

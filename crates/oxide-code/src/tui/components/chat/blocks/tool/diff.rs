@@ -32,6 +32,11 @@ const MAX_DIFF_BODY_LINES: usize = 20;
 /// `replace_all` doesn't produce a 50-number footer.
 const MAX_LOCATIONS_DISPLAYED: usize = 8;
 
+/// Body shown when the diff resolves to a no-op (defensive — the live
+/// producer rejects no-op edits, so this only triggers from corrupt
+/// resumed transcripts).
+const NO_CHANGE_MARKER: &str = "(no change)";
+
 /// Renders the body of an edit-tool diff result.
 ///
 /// Each [`DiffChunk`] is shown as `- ` (red) old lines and `+ ` (green)
@@ -61,7 +66,7 @@ pub(super) fn render(
     if !any_chunk_has_content(chunks) {
         out.push(Line::from(vec![
             Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
-            Span::styled("(no change)", ctx.theme.dim()),
+            Span::styled(NO_CHANGE_MARKER, ctx.theme.dim()),
         ]));
         return;
     }

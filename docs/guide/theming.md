@@ -111,11 +111,12 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Semantic accents
 
-| Slot        | Role                              |
-| ----------- | --------------------------------- |
-| `accent`    | Highlights, active borders (bold) |
-| `user`      | User message bar / icon           |
-| `assistant` | Assistant message bar / icon      |
+| Slot        | Role                                      |
+| ----------- | ----------------------------------------- |
+| `accent`    | Highlights, active borders (bold)         |
+| `user`      | User message bar / icon                   |
+| `queued`    | Queued user prompts in the preview ghosts |
+| `assistant` | Assistant message bar / icon              |
 
 ### Status indicators
 

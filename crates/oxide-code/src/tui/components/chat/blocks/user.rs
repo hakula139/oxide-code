@@ -3,10 +3,7 @@
 use ratatui::text::Line;
 
 use super::{ChatBlock, RenderCtx, push_icon_wrapped};
-
-/// First-line prefix for user messages — chevron + space. Continuation
-/// wraps to a 2-column space indent under the text.
-const USER_PREFIX: &str = "❯ ";
+use crate::tui::glyphs::{USER_PROMPT_CONT, USER_PROMPT_PREFIX};
 
 /// A user-typed message.
 pub(crate) struct UserMessage {
@@ -27,7 +24,11 @@ impl ChatBlock for UserMessage {
 
         let mut out = Vec::new();
         for (i, text_line) in self.text.trim().lines().enumerate() {
-            let prefix = if i == 0 { USER_PREFIX } else { "  " };
+            let prefix = if i == 0 {
+                USER_PROMPT_PREFIX
+            } else {
+                USER_PROMPT_CONT
+            };
             push_icon_wrapped(&mut out, prefix, icon_style, text_line, text_style, width);
         }
         out

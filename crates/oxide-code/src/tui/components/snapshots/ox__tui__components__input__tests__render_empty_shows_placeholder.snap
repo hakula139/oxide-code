@@ -3,5 +3,5 @@ source: crates/oxide-code/src/tui/components/input.rs
 expression: "render_to_backend(&input, 60, 3)"
 ---
 "────────────────────────────────────────────────────────────"
-" Ask anything...                                            "
-"Enter: send │ Shift+Enter: newline │ Ctrl+C: quit           "
+"❯  Ask anything...                                          "
+"────────────────────────────────────────────────────────────"
