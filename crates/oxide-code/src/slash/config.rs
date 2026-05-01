@@ -60,22 +60,22 @@ fn render_config(
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
     let thinking = if cfg.show_thinking { "yes" } else { "no" };
     let resolved: [(&str, &str); 8] = [
-        ("model", &info.model),
-        ("model id", &cfg.model_id),
-        ("base url", &cfg.base_url),
-        ("auth", cfg.auth_label),
-        ("effort", &effort),
-        ("max tokens", &max_tokens),
-        ("prompt cache ttl", &cache_ttl),
-        ("show thinking", thinking),
+        ("Model", &info.model),
+        ("Model ID", &cfg.model_id),
+        ("Base URL", &cfg.base_url),
+        ("Auth", cfg.auth_label),
+        ("Effort", &effort),
+        ("Max Tokens", &max_tokens),
+        ("Prompt Cache TTL", &cache_ttl),
+        ("Show Thinking", thinking),
     ];
     let user = display_path(user_path);
     let project = display_path(project_path);
-    let files: [(&str, &str); 2] = [("user", &user), ("project", &project)];
+    let files: [(&str, &str); 2] = [("User", &user), ("Project", &project)];
 
     let mut out = String::new();
-    write_kv_section(&mut out, "Resolved config", resolved);
-    write_kv_section(&mut out, "Source files", files);
+    write_kv_section(&mut out, "Resolved Config", resolved);
+    write_kv_section(&mut out, "Source Files", files);
     out
 }
 
@@ -134,8 +134,8 @@ mod tests {
     fn render_config_starts_with_resolved_heading_then_sources_section() {
         let info = test_session_info();
         let body = render_config(&info, None, None);
-        assert!(body.starts_with("Resolved config"), "{body}");
-        assert!(body.contains("\nSource files\n"), "{body}");
+        assert!(body.starts_with("Resolved Config"), "{body}");
+        assert!(body.contains("\nSource Files\n"), "{body}");
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
         let mut info = test_session_info();
         info.config.show_thinking = false;
         let body = render_config(&info, None, None);
-        assert!(body.contains("show thinking"), "label missing: {body}");
+        assert!(body.contains("Show Thinking"), "label missing: {body}");
         assert!(body.contains("  no"), "false should render `no`: {body}");
         info.config.show_thinking = true;
         let body = render_config(&info, None, None);

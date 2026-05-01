@@ -39,7 +39,7 @@ fn render_help() -> String {
         .zip(BUILT_INS)
         .map(|(label, cmd)| (label.as_str(), cmd.description()));
     let mut out = String::new();
-    write_kv_section(&mut out, "Available commands", rows);
+    write_kv_section(&mut out, "Available Commands", rows);
     out.push_str(
         "\nTip: prefix with `//` to send a literal slash to the model (e.g., `//etc/hosts`).\n",
     );
@@ -75,7 +75,7 @@ mod tests {
     fn render_help_starts_with_heading_and_lists_every_command() {
         let body = render_help();
         let mut lines = body.lines();
-        assert_eq!(lines.next(), Some("Available commands"));
+        assert_eq!(lines.next(), Some("Available Commands"));
         assert_eq!(lines.next(), Some(""), "heading separated by blank line");
         // Each registered command appears as a row whose body contains
         // its slash-prefixed canonical name. Skipping the popup-format

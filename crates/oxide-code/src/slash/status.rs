@@ -27,20 +27,20 @@ impl SlashCommand for StatusCmd {
 
 /// Render the snapshot as a `key  value` table. Keys are pre-defined
 /// here (not extracted from `SessionInfo`'s field names) so the output
-/// stays stable when the struct grows. `model id` sits next to the
-/// marketing-name `model` so the user debugging a routing issue can
+/// stays stable when the struct grows. `Model ID` sits next to the
+/// marketing-name `Model` so the user debugging a routing issue can
 /// see both at a glance — matching the pair `/config` shows.
 fn render_status(info: &SessionInfo) -> String {
     let rows: [(&str, &str); 6] = [
-        ("model", &info.model),
-        ("model id", &info.config.model_id),
-        ("cwd", &info.cwd),
-        ("version", info.version),
-        ("auth", info.config.auth_label),
-        ("session id", &info.session_id),
+        ("Model", &info.model),
+        ("Model ID", &info.config.model_id),
+        ("CWD", &info.cwd),
+        ("Version", info.version),
+        ("Auth", info.config.auth_label),
+        ("Session ID", &info.session_id),
     ];
     let mut out = String::new();
-    write_kv_section(&mut out, "Session status", rows);
+    write_kv_section(&mut out, "Session Status", rows);
     out
 }
 
@@ -82,7 +82,7 @@ mod tests {
     fn render_status_starts_with_heading_and_blank_line() {
         let body = render_status(&test_session_info());
         let mut lines = body.lines();
-        assert_eq!(lines.next(), Some("Session status"));
+        assert_eq!(lines.next(), Some("Session Status"));
         assert_eq!(lines.next(), Some(""), "heading separated by blank line");
     }
 
@@ -131,7 +131,7 @@ mod tests {
             .zip(values)
             .map(|(line, value)| line.find(value).expect("value missing from row"))
             .collect();
-        // Longest label is "session id" (10) ⇒ prefix(2) + 10 + gap(2) = 14.
+        // Longest label is "Session ID" (10) ⇒ prefix(2) + 10 + gap(2) = 14.
         assert!(
             cols.iter().all(|c| *c == 14),
             "value columns not aligned at col 14: {cols:?}",
