@@ -7,10 +7,13 @@
 //! two keeps the borrow story clean — execution never holds an
 //! exclusive borrow on `&App` just to read the cwd string.
 
+use crate::config::ConfigSnapshot;
 use crate::tui::components::chat::ChatView;
 
 /// Read-only snapshot of session-level descriptors. Built once per
-/// process at TUI startup and never mutated.
+/// process at TUI startup and never mutated. Embeds the
+/// [`ConfigSnapshot`] so `/config` reads its fields without a second
+/// plumbing path.
 pub(crate) struct SessionInfo {
     /// Marketing display name (e.g. `"Claude Sonnet 4.6"`).
     pub(crate) model: String,
@@ -18,10 +21,10 @@ pub(crate) struct SessionInfo {
     pub(crate) cwd: String,
     /// Crate version (`env!("CARGO_PKG_VERSION")`).
     pub(crate) version: &'static str,
-    /// Short auth-method label ("API key" / "OAuth"). Never the secret.
-    pub(crate) auth_label: &'static str,
     /// Active session UUID — useful for `--continue` lookups.
     pub(crate) session_id: String,
+    /// Resolved-config view (auth method, model id, effort, ...).
+    pub(crate) config: ConfigSnapshot,
 }
 
 /// Borrowed view of App-owned state plus a session snapshot for the

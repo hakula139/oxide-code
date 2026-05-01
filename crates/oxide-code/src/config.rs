@@ -5,7 +5,7 @@
 //! the same precedence but terminates at the first source that
 //! resolves (API key env > API key in file > OAuth credentials).
 
-mod file;
+pub(crate) mod file;
 mod oauth;
 
 use std::fmt;
@@ -38,6 +38,21 @@ impl Auth {
             Self::OAuth(_) => "OAuth",
         }
     }
+}
+
+/// Read-only view of resolved config — every field [`Config`] holds
+/// except the actual secret. Built once at startup from
+/// [`Config::snapshot`] and handed into the slash dispatcher; survives
+/// the move when [`Config`] itself is consumed by the API client.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSnapshot {
+    pub(crate) auth_label: &'static str,
+    pub(crate) base_url: String,
+    pub(crate) model_id: String,
+    pub(crate) effort: Option<Effort>,
+    pub(crate) max_tokens: u32,
+    pub(crate) prompt_cache_ttl: PromptCacheTtl,
+    pub(crate) show_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +202,21 @@ impl Config {
     ///
     /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
     /// file > Claude Code OAuth credentials.
+    /// Captures the resolved descriptors `/config` (and friends) print,
+    /// minus the auth secret. Called before [`Self`] is consumed by
+    /// the client constructor so the snapshot survives the move.
+    pub(crate) fn snapshot(&self) -> ConfigSnapshot {
+        ConfigSnapshot {
+            auth_label: self.auth.label(),
+            base_url: self.base_url.clone(),
+            model_id: self.model.clone(),
+            effort: self.effort,
+            max_tokens: self.max_tokens,
+            prompt_cache_ttl: self.prompt_cache_ttl,
+            show_thinking: self.show_thinking,
+        }
+    }
+
     pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();

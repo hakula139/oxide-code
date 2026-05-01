@@ -604,12 +604,26 @@ mod tests {
     }
 
     fn test_session_info() -> SessionInfo {
+        // Local fixture keeps the snapshot-pinned model label
+        // (`test-model`) stable; slash::test_session_info uses
+        // `Test Model` to verify the marketing-name rendering path
+        // and would churn the TUI insta snapshots on import.
+        use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
+
         SessionInfo {
             model: "test-model".to_owned(),
             cwd: "~/test".to_owned(),
             version: "0.0.0-test",
-            auth_label: "API key",
             session_id: "test-session".to_owned(),
+            config: ConfigSnapshot {
+                auth_label: "API key",
+                base_url: "https://api.test.invalid".to_owned(),
+                model_id: "claude-test-1-0".to_owned(),
+                effort: Some(Effort::High),
+                max_tokens: 32_000,
+                prompt_cache_ttl: PromptCacheTtl::OneHour,
+                show_thinking: false,
+            },
         }
     }
 

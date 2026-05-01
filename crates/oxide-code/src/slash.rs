@@ -18,6 +18,7 @@
 //! 6). Mutations are session-local; restart returns to the
 //! user-declared config.
 
+mod config;
 mod context;
 mod diff;
 mod help;
@@ -46,12 +47,22 @@ pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
 /// every sibling `slash::*::tests` module can pull it in.
 #[cfg(test)]
 pub(crate) fn test_session_info() -> SessionInfo {
+    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
+
     SessionInfo {
         model: "Test Model".to_owned(),
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
-        auth_label: "API key",
         session_id: "test-session".to_owned(),
+        config: ConfigSnapshot {
+            auth_label: "API key",
+            base_url: "https://api.test.invalid".to_owned(),
+            model_id: "claude-test-1-0".to_owned(),
+            effort: Some(Effort::High),
+            max_tokens: 32_000,
+            prompt_cache_ttl: PromptCacheTtl::OneHour,
+            show_thinking: false,
+        },
     }
 }
 

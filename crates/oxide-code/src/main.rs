@@ -128,7 +128,7 @@ async fn async_main() -> Result<()> {
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
     let theme = config.theme.clone();
-    let auth_label = config.auth.label();
+    let snapshot = config.snapshot();
 
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
@@ -173,7 +173,7 @@ async fn async_main() -> Result<()> {
         &client,
         &model,
         show_thinking,
-        auth_label,
+        snapshot,
         &theme,
         tools,
         resumed,
@@ -273,7 +273,7 @@ async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
-    auth_label: &'static str,
+    config: config::ConfigSnapshot,
     theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
@@ -309,8 +309,8 @@ async fn run_tui(
         model: display_model,
         cwd,
         version: env!("CARGO_PKG_VERSION"),
-        auth_label,
         session_id: session.session_id().to_owned(),
+        config,
     };
 
     let mut terminal = tui::terminal::init()?;

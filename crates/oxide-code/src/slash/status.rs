@@ -33,7 +33,7 @@ fn render_status(info: &SessionInfo) -> String {
         ("model", &info.model),
         ("cwd", &info.cwd),
         ("version", info.version),
-        ("auth", info.auth_label),
+        ("auth", info.config.auth_label),
         ("session", &info.session_id),
     ];
     let gutter = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
@@ -83,7 +83,7 @@ mod tests {
             info.model.as_str(),
             info.cwd.as_str(),
             info.version,
-            info.auth_label,
+            info.config.auth_label,
             info.session_id.as_str(),
         ] {
             assert!(body.contains(needle), "missing `{needle}`: {body}");
@@ -102,7 +102,7 @@ mod tests {
             info.model.as_str(),
             info.cwd.as_str(),
             info.version,
-            info.auth_label,
+            info.config.auth_label,
             info.session_id.as_str(),
         ];
         let body = render_status(&info);
