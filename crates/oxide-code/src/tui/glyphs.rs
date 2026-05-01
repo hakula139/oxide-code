@@ -73,7 +73,7 @@ pub(crate) const SPINNER_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', 
 
 #[cfg(test)]
 mod tests {
-    use unicode_width::UnicodeWidthStr;
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     use super::*;
 
@@ -113,5 +113,18 @@ mod tests {
             ERROR_PREFIX.starts_with(TOOL_ERROR),
             "ERROR_PREFIX ({ERROR_PREFIX:?}) must start with TOOL_ERROR ({TOOL_ERROR:?})",
         );
+    }
+
+    // ── Spinner ──
+
+    #[test]
+    fn spinner_frames_each_render_in_one_column() {
+        for &frame in SPINNER_FRAMES {
+            assert_eq!(
+                frame.width(),
+                Some(1),
+                "spinner frame {frame:?} must render in one terminal column",
+            );
+        }
     }
 }

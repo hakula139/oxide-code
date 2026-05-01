@@ -247,6 +247,24 @@ mod tests {
 
     use super::*;
 
+    // ── Cross-glyph invariants ──
+
+    #[test]
+    fn border_prefix_starts_with_bar() {
+        assert!(
+            BORDER_PREFIX.starts_with(BAR),
+            "BORDER_PREFIX ({BORDER_PREFIX:?}) must start with BAR ({BAR:?})",
+        );
+    }
+
+    #[test]
+    fn status_line_cont_starts_with_bar() {
+        assert!(
+            STATUS_LINE_CONT.starts_with(BAR),
+            "STATUS_LINE_CONT ({STATUS_LINE_CONT:?}) must start with BAR ({BAR:?})",
+        );
+    }
+
     // ── border_continuation_prefix ──
 
     #[test]
