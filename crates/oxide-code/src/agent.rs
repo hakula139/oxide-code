@@ -327,6 +327,11 @@ async fn record_drained_prompts(
 /// the calling round drains the buffer into trailing user messages
 /// alongside the tool results, splicing the queued text into the same
 /// turn without aborting the in-flight work.
+///
+/// `fut` MUST be cancel-safe across loop iterations: a queued submit
+/// returns to the `select!` and re-polls `fut` from where it paused.
+/// Existing callers (`stream_response`'s mpsc pump, `tools.run`'s
+/// per-tool awaits) all are; new callers must verify the same.
 async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
