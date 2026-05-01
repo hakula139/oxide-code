@@ -15,6 +15,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout};
+use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::component::Component;
@@ -462,8 +463,6 @@ impl App {
     }
 
     fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {
-        use ratatui::text::{Line, Span};
-
         // Body width = area minus the chevron gutter on the left and a
         // one-column right margin so the ellipsis tail never butts
         // against the screen edge.
@@ -494,9 +493,8 @@ impl App {
 /// at `body_width` columns (excluding the chevron gutter). CJK / emoji
 /// are billed at their display width via `unicode-width` so the
 /// truncation budget matches what the user actually sees.
-fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> ratatui::text::Line<'static> {
+fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static> {
     use ratatui::style::Modifier;
-    use ratatui::text::{Line, Span};
 
     // Replace newlines with a glyph so multi-line prompts collapse to
     // one row without losing the "this is more than it looks" hint.
@@ -635,37 +633,6 @@ mod tests {
         assert!(app.should_quit, "second press within window confirms");
     }
 
-    #[test]
-    fn expire_armed_exit_returns_to_idle_after_window() {
-        // After the 1 s window the armed state evaporates so the user
-        // isn't left staring at an exit hint they didn't act on.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::ConfirmExit);
-        // Force an expired deadline so the test doesn't sleep.
-        let until = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(1))
-            .expect("monotonic clock has run for at least one second since boot");
-        app.status_bar.set_status(Status::ExitArmed { until });
-
-        assert!(app.expire_armed_exit(), "stale armed state must clear");
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-    }
-
-    #[test]
-    fn expire_armed_exit_when_not_armed_is_a_noop() {
-        // Tick path calls `expire_armed_exit` every frame regardless of
-        // status; the false branch must leave the bar untouched and
-        // skip the dirty bump that would otherwise wake the renderer.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-
-        assert!(
-            !app.expire_armed_exit(),
-            "no-op when status isn't ExitArmed",
-        );
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-    }
-
     #[tokio::test]
     async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
         // Mid-turn Ctrl+C must reach the agent loop as `Cancel` so it
@@ -738,6 +705,62 @@ mod tests {
         app.input.set_enabled(false);
         app.handle_crossterm_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
         assert!(app.dirty);
+    }
+
+    // ── handle_esc ──
+
+    #[tokio::test]
+    async fn handle_esc_busy_dispatches_cancel() {
+        // Esc is routed by `App` because its meaning depends on queue
+        // state and run-state; the input component can't see those.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
+        let forwarded = rx.recv().await.expect("Cancel forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[test]
+    fn handle_esc_idle_with_empty_queue_is_silent() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
+        // The most-recent (back of the FIFO) returns to the input for
+        // editing; the rest stay queued so the user can keep peeling.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("first".into());
+        app.pending_prompts.push_back("second".into());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["second".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["first".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_idle_with_buffer_content_refuses_pop() {
+        // Esc must not clobber an in-progress draft. The user has to
+        // clear the buffer (or submit) before peeling a queued prompt.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.input.set_text("draft");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+        );
     }
 
     // ── dispatch_user_action ──
@@ -935,62 +958,6 @@ mod tests {
         assert_eq!(app.status_bar.status(), &Status::Cancelling);
     }
 
-    // ── handle_esc ──
-
-    #[tokio::test]
-    async fn handle_esc_busy_dispatches_cancel() {
-        // Replaces the input-component test removed in the queue work:
-        // Esc is now routed by `App` because it depends on queue state.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
-        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.status_bar.status(), &Status::Cancelling);
-        let forwarded = rx.recv().await.expect("Cancel forwarded");
-        assert!(matches!(forwarded, UserAction::Cancel));
-    }
-
-    #[test]
-    fn handle_esc_idle_with_empty_queue_is_silent() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.status_bar.status(), &Status::Idle);
-        assert!(app.pending_prompts.is_empty());
-    }
-
-    #[test]
-    fn handle_esc_idle_with_queue_pops_most_recent_into_input() {
-        // The most-recent (back of the FIFO) returns to the input for
-        // editing; the rest stay queued so the user can keep peeling.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.pending_prompts.push_back("first".into());
-        app.pending_prompts.push_back("second".into());
-
-        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-
-        assert_eq!(app.input.lines(), vec!["second".to_owned()]);
-        assert_eq!(
-            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-            vec!["first".to_owned()],
-        );
-    }
-
-    #[test]
-    fn handle_esc_idle_with_buffer_content_refuses_pop() {
-        // Esc must not clobber an in-progress draft. The user has to
-        // clear the buffer (or submit) before peeling a queued prompt.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.pending_prompts.push_back("queued".into());
-        app.input.set_text("draft");
-
-        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-
-        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
-        assert_eq!(
-            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
-            vec!["queued".to_owned()],
-        );
-    }
-
     // ── pending prompt queue ──
 
     #[tokio::test]
@@ -1078,9 +1045,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_drains_queue_head_to_match_completed_path() {
-        // Decision 5 in the design: cancellation does not auto-clear
-        // the queue. The user typically still wants their planned
-        // follow-up after dropping a stuck turn.
+        // Cancellation does not auto-clear the queue — a user who
+        // interrupts a stuck turn typically still wants their planned
+        // follow-up to fire.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1094,12 +1061,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_error_drains_queue_head_only_once() {
-        // Regression: `agent_loop_task` previously emitted both
-        // `Error` and `TurnComplete` after a failed turn, and each
-        // event ran `finalize_idle` → `drain_pending_prompt`. The
-        // sequence drained two prompts and silently reordered the
-        // remainder. Now `agent_loop_task` fires only `Error`, and
-        // the TUI's `Error` handler is the single drain site.
+        // Single-drain contract: `Error` is the only teardown event
+        // a failed turn fires (no paired `TurnComplete`), so
+        // `finalize_idle` → `drain_pending_prompt` runs exactly once
+        // and pops one head — not two — when the queue is non-empty.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1119,12 +1084,13 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
-        // Regression: between the user pressing Esc and the matching
-        // `AgentEvent::Cancelled` arriving, the agent's outer `recv`
-        // is racing for the next signal. Forwarding a fresh submit
-        // here lets it slip ahead of `pending_prompts`'s existing
-        // head — the agent picks it up and starts a new turn while
-        // older queued items fall behind. Hold mid-turn submits
+        // Cancel-window FIFO authority: between the user pressing Esc
+        // and the matching `AgentEvent::Cancelled` arriving, the
+        // agent's outer `recv` is racing for the next signal.
+        // Forwarding a fresh submit here lets it slip ahead of
+        // `pending_prompts`'s existing head — the agent picks it up
+        // and starts a new turn while older queued items fall behind.
+        // Hold mid-turn submits
         // locally; `finalize_idle`'s drain re-fires them in order
         // after `Cancelled` lands.
         let (mut app, mut rx, _agent_tx) = test_app(None);
@@ -1271,10 +1237,10 @@ mod tests {
         // `title: None` means the tool didn't set a result header —
         // typically a failure path (timeout, invalid input) that
         // aborted before `.with_title(...)`. The result must still be
-        // pushed (previously: silently swallowed, hiding the error
-        // body from the user) and the header must render the
-        // tool-call label stashed at `ToolCallStart`, not a blank
-        // string or the generic `(result)` fallback.
+        // pushed (silent swallow would hide the error body) and the
+        // header must render the tool-call label stashed at
+        // `ToolCallStart`, not a blank string or the generic
+        // `(result)` fallback.
         let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
@@ -1329,6 +1295,39 @@ mod tests {
             text.contains("(result)"),
             "orphan End with no pending call should use the generic fallback, got:\n{text}",
         );
+    }
+
+    // ── expire_armed_exit ──
+
+    #[test]
+    fn expire_armed_exit_returns_to_idle_after_window() {
+        // After the 1 s window the armed state evaporates so the user
+        // isn't left staring at an exit hint they didn't act on.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::ConfirmExit);
+        // Force an expired deadline so the test doesn't sleep.
+        let until = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("monotonic clock has run for at least one second since boot");
+        app.status_bar.set_status(Status::ExitArmed { until });
+
+        assert!(app.expire_armed_exit(), "stale armed state must clear");
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    #[test]
+    fn expire_armed_exit_when_not_armed_is_a_noop() {
+        // Tick path calls `expire_armed_exit` every frame regardless of
+        // status; the false branch must leave the bar untouched and
+        // skip the dirty bump that would otherwise wake the renderer.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+
+        assert!(
+            !app.expire_armed_exit(),
+            "no-op when status isn't ExitArmed",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     // ── draw_frame ──
