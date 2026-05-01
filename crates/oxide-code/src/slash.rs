@@ -19,6 +19,7 @@
 //! user-declared config.
 
 mod context;
+mod diff;
 mod help;
 mod parser;
 mod registry;
