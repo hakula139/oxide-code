@@ -42,7 +42,8 @@ const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds anoth
 /// Key bindings (busy, i.e. disabled):
 ///
 /// - Ctrl+C: cancel the in-flight turn
-/// - Ctrl+D: quit
+/// - Ctrl+D: no-op (avoid tearing down an in-flight turn from a
+///   stray habitual EOF)
 ///
 /// Esc routes through [`App::handle_crossterm_event`](super::super::app::App::handle_crossterm_event)
 /// because its meaning depends on App-level state (queue, run state).
@@ -142,15 +143,17 @@ impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         // Ctrl+D follows the POSIX EOF idiom: quit only when the input
         // buffer is empty so a stray press while composing never
-        // discards work — applies in both states, since typing while
-        // busy queues a follow-up and the buffer can carry content.
+        // discards work. Disabled while busy — a turn in flight is
+        // closer to "command running" than "shell at the prompt", so
+        // a habitual Ctrl+D shouldn't tear it down; cancel via Esc /
+        // Ctrl+C first, then quit.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,
             ..
         }) = event
         {
-            return if self.is_empty() {
+            return if self.enabled && self.is_empty() {
                 Some(UserAction::Quit)
             } else {
                 None
@@ -431,16 +434,17 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_ctrl_d_empty_buffer_quits_in_idle_and_busy() {
-        // POSIX EOF idiom: Ctrl+D on an empty buffer exits in both
-        // idle and busy states.
+    fn handle_event_ctrl_d_empty_buffer_quits_only_when_idle() {
+        // POSIX EOF idiom: idle Ctrl+D on an empty buffer exits.
         let mut input = test_input();
         let idle_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(matches!(idle_action, Some(UserAction::Quit)));
 
+        // Busy Ctrl+D is a no-op even with an empty buffer — a habitual
+        // EOF press shouldn't tear down an in-flight turn.
         input.set_enabled(false);
         let busy_action = input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(matches!(busy_action, Some(UserAction::Quit)));
+        assert!(busy_action.is_none());
     }
 
     #[test]
