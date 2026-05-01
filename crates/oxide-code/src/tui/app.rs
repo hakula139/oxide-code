@@ -181,13 +181,17 @@ impl App {
     /// Esc routing:
     ///
     /// - busy → cancel the in-flight turn
-    /// - idle with a non-empty queue → pop the most recent queued
-    ///   prompt back into the input for editing
+    /// - idle with a non-empty queue AND empty input → pop the most
+    ///   recent queued prompt back into the input for editing
+    /// - idle with content already in the input → no-op (refuse to
+    ///   clobber the user's draft; they must clear it first)
     /// - idle with an empty queue → no-op (textarea has no use for Esc)
     fn handle_esc(&mut self) {
         if !self.input.is_enabled() {
             self.dispatch_user_action(UserAction::Cancel);
-        } else if let Some(prompt) = self.pending_prompts.pop_back() {
+        } else if self.input.is_empty()
+            && let Some(prompt) = self.pending_prompts.pop_back()
+        {
             self.input.set_text(&prompt);
             self.sync_input_queue_hint();
         }
@@ -967,6 +971,23 @@ mod tests {
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["first".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_idle_with_buffer_content_refuses_pop() {
+        // Esc must not clobber an in-progress draft. The user has to
+        // clear the buffer (or submit) before peeling a queued prompt.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.input.set_text("draft");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.input.lines(), vec!["draft".to_owned()]);
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
         );
     }
 

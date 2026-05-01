@@ -329,8 +329,9 @@ impl InputArea {
     }
 
     /// Whether the buffer contains only whitespace. Drives the
-    /// POSIX-style Ctrl+D EOF gate (and short-circuits empty submits).
-    fn is_empty(&self) -> bool {
+    /// POSIX-style Ctrl+D EOF gate, short-circuits empty submits,
+    /// and gates the Esc-pop refusal in `App::handle_esc`.
+    pub(crate) fn is_empty(&self) -> bool {
         self.textarea
             .lines()
             .iter()
