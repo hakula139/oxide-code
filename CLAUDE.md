@@ -146,6 +146,10 @@ ox                                          # Start an interactive session
 - Reach for `thiserror::Error` only when callers need to match on error variants (no current uses; add the dep when the first one lands).
 - Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
 
+### Discarding Results
+
+- Use `_ = expr` (no `let`) to discard a result you don't need — typically the `()` from `writeln!`/`write!` against a `String` (infallible by `fmt::Write`). `let _ = expr` adds nothing and makes the intent noisier; the bare `_ = ...` form is what the rest of the crate uses.
+
 ### Lint Suppression
 
 - Use `#[expect(lint)]` instead of `#[allow(lint)]`. `#[expect]` warns when the suppressed lint is no longer triggered, preventing stale suppressions from accumulating.
