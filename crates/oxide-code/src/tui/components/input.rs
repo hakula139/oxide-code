@@ -149,8 +149,8 @@ impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         // Ctrl+D follows the POSIX EOF idiom: quit only when the input
         // buffer is empty so a stray press while composing never
-        // discards work. The disabled (busy) buffer is empty by
-        // construction, so mid-turn Ctrl+D still exits.
+        // discards work — applies in both states, since typing while
+        // busy queues a follow-up and the buffer can carry content.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,
