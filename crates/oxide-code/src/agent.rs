@@ -759,13 +759,13 @@ mod tests {
         }
     }
 
-    /// Returns a `UserAction` channel whose sender is leaked, so the
-    /// receiver's `recv()` future stays pending for the lifetime of
-    /// the test. `agent_turn` callers that don't drive cancellation /
-    /// quit / submit signals (every test in this module) use this to
-    /// satisfy the `user_rx` parameter without coordinating signals.
+    /// Inert `UserAction` receiver for `agent_turn` tests that don't
+    /// drive cancel / quit / submit signals. The sender is leaked so
+    /// `recv()` stays pending for the test's lifetime; a tracked-leak
+    /// alternative (returning the pair) costs every call site a `let`
+    /// binding for no test-correctness benefit.
     fn inert_user_rx() -> mpsc::Receiver<UserAction> {
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = crate::agent::event::inert_user_action_channel();
         std::mem::forget(tx);
         rx
     }

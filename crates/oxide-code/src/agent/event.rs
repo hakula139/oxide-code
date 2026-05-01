@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 
 use crate::tool::ToolRegistry;
 
@@ -84,6 +85,17 @@ pub(crate) enum UserAction {
     /// Hard quit (Ctrl+D, or confirmed exit). Both the TUI and the
     /// agent loop tear down on this.
     Quit,
+}
+
+/// `UserAction` channel pair where `recv()` stays pending forever.
+/// Used by display modes (bare REPL, headless) that have no in-process
+/// source of `UserAction`s — the caller holds the returned sender on
+/// its stack so [`agent_turn`](crate::agent::agent_turn)'s race against
+/// `user_rx.recv()` blocks indefinitely until something else (e.g.
+/// `shutdown_signal`) drops the turn future externally.
+pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Receiver<UserAction>)
+{
+    mpsc::channel(1)
 }
 
 // ── Agent Sink ──

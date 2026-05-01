@@ -26,7 +26,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
+use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
 use agent::{TurnAbort, agent_turn};
 use client::anthropic::Client;
 use config::Config;
@@ -458,10 +458,8 @@ async fn bare_repl(
     let mut shutdown_fired = false;
     // Bare REPL has no in-process source of `UserAction`s — Ctrl+C
     // arrives via `shutdown_signal()` and drops the turn future from
-    // the outer `select!`. Keep `_user_tx` alive so `user_rx.recv()`
-    // inside `agent_turn` stays pending instead of returning `None`
-    // (which would terminate the turn as `TurnOutcome::Quit`).
-    let (_user_tx, mut user_rx) = mpsc::channel::<UserAction>(1);
+    // the outer `select!`.
+    let (_user_tx, mut user_rx) = inert_user_action_channel();
 
     let result: Result<()> = async {
         loop {
@@ -568,10 +566,7 @@ async fn headless(
     // user message still gets a Summary entry on Ctrl+C / SIGTERM /
     // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
-    // Headless has no in-process `UserAction` source — keep a sender
-    // alive so `agent_turn`'s race against `user_rx.recv()` stays
-    // pending until shutdown drops the future externally.
-    let (_user_tx, mut user_rx) = mpsc::channel::<UserAction>(1);
+    let (_user_tx, mut user_rx) = inert_user_action_channel();
     let turn = agent_turn(
         client,
         &tools,
