@@ -2,7 +2,7 @@
 source: crates/oxide-code/src/tui/app.rs
 expression: "render_app(&mut app, 40, 8)"
 ---
-"  ox │ test-model │ ready       ~/test  "
+"  ox │ test-model │ Ready       ~/test  "
 "────────────────────────────────────────"
 "❯ hi                                    "
 "                                        "

@@ -40,11 +40,16 @@ pub(crate) struct StatusBar {
     tick_counter: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Status {
     Idle,
     Streaming,
-    ToolRunning,
+    /// A tool is running. `name` is the tool's display name (`bash`,
+    /// `read`, `edit`, etc.) so the busy hint can read
+    /// `"<name> · Esc to interrupt"` rather than a generic label.
+    ToolRunning {
+        name: String,
+    },
     /// User-issued `Cancel` is being honored — the partial turn is
     /// being torn down, but [`crate::agent::event::AgentEvent::Cancelled`]
     /// hasn't arrived yet.
@@ -88,8 +93,8 @@ impl StatusBar {
     /// Current status. Used by [`App`](super::super::app::App) to
     /// arm-or-exit on Ctrl+C and to clear an expired
     /// [`Status::ExitArmed`] from the tick arm.
-    pub(crate) fn status(&self) -> Status {
-        self.status
+    pub(crate) fn status(&self) -> &Status {
+        &self.status
     }
 
     /// Current title slot, or `None` when no title is set. Same
@@ -103,7 +108,7 @@ impl StatusBar {
     /// changed (caller should mark dirty). The non-spinner states
     /// ([`Status::Idle`], [`Status::ExitArmed`]) short-circuit.
     pub(crate) fn tick(&mut self) -> bool {
-        if !is_animated(self.status) {
+        if !is_animated(&self.status) {
             return false;
         }
         self.tick_counter += 1;
@@ -142,7 +147,7 @@ impl Component for StatusBar {
             .title
             .as_deref()
             .map(|t| title_slot_spans(t, &sep, self.theme.muted()));
-        let title_slot_width = title_slot.as_ref().map_or(0, slot_width);
+        let title_slot_width = title_slot.as_deref().map_or(0, slot_width);
 
         // CWD: `<gap> cwd  ` on the right edge. Dropped when the remaining
         // budget is too small to fit `gap + cwd + 2-space margin`. The +1
@@ -187,11 +192,13 @@ impl Component for StatusBar {
 
 impl StatusBar {
     fn status_span(&self) -> Span<'static> {
-        match self.status {
-            Status::Idle => Span::styled("ready", self.theme.success()),
-            Status::Streaming => self.busy_span("streaming... · Esc to interrupt"),
-            Status::ToolRunning => self.busy_span("running tool... · Esc to interrupt"),
-            Status::Cancelling => self.busy_span("cancelling..."),
+        match &self.status {
+            Status::Idle => Span::styled("Ready", self.theme.success()),
+            Status::Streaming => self.busy_span("Streaming · Esc to interrupt"),
+            Status::ToolRunning { name } => {
+                self.busy_span(&format!("Running {name} · Esc to interrupt"))
+            }
+            Status::Cancelling => self.busy_span("Cancelling..."),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
             }
@@ -206,10 +213,10 @@ impl StatusBar {
 
 /// Whether the status drives the braille spinner. Idle is at rest;
 /// [`Status::ExitArmed`] uses a static hint instead of an animation.
-fn is_animated(status: Status) -> bool {
+fn is_animated(status: &Status) -> bool {
     matches!(
         status,
-        Status::Streaming | Status::ToolRunning | Status::Cancelling,
+        Status::Streaming | Status::ToolRunning { .. } | Status::Cancelling,
     )
 }
 
@@ -230,7 +237,7 @@ fn title_slot_spans<'a>(
 
 /// Total visual width of a slot's spans. Free helper so both the fit check
 /// and the final insert share the same measurement.
-fn slot_width(slot: &Vec<Span<'_>>) -> usize {
+fn slot_width(slot: &[Span<'_>]) -> usize {
     slot.iter().map(Span::width).sum()
 }
 
@@ -307,7 +314,9 @@ mod tests {
         }
         assert_eq!(bar.spinner_frame, 3);
 
-        bar.set_status(Status::ToolRunning);
+        bar.set_status(Status::ToolRunning {
+            name: "bash".to_owned(),
+        });
         assert_eq!(bar.spinner_frame, 0);
         assert_eq!(bar.tick_counter, 0);
     }
@@ -379,7 +388,9 @@ mod tests {
     #[test]
     fn tick_wraps_spinner_frames() {
         let mut bar = test_bar();
-        bar.set_status(Status::ToolRunning);
+        bar.set_status(Status::ToolRunning {
+            name: "bash".to_owned(),
+        });
 
         for _ in 0..SPINNER_FRAMES.len() * TICKS_PER_FRAME {
             bar.tick();
@@ -461,7 +472,9 @@ mod tests {
     #[test]
     fn render_tool_running_status() {
         let mut bar = bar_idle(None, "~/projects/demo");
-        bar.set_status(Status::ToolRunning);
+        bar.set_status(Status::ToolRunning {
+            name: "bash".to_owned(),
+        });
         insta::assert_snapshot!(render_status(&mut bar, 80));
     }
 
@@ -497,7 +510,7 @@ mod tests {
         let output = render_top_row(&mut bar, 120);
         let model_at = output.find("test-model").unwrap();
         let title_at = output.find("Fix auth bug").unwrap();
-        let status_at = output.find("ready").unwrap();
+        let status_at = output.find("Ready").unwrap();
         assert!(model_at < title_at, "title should follow model: {output:?}");
         assert!(
             title_at < status_at,
@@ -560,7 +573,7 @@ mod tests {
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("ox"));
         assert!(output.contains("test-model"));
-        assert!(output.contains("ready"));
+        assert!(output.contains("Ready"));
         assert!(
             !output.contains('~'),
             "no tildified path should appear: {output:?}",

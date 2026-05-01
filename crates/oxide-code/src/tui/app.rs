@@ -256,7 +256,7 @@ impl App {
             // window confirms. TUI-only — no agent-side consumer.
             UserAction::ConfirmExit => {
                 if let Status::ExitArmed { until } = self.status_bar.status()
-                    && Instant::now() < until
+                    && Instant::now() < *until
                 {
                     self.should_quit = true;
                 } else {
@@ -290,9 +290,9 @@ impl App {
                 // streaming assistant text — no explicit
                 // `commit_streaming` side channel needed.
                 self.chat.push_tool_call(icon, &label);
+                self.set_active_status(Status::ToolRunning { name: name.clone() });
                 self.pending_calls
                     .insert(id, PendingCall { label, name, input });
-                self.set_active_status(Status::ToolRunning);
             }
             AgentEvent::ToolCallEnd {
                 id,
@@ -405,7 +405,7 @@ impl App {
     /// and the bar was reset to idle.
     fn expire_armed_exit(&mut self) -> bool {
         if let Status::ExitArmed { until } = self.status_bar.status()
-            && Instant::now() >= until
+            && Instant::now() >= *until
         {
             self.status_bar.set_status(Status::Idle);
             return true;
@@ -568,7 +568,7 @@ mod tests {
     fn new_plumbs_resumed_title_into_status_bar() {
         let (app, _rx, _agent_tx) = test_app(Some("Resumed title"));
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert_eq!(app.chat.entry_count(), 0);
         assert!(app.input.is_enabled());
         assert!(!app.should_quit);
@@ -607,7 +607,7 @@ mod tests {
 
         assert!(app.dirty);
         assert_eq!(app.chat.entry_count(), 1);
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.unwrap();
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hi"));
     }
@@ -637,7 +637,7 @@ mod tests {
         app.status_bar.set_status(Status::ExitArmed { until });
 
         assert!(app.expire_armed_exit(), "stale armed state must clear");
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     #[test]
@@ -646,13 +646,13 @@ mod tests {
         // status; the false branch must leave the bar untouched and
         // skip the dirty bump that would otherwise wake the renderer.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
 
         assert!(
             !app.expire_armed_exit(),
             "no-op when status isn't ExitArmed",
         );
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     #[tokio::test]
@@ -738,7 +738,7 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), 1);
         assert!(!app.input.is_enabled(), "streaming disables input");
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
@@ -758,7 +758,7 @@ mod tests {
         app.dispatch_user_action(UserAction::Cancel);
 
         assert_eq!(app.chat.entry_count(), entries_before, "no new chat entry");
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("Cancel forwarded");
         assert!(matches!(forwarded, UserAction::Cancel));
@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(app.chat.entry_count(), 0);
         // Status bar stays idle — Quit flows past the streaming setup so
         // the tear-down path doesn't have to un-spinner it.
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
     }
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
     fn handle_stream_token_switches_to_streaming_and_disables_input() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::StreamToken("partial".to_owned()));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
     }
 
@@ -852,7 +852,7 @@ mod tests {
         // before any visible text arrives.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ThinkingToken("planning...".to_owned()));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         // Unlike StreamToken, thinking does not disable input on its
         // own — the matching SubmitPrompt already did that.
     }
@@ -865,7 +865,10 @@ mod tests {
             name: "bash".to_owned(),
             input: serde_json::json!({"command": "ls"}),
         });
-        assert_eq!(app.status_bar.status(), Status::ToolRunning);
+        assert!(matches!(
+            app.status_bar.status(),
+            Status::ToolRunning { .. }
+        ));
         assert_eq!(
             app.chat.entry_count(),
             1,
@@ -879,11 +882,11 @@ mod tests {
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
         let entries_before = app.chat.entry_count();
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
 
         app.handle_agent_event(AgentEvent::Cancelled);
 
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
         // commit_streaming pushes the partial text as an AssistantText
         // block; push_interrupted_marker pushes the marker — two new
@@ -909,16 +912,16 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         app.dispatch_user_action(UserAction::Cancel);
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
 
         app.handle_agent_event(AgentEvent::StreamToken("late".into()));
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t-late".to_owned(),
             name: "bash".to_owned(),
             input: serde_json::json!({"command": "ls"}),
         });
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
     }
 
     // ── handle_esc ──
@@ -930,7 +933,7 @@ mod tests {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
         let forwarded = rx.recv().await.expect("Cancel forwarded");
         assert!(matches!(forwarded, UserAction::Cancel));
     }
@@ -939,7 +942,7 @@ mod tests {
     fn handle_esc_idle_with_empty_queue_is_silent() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.pending_prompts.is_empty());
     }
 
@@ -978,7 +981,7 @@ mod tests {
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["queued".to_owned()],
         );
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.expect("queued submit forwarded");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
@@ -1038,7 +1041,7 @@ mod tests {
 
         let forwarded = rx.recv().await.expect("queued head forwarded");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "a"));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["b".to_owned()],
@@ -1101,7 +1104,7 @@ mod tests {
         rx.recv().await.expect("active submit forwarded");
         app.dispatch_user_action(UserAction::Cancel);
         rx.recv().await.expect("cancel forwarded");
-        assert_eq!(app.status_bar.status(), Status::Cancelling);
+        assert_eq!(app.status_bar.status(), &Status::Cancelling);
 
         app.dispatch_user_action(UserAction::SubmitPrompt("typed-during-cancel".to_owned()));
 
@@ -1174,11 +1177,11 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(None);
         // Drive into streaming first so TurnComplete has state to tear down.
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
-        assert_eq!(app.status_bar.status(), Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
         assert!(!app.input.is_enabled());
 
         app.handle_agent_event(AgentEvent::TurnComplete);
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
 
@@ -1210,7 +1213,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::Error("API blew up".to_owned()));
 
         assert!(app.chat.last_is_error(), "error entry appended");
-        assert_eq!(app.status_bar.status(), Status::Idle);
+        assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled());
     }
 
