@@ -315,6 +315,17 @@ mod tests {
 
     use super::*;
 
+    // ── Auth::label ──
+
+    #[test]
+    fn label_distinguishes_api_key_from_oauth() {
+        // Both branches reach `/status` and `/config` rows. Pin the
+        // exact strings — a regression that swapped them would mislabel
+        // every user's auth source without otherwise tripping a test.
+        assert_eq!(Auth::ApiKey("secret".to_owned()).label(), "API key");
+        assert_eq!(Auth::OAuth("token".to_owned()).label(), "OAuth");
+    }
+
     // ── ThinkingConfig ──
 
     #[test]
@@ -778,6 +789,36 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
         assert!(msg.contains("insane"), "{msg}");
+    }
+
+    // ── Config::snapshot ──
+
+    #[test]
+    fn snapshot_copies_every_user_facing_field_and_drops_secret() {
+        // The snapshot is what `/config` prints; pin every field so a
+        // regression that forgot to copy one (or that swapped two
+        // names) shows up here, not silently in the rendered table.
+        // The auth secret never reaches the snapshot — only the
+        // `label()` projection does.
+        let cfg = Config {
+            auth: Auth::OAuth("token-must-not-leak".to_owned()),
+            base_url: "https://api.example.test".to_owned(),
+            model: "claude-test-1-0".to_owned(),
+            effort: Some(Effort::Xhigh),
+            max_tokens: 64_000,
+            prompt_cache_ttl: PromptCacheTtl::FiveMin,
+            thinking: None,
+            show_thinking: true,
+            theme: Theme::default(),
+        };
+        let snap = cfg.snapshot();
+        assert_eq!(snap.auth_label, "OAuth");
+        assert_eq!(snap.base_url, "https://api.example.test");
+        assert_eq!(snap.model_id, "claude-test-1-0");
+        assert_eq!(snap.effort, Some(Effort::Xhigh));
+        assert_eq!(snap.max_tokens, 64_000);
+        assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+        assert!(snap.show_thinking);
     }
 
     // ── default_max_tokens ──
