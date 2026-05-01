@@ -55,8 +55,12 @@ pub(crate) enum AgentEvent {
     /// matching head from its preview queue (FIFO) and renders the
     /// drained prompt as a regular user message in chat history.
     PromptDrained(String),
-    /// The current assistant turn is complete (text-only response, no more
-    /// tool calls).
+    /// The current assistant turn finished cleanly (text-only response,
+    /// no more tool calls). Distinct from [`crate::agent::TurnAbort`],
+    /// which carries every *early-exit* reason (cancel, quit, failure)
+    /// internally inside [`crate::agent::agent_turn`]'s `Result`. Sinks
+    /// see only display-facing events; the abort enum stays inside the
+    /// agent loop.
     TurnComplete,
     /// Mid-flight turn was dropped in response to a [`UserAction::Cancel`].
     /// Same teardown as [`Self::TurnComplete`] plus an `(interrupted)`
