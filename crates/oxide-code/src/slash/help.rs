@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use super::context::SlashContext;
-use super::format::write_kv_table;
+use super::format::write_kv_section;
 use super::registry::{BUILT_INS, SlashCommand};
 
 pub(crate) struct HelpCmd;
@@ -18,7 +18,7 @@ impl SlashCommand for HelpCmd {
     }
 
     fn description(&self) -> &'static str {
-        "list available commands"
+        "show available commands"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
@@ -29,17 +29,19 @@ impl SlashCommand for HelpCmd {
 
 /// Plain-text help body. Heading on its own line, blank separator,
 /// then a key-value table where the key is the display label and the
-/// value is the command description. Heading shape matches `/status`
-/// and `/config` so the three commands feel parallel.
+/// value is the command description. A trailing escape-hint footer
+/// teaches the user how to send a literal slash to the model — today
+/// the only path to discovering that is typing an unknown command.
 fn render_help() -> String {
     let labels: Vec<String> = BUILT_INS.iter().map(|c| display_label(*c)).collect();
-    let mut out = String::from("Available commands\n\n");
-    write_kv_table(
-        &mut out,
-        labels
-            .iter()
-            .zip(BUILT_INS)
-            .map(|(label, cmd)| (label.as_str(), cmd.description())),
+    let rows = labels
+        .iter()
+        .zip(BUILT_INS)
+        .map(|(label, cmd)| (label.as_str(), cmd.description()));
+    let mut out = String::new();
+    write_kv_section(&mut out, "Available commands", rows);
+    out.push_str(
+        "\nTip: prefix with `//` to send a literal slash to the model (e.g., `//etc/hosts`).\n",
     );
     out
 }
@@ -85,6 +87,19 @@ mod tests {
                 "help body missing `{needle}`: {body}",
             );
         }
+    }
+
+    #[test]
+    fn render_help_includes_escape_tip_footer() {
+        // The `//foo` escape is otherwise only discoverable by typing
+        // an unknown command — pin the footer so a regression that
+        // drops it costs the user a worst-case onboarding path.
+        let body = render_help();
+        assert!(body.contains("`//`"), "footer missing tip body: {body}");
+        assert!(
+            body.trim_end().ends_with("`//etc/hosts`)."),
+            "tip should be the last paragraph: {body}",
+        );
     }
 
     #[test]

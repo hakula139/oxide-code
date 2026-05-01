@@ -5,7 +5,7 @@
 //! blank line, then key-value rows aligned to a shared gutter.
 
 use super::context::{SessionInfo, SlashContext};
-use super::format::write_kv_table;
+use super::format::write_kv_section;
 use super::registry::SlashCommand;
 
 pub(crate) struct StatusCmd;
@@ -16,7 +16,7 @@ impl SlashCommand for StatusCmd {
     }
 
     fn description(&self) -> &'static str {
-        "show session info (model, cwd, auth, ...)"
+        "show session info"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
@@ -27,17 +27,20 @@ impl SlashCommand for StatusCmd {
 
 /// Render the snapshot as a `key  value` table. Keys are pre-defined
 /// here (not extracted from `SessionInfo`'s field names) so the output
-/// stays stable when the struct grows.
+/// stays stable when the struct grows. `model id` sits next to the
+/// marketing-name `model` so the user debugging a routing issue can
+/// see both at a glance — matching the pair `/config` shows.
 fn render_status(info: &SessionInfo) -> String {
-    let rows: [(&str, &str); 5] = [
+    let rows: [(&str, &str); 6] = [
         ("model", &info.model),
+        ("model id", &info.config.model_id),
         ("cwd", &info.cwd),
         ("version", info.version),
         ("auth", info.config.auth_label),
-        ("session", &info.session_id),
+        ("session id", &info.session_id),
     ];
-    let mut out = String::from("Status\n\n");
-    write_kv_table(&mut out, rows);
+    let mut out = String::new();
+    write_kv_section(&mut out, "Session status", rows);
     out
 }
 
@@ -62,8 +65,6 @@ mod tests {
         // Trait-method end-to-end: `execute` must return `Ok(())` and
         // leave a single non-error block in the chat. Pins the
         // success-path contract the dispatcher relies on.
-        use crate::slash::SlashContext;
-        use crate::slash::test_session_info;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -81,19 +82,21 @@ mod tests {
     fn render_status_starts_with_heading_and_blank_line() {
         let body = render_status(&test_session_info());
         let mut lines = body.lines();
-        assert_eq!(lines.next(), Some("Status"));
+        assert_eq!(lines.next(), Some("Session status"));
         assert_eq!(lines.next(), Some(""), "heading separated by blank line");
     }
 
     #[test]
     fn render_status_emits_one_row_per_session_field() {
         // Every `SessionInfo` field reaches the user — a regression
-        // that drops a row (e.g. by truncating the array) would fail
-        // here before it can ship.
+        // that drops a row (e.g., by truncating the array) would fail
+        // here before it can ship. Pin the row count too so an
+        // accidental row drop doesn't slip past the per-value checks.
         let info = test_session_info();
         let body = render_status(&info);
         for needle in [
             info.model.as_str(),
+            info.config.model_id.as_str(),
             info.cwd.as_str(),
             info.version,
             info.config.auth_label,
@@ -101,18 +104,20 @@ mod tests {
         ] {
             assert!(body.contains(needle), "missing `{needle}`: {body}");
         }
+        let row_count = body.lines().skip(2).filter(|l| !l.is_empty()).count();
+        assert_eq!(row_count, 6, "expected 6 rendered rows: {body}");
     }
 
     #[test]
     fn render_status_aligns_values_to_a_shared_gutter() {
         // The longest key sets the gutter; every row's value must land
         // at the same byte offset so the value column reads as a clean
-        // stripe. Locate each value directly by substring rather than
-        // scanning for double-spaces — values like the cwd may contain
-        // their own spaces.
+        // stripe. Pin the actual expected offset (not just "all rows
+        // agree") — a uniformly broken renderer would otherwise pass.
         let info = test_session_info();
         let values = [
             info.model.as_str(),
+            info.config.model_id.as_str(),
             info.cwd.as_str(),
             info.version,
             info.config.auth_label,
@@ -126,9 +131,10 @@ mod tests {
             .zip(values)
             .map(|(line, value)| line.find(value).expect("value missing from row"))
             .collect();
+        // Longest label is "session id" (10) ⇒ prefix(2) + 10 + gap(2) = 14.
         assert!(
-            cols.iter().all(|c| *c == cols[0]),
-            "value columns not aligned: {cols:?}",
+            cols.iter().all(|c| *c == 14),
+            "value columns not aligned at col 14: {cols:?}",
         );
     }
 }

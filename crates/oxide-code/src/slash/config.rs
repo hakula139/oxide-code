@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use super::context::{SessionInfo, SlashContext};
-use super::format::write_kv_table;
+use super::format::write_kv_section;
 use super::registry::SlashCommand;
 use crate::config::file;
 use crate::util::path::tildify;
@@ -31,7 +31,7 @@ impl SlashCommand for ConfigCmd {
     }
 
     fn description(&self) -> &'static str {
-        "show resolved config (read-only)"
+        "show resolved config and source files"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
@@ -55,10 +55,10 @@ fn render_config(
     let cfg = &info.config;
     let effort = cfg
         .effort
-        .map_or_else(|| "(default)".to_owned(), |e| e.to_string());
+        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
     let max_tokens = cfg.max_tokens.to_string();
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
-    let thinking = if cfg.show_thinking { "shown" } else { "hidden" };
+    let thinking = if cfg.show_thinking { "yes" } else { "no" };
     let resolved: [(&str, &str); 8] = [
         ("model", &info.model),
         ("model id", &cfg.model_id),
@@ -67,31 +67,32 @@ fn render_config(
         ("effort", &effort),
         ("max tokens", &max_tokens),
         ("prompt cache ttl", &cache_ttl),
-        ("thinking", thinking),
+        ("show thinking", thinking),
     ];
     let user = display_path(user_path);
     let project = display_path(project_path);
     let files: [(&str, &str); 2] = [("user", &user), ("project", &project)];
 
-    let mut out = String::from("Config (resolved)\n\n");
-    write_kv_table(&mut out, resolved);
-    out.push_str("\nSources\n\n");
-    write_kv_table(&mut out, files);
+    let mut out = String::new();
+    write_kv_section(&mut out, "Resolved config", resolved);
+    write_kv_section(&mut out, "Source files", files);
     out
 }
 
-/// `$HOME`-relative path string, or the explicit `(none)` /
-/// `(absent)` markers so the user can tell missing-from-disk apart
-/// from never-discovered.
+/// Render the searched path with `(not found)` when the file isn't on
+/// disk, or `(not configured)` when the path itself was never resolved
+/// (e.g., neither `$XDG_CONFIG_HOME` nor `$HOME` is set). The path is
+/// always shown when known, so the user can see *where* we looked even
+/// if nothing was there.
 fn display_path(path: Option<&Path>) -> String {
     let Some(path) = path else {
-        return "(none)".to_owned();
+        return "(not configured)".to_owned();
     };
     let pretty = tildify(path);
     if path.exists() {
         pretty
     } else {
-        format!("{pretty} (absent)")
+        format!("{pretty} (not found)")
     }
 }
 
@@ -116,7 +117,6 @@ mod tests {
         // non-error block in chat. Path discovery may or may not
         // resolve a real config in the test environment; either way
         // the renderer produces output, never an error.
-        use crate::slash::SlashContext;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -134,20 +134,32 @@ mod tests {
     fn render_config_starts_with_resolved_heading_then_sources_section() {
         let info = test_session_info();
         let body = render_config(&info, None, None);
-        assert!(body.starts_with("Config (resolved)"), "{body}");
-        assert!(body.contains("\nSources\n"), "{body}");
+        assert!(body.starts_with("Resolved config"), "{body}");
+        assert!(body.contains("\nSource files\n"), "{body}");
     }
 
     #[test]
     fn render_config_includes_every_resolved_field_value() {
+        // Every `ConfigSnapshot` field reaches the user — a regression
+        // that drops a row would fail here before it can ship. Includes
+        // the `Some(effort)` rendering and `show_thinking` value, both
+        // of which the dedicated tests below pin in their None / true
+        // / false branches but neither covers the happy-path Some +
+        // false combination the live fixture uses.
         let info = test_session_info();
         let cfg = &info.config;
         let body = render_config(&info, None, None);
+        let effort = cfg
+            .effort
+            .map(|e| e.to_string())
+            .expect("fixture sets effort = Some");
         for needle in [
             info.model.as_str(),
             cfg.model_id.as_str(),
             cfg.base_url.as_str(),
             cfg.auth_label,
+            effort.as_str(),
+            "no", // fixture: show_thinking = false
         ] {
             assert!(body.contains(needle), "missing `{needle}`: {body}");
         }
@@ -162,33 +174,31 @@ mod tests {
     }
 
     #[test]
-    fn render_config_renders_effort_or_fallback_marker_when_none() {
+    fn render_config_renders_effort_fallback_marker_when_none() {
         // None should not display as "None" or empty — it should say
-        // explicitly that the value defaults. Pin the marker text so
-        // a refactor that loses the fallback fails here.
+        // explicitly that the value defers to the model's own default.
+        // Pin the marker text so a refactor that loses the fallback
+        // fails here.
         let mut info = test_session_info();
         info.config.effort = None;
         let body = render_config(&info, None, None);
-        assert!(body.contains("(default)"), "{body}");
+        assert!(body.contains("(model default)"), "{body}");
     }
 
     #[test]
-    fn render_config_thinking_renders_shown_or_hidden_per_flag() {
-        // `show_thinking: false` ⇒ "hidden", `true` ⇒ "shown". Pin
-        // both branches so a regression that prints `true` / `false`
-        // fails here. Avoids "show thinking  true" reading as a
-        // verb-phrase next to a bool.
+    fn render_config_thinking_renders_yes_or_no_per_flag() {
+        // The `show_thinking` row mirrors the toml key directly:
+        // label `show thinking`, value `yes` / `no`. Pin both branches
+        // so a regression that prints `true` / `false` (or drops the
+        // row entirely) fails here.
         let mut info = test_session_info();
         info.config.show_thinking = false;
-        assert!(
-            render_config(&info, None, None).contains("hidden"),
-            "false flag should render `hidden`",
-        );
+        let body = render_config(&info, None, None);
+        assert!(body.contains("show thinking"), "label missing: {body}");
+        assert!(body.contains("  no"), "false should render `no`: {body}");
         info.config.show_thinking = true;
-        assert!(
-            render_config(&info, None, None).contains("shown"),
-            "true flag should render `shown`",
-        );
+        let body = render_config(&info, None, None);
+        assert!(body.contains("  yes"), "true should render `yes`: {body}");
     }
 
     #[test]
@@ -196,47 +206,50 @@ mod tests {
         let info = test_session_info();
         let path = PathBuf::from("/nonexistent/dir/config.toml");
         let body = render_config(&info, Some(&path), None);
-        // Nonexistent path gets `(absent)` marker so the user sees the
-        // file isn't actually there.
-        assert!(body.contains("(absent)"), "{body}");
+        // Missing-on-disk paths render the path with `(not found)`,
+        // not the bare path or a placeholder — the user can see
+        // *where* /config looked even when the file is absent.
+        assert!(body.contains("(not found)"), "{body}");
+        assert!(
+            body.contains("/nonexistent/dir/config.toml"),
+            "missing path body: {body}",
+        );
     }
 
     #[test]
     fn render_config_paths_none_marks_each_section_explicitly() {
-        // Both file paths absent: `/config` distinguishes
-        // never-discovered (`(none)`) from on-disk-but-missing
-        // (`(absent)`). When both `user_path` and `project_path` are
-        // `None` (no XDG home, no ox.toml in CWD ancestry) the output
-        // should still render `(none)` placeholders, not blank rows.
+        // When neither path resolved (e.g., no XDG home, no `ox.toml`
+        // in CWD ancestry) both rows render `(not configured)`, not
+        // blank values. Two rows ⇒ two markers.
         let info = test_session_info();
         let body = render_config(&info, None, None);
-        // Two `(none)` rows expected — one per file.
-        assert_eq!(body.matches("(none)").count(), 2, "{body}");
+        assert_eq!(body.matches("(not configured)").count(), 2, "{body}");
     }
 
     // ── display_path ──
 
     #[test]
-    fn display_path_none_yields_explicit_marker() {
-        assert_eq!(display_path(None), "(none)");
+    fn display_path_none_renders_not_configured() {
+        assert_eq!(display_path(None), "(not configured)");
     }
 
     #[test]
-    fn display_path_missing_file_marks_absent() {
+    fn display_path_missing_file_marks_not_found_after_path() {
         let p = PathBuf::from("/definitely/does/not/exist.toml");
         let got = display_path(Some(&p));
-        assert!(got.ends_with("(absent)"), "{got}");
+        assert!(got.ends_with("(not found)"), "{got}");
+        assert!(got.starts_with("/definitely/"), "path missing: {got}");
     }
 
     #[test]
-    fn display_path_existing_file_returns_tildified_value() {
+    fn display_path_existing_file_returns_tildified_value_only() {
         // Use the workspace Cargo.toml — guaranteed to exist when the
-        // test runs.
+        // test runs. Existing files render the bare tildified path
+        // with no marker.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(here.exists(), "test fixture missing");
         let got = display_path(Some(&here));
-        assert!(!got.contains("(absent)"), "{got}");
-        // Tildify either rewrites the home prefix or leaves the path
-        // verbatim; either way, it never inserts the absent marker.
+        assert!(!got.contains("(not found)"), "{got}");
+        assert!(!got.contains("(not configured)"), "{got}");
     }
 }
