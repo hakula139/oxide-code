@@ -31,14 +31,20 @@ impl SlashCommand for DiffCmd {
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
         let cwd = std::env::current_dir().map_err(|e| format!("{e:#}"))?;
-        let text = collect_diff_in(&cwd).map_err(|e| format!("{e:#}"))?;
-        if text.trim().is_empty() {
-            ctx.chat.push_system_message("No uncommitted changes.");
-        } else {
-            ctx.chat.push_system_message(text);
-        }
-        Ok(())
+        execute_in(&cwd, ctx)
     }
+}
+
+/// Body of [`DiffCmd::execute`] with the cwd injected as data so tests
+/// can drive it against a tempdir without touching process state.
+fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
+    if text.trim().is_empty() {
+        ctx.chat.push_system_message("No uncommitted changes.");
+    } else {
+        ctx.chat.push_system_message(text);
+    }
+    Ok(())
 }
 
 /// Gathers tracked + untracked diff text rooted at `cwd`. Falls back
@@ -189,6 +195,63 @@ mod tests {
         git_setup(&path, &["config", "user.email", "test@example.invalid"]);
         git_setup(&path, &["config", "user.name", "Test"]);
         (dir, path)
+    }
+
+    // ── execute_in ──
+
+    #[test]
+    fn execute_in_clean_repo_pushes_no_changes_marker() {
+        // Empty diff → friendly marker, not a blank message. Drives
+        // `execute_in` end-to-end so the system-message dispatch lands
+        // in test coverage, not just `collect_diff_in`.
+        use crate::slash::test_session_info;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let (_dir, repo) = fresh_repo();
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+            .expect("clean repo execute_in is Ok");
+        assert_eq!(chat.entry_count(), 1);
+        assert!(!chat.last_is_error());
+    }
+
+    #[test]
+    fn execute_in_dirty_repo_pushes_diff_text() {
+        // Dirty tree → the diff body itself reaches the chat as a
+        // SystemMessageBlock. Pin that the call doesn't error and that
+        // exactly one block landed (no double-push between the
+        // empty-trim guard and the body branch).
+        use crate::slash::test_session_info;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let (_dir, repo) = fresh_repo();
+        std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+            .expect("dirty repo execute_in is Ok");
+        assert_eq!(chat.entry_count(), 1);
+        assert!(!chat.last_is_error());
+    }
+
+    #[test]
+    fn execute_in_outside_a_repo_returns_err_string() {
+        // The trait boundary stringifies `anyhow::Error` — pin that
+        // the actionable "not inside a git repository" wording reaches
+        // the dispatcher's error wrapper rather than a Debug noise.
+        use crate::slash::test_session_info;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let err = execute_in(dir.path(), &mut SlashContext::new(&mut chat, &info))
+            .expect_err("execute_in must error outside a repo");
+        assert!(err.contains("not inside a git repository"), "{err}");
     }
 
     // ── collect_diff_in ──
