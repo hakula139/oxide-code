@@ -67,15 +67,16 @@ ox                                          # Start an interactive session
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
 │   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
-├── slash.rs                                # Slash-command surface root: parser + dispatcher + SessionInfo
+├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
 │   ├── context.rs                          # SlashContext (borrowed app handles) + SessionInfo (frozen runtime snapshot)
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
-│   ├── help.rs                             # /help — registry-driven command listing with display_label
+│   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
+│   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
 │   ├── parser.rs                           # parse_slash: detect `/cmd args`; allows `:` and `.` for plugin namespaces
-│   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup
-│   └── status.rs                           # /status — model, cwd, version, auth label, session id
+│   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup_in
+│   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
