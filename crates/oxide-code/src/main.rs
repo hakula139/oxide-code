@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction};
-use agent::{TurnOutcome, agent_turn};
+use agent::{TurnAbort, agent_turn};
 use client::anthropic::Client;
 use config::Config;
 use file_tracker::FileTracker;
@@ -401,22 +401,26 @@ async fn agent_loop_task(
                 )
                 .await;
                 match outcome {
-                    Ok(TurnOutcome::Completed) => {
+                    Ok(()) => {
                         _ = sink.send(AgentEvent::TurnComplete);
                     }
-                    Ok(TurnOutcome::Cancelled) => {
+                    Err(TurnAbort::Cancelled) => {
                         _ = sink.send(AgentEvent::Cancelled);
                     }
-                    Ok(TurnOutcome::Quit) => break,
-                    Err(e) => {
+                    Err(TurnAbort::Quit) => break,
+                    Err(TurnAbort::Failed(e)) => {
                         // `{e:#}` flattens the anyhow cause chain into one
                         // string ("stream error: API error (HTTP 503): ...").
                         // Plain `Display` would drop everything below the
                         // outermost context and surface only "stream error",
                         // which doesn't distinguish a transient gateway 5xx
                         // from a permanent config error.
+                        //
+                        // The TUI's `Error` handler runs the same teardown
+                        // as `TurnComplete` (drain queue, re-enable input),
+                        // so emitting both would double-drain the head of
+                        // `pending_prompts` — fire only `Error` here.
                         _ = sink.send(AgentEvent::Error(format!("{e:#}")));
-                        _ = sink.send(AgentEvent::TurnComplete);
                     }
                 }
             }
@@ -507,13 +511,16 @@ async fn bare_repl(
                     break;
                 }
             };
-            // Ignore the `TurnOutcome` discriminant in bare REPL — Ctrl+C is
-            // routed via `shutdown_signal()` (which drops the turn future
-            // from the outer `select!`), not via `UserAction::Cancel`. So
-            // a `TurnOutcome::Cancelled` here would only fire if the test
-            // harness pushed one on the channel; treat it the same as
-            // `Completed` for shell purposes.
-            turn_result?;
+            // Bare REPL routes Ctrl+C via `shutdown_signal()` (which
+            // drops the turn future from the outer `select!`), not via
+            // `UserAction::Cancel`, so `Cancelled` / `Quit` aborts only
+            // arrive in test harnesses; treat them the same as a
+            // completed turn for shell purposes. Real failures still
+            // propagate so the exit code reflects the result.
+            match turn_result {
+                Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
+                Err(TurnAbort::Failed(e)) => return Err(e),
+            }
             _ = sink.send(AgentEvent::TurnComplete);
         }
         Ok(())
@@ -573,9 +580,13 @@ async fn headless(
         &mut user_rx,
     );
     let result: Result<()> = tokio::select! {
-        // Discard the `TurnOutcome`: headless has no follow-up surface,
-        // so Cancelled / Quit / Completed are all the same exit signal.
-        r = turn => r.map(|_| ()),
+        // Headless has no follow-up surface, so user-initiated aborts
+        // (Cancelled / Quit) collapse to a clean exit; only a real
+        // `Failed` propagates so the exit code reflects the failure.
+        r = turn => match r {
+            Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
+            Err(TurnAbort::Failed(e)) => Err(e),
+        },
         () = shutdown_signal() => {
             eprintln!();
             shutdown_fired = true;

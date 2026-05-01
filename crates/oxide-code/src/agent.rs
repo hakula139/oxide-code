@@ -11,7 +11,7 @@ pub(crate) mod pending_calls;
 use std::collections::HashMap;
 use std::future::Future;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -25,29 +25,52 @@ use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
-// ── Turn Outcome ──
+// ── Turn Abort ──
 
-/// Result of one [`agent_turn`] call.
+/// Reasons a turn ends before the model produces a final response.
+/// `Ok(())` from [`agent_turn`] is the implicit "completed" path.
 ///
-/// `Cancelled` and `Quit` are user-initiated terminations: the caller
-/// observes them by returning, then drops the future. Drop cleans up
-/// the in-flight HTTP stream (reqwest closes on drop) and any tool
-/// subprocesses (`tokio::process::Child` is `kill_on_drop(true)`).
-/// Errors bubble through `Result::Err`.
+/// `Cancelled` and `Quit` are user-initiated; the caller drops the
+/// agent future, which closes the in-flight HTTP stream (reqwest
+/// closes on drop) and reaps any tool subprocess
+/// (`tokio::process::Child::kill_on_drop(true)`).
 #[derive(Debug)]
-pub(crate) enum TurnOutcome {
-    /// The model produced a text-only response and the turn ended
-    /// naturally (or [`MAX_TOOL_ROUNDS`] tripped — the safety-cap
-    /// `bail!` branch surfaces as `Err`, not `Completed`).
-    Completed,
-    /// The user pressed Esc / Ctrl+C — drop the future and tell the
-    /// TUI to render an `(interrupted)` marker.
+pub(crate) enum TurnAbort {
+    /// User pressed Esc / Ctrl+C — drop the future and tell the TUI
+    /// to render an `(interrupted)` marker.
     Cancelled,
-    /// The user requested quit (Ctrl+D, confirmed exit, or the TUI
+    /// User requested quit (Ctrl+D, confirmed exit, or the TUI
     /// dropped the action channel). The agent loop returns to its
     /// outer driver, which exits.
     Quit,
+    /// Stream / tool / API error. `anyhow::Error` preserves the
+    /// cause chain so `{e:#}` renders the full context.
+    Failed(anyhow::Error),
 }
+
+impl From<anyhow::Error> for TurnAbort {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl std::fmt::Display for TurnAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("turn cancelled"),
+            Self::Quit => f.write_str("turn quit"),
+            // Delegate alternate / non-alternate formatting so callers
+            // that already do `{e:#}` keep the anyhow cause chain.
+            Self::Failed(e) if f.alternate() => write!(f, "{e:#}"),
+            Self::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Shorthand for `Result<T, TurnAbort>`. Used by the helpers that
+/// race a future against `user_rx` so `?` short-circuits both
+/// abort signals and inner anyhow errors uniformly.
+type AbortResult<T> = std::result::Result<T, TurnAbort>;
 
 // ── Agent Client ──
 
@@ -82,12 +105,14 @@ impl AgentClient for Client {
 /// Drives one user → assistant turn until the model produces a
 /// text-only response or [`MAX_TOOL_ROUNDS`] trips. Records each
 /// assistant / tool-result message to `session` as it completes.
+/// Returns `Ok(())` on a clean completion; the [`TurnAbort`] error
+/// carries every other early-exit reason (cancel, quit, failure).
 ///
 /// Long-running awaits race against `user_rx` for three signals:
 ///
-/// 1. Esc / Ctrl+C → [`TurnOutcome::Cancelled`]; drop unwinds the SSE
+/// 1. Esc / Ctrl+C → [`TurnAbort::Cancelled`]; drop unwinds the SSE
 ///    stream and any tool subprocesses.
-/// 2. TUI sender drop → [`TurnOutcome::Quit`].
+/// 2. TUI sender drop → [`TurnAbort::Quit`].
 /// 3. Mid-turn [`UserAction::SubmitPrompt`] → buffered into
 ///    `pending_user_text`, drained at the next round boundary as a
 ///    trailing user message so the queued text lands in the very next
@@ -100,7 +125,7 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
-) -> Result<TurnOutcome> {
+) -> AbortResult<()> {
     let tool_defs = tools.definitions();
     // SubmitPrompts observed during stream / tool races; drained at
     // the round boundary into trailing user messages.
@@ -108,19 +133,18 @@ pub(crate) async fn agent_turn(
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
+        // First `?` propagates a `TurnAbort` early-exit; second `?`
+        // converts an inner `anyhow::Error` into `TurnAbort::Failed`
+        // via `From<anyhow::Error>`.
         let StreamOutcome {
             blocks,
             parse_errors,
-        } = match await_unless_aborted(
+        } = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
             &mut pending_user_text,
         )
-        .await
-        {
-            Ok(r) => r?,
-            Err(outcome) => return Ok(outcome),
-        };
+        .await??;
 
         let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
@@ -135,10 +159,10 @@ pub(crate) async fn agent_turn(
             // which dispatches it as a fresh `SubmitPrompt`.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(TurnOutcome::Completed);
+            return Ok(());
         }
 
-        let (results, sidecars) = match run_tool_round(
+        let (results, sidecars) = run_tool_round(
             tools,
             tool_uses,
             &parse_errors,
@@ -146,11 +170,7 @@ pub(crate) async fn agent_turn(
             user_rx,
             &mut pending_user_text,
         )
-        .await
-        {
-            Ok(round) => round,
-            Err(outcome) => return Ok(outcome),
-        };
+        .await?;
         let tool_result_msg = Message {
             role: Role::User,
             content: results,
@@ -162,10 +182,10 @@ pub(crate) async fn agent_turn(
         record_drained_prompts(pending_user_text.drain(..), messages, session, sink).await;
     }
 
-    bail!(
+    Err(TurnAbort::Failed(anyhow!(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
-    )
+    )))
 }
 
 /// Extract the `(id, name, input)` triples from each `ToolUse` block in
@@ -193,7 +213,7 @@ async fn run_tool_round(
     sink: &dyn AgentSink,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
-) -> std::result::Result<(Vec<ContentBlock>, Vec<(String, ToolMetadata)>), TurnOutcome> {
+) -> AbortResult<(Vec<ContentBlock>, Vec<(String, ToolMetadata)>)> {
     let mut results = Vec::with_capacity(tool_uses.len());
     let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
     for (id, name, input) in tool_uses {
@@ -261,7 +281,7 @@ async fn dispatch_tool_call(
     parse_error: Option<&String>,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
-) -> std::result::Result<ToolOutput, TurnOutcome> {
+) -> AbortResult<ToolOutput> {
     if let Some(err) = parse_error {
         return Ok(ToolOutput {
             content: format!("tool input JSON failed to parse: {err}; retry with a valid object"),
@@ -303,9 +323,8 @@ async fn record_drained_prompts(
 }
 
 /// Race `fut` against user actions on `user_rx`. Returns the future's
-/// output on completion, or a terminal [`TurnOutcome`] when the user
-/// cancels or quits — `Err(outcome)` so the caller can `?`-style
-/// short-circuit out of the round loop.
+/// output on completion, or a [`TurnAbort`] when the user cancels or
+/// quits so the caller can use `?` to short-circuit the round loop.
 ///
 /// Mid-turn [`UserAction::SubmitPrompt`]s are appended to `pending` —
 /// the calling round drains the buffer into trailing user messages
@@ -315,7 +334,7 @@ async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
-) -> std::result::Result<T, TurnOutcome>
+) -> AbortResult<T>
 where
     F: Future<Output = T>,
 {
@@ -330,10 +349,10 @@ where
             // into `pending`. Cancel responsiveness benefits too.
             biased;
             action = user_rx.recv() => match action {
-                Some(UserAction::Cancel) => return Err(TurnOutcome::Cancelled),
+                Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
                 // `None` means every sender dropped — the TUI is gone, treat
                 // it as a quit so the agent loop exits cleanly.
-                Some(UserAction::Quit) | None => return Err(TurnOutcome::Quit),
+                Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
                 // Idle-state signal that shouldn't reach a busy turn,
                 // but the TUI may still forward it during teardown.
@@ -1007,11 +1026,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_stream_returns_cancelled_outcome() {
+    async fn agent_turn_cancel_during_stream_returns_cancelled_abort() {
         // Biased select picks the queued Cancel before the synchronous
         // stream future, so the turn never produces an assistant
         // message. The session must stay at its pre-turn tail and the
-        // outcome must be Cancelled (not Completed / not an Err).
+        // abort must be Cancelled (not a `Failed` error).
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1021,7 +1040,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         tx.try_send(UserAction::Cancel).unwrap();
 
-        let outcome = agent_turn(
+        let abort = agent_turn(
             &client,
             &tools,
             &mut messages,
@@ -1031,18 +1050,18 @@ mod tests {
             &mut rx,
         )
         .await
-        .expect("cancel must surface as Ok(Cancelled), not Err");
+        .expect_err("cancel must surface as Err(Cancelled)");
 
-        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
         assert_eq!(messages.len(), 1, "no assistant message recorded");
         drop(tx);
     }
 
     #[tokio::test]
-    async fn agent_turn_quit_during_stream_returns_quit_outcome() {
+    async fn agent_turn_quit_during_stream_returns_quit_abort() {
         // `Quit` is the explicit teardown signal; the agent loop relies
         // on it to break out of its outer driver. Pre-queueing it must
-        // surface as Ok(Quit) so callers don't conflate it with cancel.
+        // surface as Err(Quit) so callers don't conflate it with cancel.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1052,7 +1071,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         tx.try_send(UserAction::Quit).unwrap();
 
-        let outcome = agent_turn(
+        let abort = agent_turn(
             &client,
             &tools,
             &mut messages,
@@ -1062,14 +1081,14 @@ mod tests {
             &mut rx,
         )
         .await
-        .expect("quit must surface as Ok(Quit), not Err");
+        .expect_err("quit must surface as Err(Quit)");
 
-        assert!(matches!(outcome, TurnOutcome::Quit));
+        assert!(matches!(abort, TurnAbort::Quit), "got {abort:?}");
         drop(tx);
     }
 
     #[tokio::test]
-    async fn agent_turn_sender_drop_during_turn_collapses_to_quit_outcome() {
+    async fn agent_turn_sender_drop_during_turn_collapses_to_quit_abort() {
         // When every `UserAction` sender drops, `recv()` resolves to
         // `None`. The agent treats it as Quit so the outer loop can
         // exit cleanly instead of looping on a dead channel.
@@ -1082,7 +1101,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         drop(tx);
 
-        let outcome = agent_turn(
+        let abort = agent_turn(
             &client,
             &tools,
             &mut messages,
@@ -1092,13 +1111,13 @@ mod tests {
             &mut rx,
         )
         .await
-        .expect("dead channel must surface as Ok(Quit), not Err");
+        .expect_err("dead channel must surface as Err(Quit)");
 
-        assert!(matches!(outcome, TurnOutcome::Quit));
+        assert!(matches!(abort, TurnAbort::Quit), "got {abort:?}");
     }
 
     #[tokio::test]
-    async fn agent_turn_confirm_exit_is_absorbed_without_aborting_turn() {
+    async fn agent_turn_confirm_exit_completes_turn_normally() {
         // `ConfirmExit` only matters to the TUI's exit-arming hint; the
         // agent must absorb stragglers silently so a buffered press
         // during teardown doesn't kill an in-flight turn.
@@ -1111,7 +1130,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<UserAction>(1);
         tx.try_send(UserAction::ConfirmExit).unwrap();
 
-        let outcome = agent_turn(
+        agent_turn(
             &client,
             &tools,
             &mut messages,
@@ -1123,7 +1142,6 @@ mod tests {
         .await
         .expect("turn must complete despite ConfirmExit");
 
-        assert!(matches!(outcome, TurnOutcome::Completed));
         assert_eq!(messages.len(), 2, "assistant message recorded");
         drop(tx);
     }
@@ -1163,8 +1181,8 @@ mod tests {
             },
         );
 
-        let outcome = turn_result.expect("cancel must surface as Ok(Cancelled), not Err");
-        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
+        assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
         // Tool-round cancel happens before the assistant tool_use and
         // tool_result messages are appended, so the conversation must
         // stay at the pre-turn tail. Iteration-atomic: the next turn
