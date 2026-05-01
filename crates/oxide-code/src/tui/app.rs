@@ -491,15 +491,22 @@ impl App {
 /// are billed at their display width via `unicode-width` so the
 /// truncation budget matches what the user actually sees.
 fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> ratatui::text::Line<'static> {
+    use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
 
     // Replace newlines with a glyph so multi-line prompts collapse to
     // one row without losing the "this is more than it looks" hint.
     let flat = prompt.replace('\n', NEWLINE_GLYPH);
     let display = truncate_to_width(&flat, body_width);
+    // The DIM modifier renders the queued accent at reduced intensity
+    // so the rows read as "yours, in-waiting" rather than competing
+    // with the active input. The +N overflow row reuses theme.dim()
+    // (a different gray) — stylistically intentional: the rows speak
+    // for themselves in queued color, the count is a footnote.
+    let style = theme.queued().add_modifier(Modifier::DIM);
     Line::from(vec![
-        Span::styled(USER_PROMPT_PREFIX, theme.queued()),
-        Span::styled(display, theme.queued()),
+        Span::styled(USER_PROMPT_PREFIX, style),
+        Span::styled(display, style),
     ])
 }
 

@@ -21,7 +21,7 @@ const MAX_VISIBLE_LINES: u16 = 6;
 /// while the buffer is empty.
 const PLACEHOLDER_IDLE: &str = "Ask anything...";
 const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
-const PLACEHOLDER_IDLE_QUEUED: &str = "Press Esc to edit queued, Enter to send";
+const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds another";
 
 /// Multi-line input area at the bottom of the TUI.
 ///
