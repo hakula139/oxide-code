@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
-use super::{MAX_TOOL_OUTPUT_LINE_BYTES, STATUS_LINE_CONT, truncate_to_bytes};
+use super::{MAX_TOOL_OUTPUT_LINE_BYTES, TOOL_BORDER_CONT, truncate_to_bytes};
 use crate::tui::glyphs::BAR;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
@@ -64,7 +64,7 @@ impl<'a> Renderer<'a> {
         row_bg: Option<Style>,
     ) -> Self {
         let separator_width = separator.width();
-        let cont_indent = STATUS_LINE_CONT.width() + number_width + separator_width;
+        let cont_indent = TOOL_BORDER_CONT.width() + number_width + separator_width;
         let cont_spans = make_cont_spans(border_style, number_width, separator_width, row_bg);
         Self {
             ctx,
@@ -90,7 +90,7 @@ impl<'a> Renderer<'a> {
         let line_number = format!("{:>width$}", number, width = self.number_width);
         let bg = self.row_bg.unwrap_or_default();
         let rendered = Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), self.border_style),
+            Span::styled(TOOL_BORDER_CONT.to_owned(), self.border_style),
             Span::styled(line_number, self.ctx.theme.muted().patch(bg)),
             Span::styled(self.separator.to_owned(), self.separator_style.patch(bg)),
             Span::styled(display_text, text_style.patch(bg)),
@@ -111,7 +111,7 @@ impl<'a> Renderer<'a> {
 }
 
 /// Builds the wrapped-line continuation prefix. The bar prefix area
-/// (`▎` + `STATUS_LINE_CONT` padding) stays transparent so it doesn't
+/// (`▎` + `TOOL_BORDER_CONT` padding) stays transparent so it doesn't
 /// inherit the row tint; the text-column padding (number + separator
 /// width) carries `row_bg` so the tint visually starts under the
 /// number column on every wrapped row.
@@ -121,7 +121,7 @@ fn make_cont_spans(
     separator_width: usize,
     row_bg: Option<Style>,
 ) -> Vec<Span<'static>> {
-    let bar_prefix_padding = STATUS_LINE_CONT.width().saturating_sub(BAR.width());
+    let bar_prefix_padding = TOOL_BORDER_CONT.width().saturating_sub(BAR.width());
     let text_col_padding = number_width + separator_width;
     let bg = row_bg.unwrap_or_default();
     vec![
@@ -166,7 +166,7 @@ mod tests {
 
         let row = out.first().expect("renders one line");
         let spans: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(spans, vec![STATUS_LINE_CONT, "  7", " │ ", "hello"]);
+        assert_eq!(spans, vec![TOOL_BORDER_CONT, "  7", " │ ", "hello"]);
     }
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
 
         let row = out.first().expect("renders one line");
         let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(contents[0], STATUS_LINE_CONT);
+        assert_eq!(contents[0], TOOL_BORDER_CONT);
         assert_eq!(contents[1], "14");
         assert_eq!(contents[2], " - ");
         assert_eq!(contents[3], "println!(\"x\");");
@@ -390,8 +390,8 @@ mod tests {
         assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
         let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            cont_text.starts_with("▎     "),
-            "continuation should align under text column: {cont_text:?}",
+            cont_text.starts_with(TOOL_BORDER_CONT),
+            "continuation must keep tool border continuation prefix: {cont_text:?}",
         );
     }
 }

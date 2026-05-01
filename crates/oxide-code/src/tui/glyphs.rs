@@ -44,6 +44,17 @@ pub(crate) const BAR: &str = "▎";
 /// rows align with adjacent tool-block bars.
 pub(crate) const THINKING_PREFIX: &str = "▎ ";
 
+/// First-line prefix for tool-call and tool-result status lines — [`BAR`]
+/// + space. Content sits at col 2.
+pub(crate) const TOOL_BORDER_PREFIX: &str = "▎ ";
+
+/// Continuation prefix for lines subordinate to a tool-block status
+/// header — wrapped tool name / result label and tool output body lines.
+/// Aligns content at col 4, past the [`TOOL_SUCCESS`] / [`TOOL_ERROR`]
+/// indicator, so the body reads as a child of the status header rather
+/// than a peer.
+pub(crate) const TOOL_BORDER_CONT: &str = "▎   ";
+
 /// Tool-result success indicator. No trailing space — tool blocks
 /// handle their own column gap via [`BAR`] and the status-line layout.
 pub(crate) const TOOL_SUCCESS: &str = "✓";
@@ -102,6 +113,22 @@ mod tests {
         assert!(
             THINKING_PREFIX.starts_with(BAR),
             "THINKING_PREFIX ({THINKING_PREFIX:?}) must start with BAR ({BAR:?})",
+        );
+    }
+
+    #[test]
+    fn tool_border_prefix_starts_with_bar() {
+        assert!(
+            TOOL_BORDER_PREFIX.starts_with(BAR),
+            "TOOL_BORDER_PREFIX ({TOOL_BORDER_PREFIX:?}) must start with BAR ({BAR:?})",
+        );
+    }
+
+    #[test]
+    fn tool_border_cont_starts_with_bar() {
+        assert!(
+            TOOL_BORDER_CONT.starts_with(BAR),
+            "TOOL_BORDER_CONT ({TOOL_BORDER_CONT:?}) must start with BAR ({BAR:?})",
         );
     }
 

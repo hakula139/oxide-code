@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 use super::super::RenderCtx;
 use super::numbered_row;
 use super::{
-    MAX_TOOL_OUTPUT_LINES, STATUS_LINE_CONT, border_continuation_prefix, border_style_for,
+    MAX_TOOL_OUTPUT_LINES, TOOL_BORDER_CONT, border_continuation_prefix, border_style_for,
 };
 use crate::tool::ReadExcerptLine;
 use crate::tui::wrap::wrap_line;
@@ -22,16 +22,16 @@ pub(super) fn render(
 ) {
     let border_style = border_style_for(ctx.theme, is_error);
     let width = usize::from(ctx.width);
-    let status_cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let status_cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let context = context_label(path, lines, total_lines);
     let context_line = Line::from(vec![
-        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
         Span::styled(context, ctx.theme.dim()),
     ]);
     out.extend(wrap_line(
         context_line,
         width,
-        STATUS_LINE_CONT.width(),
+        TOOL_BORDER_CONT.width(),
         Some(&status_cont_prefix),
     ));
     if lines.is_empty() {
@@ -58,7 +58,7 @@ pub(super) fn render(
         let hidden = lines.len() - MAX_TOOL_OUTPUT_LINES;
         let noun = if hidden == 1 { "line" } else { "lines" };
         out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
             Span::styled(format!("... +{hidden} {noun}"), ctx.theme.dim()),
         ]));
     }
