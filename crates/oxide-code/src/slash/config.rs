@@ -15,17 +15,17 @@
 //! runtime state live behind `/model`, `/theme`, etc. and stay
 //! session-local (see `docs/research/design/slash-commands.md`).
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use super::context::{SessionInfo, SlashContext};
+use super::format::write_kv_table;
 use super::registry::SlashCommand;
 use crate::config::file;
 use crate::util::path::tildify;
 
-pub(crate) struct Config;
+pub(crate) struct ConfigCmd;
 
-impl SlashCommand for Config {
+impl SlashCommand for ConfigCmd {
     fn name(&self) -> &'static str {
         "config"
     }
@@ -34,11 +34,12 @@ impl SlashCommand for Config {
         "show resolved config (read-only)"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
         let user = file::user_config_path();
         let project = file::find_project_config();
         ctx.chat
             .push_system_message(render_config(ctx.info, user.as_deref(), project.as_deref()));
+        Ok(())
     }
 }
 
@@ -54,40 +55,29 @@ fn render_config(
     let cfg = &info.config;
     let effort = cfg
         .effort
-        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
-    let resolved: Vec<(&str, String)> = vec![
-        ("model", info.model.clone()),
-        ("model id", cfg.model_id.clone()),
-        ("base url", cfg.base_url.clone()),
-        ("auth", cfg.auth_label.to_owned()),
-        ("effort", effort),
-        ("max tokens", cfg.max_tokens.to_string()),
-        ("prompt cache ttl", cfg.prompt_cache_ttl.to_string()),
-        ("show thinking", cfg.show_thinking.to_string()),
+        .map_or_else(|| "(default)".to_owned(), |e| e.to_string());
+    let max_tokens = cfg.max_tokens.to_string();
+    let cache_ttl = cfg.prompt_cache_ttl.to_string();
+    let thinking = if cfg.show_thinking { "shown" } else { "hidden" };
+    let resolved: [(&str, &str); 8] = [
+        ("model", &info.model),
+        ("model id", &cfg.model_id),
+        ("base url", &cfg.base_url),
+        ("auth", cfg.auth_label),
+        ("effort", &effort),
+        ("max tokens", &max_tokens),
+        ("prompt cache ttl", &cache_ttl),
+        ("thinking", thinking),
     ];
-    let files: Vec<(&str, String)> = vec![
-        ("user", display_path(user_path)),
-        ("project", display_path(project_path)),
-    ];
-    let gutter = resolved
-        .iter()
-        .chain(files.iter())
-        .map(|(k, _)| k.len())
-        .max()
-        .unwrap_or(0);
+    let user = display_path(user_path);
+    let project = display_path(project_path);
+    let files: [(&str, &str); 2] = [("user", &user), ("project", &project)];
 
     let mut out = String::from("Config (resolved)\n\n");
-    write_rows(&mut out, &resolved, gutter);
-    out.push_str("\nLoaded from\n\n");
-    write_rows(&mut out, &files, gutter);
+    write_kv_table(&mut out, resolved);
+    out.push_str("\nSources\n\n");
+    write_kv_table(&mut out, files);
     out
-}
-
-fn write_rows(out: &mut String, rows: &[(&str, String)], gutter: usize) {
-    for (key, value) in rows {
-        let pad = gutter.saturating_sub(key.len());
-        _ = writeln!(out, "  {key}{spaces}  {value}", spaces = " ".repeat(pad));
-    }
 }
 
 /// `$HOME`-relative path string, or the explicit `(none)` /
@@ -116,18 +106,36 @@ mod tests {
 
     #[test]
     fn config_metadata_exposes_canonical_name_and_description() {
-        assert_eq!(Config.name(), "config");
-        assert!(!Config.description().is_empty());
+        assert_eq!(ConfigCmd.name(), "config");
+        assert!(!ConfigCmd.description().is_empty());
+    }
+
+    #[test]
+    fn config_execute_pushes_a_non_error_block() {
+        // End-to-end through the trait method: success → one
+        // non-error block in chat. Path discovery may or may not
+        // resolve a real config in the test environment; either way
+        // the renderer produces output, never an error.
+        use crate::slash::SlashContext;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        ConfigCmd.execute("", &mut ctx).unwrap();
+        assert_eq!(chat.entry_count(), 1);
+        assert!(!chat.last_is_error());
     }
 
     // ── render_config ──
 
     #[test]
-    fn render_config_starts_with_resolved_heading_then_loaded_from_section() {
+    fn render_config_starts_with_resolved_heading_then_sources_section() {
         let info = test_session_info();
         let body = render_config(&info, None, None);
         assert!(body.starts_with("Config (resolved)"), "{body}");
-        assert!(body.contains("\nLoaded from\n"), "{body}");
+        assert!(body.contains("\nSources\n"), "{body}");
     }
 
     #[test]
@@ -156,12 +164,31 @@ mod tests {
     #[test]
     fn render_config_renders_effort_or_fallback_marker_when_none() {
         // None should not display as "None" or empty — it should say
-        // explicitly that the model picks the default. Pin the marker
-        // text so a refactor that loses the fallback fails here.
+        // explicitly that the value defaults. Pin the marker text so
+        // a refactor that loses the fallback fails here.
         let mut info = test_session_info();
         info.config.effort = None;
         let body = render_config(&info, None, None);
-        assert!(body.contains("(model default)"), "{body}");
+        assert!(body.contains("(default)"), "{body}");
+    }
+
+    #[test]
+    fn render_config_thinking_renders_shown_or_hidden_per_flag() {
+        // `show_thinking: false` ⇒ "hidden", `true` ⇒ "shown". Pin
+        // both branches so a regression that prints `true` / `false`
+        // fails here. Avoids "show thinking  true" reading as a
+        // verb-phrase next to a bool.
+        let mut info = test_session_info();
+        info.config.show_thinking = false;
+        assert!(
+            render_config(&info, None, None).contains("hidden"),
+            "false flag should render `hidden`",
+        );
+        info.config.show_thinking = true;
+        assert!(
+            render_config(&info, None, None).contains("shown"),
+            "true flag should render `shown`",
+        );
     }
 
     #[test]

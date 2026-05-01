@@ -7,11 +7,12 @@
 use std::fmt::Write as _;
 
 use super::context::SlashContext;
+use super::format::write_kv_table;
 use super::registry::{BUILT_INS, SlashCommand};
 
-pub(crate) struct Help;
+pub(crate) struct HelpCmd;
 
-impl SlashCommand for Help {
+impl SlashCommand for HelpCmd {
     fn name(&self) -> &'static str {
         "help"
     }
@@ -20,30 +21,26 @@ impl SlashCommand for Help {
         "list available commands"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
         ctx.chat.push_system_message(render_help());
+        Ok(())
     }
 }
 
-/// Plain-text help body. The first line is a heading; subsequent rows
-/// are `<label><gap><description>`, padded so descriptions form a
-/// clean second column. The label folds aliases into the canonical
-/// name (`name (alias, alias)`) and appends the usage hint when the
-/// command has one (`name <arg>`).
+/// Plain-text help body. Heading on its own line, blank separator,
+/// then a key-value table where the key is the display label and the
+/// value is the command description. Heading shape matches `/status`
+/// and `/config` so the three commands feel parallel.
 fn render_help() -> String {
     let labels: Vec<String> = BUILT_INS.iter().map(|c| display_label(*c)).collect();
-    let gutter = labels.iter().map(String::len).max().unwrap_or(0);
-
-    let mut out = String::from("Available commands:\n");
-    for (cmd, label) in BUILT_INS.iter().zip(&labels) {
-        let pad = gutter.saturating_sub(label.len());
-        _ = writeln!(
-            out,
-            "  {label}{spaces}  {desc}",
-            spaces = " ".repeat(pad),
-            desc = cmd.description(),
-        );
-    }
+    let mut out = String::from("Available commands\n\n");
+    write_kv_table(
+        &mut out,
+        labels
+            .iter()
+            .zip(BUILT_INS)
+            .map(|(label, cmd)| (label.as_str(), cmd.description())),
+    );
     out
 }
 
@@ -54,9 +51,7 @@ fn render_help() -> String {
 /// - `/clear (new, reset)` — aliases only.
 /// - `/model <model-id>` — usage only.
 /// - `/clear (new, reset) <args>` — both.
-///
-/// Shared with the popup row renderer (added in a later commit).
-pub(crate) fn display_label(cmd: &dyn SlashCommand) -> String {
+fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
     if !cmd.aliases().is_empty() {
         _ = write!(out, " ({})", cmd.aliases().join(", "));
@@ -72,11 +67,55 @@ pub(crate) fn display_label(cmd: &dyn SlashCommand) -> String {
 mod tests {
     use super::*;
 
+    // ── render_help ──
+
+    #[test]
+    fn render_help_starts_with_heading_and_lists_every_command() {
+        let body = render_help();
+        let mut lines = body.lines();
+        assert_eq!(lines.next(), Some("Available commands"));
+        assert_eq!(lines.next(), Some(""), "heading separated by blank line");
+        // Each registered command appears as a row whose body contains
+        // its slash-prefixed canonical name. Skipping the popup-format
+        // alias presentation here — `display_label` already covers it.
+        for cmd in BUILT_INS {
+            let needle = format!("/{}", cmd.name());
+            assert!(
+                body.contains(&needle),
+                "help body missing `{needle}`: {body}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_help_aligns_descriptions_to_a_shared_gutter() {
+        // Pin the actual gutter column the renderer agreed on, not just
+        // "all rows match each other" — a uniformly broken renderer
+        // would still pass the latter. Expected column = "  " row
+        // prefix + longest label width + "  " gap.
+        let body = render_help();
+        let longest = BUILT_INS
+            .iter()
+            .map(|c| display_label(*c).len())
+            .max()
+            .unwrap_or(0);
+        let expected = "  ".len() + longest + "  ".len();
+        for (line, desc) in body
+            .lines()
+            .skip(2)
+            .filter(|l| !l.is_empty())
+            .zip(BUILT_INS.iter().map(|c| c.description()))
+        {
+            let col = line.find(desc).expect("description missing from row");
+            assert_eq!(col, expected, "row mis-aligned: {line:?}");
+        }
+    }
+
     // ── display_label ──
 
     #[test]
     fn display_label_no_aliases_is_just_slashed_name() {
-        assert_eq!(display_label(&Help), "/help");
+        assert_eq!(display_label(&HelpCmd), "/help");
     }
 
     #[test]
@@ -95,49 +134,10 @@ mod tests {
             fn description(&self) -> &'static str {
                 ""
             }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) {}
+            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+                Ok(())
+            }
         }
         assert_eq!(display_label(&Fake), "/clear (new, reset)");
-    }
-
-    // ── render_help ──
-
-    #[test]
-    fn render_help_starts_with_heading_and_lists_every_command() {
-        let body = render_help();
-        let mut lines = body.lines();
-        assert_eq!(lines.next(), Some("Available commands:"));
-        // Each registered command appears as a row whose body contains
-        // its slash-prefixed canonical name. Skipping the popup-format
-        // alias presentation here — `display_label` already covers it.
-        for cmd in BUILT_INS {
-            let needle = format!("/{}", cmd.name());
-            assert!(
-                body.contains(&needle),
-                "help body missing `{needle}`: {body}",
-            );
-        }
-    }
-
-    #[test]
-    fn render_help_aligns_descriptions_to_a_shared_gutter() {
-        // The longest label sets the gutter; every row must position
-        // its description at the same byte offset so the second column
-        // reads as a clean stripe. Locate each description directly by
-        // substring rather than scanning for double-spaces — labels
-        // shorter than the gutter pad with spaces too, which would
-        // confuse a `find("  ")`-style probe.
-        let body = render_help();
-        let cols: Vec<usize> = body
-            .lines()
-            .skip(1)
-            .filter(|l| !l.is_empty())
-            .zip(BUILT_INS.iter().map(|c| c.description()))
-            .map(|(line, desc)| line.find(desc).expect("description missing from row"))
-            .collect();
-        assert!(
-            cols.iter().all(|c| *c == cols[0]),
-            "row gutters not aligned: {cols:?}",
-        );
     }
 }

@@ -202,21 +202,6 @@ impl Config {
     ///
     /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
     /// file > Claude Code OAuth credentials.
-    /// Captures the resolved descriptors `/config` (and friends) print,
-    /// minus the auth secret. Called before [`Self`] is consumed by
-    /// the client constructor so the snapshot survives the move.
-    pub(crate) fn snapshot(&self) -> ConfigSnapshot {
-        ConfigSnapshot {
-            auth_label: self.auth.label(),
-            base_url: self.base_url.clone(),
-            model_id: self.model.clone(),
-            effort: self.effort,
-            max_tokens: self.max_tokens,
-            prompt_cache_ttl: self.prompt_cache_ttl,
-            show_thinking: self.show_thinking,
-        }
-    }
-
     pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
@@ -293,6 +278,21 @@ impl Config {
             show_thinking,
             theme,
         })
+    }
+
+    /// Captures the resolved descriptors `/config` (and friends)
+    /// print, minus the auth secret. Called before `self` is moved
+    /// into the API client so the snapshot survives the move.
+    pub(crate) fn snapshot(&self) -> ConfigSnapshot {
+        ConfigSnapshot {
+            auth_label: self.auth.label(),
+            base_url: self.base_url.clone(),
+            model_id: self.model.clone(),
+            effort: self.effort,
+            max_tokens: self.max_tokens,
+            prompt_cache_ttl: self.prompt_cache_ttl,
+            show_thinking: self.show_thinking,
+        }
     }
 }
 

@@ -4,14 +4,13 @@
 //! never mutates state. Output mirrors `/help`'s shape: a heading, a
 //! blank line, then key-value rows aligned to a shared gutter.
 
-use std::fmt::Write as _;
-
 use super::context::{SessionInfo, SlashContext};
+use super::format::write_kv_table;
 use super::registry::SlashCommand;
 
-pub(crate) struct Status;
+pub(crate) struct StatusCmd;
 
-impl SlashCommand for Status {
+impl SlashCommand for StatusCmd {
     fn name(&self) -> &'static str {
         "status"
     }
@@ -20,8 +19,9 @@ impl SlashCommand for Status {
         "show session info (model, cwd, auth, ...)"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
         ctx.chat.push_system_message(render_status(ctx.info));
+        Ok(())
     }
 }
 
@@ -36,13 +36,8 @@ fn render_status(info: &SessionInfo) -> String {
         ("auth", info.config.auth_label),
         ("session", &info.session_id),
     ];
-    let gutter = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-
     let mut out = String::from("Status\n\n");
-    for (key, value) in rows {
-        let pad = gutter.saturating_sub(key.len());
-        _ = writeln!(out, "  {key}{spaces}  {value}", spaces = " ".repeat(pad));
-    }
+    write_kv_table(&mut out, rows);
     out
 }
 
@@ -58,8 +53,26 @@ mod tests {
         // Pin the user-visible name + description so an edit that
         // accidentally sends them through `tr` lowercase or rephrases
         // the gutter copy fails CI here, not in a manual smoke test.
-        assert_eq!(Status.name(), "status");
-        assert!(!Status.description().is_empty());
+        assert_eq!(StatusCmd.name(), "status");
+        assert!(!StatusCmd.description().is_empty());
+    }
+
+    #[test]
+    fn status_execute_pushes_a_non_error_block() {
+        // Trait-method end-to-end: `execute` must return `Ok(())` and
+        // leave a single non-error block in the chat. Pins the
+        // success-path contract the dispatcher relies on.
+        use crate::slash::SlashContext;
+        use crate::slash::test_session_info;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        StatusCmd.execute("", &mut ctx).unwrap();
+        assert_eq!(chat.entry_count(), 1);
+        assert!(!chat.last_is_error());
     }
 
     // ── render_status ──

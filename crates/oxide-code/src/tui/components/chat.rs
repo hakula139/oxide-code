@@ -285,6 +285,15 @@ impl ChatView {
         self.blocks.last().is_some_and(|b| b.is_error_marker())
     }
 
+    /// User-visible text of the tail block when it's an `ErrorBlock`,
+    /// otherwise `None`. Lets slash-dispatch tests assert on the
+    /// rendered wording (alphabetic chars, not bar glyphs) without
+    /// reaching into block internals.
+    #[cfg(test)]
+    pub(crate) fn last_error_text(&self) -> Option<&str> {
+        self.blocks.last().and_then(|b| b.error_text())
+    }
+
     /// Updates cached viewport height and syncs scroll position. Called
     /// by [`App`](super::super::app::App) after each frame.
     pub(crate) fn update_layout(&mut self, area: Rect) {

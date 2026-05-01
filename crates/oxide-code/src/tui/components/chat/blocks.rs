@@ -102,6 +102,15 @@ pub(super) trait ChatBlock {
     fn is_error_marker(&self) -> bool {
         false
     }
+
+    /// The block's user-visible message when the block is an
+    /// [`ErrorBlock`] — `None` for every other variant. Lets test
+    /// helpers assert on the wording the user sees without reaching
+    /// through the rendered glyph stream.
+    #[cfg(test)]
+    fn error_text(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ── Shared Helpers ──

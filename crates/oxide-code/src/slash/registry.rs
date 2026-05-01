@@ -5,11 +5,11 @@
 //! new command is one file plus one slice entry — no central match
 //! arm, no enum variant.
 
-use super::config::Config;
+use super::config::ConfigCmd;
 use super::context::SlashContext;
-use super::diff::Diff;
-use super::help::Help;
-use super::status::Status;
+use super::diff::DiffCmd;
+use super::help::HelpCmd;
+use super::status::StatusCmd;
 
 /// A locally-dispatched command typed at the input as `/name args`.
 ///
@@ -41,12 +41,18 @@ pub(crate) trait SlashCommand: Sync {
     /// Runs the command. Mutations land through `ctx` (push to chat,
     /// flip status, mutate session) so the trait stays sync — no
     /// channel round-trip to the agent loop is needed for v1.
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>);
+    ///
+    /// Failures return `Err(message)`. The dispatcher renders one
+    /// `ErrorBlock` per failure — commands must not call
+    /// `ctx.chat.push_error(...)` themselves. Successful runs push
+    /// their own informational output (typically a `SystemMessageBlock`)
+    /// before returning `Ok`.
+    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String>;
 }
 
 /// Every built-in v1 command. Order is presentation order in `/help`
 /// and the popup, so the most frequently-used commands sit first.
-pub(crate) const BUILT_INS: &[&dyn SlashCommand] = &[&Help, &Status, &Config, &Diff];
+pub(crate) const BUILT_INS: &[&dyn SlashCommand] = &[&HelpCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
 
 /// Resolves `name` against canonical names then aliases. Returns
 /// `None` for unknown commands — the dispatcher renders an
