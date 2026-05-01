@@ -114,7 +114,7 @@ impl AgentClient for Client {
 ///    stream and any tool subprocesses.
 /// 2. TUI sender drop → [`TurnAbort::Quit`].
 /// 3. Mid-turn [`UserAction::SubmitPrompt`] → buffered into
-///    `pending_user_text`, drained at the next round boundary as a
+///    `pending_prompts`, drained at the next round boundary as a
 ///    trailing user message so the queued text lands in the very next
 ///    API request without aborting in-flight work.
 pub(crate) async fn agent_turn(
@@ -129,7 +129,7 @@ pub(crate) async fn agent_turn(
     let tool_defs = tools.definitions();
     // SubmitPrompts observed during stream / tool races; drained at
     // the round boundary into trailing user messages.
-    let mut pending_user_text: Vec<String> = Vec::new();
+    let mut pending_prompts: Vec<String> = Vec::new();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
@@ -142,7 +142,7 @@ pub(crate) async fn agent_turn(
         } = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
-            &mut pending_user_text,
+            &mut pending_prompts,
         )
         .await??;
 
@@ -154,7 +154,7 @@ pub(crate) async fn agent_turn(
 
         if tool_uses.is_empty() {
             // Text-only turn: no round boundary to drain queued text
-            // into, so any `pending_user_text` instead falls through
+            // into, so any `pending_prompts` instead falls through
             // to the TUI's turn-end drain in `App::finalize_idle`,
             // which dispatches it as a fresh `SubmitPrompt`.
             record_message(session, assistant_msg.clone(), sink).await;
@@ -168,7 +168,7 @@ pub(crate) async fn agent_turn(
             &parse_errors,
             sink,
             user_rx,
-            &mut pending_user_text,
+            &mut pending_prompts,
         )
         .await?;
         let tool_result_msg = Message {
@@ -179,7 +179,7 @@ pub(crate) async fn agent_turn(
         commit_round_writes(session, sink, &assistant_msg, &tool_result_msg, sidecars).await;
         messages.push(assistant_msg);
         messages.push(tool_result_msg);
-        record_drained_prompts(pending_user_text.drain(..), messages, session, sink).await;
+        record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
     Err(TurnAbort::Failed(anyhow!(
