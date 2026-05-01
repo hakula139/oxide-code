@@ -28,6 +28,18 @@ pub(crate) enum Auth {
     OAuth(String),
 }
 
+impl Auth {
+    /// Short label naming the credential type (`"API key"` /
+    /// `"OAuth"`). Surfaced by `/status` and `/config` so the user
+    /// knows which auth source is live without dumping the secret.
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => "API key",
+            Self::OAuth(_) => "OAuth",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ThinkingConfig {

@@ -23,8 +23,9 @@ mod diff;
 mod help;
 mod parser;
 mod registry;
+mod status;
 
-pub(crate) use context::SlashContext;
+pub(crate) use context::{SessionInfo, SlashContext};
 pub(crate) use parser::{Parsed, parse_slash};
 pub(crate) use registry::lookup;
 
@@ -38,6 +39,20 @@ pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
         return;
     };
     cmd.execute(&parsed.args, ctx);
+}
+
+/// Shared test fixture — a fully-populated `SessionInfo` so per-command
+/// tests don't repeat the boilerplate. Lives at the module root so
+/// every sibling `slash::*::tests` module can pull it in.
+#[cfg(test)]
+pub(crate) fn test_session_info() -> SessionInfo {
+    SessionInfo {
+        model: "Test Model".to_owned(),
+        cwd: "~/test".to_owned(),
+        version: "0.0.0-test",
+        auth_label: "API key",
+        session_id: "test-session".to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -55,11 +70,12 @@ mod tests {
     #[test]
     fn dispatch_unknown_command_pushes_error_block() {
         let mut chat = fresh_chat();
+        let info = test_session_info();
         let parsed = Parsed {
             name: "no-such-command".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat));
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(
             chat.last_is_error(),
             "unknown command should land as an ErrorBlock",
@@ -69,12 +85,12 @@ mod tests {
     #[test]
     fn dispatch_known_command_runs_and_does_not_push_error() {
         let mut chat = fresh_chat();
+        let info = test_session_info();
         let parsed = Parsed {
             name: "help".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat));
-        // /help pushes a SystemMessageBlock, not an ErrorBlock.
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
     }

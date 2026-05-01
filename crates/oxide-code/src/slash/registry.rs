@@ -8,6 +8,7 @@
 use super::context::SlashContext;
 use super::diff::Diff;
 use super::help::Help;
+use super::status::Status;
 
 /// A locally-dispatched command typed at the input as `/name args`.
 ///
@@ -44,7 +45,7 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Every built-in v1 command. Order is presentation order in `/help`
 /// and the popup, so the most frequently-used commands sit first.
-pub(crate) const BUILT_INS: &[&dyn SlashCommand] = &[&Help, &Diff];
+pub(crate) const BUILT_INS: &[&dyn SlashCommand] = &[&Help, &Status, &Diff];
 
 /// Resolves `name` against canonical names then aliases. Returns
 /// `None` for unknown commands — the dispatcher renders an

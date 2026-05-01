@@ -28,7 +28,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
-use crate::slash::{self, SlashContext};
+use crate::slash::{self, SessionInfo, SlashContext};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -49,6 +49,9 @@ pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
+    /// Frozen snapshot of session-level descriptors that `/status`,
+    /// `/config`, and other read-only slash commands surface.
+    session_info: SessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
@@ -73,9 +76,8 @@ impl App {
     )]
     pub(crate) fn new(
         theme: &Theme,
-        model: String,
+        session_info: SessionInfo,
         show_thinking: bool,
-        cwd: String,
         title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
@@ -85,13 +87,15 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
-        let mut status_bar = StatusBar::new(theme, model, cwd);
+        let mut status_bar =
+            StatusBar::new(theme, session_info.model.clone(), session_info.cwd.clone());
         status_bar.set_title(title);
         Self {
             theme: theme.clone(),
             status_bar,
             chat,
             input: InputArea::new(theme),
+            session_info,
             agent_rx,
             user_tx,
             tools,
@@ -255,7 +259,7 @@ impl App {
                     // accounting / model context all stay clean.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let mut ctx = SlashContext::new(&mut self.chat);
+                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
                         slash::dispatch(&parsed, &mut ctx);
                         return false;
                     }
@@ -587,9 +591,8 @@ mod tests {
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
             &Theme::default(),
-            "test-model".to_owned(),
+            test_session_info(),
             false,
-            "~/test".to_owned(),
             title.map(ToOwned::to_owned),
             agent_rx,
             user_tx,
@@ -598,6 +601,16 @@ mod tests {
             tools,
         );
         (app, user_rx, agent_tx)
+    }
+
+    fn test_session_info() -> SessionInfo {
+        SessionInfo {
+            model: "test-model".to_owned(),
+            cwd: "~/test".to_owned(),
+            version: "0.0.0-test",
+            auth_label: "API key",
+            session_id: "test-session".to_owned(),
+        }
     }
 
     #[derive(Clone)]

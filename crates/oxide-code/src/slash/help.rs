@@ -122,33 +122,22 @@ mod tests {
     #[test]
     fn render_help_aligns_descriptions_to_a_shared_gutter() {
         // The longest label sets the gutter; every row must position
-        // its description at that column so the second column reads
-        // as a clean stripe. A regression that drops the padding
-        // would land descriptions ragged-right under the names.
+        // its description at the same byte offset so the second column
+        // reads as a clean stripe. Locate each description directly by
+        // substring rather than scanning for double-spaces — labels
+        // shorter than the gutter pad with spaces too, which would
+        // confuse a `find("  ")`-style probe.
         let body = render_help();
-        // Descriptions follow exactly two spaces after the label cell.
-        // Verify by checking the description column index is uniform
-        // across rows.
-        let cols: Vec<_> = body
+        let cols: Vec<usize> = body
             .lines()
-            .skip(1) // heading
+            .skip(1)
             .filter(|l| !l.is_empty())
-            .map(|l| {
-                // Each row begins with two leading spaces. The
-                // description starts at the first non-space char after
-                // the label run + its trailing two-space gap. Locate
-                // it as the byte index of the second double-space.
-                l.strip_prefix("  ")
-                    .unwrap_or(l)
-                    .find("  ")
-                    .expect("each row should have a label/desc gap")
-            })
+            .zip(BUILT_INS.iter().map(|c| c.description()))
+            .map(|(line, desc)| line.find(desc).expect("description missing from row"))
             .collect();
-        if let Some(first) = cols.first() {
-            assert!(
-                cols.iter().all(|c| c == first),
-                "row gutters not aligned: {cols:?}",
-            );
-        }
+        assert!(
+            cols.iter().all(|c| *c == cols[0]),
+            "row gutters not aligned: {cols:?}",
+        );
     }
 }

@@ -38,6 +38,7 @@ use session::handle::{ResumedSession, SessionHandle};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
+use slash::SessionInfo;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
@@ -127,6 +128,7 @@ async fn async_main() -> Result<()> {
     let show_thinking = config.show_thinking;
     let model = config.model.clone();
     let theme = config.theme.clone();
+    let auth_label = config.auth.label();
 
     // Resolve which session to resume (if any) before creating the client,
     // so we can pass the session ID to the API headers.
@@ -171,6 +173,7 @@ async fn async_main() -> Result<()> {
         &client,
         &model,
         show_thinking,
+        auth_label,
         &theme,
         tools,
         resumed,
@@ -262,10 +265,15 @@ async fn shutdown_signal() {
 
 // ── TUI Mode ──
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wires the full TUI surface (client, display config, resumed state, tool registry, file tracker); a builder would obscure which dependencies run_tui owns vs. borrows"
+)]
 async fn run_tui(
     client: &Client,
     model: &str,
     show_thinking: bool,
+    auth_label: &'static str,
     theme: &tui::theme::Theme,
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
@@ -297,12 +305,19 @@ async fn run_tui(
         None => model.to_owned(),
     };
 
+    let session_info = SessionInfo {
+        model: display_model,
+        cwd,
+        version: env!("CARGO_PKG_VERSION"),
+        auth_label,
+        session_id: session.session_id().to_owned(),
+    };
+
     let mut terminal = tui::terminal::init()?;
     let mut app = tui::app::App::new(
         theme,
-        display_model,
+        session_info,
         show_thinking,
-        cwd,
         resumed_title,
         agent_rx,
         user_tx,
