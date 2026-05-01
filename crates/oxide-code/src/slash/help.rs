@@ -37,7 +37,7 @@ fn render_help() -> String {
     let mut out = String::from("Available commands:\n");
     for (cmd, label) in BUILT_INS.iter().zip(&labels) {
         let pad = gutter.saturating_sub(label.len());
-        let _ = writeln!(
+        _ = writeln!(
             out,
             "  {label}{spaces}  {desc}",
             spaces = " ".repeat(pad),
@@ -59,7 +59,7 @@ fn render_help() -> String {
 pub(crate) fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
     if !cmd.aliases().is_empty() {
-        let _ = write!(out, " ({})", cmd.aliases().join(", "));
+        _ = write!(out, " ({})", cmd.aliases().join(", "));
     }
     if let Some(usage) = cmd.usage() {
         out.push(' ');
