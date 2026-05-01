@@ -893,6 +893,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_slash_command_renders_locally_without_forwarding() {
+        // Slash commands stay client-side: the typed text lands as a
+        // user-message block, the command's output lands as a second
+        // block, and the agent loop never sees the prompt. Pin the
+        // full path through `apply_action_locally` so a regression
+        // that fell through to `user_tx.try_send` would fail here.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+
+        assert_eq!(
+            app.chat.entry_count(),
+            2,
+            "user-message + system-message blocks expected",
+        );
+        assert!(
+            app.input.is_enabled(),
+            "slash command must not flip input to streaming",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must not produce an error block",
+        );
+        // The channel must not receive anything — `try_recv` returns
+        // `Empty` when the queue is drained but the sender is alive.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_command_renders_error_without_forwarding() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/no-such".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 2);
+        assert!(app.input.is_enabled());
+        assert!(app.chat.last_is_error());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
     async fn dispatch_cancel_flips_status_to_cancelling_and_forwards() {
         // Cancel acknowledges the user request immediately by flipping
         // the status; the matching `AgentEvent::Cancelled` returns to

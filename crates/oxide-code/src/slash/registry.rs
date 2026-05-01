@@ -52,13 +52,17 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Every built-in v1 command. Order is presentation order in `/help`
 /// and the popup, so the most frequently-used commands sit first.
-pub(crate) const BUILT_INS: &[&dyn SlashCommand] = &[&HelpCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
+pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[&HelpCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
 
-/// Resolves `name` against canonical names then aliases. Returns
-/// `None` for unknown commands — the dispatcher renders an
-/// `ErrorBlock` in that case.
-pub(crate) fn lookup(name: &str) -> Option<&'static dyn SlashCommand> {
-    BUILT_INS
+/// Resolves `name` against `commands` by canonical name first, then
+/// aliases. Returns `None` for unknown names — the dispatcher renders
+/// an `ErrorBlock` in that case. Generic over the slice so tests can
+/// drive it against a synthetic registry.
+pub(super) fn lookup_in<'a>(
+    commands: &'a [&'a dyn SlashCommand],
+    name: &str,
+) -> Option<&'a dyn SlashCommand> {
+    commands
         .iter()
         .find(|cmd| cmd.name() == name || cmd.aliases().contains(&name))
         .copied()
@@ -115,16 +119,49 @@ mod tests {
         }
     }
 
-    // ── lookup ──
+    // ── lookup_in ──
+
+    /// Synthetic command with a canonical name and two aliases — used
+    /// to pin alias-branch behavior without depending on whether any
+    /// real built-in carries an alias.
+    struct AliasedCmd;
+    impl SlashCommand for AliasedCmd {
+        fn name(&self) -> &'static str {
+            "primary"
+        }
+        fn aliases(&self) -> &'static [&'static str] {
+            &["alt", "shortcut"]
+        }
+        fn description(&self) -> &'static str {
+            "fake"
+        }
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
-    fn lookup_resolves_canonical_name() {
-        let cmd = lookup("help").expect("/help is registered");
+    fn lookup_in_resolves_canonical_name() {
+        let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
         assert_eq!(cmd.name(), "help");
     }
 
     #[test]
-    fn lookup_unknown_name_is_absent() {
-        assert!(lookup("nonexistent").is_none());
+    fn lookup_in_resolves_each_alias_to_canonical_impl() {
+        // The alias branch is dead in the live registry today (no
+        // built-in carries an alias), so a mutation that flipped the
+        // OR to AND would survive without this test. Drive a
+        // synthetic registry to pin both branches.
+        let registry: &[&dyn SlashCommand] = &[&AliasedCmd];
+        for alias in ["alt", "shortcut"] {
+            let cmd =
+                lookup_in(registry, alias).unwrap_or_else(|| panic!("alias `{alias}` resolved"));
+            assert_eq!(cmd.name(), "primary");
+        }
+    }
+
+    #[test]
+    fn lookup_in_unknown_name_is_absent() {
+        assert!(lookup_in(BUILT_INS, "nonexistent").is_none());
     }
 }

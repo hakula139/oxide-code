@@ -2,7 +2,7 @@
 //!
 //! [`parse_slash`] decides whether a submitted prompt is a slash
 //! command; [`dispatch`] resolves the parsed command against the
-//! registry and runs it. The TUI's [`App::dispatch_user_action`] calls
+//! registry and runs it. The TUI's `App::apply_action_locally` calls
 //! both: an unmatched prompt continues to the agent loop, a matched
 //! one stays local.
 //!
@@ -29,19 +29,33 @@ mod status;
 
 pub(crate) use context::{SessionInfo, SlashContext};
 pub(crate) use parser::{Parsed, parse_slash};
-pub(crate) use registry::lookup;
 
-/// Resolves and runs a parsed slash command. Renders an `ErrorBlock`
-/// on unknown name or on `Err` returned by the command. Commands
-/// push their own informational output (`SystemMessageBlock`) before
-/// returning `Ok`.
+/// Resolves and runs a parsed slash command against the built-in
+/// registry. See [`dispatch_with`].
 pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
-    let Some(cmd) = lookup(&parsed.name) else {
+    dispatch_with(registry::BUILT_INS, parsed, ctx);
+}
+
+/// Resolves `parsed` against `commands` and runs the matching impl.
+/// Renders an `ErrorBlock` on unknown name or on `Err` returned by
+/// the command; successful commands push their own informational
+/// output (`SystemMessageBlock`) before returning `Ok`.
+///
+/// Extracted so tests can drive the dispatcher with a synthetic
+/// registry — exercising the alias-resolution and error-wrapping
+/// branches against fake commands rather than reimplementing the
+/// dispatcher's tail in test code.
+fn dispatch_with(
+    commands: &[&dyn registry::SlashCommand],
+    parsed: &Parsed,
+    ctx: &mut SlashContext<'_>,
+) {
+    let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         ctx.chat.push_error(&format!(
             "unknown command: /{name}. Available: {available}. \
              Use //{name} to send the literal text.",
             name = parsed.name,
-            available = available_commands(),
+            available = format_available(commands),
         ));
         return;
     };
@@ -50,13 +64,19 @@ pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
     }
 }
 
-/// Comma-separated `/name` list for the unknown-command hint.
-fn available_commands() -> String {
-    let names: Vec<String> = registry::BUILT_INS
-        .iter()
-        .map(|c| format!("/{}", c.name()))
-        .collect();
-    names.join(", ")
+/// Comma-separated `/name` list for the unknown-command hint. Writes
+/// directly into a single `String` to avoid the `Vec<String> + join`
+/// double allocation.
+fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for cmd in commands {
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        _ = write!(out, "/{}", cmd.name());
+    }
+    out
 }
 
 /// Shared test fixture — a fully-populated `SessionInfo` so per-command
@@ -148,37 +168,59 @@ mod tests {
         assert_eq!(chat.entry_count(), 1);
     }
 
-    #[test]
-    fn dispatch_command_failure_renders_error_block_prefixed_with_name() {
-        // Commands return `Err(message)`; the dispatcher must wrap it
-        // as `/name: message` and push an `ErrorBlock`. Pin the prefix
-        // so the user always sees which command failed.
-        struct Failing;
-        impl registry::SlashCommand for Failing {
-            fn name(&self) -> &'static str {
-                "failing"
-            }
-            fn description(&self) -> &'static str {
-                "test"
-            }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-                Err("explicit failure".to_owned())
-            }
+    // ── dispatch_with ──
+
+    /// Synthetic command with two aliases that always returns `Err` —
+    /// drives the real dispatcher's alias-resolution and error-wrapping
+    /// branches against a registry whose contents the test controls.
+    struct Failing;
+    impl registry::SlashCommand for Failing {
+        fn name(&self) -> &'static str {
+            "failing"
         }
-        // Bypass the registry and call execute directly through the
-        // wrapper-style code path. Since dispatch resolves through
-        // `lookup`, exercise the same shape it uses (the ErrorBlock
-        // wrapping happens in dispatch's tail). For Failing to be
-        // reachable through dispatch, it'd need to be in BUILT_INS;
-        // instead we mimic dispatch's tail directly.
+        fn aliases(&self) -> &'static [&'static str] {
+            &["bust", "boom"]
+        }
+        fn description(&self) -> &'static str {
+            "test"
+        }
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+            Err("explicit failure".to_owned())
+        }
+    }
+
+    #[test]
+    fn dispatch_with_command_failure_renders_error_block_prefixed_with_name() {
+        // Pin the dispatcher's actual error-wrapping shape: an `Err`
+        // returned by a command must land as `/name: msg` in an
+        // ErrorBlock. Driven through `dispatch_with` so the test
+        // exercises the real production path, not a hand-rolled
+        // reimplementation of its tail.
         let mut chat = fresh_chat();
         let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        let cmd: &dyn registry::SlashCommand = &Failing;
-        if let Err(msg) = cmd.execute("", &mut ctx) {
-            ctx.chat.push_error(&format!("/{}: {msg}", cmd.name()));
-        }
-        let body = chat.last_error_text().expect("error block present");
-        assert_eq!(body, "/failing: explicit failure");
+        let parsed = Parsed {
+            name: "failing".to_owned(),
+            args: String::new(),
+        };
+        let registry: &[&dyn registry::SlashCommand] = &[&Failing];
+        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        assert_eq!(chat.last_error_text(), Some("/failing: explicit failure"),);
+    }
+
+    #[test]
+    fn dispatch_with_alias_routes_to_canonical_impl() {
+        // Submitting an alias must run the same impl as the canonical
+        // name — and the dispatcher's error wrapping must use the
+        // typed name (the alias), not the canonical one, so the user
+        // sees what they typed echoed back.
+        let mut chat = fresh_chat();
+        let info = test_session_info();
+        let parsed = Parsed {
+            name: "boom".to_owned(),
+            args: String::new(),
+        };
+        let registry: &[&dyn registry::SlashCommand] = &[&Failing];
+        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
     }
 }
