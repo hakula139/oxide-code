@@ -141,6 +141,27 @@ mod tests {
     }
 
     #[test]
+    fn aliased_cmd_fixture_satisfies_trait_contract() {
+        // The lookup_in tests below rely on `AliasedCmd` having
+        // exactly two aliases and a description. Pin the fixture
+        // directly so a drifted edit (one alias, missing description)
+        // breaks here rather than silently misleading later tests —
+        // and so the trait's required slots don't sit as uncovered
+        // stub bodies.
+        use crate::slash::context::SlashContext;
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        assert_eq!(AliasedCmd.name(), "primary");
+        assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
+        assert_eq!(AliasedCmd.description(), "fake");
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        assert_eq!(AliasedCmd.execute("", &mut ctx), Ok(()));
+    }
+
+    #[test]
     fn lookup_in_resolves_canonical_name() {
         let cmd = lookup_in(BUILT_INS, "help").expect("/help is registered");
         assert_eq!(cmd.name(), "help");

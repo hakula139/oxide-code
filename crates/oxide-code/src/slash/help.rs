@@ -138,21 +138,83 @@ mod tests {
         // Pinned with a fake command instead of a registered one so
         // the test doesn't break when /clear's alias list later
         // changes — the format rule itself is what we're locking.
-        struct Fake;
-        impl SlashCommand for Fake {
-            fn name(&self) -> &'static str {
-                "clear"
-            }
-            fn aliases(&self) -> &'static [&'static str] {
-                &["new", "reset"]
-            }
-            fn description(&self) -> &'static str {
-                ""
-            }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-                Ok(())
-            }
+        assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
+    }
+
+    #[test]
+    fn fake_fixture_stub_methods_satisfy_trait_contract() {
+        // `display_label` only reads name / aliases / usage off the
+        // fixture, leaving description + execute as required-but-unused
+        // stubs. Exercise them once here so the fixture's trait surface
+        // doesn't sit as silently-uncovered scaffolding — and so a
+        // future edit that flipped execute to Err can't slip past.
+        use crate::tui::components::chat::ChatView;
+        use crate::tui::theme::Theme;
+
+        assert_eq!(Fake::CLEAR.description(), "");
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(()));
+    }
+
+    #[test]
+    fn display_label_with_usage_appends_hint_after_name() {
+        // No live built-in carries a usage hint today, so the
+        // `usage()` branch in `display_label` is dead in the registry.
+        // Drive a synthetic command to pin both the no-alias + usage
+        // shape (`/model <model-id>`) and the both-present shape
+        // (`/clear (new, reset) <args>`).
+        assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
+        assert_eq!(
+            display_label(&Fake::CLEAR_WITH_USAGE),
+            "/clear (new, reset) <args>",
+        );
+    }
+
+    /// Synthetic `SlashCommand` whose metadata flips per `Fake::*`
+    /// constructor — lets `display_label` tests exercise the no-alias /
+    /// alias-only / usage-only / both-present matrix without spinning
+    /// up a fresh struct per case.
+    struct Fake {
+        name: &'static str,
+        aliases: &'static [&'static str],
+        usage: Option<&'static str>,
+    }
+
+    impl Fake {
+        const CLEAR: Self = Self {
+            name: "clear",
+            aliases: &["new", "reset"],
+            usage: None,
+        };
+        const MODEL: Self = Self {
+            name: "model",
+            aliases: &[],
+            usage: Some("<model-id>"),
+        };
+        const CLEAR_WITH_USAGE: Self = Self {
+            name: "clear",
+            aliases: &["new", "reset"],
+            usage: Some("<args>"),
+        };
+    }
+
+    impl SlashCommand for Fake {
+        fn name(&self) -> &'static str {
+            self.name
         }
-        assert_eq!(display_label(&Fake), "/clear (new, reset)");
+        fn aliases(&self) -> &'static [&'static str] {
+            self.aliases
+        }
+        fn description(&self) -> &'static str {
+            ""
+        }
+        fn usage(&self) -> Option<&'static str> {
+            self.usage
+        }
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+            Ok(())
+        }
     }
 }

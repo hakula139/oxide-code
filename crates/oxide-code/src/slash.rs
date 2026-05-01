@@ -106,6 +106,7 @@ pub(crate) fn test_session_info() -> SessionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::registry::SlashCommand;
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
@@ -166,6 +167,12 @@ mod tests {
         dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
+        // The last block is a SystemMessageBlock, which inherits the
+        // ChatBlock::error_text default returning None. Pin that so a
+        // refactor that flipped the default to Some(_) — and silently
+        // started letting non-error blocks claim error wording — fails
+        // here.
+        assert_eq!(chat.last_error_text(), None);
     }
 
     // ── dispatch_with ──
@@ -187,6 +194,18 @@ mod tests {
         fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
             Err("explicit failure".to_owned())
         }
+    }
+
+    #[test]
+    fn failing_fixture_metadata_matches_what_dispatcher_tests_assume() {
+        // The dispatcher tests below rely on `Failing` carrying both
+        // aliases and a deliberate `Err`. Pin the metadata directly so
+        // a fixture edit that drifted from those assumptions trips
+        // here — and so the trait's required `description` slot isn't
+        // a silently-uncovered stub.
+        assert_eq!(Failing.name(), "failing");
+        assert_eq!(Failing.aliases(), &["bust", "boom"]);
+        assert_eq!(Failing.description(), "test");
     }
 
     #[test]
