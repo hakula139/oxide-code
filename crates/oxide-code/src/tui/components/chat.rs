@@ -246,10 +246,12 @@ impl ChatView {
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
     }
 
-    /// Appends a dim italic `(interrupted)` marker. Pair with
-    /// [`commit_streaming`](Self::commit_streaming) on cancel so the
-    /// transcript shows where the user dropped the turn.
+    /// Appends a dim italic `(interrupted)` marker. Finalizes any
+    /// in-flight streaming buffer first — a cancel implicitly ends
+    /// the current assistant turn's text, mirroring
+    /// [`push_tool_call`](Self::push_tool_call).
     pub(crate) fn push_interrupted_marker(&mut self) {
+        self.commit_streaming();
         self.blocks.push(Box::new(InterruptedMarker));
     }
 
