@@ -705,6 +705,27 @@ mod tests {
         ]
     }
 
+    fn text_turn_with_initial_text(text: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text { text: text.into() },
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageStop,
+        ]
+    }
+
     fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
         vec![
             StreamEvent::ContentBlockStart {
@@ -931,6 +952,43 @@ mod tests {
             })
             .collect();
         assert_eq!(streamed, ["Hello there!"]);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_initial_text_block_streams_without_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn_with_initial_text("Hello immediately")]);
+        let tools = ToolRegistry::new(Vec::new());
+        let sink = CapturingSink::new();
+        let mut user_rx = inert_user_rx();
+        let mut messages = vec![Message::user("hi")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut user_rx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Hello immediately"),
+        );
+        let streamed: Vec<String> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::StreamToken(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, ["Hello immediately"]);
     }
 
     #[tokio::test]

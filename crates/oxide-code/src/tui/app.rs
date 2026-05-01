@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
@@ -103,7 +103,18 @@ impl App {
 
     /// Main event loop. Runs until the user quits or the agent channel closes.
     pub(crate) async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
-        let mut crossterm_events = EventStream::new();
+        self.run_with_events(terminal, EventStream::new()).await
+    }
+
+    async fn run_with_events<W, S>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+        mut crossterm_events: S,
+    ) -> Result<()>
+    where
+        W: std::io::Write,
+        S: Stream<Item = std::io::Result<Event>> + Unpin,
+    {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -420,7 +431,10 @@ impl App {
 
     // ── Rendering ──
 
-    fn render(&mut self, terminal: &mut Tui) -> Result<()> {
+    fn render<W: std::io::Write>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<W>>,
+    ) -> Result<()> {
         let mut chat_area = ratatui::layout::Rect::default();
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
@@ -514,16 +528,18 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::prelude::CrosstermBackend;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::tool::ToolRegistry;
-
-    // `App::run` / `App::render` need a real terminal and stay untested.
 
     /// Fresh idle `App` plus the `user_tx` consumer (for forwarded-action
     /// assertions) and the `agent_tx` producer (kept alive so the
@@ -571,6 +587,35 @@ mod tests {
         (app, user_rx, agent_tx)
     }
 
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn crossterm_test_terminal(
+        width: u16,
+        height: u16,
+    ) -> (
+        Terminal<CrosstermBackend<SharedWriter>>,
+        Arc<Mutex<Vec<u8>>>,
+    ) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
+        let opts = TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
+        };
+        (Terminal::with_options(backend, opts).unwrap(), buf)
+    }
+
     // ── App::new ──
 
     #[test]
@@ -596,6 +641,35 @@ mod tests {
         // value from `SessionData` won't leave a blank slot in the bar.
         let (app, _rx, _agent_tx) = test_app(Some("   \n "));
         assert!(app.status_bar.title().is_none());
+    }
+
+    // ── run_with_events ──
+
+    #[tokio::test]
+    async fn run_with_events_expires_armed_exit_on_tick_before_channel_close() {
+        let (mut app, _rx, agent_tx) = test_app(None);
+        let until = Instant::now()
+            .checked_sub(EXIT_WINDOW)
+            .expect("monotonic clock has run long enough for a test deadline");
+        app.status_bar.set_status(Status::ExitArmed { until });
+        app.dirty = false;
+
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let closer = tokio::spawn(async move {
+            tokio::time::sleep(TICK_INTERVAL * 2).await;
+            drop(agent_tx);
+        });
+
+        app.run_with_events(
+            &mut terminal,
+            futures::stream::pending::<std::io::Result<Event>>(),
+        )
+        .await
+        .unwrap();
+        closer.await.unwrap();
+
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.should_quit);
     }
 
     // ── handle_crossterm_event ──
@@ -1368,6 +1442,28 @@ mod tests {
             "no-op when status isn't ExitArmed",
         );
         assert_eq!(app.status_bar.status(), &Status::Idle);
+    }
+
+    // ── render ──
+
+    const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+    const END_SYNC: &[u8] = b"\x1b[?2026l";
+
+    fn index_of(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn render_brackets_frame_with_sync_update_bytes() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let (mut terminal, buf) = crossterm_test_terminal(60, 8);
+
+        app.render(&mut terminal).unwrap();
+
+        let bytes = buf.lock().unwrap();
+        let begin = index_of(&bytes, BEGIN_SYNC).expect("BeginSynchronizedUpdate emitted");
+        let end = index_of(&bytes, END_SYNC).expect("EndSynchronizedUpdate emitted");
+        assert!(begin < end, "sync update must bracket the rendered frame");
     }
 
     // ── draw_frame ──
