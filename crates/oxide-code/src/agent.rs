@@ -312,10 +312,7 @@ async fn record_drained_prompts(
     sink: &dyn AgentSink,
 ) {
     for text in texts {
-        let queued_msg = Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text { text: text.clone() }],
-        };
+        let queued_msg = Message::user(text.clone());
         record_message(session, queued_msg.clone(), sink).await;
         messages.push(queued_msg);
         _ = sink.send(AgentEvent::PromptDrained(text));
