@@ -1,8 +1,11 @@
-//! Shared row primitive for tool result bodies that render a
+//! Shared row primitive for chat blocks that render a
 //! `[bar] [number] [separator] [text]` row shape. Read / grep use the
-//! default `" │ "` pipe separator with no row background; diff sides
-//! pass the `- ` / `+ ` sign as separator and a Catppuccin red / green
-//! row bg via [`Renderer::with_style`].
+//! default `" │ "` pipe separator with no row background; Edit-tool
+//! diff sides and the slash `/diff` `GitDiffBlock` pass the `- ` / `+ `
+//! sign as separator and a Catppuccin red / green row bg via
+//! [`Renderer::with_style`]. Visibility is widened to `pub(in
+//! super::super)` so non-tool block modules (`blocks::git_diff`) reuse
+//! the renderer without having to physically move it.
 //!
 //! The renderer captures per-call state — border style, separator,
 //! optional row bg, number column width, continuation prefix — once at
@@ -24,7 +27,7 @@ use crate::tui::wrap::{expand_tabs, wrap_line};
 const DEFAULT_SEPARATOR: &str = " │ ";
 
 /// Renders numbered rows under a shared bordered tool-result body.
-pub(super) struct Renderer<'a> {
+pub(in super::super) struct Renderer<'a> {
     ctx: &'a RenderCtx<'a>,
     border_style: Style,
     number_width: usize,
@@ -38,7 +41,11 @@ pub(super) struct Renderer<'a> {
 impl<'a> Renderer<'a> {
     /// Default constructor for plain numbered rows — pipe separator,
     /// no row bg. Used by read / grep.
-    pub(super) fn new(ctx: &'a RenderCtx<'a>, border_style: Style, number_width: usize) -> Self {
+    pub(in super::super) fn new(
+        ctx: &'a RenderCtx<'a>,
+        border_style: Style,
+        number_width: usize,
+    ) -> Self {
         Self::with_style(
             ctx,
             border_style,
@@ -55,7 +62,7 @@ impl<'a> Renderer<'a> {
     ///
     /// [`Theme::diff_add_row`]: crate::tui::theme::Theme::diff_add_row
     /// [`Theme::diff_del_row`]: crate::tui::theme::Theme::diff_del_row
-    pub(super) fn with_style(
+    pub(in super::super) fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
         number_width: usize,
@@ -78,7 +85,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub(super) fn render(
+    pub(in super::super) fn render(
         &self,
         out: &mut Vec<Line<'static>>,
         number: usize,
