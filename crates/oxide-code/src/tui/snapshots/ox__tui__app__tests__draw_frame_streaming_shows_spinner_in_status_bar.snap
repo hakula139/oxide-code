@@ -2,7 +2,7 @@
 source: crates/oxide-code/src/tui/app.rs
 expression: "render_app(&mut app, 60, 8)"
 ---
-"  ox │ test-model │ ⣾ Streaming · Esc to interrupt  ~/test  "
+"  ox │ test-model │ ⣷ Streaming · Esc to interrupt  ~/test  "
 "────────────────────────────────────────────────────────────"
 "❯ working...                                                "
 "                                                            "
