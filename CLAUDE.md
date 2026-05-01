@@ -67,6 +67,15 @@ ox                                          # Start an interactive session
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
 │   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
+├── slash.rs                                # Slash-command surface root: parser + dispatcher + SessionInfo
+├── slash/
+│   ├── config.rs                           # /config — read-only resolved config + layered file paths
+│   ├── context.rs                          # SlashContext (borrowed app handles) + SessionInfo (frozen runtime snapshot)
+│   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
+│   ├── help.rs                             # /help — registry-driven command listing with display_label
+│   ├── parser.rs                           # parse_slash: detect `/cmd args`; allows `:` and `.` for plugin namespaces
+│   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup
+│   └── status.rs                           # /status — model, cwd, version, auth label, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
@@ -94,6 +103,7 @@ ox                                          # Start an interactive session
 │   │   │       ├── error.rs                # ErrorBlock
 │   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
+│   │   │       ├── system.rs               # SystemMessageBlock — left-bar accent + body text for slash-command output
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
 │   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows (text, grep paths, glob list, footers)

@@ -59,6 +59,13 @@ The direction is simple:
 - Edit and Write require a prior full Read and refuse if the on-disk bytes have drifted (xxh64 fallback for cloud-sync mtime touches).
 - Tracker state persists into the session JSONL on clean exit and restores on resume.
 
+### Slash Commands
+
+- `/help`, `/diff`, `/status`, `/config` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock`.
+- Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
+- Aliases display inline (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.
+- Read-only by design: no slash command writes to user config files. Mutations to runtime state (`/model`, `/theme`) will be session-local on a NixOS-style declarative setup, restart returns to the user-declared values.
+
 ### Authentication & Configuration
 
 - Anthropic API key via `ANTHROPIC_API_KEY` or config file.
@@ -67,13 +74,15 @@ The direction is simple:
 
 ## Current Focus
 
-### Slash Commands
+### Slash Commands (continuation)
 
-Interactive commands typed in the REPL / TUI, processed locally before reaching the model.
+The first wave (`/help`, `/diff`, `/status`, `/config`) shipped under Working Today. Remaining v1 surface:
 
-- Session: `/clear`, `/compact`, `/resume`.
-- Runtime config: `/model`, `/config`.
-- Info: `/help`, `/cost`, `/status`.
+- Session: `/clear`, `/resume`.
+- Mid-session swap: `/model`, `/theme`.
+- Workflow: `/init` (submits a fixed prompt that asks the model to author `CLAUDE.md` / `AGENTS.md`).
+- Autocomplete popup: two-column overlay above the input with matched-character emphasis (Claude Code shape).
+- Deferred: `/compact` (needs a summarization call we don't have), `/cost` (needs token persistence we don't have), `/login` / `/logout` (interactive OAuth), custom user commands (markdown templates).
 
 ### Permission & Approval
 
