@@ -23,6 +23,8 @@ use std::time::SystemTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::util::text::ELLIPSIS;
+
 // ── Tool Definition ──
 
 /// Schema sent to the Anthropic API to describe an available tool.
@@ -660,7 +662,10 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
         .char_indices()
         .nth(MAX_LINE_LENGTH)
         .map_or(line.len(), |(i, _)| i);
-    Cow::Owned(format!("{}... [{total_chars} chars]", &line[..boundary]))
+    Cow::Owned(format!(
+        "{}{ELLIPSIS} [{total_chars} chars]",
+        &line[..boundary]
+    ))
 }
 
 #[cfg(test)]
