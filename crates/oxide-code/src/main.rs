@@ -426,9 +426,11 @@ async fn agent_loop_task(
                     }
                 }
             }
-            // `ConfirmExit` is TUI-only — `apply_action_locally` no
-            // longer forwards it. `Cancel` arrives idle when the user
-            // hammered Esc / Ctrl+C with no turn in flight.
+            // `Cancel` arrives idle when the user hammered Esc /
+            // Ctrl+C with no turn in flight. `ConfirmExit` is TUI-only;
+            // `apply_action_locally` short-circuits it before the
+            // forward path, so it never reaches `recv` here, and the
+            // arm exists only for exhaustive matching.
             UserAction::Cancel | UserAction::ConfirmExit => {}
             UserAction::Quit => break,
         }
