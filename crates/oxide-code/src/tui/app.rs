@@ -932,7 +932,10 @@ mod tests {
         );
         let text = rendered_text(&mut app, 60, 12);
         assert!(text.contains("partial answer"), "stream tail kept: {text}");
-        assert!(text.contains("(interrupted)"), "marker present: {text}");
+        assert!(
+            text.contains(crate::agent::event::INTERRUPTED_MARKER),
+            "marker present: {text}",
+        );
     }
 
     #[test]
@@ -1197,7 +1200,10 @@ mod tests {
 
         assert_eq!(app.chat.entry_count(), entries_before + 1);
         let text = rendered_text(&mut app, 60, 8);
-        assert!(text.contains("(interrupted)"), "marker present: {text}");
+        assert!(
+            text.contains(crate::agent::event::INTERRUPTED_MARKER),
+            "marker present: {text}",
+        );
     }
 
     #[test]

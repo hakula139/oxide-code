@@ -517,6 +517,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker;
     use crate::message::{ContentBlock, Role};
+    use crate::tui::glyphs::{ASSISTANT_PREFIX, BAR, TOOL_ERROR};
 
     // ── Fixtures ──
 
@@ -726,7 +727,7 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("(result)"));
         assert!(text.contains("stderr"));
-        assert!(text.contains('✗'));
+        assert!(text.contains(TOOL_ERROR));
     }
 
     #[test]
@@ -754,7 +755,7 @@ mod tests {
         // Assistant text renders bar-less after the redesign; load_history
         // is a natural place to pin this without a standalone test.
         assert!(
-            !text.contains('▎'),
+            !text.contains(BAR),
             "assistant text should render without the left bar: {text}"
         );
     }
@@ -997,7 +998,7 @@ mod tests {
         // Bar redesign: user messages render bar-less. A regressed snapshot
         // that re-adds `▎` would land silently without this invariant.
         assert!(
-            !text.contains('▎'),
+            !text.contains(BAR),
             "user message should render without the left bar: {text}"
         );
     }
@@ -1083,7 +1084,10 @@ mod tests {
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("partial response");
         let text = all_text(&chat);
-        assert!(text.contains('◉'), "should show assistant icon");
+        assert!(
+            text.contains(ASSISTANT_PREFIX),
+            "should show assistant icon"
+        );
         assert!(text.contains("partial response"));
     }
 
@@ -1119,7 +1123,10 @@ mod tests {
         chat.append_stream_token("response");
 
         let text = all_text(&chat);
-        assert!(text.contains('◉'), "new turn should show assistant icon");
+        assert!(
+            text.contains(ASSISTANT_PREFIX),
+            "new turn should show assistant icon"
+        );
     }
 
     #[test]
@@ -1132,7 +1139,7 @@ mod tests {
         chat.streaming = Some(s);
 
         let text = all_text(&chat);
-        let count = text.matches('◉').count();
+        let count = text.matches(ASSISTANT_PREFIX).count();
         assert_eq!(count, 1, "icon should appear once, not duplicated");
     }
 
@@ -1422,7 +1429,7 @@ mod tests {
         // Bar is preserved specifically on tool call / tool result — it
         // visually groups the call with its output and color-codes status.
         assert!(
-            text.contains('▎'),
+            text.contains(BAR),
             "tool call should retain the left bar: {text}"
         );
     }
@@ -1466,7 +1473,7 @@ mod tests {
             "expected one blank separator between groups: {lines:?}",
         );
         assert!(
-            separators.iter().all(|s| !s.contains('▎')),
+            separators.iter().all(|s| !s.contains(BAR)),
             "spacer must be borderless: {separators:?}",
         );
     }
@@ -1538,7 +1545,7 @@ mod tests {
             .lines
             .iter()
             .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.contains('▎'))
+            .find(|s| s.content.contains(BAR))
             .map(|s| s.style)
             .expect("rendered line should contain a ▎ span");
         assert_eq!(
@@ -2050,7 +2057,7 @@ mod tests {
         assert!(text.contains("✗"));
         assert!(text.contains("something broke"));
         assert!(
-            !text.contains('▎'),
+            !text.contains(BAR),
             "error block should render without the left bar: {text}"
         );
     }
