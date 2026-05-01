@@ -160,8 +160,12 @@ impl ChatView {
         }
     }
 
-    /// Appends a user message to the chat.
+    /// Appends a user message to the chat. Finalizes any in-flight
+    /// streaming buffer first — a fresh user turn implicitly ends the
+    /// previous assistant turn's text, mirroring [`push_tool_call`](Self::push_tool_call)
+    /// and [`push_interrupted_marker`](Self::push_interrupted_marker).
     pub(crate) fn push_user_message(&mut self, text: String) {
+        self.commit_streaming();
         self.blocks.push(Box::new(UserMessage::new(text)));
         self.auto_scroll = true;
     }

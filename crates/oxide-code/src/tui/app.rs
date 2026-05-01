@@ -322,7 +322,6 @@ impl App {
             // the preview entry "graduates" into the conversation.
             AgentEvent::PromptDrained(text) => {
                 self.pending_prompts.pop_front();
-                self.chat.commit_streaming();
                 self.chat.push_user_message(text);
                 self.sync_input_queue_hint();
             }
