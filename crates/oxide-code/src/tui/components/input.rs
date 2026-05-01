@@ -126,14 +126,7 @@ impl InputArea {
     pub(crate) fn set_text(&mut self, text: &str) {
         self.textarea.select_all();
         self.textarea.cut();
-        for (i, line) in text.split('\n').enumerate() {
-            if i > 0 {
-                self.textarea.insert_newline();
-            }
-            for ch in line.chars() {
-                self.textarea.insert_char(ch);
-            }
-        }
+        self.textarea.insert_str(text);
         self.scroll_top.set(0);
     }
 
