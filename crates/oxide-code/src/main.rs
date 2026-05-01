@@ -359,6 +359,15 @@ async fn run_tui(
     result
 }
 
+/// Drives the TUI's agent loop: reads `UserAction`s from `user_rx`,
+/// runs each `SubmitPrompt` through [`agent_turn`], and forwards the
+/// outcome to the [`tui::event::ChannelSink`].
+///
+/// `Error` and `TurnComplete` are mutually exclusive — the TUI's
+/// `Error` handler runs the same teardown as `TurnComplete` (drain
+/// queue, re-enable input), so emitting both after a failed turn
+/// would double-drain `pending_prompts`'s head. Each [`TurnAbort`]
+/// arm emits exactly one terminal event.
 async fn agent_loop_task(
     client: Client,
     tools: Arc<ToolRegistry>,
@@ -409,17 +418,10 @@ async fn agent_loop_task(
                     }
                     Err(TurnAbort::Quit) => break,
                     Err(TurnAbort::Failed(e)) => {
-                        // `{e:#}` flattens the anyhow cause chain into one
-                        // string ("stream error: API error (HTTP 503): ...").
-                        // Plain `Display` would drop everything below the
-                        // outermost context and surface only "stream error",
-                        // which doesn't distinguish a transient gateway 5xx
-                        // from a permanent config error.
-                        //
-                        // The TUI's `Error` handler runs the same teardown
-                        // as `TurnComplete` (drain queue, re-enable input),
-                        // so emitting both would double-drain the head of
-                        // `pending_prompts` — fire only `Error` here.
+                        // `{e:#}` flattens the anyhow cause chain so the
+                        // user sees both the outer "stream error" and the
+                        // inner "HTTP 503" — plain `Display` would drop
+                        // every layer below the outermost context.
                         _ = sink.send(AgentEvent::Error(format!("{e:#}")));
                     }
                 }

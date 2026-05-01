@@ -237,12 +237,6 @@ mod tests {
     use crate::tool::ToolRegistry;
 
     // ── StdioSink::send ──
-    //
-    // `send` writes to stdout/stderr, which cargo's test harness captures
-    // and discards on success — so the test suite covers the match-arm
-    // dispatch and the Result contract rather than asserting on rendered
-    // bytes. Formatting-assertion tests belong behind an extracted
-    // rendering helper (see `docs/roadmap.md` → Test Coverage).
 
     fn test_sink(show_thinking: bool) -> StdioSink {
         StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
