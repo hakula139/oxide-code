@@ -37,12 +37,16 @@ impl SlashCommand for DiffCmd {
 
 /// Body of [`DiffCmd::execute`] with the cwd injected as data so tests
 /// can drive it against a tempdir without touching process state.
+/// Empty trees still emit a friendly marker via the same
+/// `SystemMessageBlock` `/help` and `/status` use; non-empty diffs go
+/// through `GitDiffBlock` so red / green row backgrounds and the
+/// line-number gutter mirror the Edit-tool diff body.
 fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
     let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
     if text.trim().is_empty() {
         ctx.chat.push_system_message("No uncommitted changes.");
     } else {
-        ctx.chat.push_system_message(text);
+        ctx.chat.push_git_diff(text);
     }
     Ok(())
 }

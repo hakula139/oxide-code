@@ -23,9 +23,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, InterruptedMarker,
-    RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
-    last_has_width,
+    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, GitDiffBlock,
+    InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
+    ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
@@ -257,6 +257,13 @@ impl ChatView {
     /// from agent prose.
     pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
         self.blocks.push(Box::new(SystemMessageBlock::new(body)));
+    }
+
+    /// Appends a `git diff` body rendered with the same red / green
+    /// row backgrounds and left line-number gutter as the Edit-tool
+    /// diff. Used by `/diff` so uncommitted changes read at a glance.
+    pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
+        self.blocks.push(Box::new(GitDiffBlock::new(text)));
     }
 
     /// Appends a dim italic `(interrupted)` marker. Finalizes any

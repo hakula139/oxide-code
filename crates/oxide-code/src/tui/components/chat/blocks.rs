@@ -12,6 +12,7 @@
 
 mod assistant;
 mod error;
+mod git_diff;
 mod interrupted;
 mod streaming;
 mod system;
@@ -20,6 +21,7 @@ mod user;
 
 pub(super) use assistant::{AssistantText, AssistantThinking};
 pub(super) use error::ErrorBlock;
+pub(super) use git_diff::GitDiffBlock;
 pub(super) use interrupted::InterruptedMarker;
 pub(super) use streaming::StreamingAssistant;
 pub(super) use system::SystemMessageBlock;
