@@ -29,7 +29,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{BlockKind, ChatBlock, RenderCtx};
 use crate::tool::ToolResultView;
-use crate::tui::glyphs::{BAR, TOOL_ERROR, TOOL_SUCCESS};
+use crate::tui::glyphs::{BAR, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -44,16 +44,6 @@ const MAX_TOOL_OUTPUT_LINES: usize = 5;
 /// budget; this cap exists to avoid pathological multi-kilobyte lines
 /// pasted into tool output.
 const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
-
-/// First-line prefix for tool-call and tool-result status lines — bar +
-/// space. Content sits at col 2.
-const BORDER_PREFIX: &str = "▎ ";
-
-/// Prefix for lines subordinate to the status header — wrapped tool
-/// name / result label (when the header overflows) and tool output body
-/// lines. Aligns content at col 4, past the `✓` / `✗` indicator, so the
-/// body reads as a child of the status header rather than a peer.
-const STATUS_LINE_CONT: &str = "▎   ";
 
 // ── Tool Call ──
 
@@ -76,9 +66,9 @@ impl ToolCallBlock {
 impl ChatBlock for ToolCallBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let border_style = ctx.theme.tool_border();
-        let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+        let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
         let line = Line::from(vec![
-            Span::styled(BORDER_PREFIX.to_owned(), border_style),
+            Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
             Span::styled(self.icon.to_owned(), ctx.theme.tool_icon()),
             Span::raw(" "),
             Span::styled(self.label.clone(), ctx.theme.text()),
@@ -86,7 +76,7 @@ impl ChatBlock for ToolCallBlock {
         wrap_line(
             line,
             usize::from(ctx.width),
-            STATUS_LINE_CONT.width(),
+            TOOL_BORDER_CONT.width(),
             Some(&cont_prefix),
         )
     }
@@ -189,9 +179,9 @@ fn render_status_line(
         (TOOL_SUCCESS, ctx.theme.success())
     };
     let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let line = Line::from(vec![
-        Span::styled(BORDER_PREFIX.to_owned(), border_style),
+        Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
         Span::styled(indicator, indicator_style),
         Span::raw(" "),
         Span::styled(label.to_owned(), ctx.theme.muted()),
@@ -199,7 +189,7 @@ fn render_status_line(
     out.extend(wrap_line(
         line,
         usize::from(ctx.width),
-        STATUS_LINE_CONT.width(),
+        TOOL_BORDER_CONT.width(),
         Some(&cont_prefix),
     ));
 }
@@ -209,7 +199,7 @@ fn render_status_line(
 /// `["", "▎", "   "]` where the bar span is styled.
 ///
 /// Precondition: `prefix` must contain [`BAR`] — every tool-rendering
-/// call site passes either [`BORDER_PREFIX`], [`STATUS_LINE_CONT`], or
+/// call site passes either [`TOOL_BORDER_PREFIX`], [`TOOL_BORDER_CONT`], or
 /// the diff-side continuation, all of which satisfy it.
 fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = prefix.find(BAR).expect("prefix must contain ▎ bar");
@@ -247,30 +237,12 @@ mod tests {
 
     use super::*;
 
-    // ── Cross-glyph invariants ──
-
-    #[test]
-    fn border_prefix_starts_with_bar() {
-        assert!(
-            BORDER_PREFIX.starts_with(BAR),
-            "BORDER_PREFIX ({BORDER_PREFIX:?}) must start with BAR ({BAR:?})",
-        );
-    }
-
-    #[test]
-    fn status_line_cont_starts_with_bar() {
-        assert!(
-            STATUS_LINE_CONT.starts_with(BAR),
-            "STATUS_LINE_CONT ({STATUS_LINE_CONT:?}) must start with BAR ({BAR:?})",
-        );
-    }
-
     // ── border_continuation_prefix ──
 
     #[test]
     fn border_continuation_prefix_preserves_bar_position() {
         let style = Style::default();
-        let spans = border_continuation_prefix(BORDER_PREFIX, style);
+        let spans = border_continuation_prefix(TOOL_BORDER_PREFIX, style);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "");
         assert_eq!(spans[1].content, BAR);

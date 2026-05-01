@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
-use super::{STATUS_LINE_CONT, border_continuation_prefix};
+use super::{TOOL_BORDER_CONT, border_continuation_prefix};
 use crate::tui::wrap::wrap_line;
 
 /// Emits a bar-prefixed row, wrapping under the bar at `ctx.width`.
@@ -17,15 +17,15 @@ pub(super) fn render(
     text: impl Into<String>,
     text_style: Style,
 ) {
-    let cont_prefix = border_continuation_prefix(STATUS_LINE_CONT, border_style);
+    let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let line = Line::from(vec![
-        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
         Span::styled(text.into(), text_style),
     ]);
     out.extend(wrap_line(
         line,
         usize::from(ctx.width),
-        STATUS_LINE_CONT.width(),
+        TOOL_BORDER_CONT.width(),
         Some(&cont_prefix),
     ));
 }
@@ -52,7 +52,7 @@ mod tests {
         assert_eq!(out.len(), 1, "short row should not wrap: {out:#?}");
         let row = &out[0];
         assert_eq!(row.spans.len(), 2);
-        assert_eq!(row.spans[0].content, STATUS_LINE_CONT);
+        assert_eq!(row.spans[0].content, TOOL_BORDER_CONT);
         assert_eq!(row.spans[0].style, theme.tool_border());
         assert_eq!(row.spans[1].content, "hello");
         assert_eq!(row.spans[1].style, theme.dim());

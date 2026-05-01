@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 
 use super::super::RenderCtx;
 use super::numbered_row;
-use super::{STATUS_LINE_CONT, border_style_for};
+use super::{TOOL_BORDER_CONT, border_style_for};
 use crate::tool::{DiffChunk, DiffLine};
 
 /// Maximum lines of diff body (combined `-` + `+`) shown before
@@ -65,7 +65,7 @@ pub(super) fn render(
     // JSONL.
     if !any_chunk_has_content(chunks) {
         out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
             Span::styled(NO_CHANGE_MARKER, ctx.theme.dim()),
         ]));
         return;
@@ -84,7 +84,7 @@ pub(super) fn render(
     // inventing fake locations.
     if replace_all && replacements > 1 {
         out.push(Line::from(vec![
-            Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+            Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
             Span::styled(
                 format!("{replacements} occurrences replaced"),
                 ctx.theme.dim(),
@@ -142,7 +142,7 @@ fn render_chunk_body(
             Entry::Ellipsis { hidden } => {
                 let noun = if hidden == 1 { "line" } else { "lines" };
                 out.push(Line::from(vec![
-                    Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+                    Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
                     // Inside a diff body the `+` glyph already means
                     // "added line" on an adjacent row; using `+N` on
                     // an ellipsis would smuggle addition semantics
@@ -195,7 +195,7 @@ fn render_locations_footer(
         "lines"
     };
     out.push(Line::from(vec![
-        Span::styled(STATUS_LINE_CONT.to_owned(), border_style),
+        Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
         Span::styled(
             format!("applied at {label} {list}{suffix}"),
             ctx.theme.dim(),
