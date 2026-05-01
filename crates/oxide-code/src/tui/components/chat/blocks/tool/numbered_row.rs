@@ -390,8 +390,8 @@ mod tests {
         assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
         let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            cont_text.starts_with("▎     "),
-            "continuation should align under text column: {cont_text:?}",
+            cont_text.starts_with(TOOL_BORDER_CONT),
+            "continuation must keep tool border continuation prefix: {cont_text:?}",
         );
     }
 }

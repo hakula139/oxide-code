@@ -517,7 +517,7 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker;
     use crate::message::{ContentBlock, Role};
-    use crate::tui::glyphs::{ASSISTANT_PREFIX, BAR, TOOL_ERROR};
+    use crate::tui::glyphs::{ASSISTANT_PREFIX, BAR, TOOL_BORDER_CONT, TOOL_ERROR, TOOL_SUCCESS};
 
     // ── Fixtures ──
 
@@ -1522,7 +1522,7 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_result("done", "output text", false);
         let text = all_text(&chat);
-        assert!(text.contains("✓"));
+        assert!(text.contains(TOOL_SUCCESS));
         assert!(text.contains("done"));
         assert!(text.contains("output text"));
     }
@@ -1532,7 +1532,7 @@ mod tests {
         let mut chat = test_chat();
         chat.push_tool_result("failed", "error details", true);
         let text = all_text(&chat);
-        assert!(text.contains("✗"));
+        assert!(text.contains(TOOL_ERROR));
         assert!(text.contains("failed"));
         assert!(text.contains("error details"));
         // The bar color is the status channel: neutral on success, error
@@ -1587,12 +1587,12 @@ mod tests {
         assert!(text.contains("line 4"));
         assert!(!text.contains("line 5"));
         assert!(text.contains("... +5 lines"));
-        // Body-indent invariant: output lines sit at col 4 (`▎   `), past
-        // the `✓`/`✗` header at col 2. Anchored to the exact prefix so a
-        // regression collapsing back to col 2 fails here, not just in
-        // snapshots.
+        // Body-indent invariant: output lines sit at col 4
+        // ([`TOOL_BORDER_CONT`]), past the `✓`/`✗` header at col 2.
+        // Anchored to the exact prefix so a regression collapsing back
+        // to col 2 fails here, not just in snapshots.
         assert!(
-            text.contains("▎   line 0"),
+            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
             "tool result body should indent past the status indicator: {text}"
         );
     }
@@ -1686,16 +1686,19 @@ mod tests {
         chat.push_tool_result("out", "\n\n real line\n\n\n", false);
         let text = all_text(&chat);
 
-        // Exactly one body row with the `▎   ` prefix (4-col status-line
-        // continuation). A regression that kept surrounding blanks would
-        // render 2+ body rows.
-        let body_row_count = text.lines().filter(|l| l.starts_with("▎   ")).count();
+        // Exactly one body row with the [`TOOL_BORDER_CONT`] prefix
+        // (4-col status-line continuation). A regression that kept
+        // surrounding blanks would render 2+ body rows.
+        let body_row_count = text
+            .lines()
+            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
+            .count();
         assert_eq!(
             body_row_count, 1,
             "expected one body row after blank-line stripping: {text}",
         );
         assert!(
-            text.contains("▎    real line"),
+            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
             "data-line indent must survive: {text}",
         );
     }
@@ -2054,7 +2057,7 @@ mod tests {
         let mut chat = test_chat();
         chat.push_error("something broke");
         let text = all_text(&chat);
-        assert!(text.contains("✗"));
+        assert!(text.contains(TOOL_ERROR));
         assert!(text.contains("something broke"));
         assert!(
             !text.contains(BAR),

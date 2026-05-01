@@ -156,6 +156,7 @@ mod tests {
     use ratatui::style::{Color, Style};
 
     use super::*;
+    use crate::tui::glyphs::USER_PROMPT_PREFIX;
 
     // ── push_icon_wrapped ──
 
@@ -164,7 +165,7 @@ mod tests {
         let mut out = Vec::new();
         push_icon_wrapped(
             &mut out,
-            "❯ ",
+            USER_PROMPT_PREFIX,
             Style::default().fg(Color::Red),
             "hello",
             Style::default(),
@@ -172,7 +173,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].spans.len(), 2);
-        assert_eq!(out[0].spans[0].content, "❯ ");
+        assert_eq!(out[0].spans[0].content, USER_PROMPT_PREFIX);
         assert_eq!(out[0].spans[1].content, "hello");
     }
 
@@ -181,7 +182,7 @@ mod tests {
         let mut out = Vec::new();
         push_icon_wrapped(
             &mut out,
-            "❯ ",
+            USER_PROMPT_PREFIX,
             Style::default(),
             "one two three four five six seven",
             Style::default(),
@@ -200,7 +201,7 @@ mod tests {
         let mut out = Vec::new();
         push_icon_wrapped(
             &mut out,
-            "❯ ",
+            USER_PROMPT_PREFIX,
             Style::default(),
             "one two three four five",
             Style::default(),

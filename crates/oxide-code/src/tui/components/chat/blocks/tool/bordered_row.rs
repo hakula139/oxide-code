@@ -32,6 +32,7 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
+    use crate::tui::glyphs::BAR;
     use crate::tui::theme::Theme;
 
     use super::*;
@@ -80,7 +81,7 @@ mod tests {
         assert!(out.len() >= 2, "expected wrapped output: {out:#?}");
         let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            cont_text.starts_with('▎'),
+            cont_text.starts_with(BAR),
             "continuation must keep bar prefix: {cont_text:?}",
         );
     }
