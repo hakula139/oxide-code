@@ -28,6 +28,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
+use crate::slash::{self, SlashContext};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -246,6 +247,18 @@ impl App {
         match action {
             UserAction::SubmitPrompt(text) => {
                 if self.input.is_enabled() {
+                    // Slash commands stay client-side: parse first, run
+                    // locally, never forward to the agent loop. The
+                    // typed text still lands as a user-message block so
+                    // the chat shows what the user typed; nothing is
+                    // recorded into `Message`s, so resume / token
+                    // accounting / model context all stay clean.
+                    if let Some(parsed) = slash::parse_slash(text) {
+                        self.chat.push_user_message(text.clone());
+                        let mut ctx = SlashContext::new(&mut self.chat);
+                        slash::dispatch(&parsed, &mut ctx);
+                        return false;
+                    }
                     self.chat.push_user_message(text.clone());
                     self.input.set_enabled(false);
                     self.status_bar.set_status(Status::Streaming);

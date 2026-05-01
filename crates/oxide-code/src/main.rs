@@ -13,6 +13,7 @@ mod message;
 mod model;
 mod prompt;
 mod session;
+mod slash;
 mod tool;
 mod tui;
 mod util;

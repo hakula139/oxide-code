@@ -24,7 +24,8 @@ use ratatui::widgets::Paragraph;
 
 use self::blocks::{
     AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, InterruptedMarker,
-    RenderCtx, StreamingAssistant, ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
+    RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock, ToolResultBlock, UserMessage,
+    last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
@@ -248,6 +249,14 @@ impl ChatView {
     /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
+    }
+
+    /// Appends informational output from a locally-dispatched slash
+    /// command (`/help`, `/status`, `/diff`, ...). Rendered with a
+    /// `▎` left-bar in `accent` so command output reads as distinct
+    /// from agent prose.
+    pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
+        self.blocks.push(Box::new(SystemMessageBlock::new(body)));
     }
 
     /// Appends a dim italic `(interrupted)` marker. Finalizes any
