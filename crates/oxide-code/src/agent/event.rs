@@ -148,19 +148,23 @@ impl StdioSink {
     }
 }
 
-impl AgentSink for StdioSink {
-    fn send(&self, event: AgentEvent) -> Result<()> {
-        use std::io::Write;
-
+impl StdioSink {
+    /// Write `event` to the supplied byte sinks. Extracted so tests
+    /// can pass `Vec<u8>` and assert on rendered bytes; production
+    /// passes locked stdout / stderr.
+    fn render<W1: std::io::Write, W2: std::io::Write>(
+        &self,
+        event: AgentEvent,
+        stdout: &mut W1,
+        stderr: &mut W2,
+    ) -> Result<()> {
         match event {
             AgentEvent::StreamToken(text) => {
-                let mut stdout = std::io::stdout().lock();
                 stdout.write_all(text.as_bytes())?;
                 stdout.flush()?;
             }
             AgentEvent::ThinkingToken(text) => {
                 if self.show_thinking {
-                    let mut stdout = std::io::stdout().lock();
                     write!(stdout, "\x1b[2m{text}\x1b[22m")?;
                     stdout.flush()?;
                 }
@@ -168,37 +172,45 @@ impl AgentSink for StdioSink {
             AgentEvent::ToolCallStart { name, input, .. } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
-                eprintln!("{icon} {label}");
+                writeln!(stderr, "{icon} {label}")?;
             }
             AgentEvent::ToolCallEnd {
                 content, metadata, ..
             } => {
                 if let Some(title) = metadata.title {
-                    eprintln!("  {title}");
+                    writeln!(stderr, "  {title}")?;
                 }
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
-                    eprintln!("{trimmed}");
+                    writeln!(stderr, "{trimmed}")?;
                 }
-                eprintln!();
+                writeln!(stderr)?;
             }
             // Both are TUI-only affordances (queued-prompt preview /
             // header title); stdio has no surface to update.
             AgentEvent::PromptDrained(_) | AgentEvent::SessionTitleUpdated(_) => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
-                println!();
+                writeln!(stdout)?;
             }
             AgentEvent::Cancelled => {
                 // Marker on stderr so captured stdout (`-p`) stays reproducible.
-                println!();
-                eprintln!("{INTERRUPTED_MARKER}");
+                writeln!(stdout)?;
+                writeln!(stderr, "{INTERRUPTED_MARKER}")?;
             }
             AgentEvent::Error(msg) => {
-                eprintln!("Error: {msg}");
+                writeln!(stderr, "Error: {msg}")?;
             }
         }
         Ok(())
+    }
+}
+
+impl AgentSink for StdioSink {
+    fn send(&self, event: AgentEvent) -> Result<()> {
+        let stdout = std::io::stdout();
+        let stderr = std::io::stderr();
+        self.render(event, &mut stdout.lock(), &mut stderr.lock())
     }
 }
 
@@ -236,25 +248,77 @@ mod tests {
     use super::*;
     use crate::tool::ToolRegistry;
 
-    // ── StdioSink::send ──
+    // ── StdioSink::render ──
 
     fn test_sink(show_thinking: bool) -> StdioSink {
         StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
     }
 
-    /// Every `AgentEvent` shape the TUI emits, including the variants
-    /// that branch on field nullability inside `StdioSink::send`.
-    fn dispatch_cases() -> Vec<AgentEvent> {
-        vec![
+    /// Capture stdout / stderr bytes for one event so assertions can
+    /// pin the exact rendered shape (not just `Ok(())`).
+    fn render_one(sink: &StdioSink, event: AgentEvent) -> (String, String) {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        sink.render(event, &mut stdout, &mut stderr)
+            .expect("render returns Ok");
+        (
+            String::from_utf8(stdout).expect("stdout is UTF-8"),
+            String::from_utf8(stderr).expect("stderr is UTF-8"),
+        )
+    }
+
+    #[test]
+    fn render_stream_token_writes_text_verbatim_to_stdout() {
+        let (stdout, stderr) = render_one(
+            &test_sink(false),
             AgentEvent::StreamToken("hello".to_owned()),
+        );
+        assert_eq!(stdout, "hello");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn render_thinking_token_wraps_in_dim_when_enabled() {
+        let (stdout, _) = render_one(
+            &test_sink(true),
             AgentEvent::ThinkingToken("plan".to_owned()),
-            // Unregistered tool name exercises the label fallback path.
+        );
+        assert_eq!(stdout, "\x1b[2mplan\x1b[22m");
+    }
+
+    #[test]
+    fn render_thinking_token_swallowed_when_disabled() {
+        let (stdout, stderr) = render_one(
+            &test_sink(false),
+            AgentEvent::ThinkingToken("plan".to_owned()),
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn render_tool_call_start_writes_icon_label_to_stderr() {
+        // Unregistered tool name exercises the label fallback path.
+        let (_, stderr) = render_one(
+            &test_sink(false),
             AgentEvent::ToolCallStart {
                 id: "t1".to_owned(),
                 name: "unregistered".to_owned(),
                 input: serde_json::Value::Null,
             },
-            // metadata.title = Some — title prints, content prints.
+        );
+        assert!(stderr.ends_with('\n'));
+        // Generic icon + tool name fallback when registry doesn't know
+        // the tool — the exact icon depends on ToolRegistry's default
+        // but the stderr must non-emptily render *something* on one line.
+        assert_eq!(stderr.lines().count(), 1);
+        assert!(stderr.contains("unregistered"));
+    }
+
+    #[test]
+    fn render_tool_call_end_with_title_writes_title_then_content() {
+        let (_, stderr) = render_one(
+            &test_sink(false),
             AgentEvent::ToolCallEnd {
                 id: "t1".to_owned(),
                 content: "file1\nfile2\n".to_owned(),
@@ -264,32 +328,60 @@ mod tests {
                     ..crate::tool::ToolMetadata::default()
                 },
             },
-            // metadata.title = None + whitespace-only content — both
-            // print arms short-circuit.
+        );
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(lines[0], "  ls");
+        assert_eq!(lines[1], "file1");
+        assert_eq!(lines[2], "file2");
+        // Trailing blank separator between tool blocks.
+        assert!(stderr.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn render_tool_call_end_without_title_skips_header_and_whitespace_content() {
+        let (_, stderr) = render_one(
+            &test_sink(false),
             AgentEvent::ToolCallEnd {
                 id: "t2".to_owned(),
                 content: "   \n".to_owned(),
                 is_error: true,
                 metadata: crate::tool::ToolMetadata::default(),
             },
-            AgentEvent::PromptDrained("queued".to_owned()),
-            AgentEvent::TurnComplete,
-            AgentEvent::Cancelled,
-            AgentEvent::SessionTitleUpdated("New title".to_owned()),
-            AgentEvent::Error("boom".to_owned()),
-        ]
+        );
+        // No title and whitespace-only content — only the trailing
+        // separator newline lands on stderr.
+        assert_eq!(stderr, "\n");
     }
 
     #[test]
-    fn send_dispatches_every_variant_in_both_thinking_modes() {
-        // Walks every match arm in `send`, including the
-        // `show_thinking` branch on `ThinkingToken` (false swallows
-        // the block entirely; true wraps it in dim escape codes).
-        for show_thinking in [false, true] {
-            let sink = test_sink(show_thinking);
-            for event in dispatch_cases() {
-                sink.send(event).expect("dispatch returns Ok");
-            }
+    fn render_prompt_drained_and_session_title_are_silent() {
+        for event in [
+            AgentEvent::PromptDrained("queued".to_owned()),
+            AgentEvent::SessionTitleUpdated("New title".to_owned()),
+        ] {
+            let (stdout, stderr) = render_one(&test_sink(false), event);
+            assert!(stdout.is_empty());
+            assert!(stderr.is_empty());
         }
+    }
+
+    #[test]
+    fn render_turn_complete_writes_trailing_newline_to_stdout() {
+        let (stdout, stderr) = render_one(&test_sink(false), AgentEvent::TurnComplete);
+        assert_eq!(stdout, "\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn render_cancelled_writes_marker_to_stderr_and_blank_to_stdout() {
+        let (stdout, stderr) = render_one(&test_sink(false), AgentEvent::Cancelled);
+        assert_eq!(stdout, "\n");
+        assert_eq!(stderr.trim(), INTERRUPTED_MARKER);
+    }
+
+    #[test]
+    fn render_error_prefixes_with_error_label() {
+        let (_, stderr) = render_one(&test_sink(false), AgentEvent::Error("boom".to_owned()));
+        assert_eq!(stderr, "Error: boom\n");
     }
 }
