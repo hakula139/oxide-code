@@ -617,6 +617,34 @@ mod tests {
     use crate::session::store::test_store;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
+    // ── TurnAbort ──
+
+    #[test]
+    fn turn_abort_display_alternate_propagates_anyhow_cause_chain() {
+        // {abort:#} must delegate to the inner anyhow Error's alternate
+        // form so the full cause chain reaches the user (e.g., when a
+        // bare-REPL or headless run prints "Error: {e:#}"); plain {abort}
+        // surfaces only the outermost context (anyhow's default Display).
+        let inner = anyhow!("HTTP 503 from upstream");
+        let chained = inner.context("stream error");
+        let abort = TurnAbort::Failed(chained);
+
+        let plain = format!("{abort}");
+        let alternate = format!("{abort:#}");
+
+        assert_eq!(plain, "stream error");
+        assert!(
+            alternate.contains("stream error") && alternate.contains("HTTP 503 from upstream"),
+            "alternate must include both layers: {alternate:?}",
+        );
+    }
+
+    #[test]
+    fn turn_abort_display_cancelled_and_quit_use_static_labels() {
+        assert_eq!(format!("{}", TurnAbort::Cancelled), "turn cancelled");
+        assert_eq!(format!("{}", TurnAbort::Quit), "turn quit");
+    }
+
     // ── agent_turn ──
 
     /// In-process fake that hands the agent loop a scripted sequence of
@@ -1025,6 +1053,64 @@ mod tests {
             drained_count, 1,
             "exactly one PromptDrained event for the queued prompt",
         );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_drains_multiple_mid_round_submits_in_order() {
+        // Two SubmitPrompts arrive during the same tool's await; both must
+        // land as separate trailing User messages in dispatch order, and
+        // the agent must emit one PromptDrained event per item.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
+            text_turn("done"),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("kick off")];
+        let (tx, mut rx) = mpsc::channel::<UserAction>(4);
+        tx.send(UserAction::SubmitPrompt("first".into()))
+            .await
+            .unwrap();
+        tx.send(UserAction::SubmitPrompt("second".into()))
+            .await
+            .unwrap();
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut rx,
+        )
+        .await
+        .expect("turn must complete");
+
+        // user → assistant(tool_use) → user(tool_result) → user("first")
+        // → user("second") → assistant("done").
+        assert_eq!(messages.len(), 6, "{messages:#?}");
+        assert!(matches!(
+            &messages[3].content[0],
+            ContentBlock::Text { text } if text == "first",
+        ));
+        assert!(matches!(
+            &messages[4].content[0],
+            ContentBlock::Text { text } if text == "second",
+        ));
+
+        let drained: Vec<_> = sink
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::PromptDrained(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drained, vec!["first".to_owned(), "second".to_owned()]);
         drop(tx);
     }
 

@@ -1083,6 +1083,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_queue_survives_max_tool_rounds_bail_and_drains_serially() {
+        // When agent_turn hits MAX_TOOL_ROUNDS its per-turn pending
+        // buffer drops with the future, but the TUI mirror is the
+        // source of truth — every queued item must surface across
+        // subsequent turn boundaries via finalize_idle's drain. Pin
+        // it here so a future refactor that "fixes" the agent-side
+        // drop without re-firing PromptDrained gets caught.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        app.pending_prompts.push_back("a".into());
+        app.pending_prompts.push_back("b".into());
+        app.pending_prompts.push_back("c".into());
+
+        // First turn dies (cap-bail surfaces as Error); head drains.
+        app.handle_agent_event(AgentEvent::Error(
+            "agent stopped after MAX_TOOL_ROUNDS".to_owned(),
+        ));
+        let first = rx.recv().await.expect("a re-fired as fresh turn");
+        assert!(matches!(first, UserAction::SubmitPrompt(s) if s == "a"));
+
+        // Subsequent terminal events keep peeling the queue.
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        let second = rx.recv().await.expect("b re-fired");
+        assert!(matches!(second, UserAction::SubmitPrompt(s) if s == "b"));
+
+        app.handle_agent_event(AgentEvent::TurnComplete);
+        let third = rx.recv().await.expect("c re-fired");
+        assert!(matches!(third, UserAction::SubmitPrompt(s) if s == "c"));
+
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: between the user pressing Esc
         // and the matching `AgentEvent::Cancelled` arriving, the
