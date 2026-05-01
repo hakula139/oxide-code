@@ -174,7 +174,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         if !content.is_empty() {
             content.push_str("\n\n");
         }
-        let _ = write!(content, "(exit code {code})");
+        _ = write!(content, "(exit code {code})");
     }
     if content.is_empty() {
         content.push_str(NO_OUTPUT_MARKER);
