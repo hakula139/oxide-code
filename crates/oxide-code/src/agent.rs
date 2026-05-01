@@ -351,8 +351,9 @@ where
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Idle-state signal that shouldn't reach a busy turn,
-                // but the TUI may still forward it during teardown.
+                // `ConfirmExit` is TUI-only — `apply_action_locally` no
+                // longer forwards it. Defensive arm for the bare-REPL /
+                // headless inert channel where it can't appear either.
                 Some(UserAction::ConfirmExit) => {}
             },
             output = &mut fut => return Ok(output),

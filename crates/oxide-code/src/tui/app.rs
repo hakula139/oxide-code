@@ -253,7 +253,7 @@ impl App {
                 true
             }
             // First press arms an exit hint; a second press inside the
-            // window confirms. The agent loop ignores this variant.
+            // window confirms. TUI-only — no agent-side consumer.
             UserAction::ConfirmExit => {
                 if let Status::ExitArmed { until } = self.status_bar.status()
                     && Instant::now() < until
@@ -263,7 +263,7 @@ impl App {
                     let until = Instant::now() + EXIT_WINDOW;
                     self.status_bar.set_status(Status::ExitArmed { until });
                 }
-                true
+                false
             }
             UserAction::Quit => {
                 self.should_quit = true;

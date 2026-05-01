@@ -424,7 +424,9 @@ async fn agent_loop_task(
                     }
                 }
             }
-            // `ConfirmExit` is a TUI-only signal (arms the exit hint).
+            // `ConfirmExit` is TUI-only — `apply_action_locally` no
+            // longer forwards it. `Cancel` arrives idle when the user
+            // hammered Esc / Ctrl+C with no turn in flight.
             UserAction::Cancel | UserAction::ConfirmExit => {}
             UserAction::Quit => break,
         }
