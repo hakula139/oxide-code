@@ -192,7 +192,7 @@ impl Component for InputArea {
         // Scroll keys while busy belong to the chat view; the textarea
         // would otherwise swallow them for cursor movement and the
         // user would lose the ability to scroll history mid-turn.
-        if !self.enabled && is_scroll_key(event) {
+        if !self.enabled && Self::is_scroll_key(event) {
             return None;
         }
 
@@ -244,11 +244,7 @@ impl Component for InputArea {
         // tracking runs in both run-states so typing into the queue
         // mid-turn updates the visible caret.
         let sc = self.textarea.screen_cursor();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "cursor position fits in u16 for terminal widths"
-        )]
-        let cursor_row = sc.row as u16;
+        let cursor_row = to_u16(sc.row);
         let height = textarea_area.height;
         let prev = self.scroll_top.get();
         let top = if cursor_row < prev {
@@ -260,22 +256,18 @@ impl Component for InputArea {
         };
         self.scroll_top.set(top);
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "cursor position fits in u16 for terminal widths"
-        )]
         let cursor_x = textarea_area
             .x
-            .saturating_add(sc.col as u16)
+            .saturating_add(to_u16(sc.col))
             .min(textarea_area.right().saturating_sub(1));
         let cursor_y = textarea_area.y + cursor_row - top;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
-// ── Render Helpers ──
-
 impl InputArea {
+    // ── Render Helpers ──
+
     /// Picks the placeholder copy for the current `(enabled, has_queued)`
     /// combo. Visible only while the buffer is empty.
     fn refresh_placeholder(&mut self) {
@@ -288,28 +280,26 @@ impl InputArea {
         };
         self.textarea.set_placeholder_text(text);
     }
-}
 
-// ── Private Helpers ──
+    // ── Private Helpers ──
 
-/// Whether `event` is one of the chat-scroll keys reserved for the
-/// surrounding `ChatView` while the input is busy.
-fn is_scroll_key(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::Key(KeyEvent {
-            code: KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End,
-            ..
-        }),
-    )
-}
+    /// Whether `event` is one of the chat-scroll keys reserved for the
+    /// surrounding `ChatView` while the input is busy.
+    fn is_scroll_key(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Key(KeyEvent {
+                code: KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End,
+                ..
+            }),
+        )
+    }
 
-impl InputArea {
     /// Estimate the number of visual (screen) lines after word-wrap.
     ///
     /// Uses `last_width` from the previous render frame. Falls back to
@@ -360,6 +350,18 @@ impl InputArea {
 
         Some(UserAction::SubmitPrompt(trimmed))
     }
+}
+
+/// Lossy `usize → u16` cast scoped to cursor / column positions, where
+/// the source value is bounded by terminal dimensions. Centralises the
+/// `cast_possible_truncation` lint suppression so the call sites stay
+/// readable.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "cursor / column positions fit in u16 for terminal widths"
+)]
+fn to_u16(n: usize) -> u16 {
+    n as u16
 }
 
 #[cfg(test)]
