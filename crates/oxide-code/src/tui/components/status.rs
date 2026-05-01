@@ -235,8 +235,9 @@ fn title_slot_spans<'a>(
     ]
 }
 
-/// Total visual width of a slot's spans. Free helper so both the fit check
-/// and the final insert share the same measurement.
+/// Total visual width of a slot's spans, fed into [`fit_layout`] so the
+/// greedy fit decides title-vs-cwd inclusion against the same column
+/// count the renderer would later emit.
 fn slot_width(slot: &[Span<'_>]) -> usize {
     slot.iter().map(Span::width).sum()
 }
