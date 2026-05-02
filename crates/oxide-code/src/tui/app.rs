@@ -838,6 +838,46 @@ mod tests {
         assert!(app.dirty);
     }
 
+    #[tokio::test]
+    async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
+        // Typing `/` opens the popup; Enter on the highlighted row
+        // submits `/{name}` through the existing dispatch path. The
+        // first BUILT_IN is /help, so the chat should land a system
+        // message (the help block), not forward to the agent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "submit clears popup");
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must produce a system message, not an error",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command stays client-side",
+        );
+    }
+
+    #[test]
+    fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
+        // Tab on a popup row inserts `/{name} ` and hides the popup —
+        // the user is now in args-typing mode.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+
+        app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "Tab hides the popup");
+        assert_eq!(
+            app.input.lines(),
+            vec!["/help ".to_owned()],
+            "buffer reflects the completed canonical name + space",
+        );
+    }
+
     // ── handle_esc ──
 
     #[tokio::test]
@@ -891,6 +931,27 @@ mod tests {
         assert_eq!(
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["queued".to_owned()],
+        );
+    }
+
+    #[test]
+    fn handle_esc_with_popup_visible_dismisses_popup_and_leaves_queue_intact() {
+        // The popup gate sits in front of App's Esc routing so a
+        // visible popup can swallow Esc before queue / cancel logic
+        // fires. Open the popup by typing `/`, queue a prompt, then
+        // press Esc — popup hides, queue stays put.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.pending_prompts.push_back("queued".into());
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible(), "/ opens the popup");
+
+        app.handle_crossterm_event(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!app.input.popup_visible(), "Esc dismisses the popup");
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["queued".to_owned()],
+            "queue must not be peeled while popup owns Esc",
         );
     }
 
