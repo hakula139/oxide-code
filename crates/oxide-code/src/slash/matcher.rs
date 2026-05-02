@@ -84,9 +84,7 @@ fn best_match(query: &str, cmd: &dyn SlashCommand) -> Option<(Tier, MatchedComma
     None
 }
 
-/// First alias whose lowercase form satisfies `pred`. Lowercases
-/// once per alias rather than per match, since the predicate runs
-/// against the lowercased copy.
+/// First alias whose lowercased form satisfies `pred`.
 fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option<&'static str> {
     cmd.aliases()
         .iter()
@@ -171,20 +169,16 @@ mod tests {
 
     #[test]
     fn filter_and_rank_empty_query_returns_full_registry_in_declared_order() {
-        // Empty query is the popup's "just typed `/`" state. Order
-        // mirrors `BUILT_INS`'s declared order so frequently-used
-        // commands stay first.
+        // The "just typed `/`" state — order tracks `BUILT_INS`.
         let rows = filter_and_rank("", &registry());
         assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
-        // Empty query never surfaces an alias — the slot is always None.
         assert!(rows.iter().all(|m| m.matched_alias.is_none()));
     }
 
     #[test]
     fn filter_and_rank_name_prefix_beats_substring_within_other_command() {
-        // Query "co" prefixes `compact` and substrings `status`-not-really
-        // (no `co` in `status`), so just `compact` returns. Add a
-        // synthetic substring case to make the tier ordering observable.
+        // "co" name-prefixes `compact` and name-substrings `forconfig`.
+        // Pin that the prefix-match wins and is reported first.
         const FORCONFIG: Fake = Fake {
             name: "forconfig",
             aliases: &[],
@@ -197,10 +191,8 @@ mod tests {
 
     #[test]
     fn filter_and_rank_alias_prefix_beats_name_substring() {
-        // `new` prefixes the alias `new`, so /clear sits above any
-        // command that only substring-matches `n`. Adding a synthetic
-        // command containing `new` mid-name makes the tier ordering
-        // observable rather than vacuous.
+        // `new` alias-prefixes `clear` and name-substrings `renew`.
+        // Alias-prefix outranks name-substring, so `/clear` leads.
         const RENEW: Fake = Fake {
             name: "renew",
             aliases: &[],
@@ -208,7 +200,6 @@ mod tests {
         };
         let with_substring: Vec<&dyn SlashCommand> = vec![&CLEAR, &RENEW];
         let rows = filter_and_rank("new", &with_substring);
-        // CLEAR matches via alias prefix; RENEW matches via name substring.
         assert_eq!(names(&rows), vec!["clear", "renew"]);
         assert_eq!(rows[0].matched_alias, Some("new"));
         assert_eq!(rows[1].matched_alias, None);

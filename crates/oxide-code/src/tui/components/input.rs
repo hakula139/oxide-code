@@ -156,9 +156,8 @@ impl InputArea {
         content_lines.min(MAX_VISIBLE_LINES) + 2
     }
 
-    /// Whether the slash popup currently has matches to draw. App
-    /// reads this to gate Esc routing — when true, App's queue / cancel
-    /// handler steps aside so Esc can dismiss the popup instead.
+    /// Whether the popup has rows to draw. App reads this to gate
+    /// Esc routing so popup-dismiss wins over queue / cancel.
     pub(crate) fn popup_visible(&self) -> bool {
         self.popup.is_visible()
     }

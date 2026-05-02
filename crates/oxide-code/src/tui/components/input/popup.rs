@@ -75,9 +75,7 @@ impl SlashPopup {
         self.matches.get(self.selected)
     }
 
-    /// Move the selection to the next row, wrapping at the bottom.
-    /// Wrapping fits the small surface — Up-from-top reaches the
-    /// last row in one keystroke.
+    /// Advance the selection one row, wrapping past the last.
     pub(crate) fn select_next(&mut self) {
         if self.matches.is_empty() {
             return;
@@ -85,7 +83,7 @@ impl SlashPopup {
         self.selected = (self.selected + 1) % self.matches.len();
     }
 
-    /// Move the selection to the previous row, wrapping at the top.
+    /// Move the selection back one row, wrapping past the first.
     pub(crate) fn select_prev(&mut self) {
         if self.matches.is_empty() {
             return;
