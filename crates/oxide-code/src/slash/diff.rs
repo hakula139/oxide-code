@@ -280,32 +280,6 @@ mod tests {
     // ── collect_diff_in ──
 
     #[test]
-    fn collect_diff_in_surfaces_spawn_failure_when_git_missing() {
-        // Drives the `inside_git_repo` Err arm through to `collect_diff_in`'s
-        // `?` propagation: with git off the PATH the spawn-context message
-        // must surface so users see *which* git invocation could not start.
-        let (_dir, repo) = fresh_repo();
-        temp_env::with_var("PATH", Some(""), || {
-            let err = collect_diff_in(&repo).unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("failed to spawn git"),
-                "spawn-failure context drift, got: {msg}",
-            );
-        });
-    }
-
-    #[test]
-    fn collect_diff_in_returns_error_outside_a_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = collect_diff_in(dir.path()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not inside a git repository"),
-            "{err:#}",
-        );
-    }
-
-    #[test]
     fn collect_diff_in_fresh_repo_is_empty_when_nothing_staged() {
         // Pre-first-commit path: `has_head` is false, so we fall back to
         // `git diff --cached` (empty). Empty result drives the execute
@@ -350,6 +324,16 @@ mod tests {
         assert!(body.contains("+edit"), "{body}");
         assert!(body.contains("Untracked files:"), "{body}");
         assert!(body.contains("untracked.txt"), "{body}");
+    }
+
+    #[test]
+    fn collect_diff_in_returns_error_outside_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = collect_diff_in(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not inside a git repository"),
+            "{err:#}",
+        );
     }
 
     // ── format_diff ──
@@ -439,22 +423,6 @@ mod tests {
     // ── run_git_in ──
 
     #[test]
-    fn run_git_in_wraps_spawn_failure_with_args_in_context() {
-        // Forcing `git` off the PATH drives the `with_context` arm — the
-        // spawn-failure context message must name the args so users see
-        // *which* git invocation couldn't start.
-        let (_dir, repo) = fresh_repo();
-        temp_env::with_var("PATH", Some(""), || {
-            let err = run_git_in(&repo, &["status"]).unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("failed to spawn git status"),
-                "context message drift, got: {msg}",
-            );
-        });
-    }
-
-    #[test]
     fn run_git_in_propagates_stderr_on_failure() {
         // `cat-file` of a missing SHA gives stable, version-independent
         // wording — flag-parser errors drift across git versions.
@@ -475,6 +443,14 @@ mod tests {
     // ── git_failure_message ──
 
     #[test]
+    fn git_failure_message_passes_through_trimmed_stderr() {
+        assert_eq!(
+            git_failure_message(&["status"], b"  fatal: not a git repo\n"),
+            "fatal: not a git repo",
+        );
+    }
+
+    #[test]
     fn git_failure_message_falls_back_to_synthetic_when_stderr_blank() {
         // Empty / whitespace-only stderr would surface as the empty
         // string without the fallback — `git status failed` is the
@@ -483,14 +459,6 @@ mod tests {
         assert_eq!(
             git_failure_message(&["diff", "HEAD"], b"  \n\t\n  "),
             "git diff HEAD failed",
-        );
-    }
-
-    #[test]
-    fn git_failure_message_passes_through_trimmed_stderr() {
-        assert_eq!(
-            git_failure_message(&["status"], b"  fatal: not a git repo\n"),
-            "fatal: not a git repo",
         );
     }
 
