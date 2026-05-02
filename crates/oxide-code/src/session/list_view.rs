@@ -213,18 +213,6 @@ mod tests {
     // ── render_sessions ──
 
     #[test]
-    fn render_sessions_empty_project_scope_mentions_project() {
-        let out = render_to_string(&[], false);
-        assert_eq!(out, "No sessions found in this project.\n");
-    }
-
-    #[test]
-    fn render_sessions_empty_all_scope_omits_project_qualifier() {
-        let out = render_to_string(&[], true);
-        assert_eq!(out, "No sessions found.\n");
-    }
-
-    #[test]
     fn render_sessions_populated_row_has_header_prefix_and_title_defaults() {
         let s = session("0123456789abcdef", datetime!(2026-04-18 13:45:00 UTC));
         let out = render_to_string(&[s], false);
@@ -375,5 +363,17 @@ mod tests {
             out.contains(full_title),
             "full title should render when budget too small: {out}",
         );
+    }
+
+    #[test]
+    fn render_sessions_empty_project_scope_mentions_project() {
+        let out = render_to_string(&[], false);
+        assert_eq!(out, "No sessions found in this project.\n");
+    }
+
+    #[test]
+    fn render_sessions_empty_all_scope_omits_project_qualifier() {
+        let out = render_to_string(&[], true);
+        assert_eq!(out, "No sessions found.\n");
     }
 }

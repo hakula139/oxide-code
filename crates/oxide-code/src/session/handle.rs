@@ -442,64 +442,6 @@ mod tests {
     // ── record_tool_metadata_batch ──
 
     #[tokio::test]
-    async fn record_tool_metadata_batch_actor_gone_surfaces_failure_once_then_silences() {
-        let handle = testing::dead("dead");
-        let item = (
-            "t1".to_owned(),
-            ToolMetadata {
-                title: Some("f.rs".to_owned()),
-                ..ToolMetadata::default()
-            },
-        );
-
-        let first = handle.record_tool_metadata_batch(vec![item.clone()]).await;
-        let second = handle.record_tool_metadata_batch(vec![item]).await;
-
-        assert!(first.failure.is_some(), "first call must surface failure");
-        assert!(second.failure.is_none(), "subsequent calls must be silent");
-    }
-
-    #[tokio::test]
-    async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
-        // Distinguishes the rx-await fallback in dispatch_outcome from
-        // the cmd_tx.send-failed early return: send succeeds and the
-        // actor receives the cmd, but drops the ack without responding
-        // (simulating a panic between recv and ack). The succeed=3
-        // header lets the same handle exercise the success arm on
-        // ToolMetadata / AppendAiTitle / Finish variants of the
-        // helper's or-pattern, then the drop arm on the 4th cmd.
-        let handle = testing::acks_then_drops("acks-then-drops", 3);
-
-        let title = handle.append_ai_title("ok".to_owned()).await;
-        let finish = handle.finish(Vec::new()).await;
-        let batch_ok = handle
-            .record_tool_metadata_batch(vec![(
-                "t1".to_owned(),
-                ToolMetadata {
-                    title: Some("f.rs".to_owned()),
-                    ..ToolMetadata::default()
-                },
-            )])
-            .await;
-        let batch_dropped = handle.record_tool_metadata_batch(vec![]).await;
-
-        assert!(title.failure.is_none(), "AppendAiTitle is acked healthily");
-        assert!(finish.failure.is_none(), "Finish is acked healthily");
-        assert!(
-            batch_ok.failure.is_none(),
-            "ToolMetadata is acked healthily"
-        );
-        assert!(
-            batch_dropped.failure.is_some(),
-            "dropped ack surfaces actor-gone",
-        );
-
-        // Drain the actor task so its loop-exit is exercised — without
-        // shutdown, the test runtime tears the task down mid-recv.
-        handle.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
         // Default-metadata items are skipped at absorb; non-defaults
         // each produce one line.
@@ -577,18 +519,65 @@ mod tests {
         );
     }
 
-    // ── append_ai_title ──
-
     #[tokio::test]
-    async fn append_ai_title_actor_gone_surfaces_failure_once_then_silences() {
+    async fn record_tool_metadata_batch_actor_gone_surfaces_failure_once_then_silences() {
         let handle = testing::dead("dead");
+        let item = (
+            "t1".to_owned(),
+            ToolMetadata {
+                title: Some("f.rs".to_owned()),
+                ..ToolMetadata::default()
+            },
+        );
 
-        let first = handle.append_ai_title("Fix auth".to_owned()).await;
-        let second = handle.append_ai_title("Fix auth".to_owned()).await;
+        let first = handle.record_tool_metadata_batch(vec![item.clone()]).await;
+        let second = handle.record_tool_metadata_batch(vec![item]).await;
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
+
+    #[tokio::test]
+    async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
+        // Distinguishes the rx-await fallback in dispatch_outcome from
+        // the cmd_tx.send-failed early return: send succeeds and the
+        // actor receives the cmd, but drops the ack without responding
+        // (simulating a panic between recv and ack). The succeed=3
+        // header lets the same handle exercise the success arm on
+        // ToolMetadata / AppendAiTitle / Finish variants of the
+        // helper's or-pattern, then the drop arm on the 4th cmd.
+        let handle = testing::acks_then_drops("acks-then-drops", 3);
+
+        let title = handle.append_ai_title("ok".to_owned()).await;
+        let finish = handle.finish(Vec::new()).await;
+        let batch_ok = handle
+            .record_tool_metadata_batch(vec![(
+                "t1".to_owned(),
+                ToolMetadata {
+                    title: Some("f.rs".to_owned()),
+                    ..ToolMetadata::default()
+                },
+            )])
+            .await;
+        let batch_dropped = handle.record_tool_metadata_batch(vec![]).await;
+
+        assert!(title.failure.is_none(), "AppendAiTitle is acked healthily");
+        assert!(finish.failure.is_none(), "Finish is acked healthily");
+        assert!(
+            batch_ok.failure.is_none(),
+            "ToolMetadata is acked healthily"
+        );
+        assert!(
+            batch_dropped.failure.is_some(),
+            "dropped ack surfaces actor-gone",
+        );
+
+        // Drain the actor task so its loop-exit is exercised — without
+        // shutdown, the test runtime tears the task down mid-recv.
+        handle.shutdown().await;
+    }
+
+    // ── append_ai_title ──
 
     #[tokio::test]
     async fn append_ai_title_writes_title_entry_and_supersedes_first_prompt_on_list() {
@@ -612,18 +601,18 @@ mod tests {
         );
     }
 
-    // ── finish ──
-
     #[tokio::test]
-    async fn finish_actor_gone_surfaces_failure_once_then_silences() {
+    async fn append_ai_title_actor_gone_surfaces_failure_once_then_silences() {
         let handle = testing::dead("dead");
 
-        let first = handle.finish(Vec::new()).await;
-        let second = handle.finish(Vec::new()).await;
+        let first = handle.append_ai_title("Fix auth".to_owned()).await;
+        let second = handle.append_ai_title("Fix auth".to_owned()).await;
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
+
+    // ── finish ──
 
     #[tokio::test]
     async fn finish_writes_summary_with_count() {
@@ -684,6 +673,17 @@ mod tests {
             .filter(|l| l.contains(r#""type":"summary""#))
             .count();
         assert_eq!(summary_count, 1);
+    }
+
+    #[tokio::test]
+    async fn finish_actor_gone_surfaces_failure_once_then_silences() {
+        let handle = testing::dead("dead");
+
+        let first = handle.finish(Vec::new()).await;
+        let second = handle.finish(Vec::new()).await;
+
+        assert!(first.failure.is_some(), "first call must surface failure");
+        assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
 
     // ── shutdown ──

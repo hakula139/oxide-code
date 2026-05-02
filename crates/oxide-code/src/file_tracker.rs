@@ -533,6 +533,16 @@ mod tests {
     // ── check_stat ──
 
     #[test]
+    fn check_stat_full_match_passes() {
+        let tracker = FileTracker::default();
+        let path = Path::new("/tmp/a.rs");
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
+        let check = tracker.check_stat(path, mtime, 5, GatePurpose::Edit);
+        assert_eq!(check, Ok(StatCheck::Pass));
+    }
+
+    #[test]
     fn check_stat_no_entry_errors_never_read() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
@@ -582,16 +592,6 @@ mod tests {
                 purpose: GatePurpose::Edit,
             }),
         );
-    }
-
-    #[test]
-    fn check_stat_full_match_passes() {
-        let tracker = FileTracker::default();
-        let path = Path::new("/tmp/a.rs");
-        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
-        let check = tracker.check_stat(path, mtime, 5, GatePurpose::Edit);
-        assert_eq!(check, Ok(StatCheck::Pass));
     }
 
     #[test]

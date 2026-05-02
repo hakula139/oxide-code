@@ -824,13 +824,6 @@ mod tests {
     // ── submit ──
 
     #[test]
-    fn submit_empty_produces_no_action() {
-        let mut input = test_input();
-        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(action.is_none());
-    }
-
-    #[test]
     fn submit_clears_textarea() {
         let mut input = test_input();
         input.textarea.input(Event::Key(KeyEvent::new(
@@ -840,6 +833,13 @@ mod tests {
 
         input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(input.textarea.lines(), vec![""]);
+    }
+
+    #[test]
+    fn submit_empty_produces_no_action() {
+        let mut input = test_input();
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(action.is_none());
     }
 
     #[test]

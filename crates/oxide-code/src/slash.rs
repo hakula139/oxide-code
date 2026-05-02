@@ -106,6 +106,23 @@ mod tests {
     // ── dispatch ──
 
     #[test]
+    fn dispatch_known_command_runs_and_does_not_push_error() {
+        let mut chat = fresh_chat();
+        let info = test_session_info();
+        let parsed = Parsed {
+            name: "help".to_owned(),
+            args: String::new(),
+        };
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        assert!(!chat.last_is_error());
+        assert_eq!(chat.entry_count(), 1);
+        // Pin: SystemMessageBlock inherits `error_text` default `None`
+        // — flipping that default would let non-error blocks claim
+        // error wording.
+        assert_eq!(chat.last_error_text(), None);
+    }
+
+    #[test]
     fn dispatch_unknown_command_pushes_error_block() {
         let mut chat = fresh_chat();
         let info = test_session_info();
@@ -141,23 +158,6 @@ mod tests {
             msg.contains("//etc"),
             "should mention `//etc` escape: {msg}"
         );
-    }
-
-    #[test]
-    fn dispatch_known_command_runs_and_does_not_push_error() {
-        let mut chat = fresh_chat();
-        let info = test_session_info();
-        let parsed = Parsed {
-            name: "help".to_owned(),
-            args: String::new(),
-        };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
-        assert!(!chat.last_is_error());
-        assert_eq!(chat.entry_count(), 1);
-        // Pin: SystemMessageBlock inherits `error_text` default `None`
-        // — flipping that default would let non-error blocks claim
-        // error wording.
-        assert_eq!(chat.last_error_text(), None);
     }
 
     // ── dispatch_with ──
