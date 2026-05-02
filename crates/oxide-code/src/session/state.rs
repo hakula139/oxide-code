@@ -381,20 +381,6 @@ mod tests {
     // ── finish_entries ──
 
     #[test]
-    fn finish_entries_pending_writer_returns_empty_and_marks_finished() {
-        // Nothing recorded → nothing to summarize, but `finished` still
-        // latches so a later record cmd no-ops cleanly.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut state = SessionState::fresh(store, "m");
-
-        let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
-
-        assert!(entries.is_empty());
-        assert!(state.finished);
-    }
-
-    #[test]
     fn finish_entries_after_record_returns_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -408,6 +394,20 @@ mod tests {
             panic!("expected trailing Summary, got {entries:?}");
         };
         assert_eq!(*message_count, 1);
+    }
+
+    #[test]
+    fn finish_entries_pending_writer_returns_empty_and_marks_finished() {
+        // Nothing recorded → nothing to summarize, but `finished` still
+        // latches so a later record cmd no-ops cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+
+        let entries = state.finish_entries(Vec::new(), OffsetDateTime::now_utc());
+
+        assert!(entries.is_empty());
+        assert!(state.finished);
     }
 
     #[test]

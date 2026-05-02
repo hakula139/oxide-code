@@ -667,39 +667,6 @@ mod tests {
         );
     }
 
-    // ── parse_replacement_count ──
-
-    #[test]
-    fn parse_replacement_count_extracts_leading_integer() {
-        assert_eq!(
-            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
-            Some(3),
-        );
-    }
-
-    #[test]
-    fn parse_replacement_count_returns_none_for_unrelated_messages() {
-        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
-        assert_eq!(parse_replacement_count(""), None);
-    }
-
-    #[test]
-    fn parse_replacement_count_requires_space_after_replaced() {
-        // The leading `"Replaced "` prefix (with trailing space) is the
-        // structural separator — `"Replaced7 occurrences ..."` is not
-        // the format `edit_file` emits and must not parse, otherwise a
-        // mutation that drops the space from the prefix would go
-        // unnoticed.
-        assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
-    }
-
-    #[test]
-    fn parse_replacement_count_returns_none_when_only_prefix_present() {
-        // Pin the empty-token `?` so a future "default to 0 / 1"
-        // regression doesn't slip.
-        assert_eq!(parse_replacement_count("Replaced "), None);
-    }
-
     // ── run ──
 
     #[tokio::test]
@@ -1277,7 +1244,16 @@ mod tests {
         // in `match_positions` or `line_at_byte` surfaces here.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.txt");
-        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                A
+                B
+                C
+                B
+            "},
+        )
+        .unwrap();
 
         let (_, replacements, chunks) = edit_file(
             path.to_str().unwrap(),
@@ -1330,7 +1306,16 @@ mod tests {
         // `build_diff_chunks` regresses visibly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grow.txt");
-        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                A
+                B
+                C
+                B
+            "},
+        )
+        .unwrap();
 
         // "B" → "X\nY" adds one line per replacement.
         let (_, _, chunks) = edit_file(
@@ -1385,7 +1370,21 @@ mod tests {
         // each prior match having shrunk the file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.txt");
-        std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                X
+                Y
+                A
+                X
+                Y
+                B
+                X
+                Y
+                C
+            "},
+        )
+        .unwrap();
 
         // "X\nY" → "Z" drops one line per replacement.
         let (_, _, chunks) = edit_file(
@@ -1450,7 +1449,13 @@ mod tests {
         // collapses, leaving only the inserted line on the new side.
         // Line numbers on the surviving entry are preserved.
         let chunks = build_diff_chunks(
-            "x\nx\nx\nx\nfn foo()\n",
+            indoc! {"
+                x
+                x
+                x
+                x
+                fn foo()
+            "},
             "fn foo()",
             "fn foo()\n    return 42;",
             1,
@@ -1708,28 +1713,6 @@ mod tests {
         assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
     }
 
-    // ── synthesize_chunk ──
-
-    #[test]
-    fn synthesize_chunk_starts_numbering_at_one() {
-        // Resume-fallback shape: line 1 is the best the renderer has
-        // when JSONL didn't carry real positions.
-        let chunk = synthesize_chunk("a\nb", "x\ny");
-        assert_eq!(chunk.old[0].number, 1);
-        assert_eq!(chunk.new[0].number, 1);
-    }
-
-    #[test]
-    fn synthesize_chunk_applies_trim() {
-        // Mirrors live-path producer trim so the rendered output for
-        // a resumed transcript matches what the live renderer would
-        // produce — pure tail insertion still drops the anchor.
-        let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
-        assert!(chunk.old.is_empty());
-        assert_eq!(chunk.new.len(), 1);
-        assert_eq!(chunk.new[0].text, "    body");
-    }
-
     // ── dominant_eol ──
 
     #[test]
@@ -1787,5 +1770,60 @@ mod tests {
     #[test]
     fn apply_eol_lf_unchanged() {
         assert_eq!(apply_eol("a\nb\n".into(), "\n"), "a\nb\n");
+    }
+
+    // ── parse_replacement_count ──
+
+    #[test]
+    fn parse_replacement_count_extracts_leading_integer() {
+        assert_eq!(
+            parse_replacement_count("Replaced 3 occurrences in /tmp/x."),
+            Some(3),
+        );
+    }
+
+    #[test]
+    fn parse_replacement_count_returns_none_for_unrelated_messages() {
+        assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
+        assert_eq!(parse_replacement_count(""), None);
+    }
+
+    #[test]
+    fn parse_replacement_count_requires_space_after_replaced() {
+        // The leading `"Replaced "` prefix (with trailing space) is the
+        // structural separator — `"Replaced7 occurrences ..."` is not
+        // the format `edit_file` emits and must not parse, otherwise a
+        // mutation that drops the space from the prefix would go
+        // unnoticed.
+        assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
+    }
+
+    #[test]
+    fn parse_replacement_count_returns_none_when_only_prefix_present() {
+        // Pin the empty-token `?` so a future "default to 0 / 1"
+        // regression doesn't slip.
+        assert_eq!(parse_replacement_count("Replaced "), None);
+    }
+
+    // ── synthesize_chunk ──
+
+    #[test]
+    fn synthesize_chunk_starts_numbering_at_one() {
+        // Resume-fallback shape: line 1 is the best the renderer has
+        // when JSONL didn't carry real positions.
+        let chunk = synthesize_chunk("a\nb", "x\ny");
+        assert_eq!(chunk.old[0].number, 1);
+        assert_eq!(chunk.new[0].number, 1);
+    }
+
+    #[test]
+    fn synthesize_chunk_applies_trim() {
+        // Mirrors live-path producer trim so the rendered output for
+        // a resumed transcript matches what the live renderer would
+        // produce — pure tail insertion still drops the anchor.
+        let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
+        assert!(chunk.old.is_empty());
+        assert_eq!(chunk.new.len(), 1);
+        assert_eq!(chunk.new[0].text, "    body");
     }
 }

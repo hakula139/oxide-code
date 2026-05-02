@@ -82,6 +82,7 @@ unrotated
 urandom
 venv
 vtable
+writeln
 xhigh
 xxhash
 yazi

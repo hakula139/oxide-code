@@ -28,6 +28,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
+use crate::slash::{self, SessionInfo, SlashContext};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -48,6 +49,9 @@ pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
+    /// Frozen snapshot of session-level descriptors that `/status`,
+    /// `/config`, and other read-only slash commands surface.
+    session_info: SessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
@@ -72,9 +76,8 @@ impl App {
     )]
     pub(crate) fn new(
         theme: &Theme,
-        model: String,
+        session_info: SessionInfo,
         show_thinking: bool,
-        cwd: String,
         title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
@@ -84,13 +87,15 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
-        let mut status_bar = StatusBar::new(theme, model, cwd);
+        let mut status_bar =
+            StatusBar::new(theme, session_info.model.clone(), session_info.cwd.clone());
         status_bar.set_title(title);
         Self {
             theme: theme.clone(),
             status_bar,
             chat,
             input: InputArea::new(theme),
+            session_info,
             agent_rx,
             user_tx,
             tools,
@@ -246,6 +251,18 @@ impl App {
         match action {
             UserAction::SubmitPrompt(text) => {
                 if self.input.is_enabled() {
+                    // Slash commands stay client-side: parse first, run
+                    // locally, never forward to the agent loop. The
+                    // typed text still lands as a user-message block so
+                    // the chat shows what the user typed; nothing is
+                    // recorded into `Message`s, so resume / token
+                    // accounting / model context all stay clean.
+                    if let Some(parsed) = slash::parse_slash(text) {
+                        self.chat.push_user_message(text.clone());
+                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                        slash::dispatch(&parsed, &mut ctx);
+                        return false;
+                    }
                     self.chat.push_user_message(text.clone());
                     self.input.set_enabled(false);
                     self.status_bar.set_status(Status::Streaming);
@@ -574,9 +591,8 @@ mod tests {
         let (user_tx, user_rx) = mpsc::channel::<UserAction>(8);
         let app = App::new(
             &Theme::default(),
-            "test-model".to_owned(),
+            test_session_info(),
             false,
-            "~/test".to_owned(),
             title.map(ToOwned::to_owned),
             agent_rx,
             user_tx,
@@ -585,6 +601,30 @@ mod tests {
             tools,
         );
         (app, user_rx, agent_tx)
+    }
+
+    fn test_session_info() -> SessionInfo {
+        // Local fixture keeps the snapshot-pinned model label
+        // (`test-model`) stable; slash::test_session_info uses
+        // `Test Model` to verify the marketing-name rendering path
+        // and would churn the TUI insta snapshots on import.
+        use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
+
+        SessionInfo {
+            model: "test-model".to_owned(),
+            cwd: "~/test".to_owned(),
+            version: "0.0.0-test",
+            session_id: "test-session".to_owned(),
+            config: ConfigSnapshot {
+                auth_label: "API key",
+                base_url: "https://api.test.invalid".to_owned(),
+                model_id: "claude-test-1-0".to_owned(),
+                effort: Some(Effort::High),
+                max_tokens: 32_000,
+                prompt_cache_ttl: PromptCacheTtl::OneHour,
+                show_thinking: false,
+            },
+        }
     }
 
     #[derive(Clone)]
@@ -850,6 +890,65 @@ mod tests {
         assert!(!app.should_quit);
         let forwarded = rx.recv().await.expect("forwarded action");
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_slash_command_renders_locally_without_forwarding() {
+        // Slash commands must stay client-side: user message + command
+        // output land in chat, agent loop never sees the prompt.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+
+        assert_eq!(
+            app.chat.entry_count(),
+            2,
+            "user-message + system-message blocks expected",
+        );
+        assert!(
+            app.input.is_enabled(),
+            "slash command must not flip input to streaming",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(
+            !app.chat.last_is_error(),
+            "/help must not produce an error block",
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_command_renders_error_without_forwarding() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/no-such".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 2);
+        assert!(app.input.is_enabled());
+        assert!(app.chat.last_is_error());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
+        // `//foo` parses as "not a command", so the agent receives the
+        // bytes verbatim — pin so a future prefix check can't swallow it.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the user message");
+        assert!(!app.input.is_enabled(), "streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert!(!app.chat.last_is_error());
+        let forwarded = rx.recv().await.expect("forwarded action");
+        assert!(matches!(
+            forwarded,
+            UserAction::SubmitPrompt(s) if s == "//etc/hosts",
+        ));
     }
 
     #[tokio::test]

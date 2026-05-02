@@ -67,6 +67,16 @@ ox                                          # Start an interactive session
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
 │   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
+├── slash.rs                                # Slash-command surface root: re-exports + dispatch
+├── slash/
+│   ├── config.rs                           # /config — read-only resolved config + layered file paths
+│   ├── context.rs                          # SlashContext (borrowed app handles) + SessionInfo (frozen runtime snapshot)
+│   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
+│   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
+│   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
+│   ├── parser.rs                           # parse_slash: detect `/cmd args`; allows `:` and `.` for plugin namespaces
+│   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup_in
+│   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
@@ -92,8 +102,10 @@ ox                                          # Start an interactive session
 │   │   │   └── blocks/
 │   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
 │   │   │       ├── error.rs                # ErrorBlock
+│   │   │       ├── git_diff.rs             # GitDiffBlock — unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
 │   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
 │   │   │       ├── streaming.rs            # StreamingAssistant (in-flight buffer + render cache)
+│   │   │       ├── system.rs               # SystemMessageBlock — left-bar accent + body text for slash-command output
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
 │   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows (text, grep paths, glob list, footers)
@@ -135,6 +147,10 @@ ox                                          # Start an interactive session
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
 - Reach for `thiserror::Error` only when callers need to match on error variants (no current uses; add the dep when the first one lands).
 - Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
+
+### Discarding Results
+
+- Use `_ = expr` (no `let`) to discard a result you don't need — typically the `()` from `writeln!`/`write!` against a `String` (infallible by `fmt::Write`). `let _ = expr` adds nothing and makes the intent noisier; the bare `_ = ...` form is what the rest of the crate uses.
 
 ### Lint Suppression
 

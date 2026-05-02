@@ -22,3 +22,4 @@ Architecture research and API reference notes for oxide-code development. Split 
 | [Tool Output Truncation](design/tool-truncation.md)                      | Tool dispatcher truncation: per-tool vs central, caps and spillover   |
 | [File Change Tracking](design/file-tracking.md)                          | Read-before-Edit gate, staleness detection, persistence across resume |
 | [Cancellation and Queued Input](design/cancellation-and-queued-input.md) | Esc / Ctrl+C cancel, double-press exit, queued prompts, run-state UX  |
+| [Slash Commands](design/slash-commands.md)                               | Slash-command surface: registry shape, popup UX, mid-session state    |

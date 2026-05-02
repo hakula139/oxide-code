@@ -12,15 +12,19 @@
 
 mod assistant;
 mod error;
+mod git_diff;
 mod interrupted;
 mod streaming;
+mod system;
 mod tool;
 mod user;
 
 pub(super) use assistant::{AssistantText, AssistantThinking};
 pub(super) use error::ErrorBlock;
+pub(super) use git_diff::GitDiffBlock;
 pub(super) use interrupted::InterruptedMarker;
 pub(super) use streaming::StreamingAssistant;
+pub(super) use system::SystemMessageBlock;
 pub(super) use tool::{ToolCallBlock, ToolResultBlock};
 pub(super) use user::UserMessage;
 
@@ -99,6 +103,15 @@ pub(super) trait ChatBlock {
     )]
     fn is_error_marker(&self) -> bool {
         false
+    }
+
+    /// The block's user-visible message when the block is an
+    /// [`ErrorBlock`] — `None` for every other variant. Lets test
+    /// helpers assert on the wording the user sees without reaching
+    /// through the rendered glyph stream.
+    #[cfg(test)]
+    fn error_text(&self) -> Option<&str> {
+        None
     }
 }
 

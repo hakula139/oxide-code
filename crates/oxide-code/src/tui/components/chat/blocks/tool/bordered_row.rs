@@ -1,5 +1,9 @@
-//! Shared `[bar] [text]` row primitive for unnumbered tool body
+//! Shared `[bar] [text]` row primitive for unnumbered chat-block body
 //! rows. Numbered rows use the sibling [`super::numbered_row`].
+//! Visibility is widened to `pub(in super::super)` so non-tool block
+//! modules (`blocks::git_diff` for file headers / hunk headers /
+//! truncation footers) reuse it without having to physically move
+//! the file.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -10,7 +14,7 @@ use super::{TOOL_BORDER_CONT, border_continuation_prefix};
 use crate::tui::wrap::wrap_line;
 
 /// Emits a bar-prefixed row, wrapping under the bar at `ctx.width`.
-pub(super) fn render(
+pub(in super::super) fn render(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
     border_style: Style,
@@ -32,10 +36,9 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::tui::glyphs::BAR;
     use crate::tui::theme::Theme;
-
-    use super::*;
 
     // ── render ──
 

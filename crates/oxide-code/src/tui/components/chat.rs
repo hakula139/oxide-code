@@ -23,8 +23,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, InterruptedMarker,
-    RenderCtx, StreamingAssistant, ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
+    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, GitDiffBlock,
+    InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
+    ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
@@ -250,6 +251,21 @@ impl ChatView {
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
     }
 
+    /// Appends informational output from a locally-dispatched slash
+    /// command (`/help`, `/status`, `/diff`, ...). Rendered with a
+    /// `▎` left-bar in `accent` so command output reads as distinct
+    /// from agent prose.
+    pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
+        self.blocks.push(Box::new(SystemMessageBlock::new(body)));
+    }
+
+    /// Appends a `git diff` body rendered with the same red / green
+    /// row backgrounds and left line-number gutter as the Edit-tool
+    /// diff. Used by `/diff` so uncommitted changes read at a glance.
+    pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
+        self.blocks.push(Box::new(GitDiffBlock::new(text)));
+    }
+
     /// Appends a dim italic `(interrupted)` marker. Finalizes any
     /// in-flight streaming buffer first — a cancel implicitly ends
     /// the current assistant turn's text, mirroring
@@ -274,6 +290,15 @@ impl ChatView {
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(|b| b.is_error_marker())
+    }
+
+    /// User-visible text of the tail block when it's an `ErrorBlock`,
+    /// otherwise `None`. Lets slash-dispatch tests assert on the
+    /// rendered wording (alphabetic chars, not bar glyphs) without
+    /// reaching into block internals.
+    #[cfg(test)]
+    pub(crate) fn last_error_text(&self) -> Option<&str> {
+        self.blocks.last().and_then(|b| b.error_text())
     }
 
     /// Updates cached viewport height and syncs scroll position. Called

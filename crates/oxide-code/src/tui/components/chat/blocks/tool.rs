@@ -15,11 +15,11 @@
 //! this file owns block types, central dispatch, and the shared border
 //! helpers child renderers reuse.
 
-mod bordered_row;
+pub(super) mod bordered_row;
 mod diff;
 mod glob;
 mod grep;
-mod numbered_row;
+pub(super) mod numbered_row;
 mod read_excerpt;
 mod text;
 

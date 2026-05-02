@@ -46,7 +46,7 @@ impl Tool for GrepTool {
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
-                    "description": "Output mode: \"content\" shows matching lines (default), \"files_with_matches\" shows file paths only, \"count\" shows match counts per file"
+                    "description": r#"Output mode: "content" shows matching lines (default), "files_with_matches" shows file paths only, "count" shows match counts per file"#
                 },
                 "context": {
                     "type": "integer",
@@ -1273,13 +1273,13 @@ mod tests {
     fn parse_content_view_groups_consecutive_lines_with_context_and_separator() {
         // Groups by path, distinguishes match (`:`) from context (`-`),
         // accepts `--` separators, chains a second file into its own group.
-        let content = indoc! {"
+        let content = indoc! {r#"
             src/main.rs:10:fn main() {
-            src/main.rs:11-    println!(\"hi\");
+            src/main.rs:11-    println!("hi");
             --
             src/main.rs:20:    helper();
             src/lib.rs:5:fn other()
-        "};
+        "#};
         assert_eq!(
             parse_content_view(content),
             Some(ToolResultView::GrepMatches {
@@ -1294,7 +1294,7 @@ mod tests {
                             },
                             GrepMatchLine {
                                 number: 11,
-                                text: "    println!(\"hi\");".to_owned(),
+                                text: r#"    println!("hi");"#.to_owned(),
                                 is_match: false,
                             },
                             GrepMatchLine {
@@ -1323,7 +1323,8 @@ mod tests {
         let content = indoc! {"
             src/main.rs:1:hit
 
-            (Results limited to 1 lines)"};
+            (Results limited to 1 lines)"
+        };
         assert_eq!(
             parse_content_view(content),
             Some(ToolResultView::GrepMatches {
@@ -1344,7 +1345,12 @@ mod tests {
     fn parse_content_view_falls_back_when_skipped_warnings_present() {
         // Skipped-warning text isn't modelled by GrepMatches; fall back
         // so the warning stays visible in the rendered text body.
-        let content = "src/main.rs:1:hit\n\nSkipped (exceeds 1 MB size limit):\n  big.txt (5.0 MB)";
+        let content = indoc! {"
+            src/main.rs:1:hit
+
+            Skipped (exceeds 1 MB size limit):
+              big.txt (5.0 MB)"
+        };
         assert!(parse_content_view(content).is_none());
     }
 

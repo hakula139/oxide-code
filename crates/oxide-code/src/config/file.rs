@@ -191,7 +191,7 @@ fn load_file(path: &Path) -> Result<Option<FileConfig>> {
 
 /// User config: `$XDG_CONFIG_HOME/ox/config.toml`, falling back to
 /// `~/.config/ox/config.toml`.
-fn user_config_path() -> Option<PathBuf> {
+pub(crate) fn user_config_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
         dirs::home_dir(),
@@ -201,7 +201,7 @@ fn user_config_path() -> Option<PathBuf> {
 }
 
 /// Walks from CWD upward to find the nearest `ox.toml`.
-fn find_project_config() -> Option<PathBuf> {
+pub(crate) fn find_project_config() -> Option<PathBuf> {
     find_project_config_from(std::env::current_dir().ok()?)
 }
 

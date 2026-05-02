@@ -36,4 +36,9 @@ impl ChatBlock for ErrorBlock {
     fn is_error_marker(&self) -> bool {
         true
     }
+
+    #[cfg(test)]
+    fn error_text(&self) -> Option<&str> {
+        Some(&self.message)
+    }
 }

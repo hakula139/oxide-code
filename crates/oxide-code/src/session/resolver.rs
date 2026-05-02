@@ -202,6 +202,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_session_resumes_from_external_path() {
+        // A session file living somewhere the store wouldn't search.
+        // The path-based resume must still pick up the title, messages,
+        // and session_id recorded in the header.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original
+            .record_message(Message::user("external path test"))
+            .await;
+        original.finish(Vec::new()).await;
+        let path = test_session_file(dir.path(), &full_id);
+        drop(original);
+
+        // Copy the file outside the project directory to simulate the
+        // "imported from another machine" scenario.
+        let external_dir = tempfile::tempdir().unwrap();
+        let external_path = external_dir.path().join("copied.jsonl");
+        std::fs::copy(&path, &external_path).unwrap();
+
+        let arg = Some(external_path.to_string_lossy().into_owned());
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("external path test"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_prefix_resumes_single_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original.record_message(Message::user("hello")).await;
+        original.finish(Vec::new()).await;
+        drop(original);
+
+        // A 10-char UUID prefix is vanishingly unlikely to collide.
+        let prefix = full_id[..10].to_owned();
+        let arg = Some(prefix);
+        let resumed = resolve_session(&store, "m", Some(&arg), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn resolve_session_all_widens_scope_to_list_all() {
+        // `--all` flips the listing from `store.list()` (current project only)
+        // to `store.list_all()` (every project subdir). The prefix match
+        // then resolves across projects and the error hint drops the
+        // "in this project" qualifier. Exercising the `all = true` branch
+        // here also covers the empty `scope_hint`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = handle::start(&store, "m");
+        let full_id = original.session_id().to_owned();
+        original.record_message(Message::user("all scope")).await;
+        original.finish(Vec::new()).await;
+        drop(original);
+
+        let arg = Some(full_id[..10].to_owned());
+        let resumed = resolve_session(&store, "m", Some(&arg), true)
+            .await
+            .unwrap();
+        assert_eq!(resumed.handle.session_id(), full_id);
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(resumed.title.as_deref(), Some("all scope"));
+
+        // Error path under `all = true` omits the "use --all" hint.
+        let missing = Some("zzzz".to_owned());
+        let err = resolve_session(&store, "m", Some(&missing), true)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            !err.contains("use --all"),
+            "hint should not suggest --all when already set: {err}",
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_session_bare_continue_errors_without_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -273,37 +361,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_session_resumes_from_external_path() {
-        // A session file living somewhere the store wouldn't search.
-        // The path-based resume must still pick up the title, messages,
-        // and session_id recorded in the header.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original
-            .record_message(Message::user("external path test"))
-            .await;
-        original.finish(Vec::new()).await;
-        let path = test_session_file(dir.path(), &full_id);
-        drop(original);
-
-        // Copy the file outside the project directory to simulate the
-        // "imported from another machine" scenario.
-        let external_dir = tempfile::tempdir().unwrap();
-        let external_path = external_dir.path().join("copied.jsonl");
-        std::fs::copy(&path, &external_path).unwrap();
-
-        let arg = Some(external_path.to_string_lossy().into_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("external path test"));
-    }
-
-    #[tokio::test]
     async fn resolve_session_path_errors_on_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -314,63 +371,6 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(err.contains("session not found"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn resolve_session_prefix_resumes_single_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original.record_message(Message::user("hello")).await;
-        original.finish(Vec::new()).await;
-        drop(original);
-
-        // A 10-char UUID prefix is vanishingly unlikely to collide.
-        let prefix = full_id[..10].to_owned();
-        let arg = Some(prefix);
-        let resumed = resolve_session(&store, "m", Some(&arg), false)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("hello"));
-    }
-
-    #[tokio::test]
-    async fn resolve_session_all_widens_scope_to_list_all() {
-        // `--all` flips the listing from `store.list()` (current project only)
-        // to `store.list_all()` (every project subdir). The prefix match
-        // then resolves across projects and the error hint drops the
-        // "in this project" qualifier. Exercising the `all = true` branch
-        // here also covers the empty `scope_hint`.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = handle::start(&store, "m");
-        let full_id = original.session_id().to_owned();
-        original.record_message(Message::user("all scope")).await;
-        original.finish(Vec::new()).await;
-        drop(original);
-
-        let arg = Some(full_id[..10].to_owned());
-        let resumed = resolve_session(&store, "m", Some(&arg), true)
-            .await
-            .unwrap();
-        assert_eq!(resumed.handle.session_id(), full_id);
-        assert_eq!(resumed.messages.len(), 1);
-        assert_eq!(resumed.title.as_deref(), Some("all scope"));
-
-        // Error path under `all = true` omits the "use --all" hint.
-        let missing = Some("zzzz".to_owned());
-        let err = resolve_session(&store, "m", Some(&missing), true)
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            !err.contains("use --all"),
-            "hint should not suggest --all when already set: {err}",
-        );
     }
 
     // ── normalize_resume_arg ──

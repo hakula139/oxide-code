@@ -5,7 +5,7 @@
 //! the same precedence but terminates at the first source that
 //! resolves (API key env > API key in file > OAuth credentials).
 
-mod file;
+pub(crate) mod file;
 mod oauth;
 
 use std::fmt;
@@ -26,6 +26,33 @@ pub(crate) enum Auth {
     ApiKey(String),
     /// OAuth access token from Claude Code (`Authorization: Bearer` header).
     OAuth(String),
+}
+
+impl Auth {
+    /// Short label naming the credential type (`"API key"` /
+    /// `"OAuth"`). Surfaced by `/status` and `/config` so the user
+    /// knows which auth source is live without dumping the secret.
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => "API key",
+            Self::OAuth(_) => "OAuth",
+        }
+    }
+}
+
+/// Read-only view of resolved config — every field [`Config`] holds
+/// except the actual secret. Built once at startup from
+/// [`Config::snapshot`] and handed into the slash dispatcher; survives
+/// the move when [`Config`] itself is consumed by the API client.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSnapshot {
+    pub(crate) auth_label: &'static str,
+    pub(crate) base_url: String,
+    pub(crate) model_id: String,
+    pub(crate) effort: Option<Effort>,
+    pub(crate) max_tokens: u32,
+    pub(crate) prompt_cache_ttl: PromptCacheTtl,
+    pub(crate) show_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +279,21 @@ impl Config {
             theme,
         })
     }
+
+    /// Captures the resolved descriptors `/config` (and friends)
+    /// print, minus the auth secret. Called before `self` is moved
+    /// into the API client so the snapshot survives the move.
+    pub(crate) fn snapshot(&self) -> ConfigSnapshot {
+        ConfigSnapshot {
+            auth_label: self.auth.label(),
+            base_url: self.base_url.clone(),
+            model_id: self.model.clone(),
+            effort: self.effort,
+            max_tokens: self.max_tokens,
+            prompt_cache_ttl: self.prompt_cache_ttl,
+            show_thinking: self.show_thinking,
+        }
+    }
 }
 
 /// Per-effort `max_tokens` default; overridden by
@@ -272,6 +314,17 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    // ── Auth::label ──
+
+    #[test]
+    fn label_distinguishes_api_key_from_oauth() {
+        // Both branches reach `/status` and `/config` rows. Pin the
+        // exact strings — a regression that swapped them would mislabel
+        // every user's auth source without otherwise tripping a test.
+        assert_eq!(Auth::ApiKey("secret".to_owned()).label(), "API key");
+        assert_eq!(Auth::OAuth("token".to_owned()).label(), "OAuth");
+    }
 
     // ── ThinkingConfig ──
 
@@ -736,6 +789,36 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
         assert!(msg.contains("insane"), "{msg}");
+    }
+
+    // ── Config::snapshot ──
+
+    #[test]
+    fn snapshot_copies_every_user_facing_field_and_drops_secret() {
+        // The snapshot is what `/config` prints; pin every field so a
+        // regression that forgot to copy one (or that swapped two
+        // names) shows up here, not silently in the rendered table.
+        // The auth secret never reaches the snapshot — only the
+        // `label()` projection does.
+        let cfg = Config {
+            auth: Auth::OAuth("token-must-not-leak".to_owned()),
+            base_url: "https://api.example.test".to_owned(),
+            model: "claude-test-1-0".to_owned(),
+            effort: Some(Effort::Xhigh),
+            max_tokens: 64_000,
+            prompt_cache_ttl: PromptCacheTtl::FiveMin,
+            thinking: None,
+            show_thinking: true,
+            theme: Theme::default(),
+        };
+        let snap = cfg.snapshot();
+        assert_eq!(snap.auth_label, "OAuth");
+        assert_eq!(snap.base_url, "https://api.example.test");
+        assert_eq!(snap.model_id, "claude-test-1-0");
+        assert_eq!(snap.effort, Some(Effort::Xhigh));
+        assert_eq!(snap.max_tokens, 64_000);
+        assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+        assert!(snap.show_thinking);
     }
 
     // ── default_max_tokens ──

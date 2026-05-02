@@ -1225,55 +1225,6 @@ mod tests {
         );
     }
 
-    // ── resolve_base_dir ──
-
-    #[test]
-    fn resolve_base_dir_some_returns_given_path() {
-        let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
-        assert_eq!(result, PathBuf::from("/tmp/foo"));
-    }
-
-    #[test]
-    fn resolve_base_dir_none_returns_cwd() {
-        let result = resolve_base_dir(None).unwrap();
-        assert_eq!(result, std::env::current_dir().unwrap());
-    }
-
-    // ── display_path ──
-
-    #[test]
-    fn display_path_relative_inside_base() {
-        let base = Path::new("/home/user/project");
-        let path = Path::new("/home/user/project/src/main.rs");
-        assert_eq!(display_path(path, base), "src/main.rs");
-    }
-
-    #[test]
-    fn display_path_outside_base_stays_absolute() {
-        let base = Path::new("/home/user/project");
-        let path = Path::new("/etc/config.toml");
-        assert_eq!(display_path(path, base), "/etc/config.toml");
-    }
-
-    #[test]
-    fn display_path_same_path_returns_filename() {
-        let base = Path::new("/home/user/project/src/main.rs");
-        let path = Path::new("/home/user/project/src/main.rs");
-        assert_eq!(display_path(path, base), "main.rs");
-    }
-
-    // ── file_name ──
-
-    #[test]
-    fn file_name_extracts_basename() {
-        assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
-    }
-
-    #[test]
-    fn file_name_bare_name_unchanged() {
-        assert_eq!(file_name("README.md"), "README.md");
-    }
-
     // ── cap_output ──
 
     #[test]
@@ -1340,6 +1291,55 @@ mod tests {
         let (out, original_len) = cap_output(original.clone());
         assert_eq!(out, original);
         assert!(original_len.is_none());
+    }
+
+    // ── resolve_base_dir ──
+
+    #[test]
+    fn resolve_base_dir_some_returns_given_path() {
+        let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/foo"));
+    }
+
+    #[test]
+    fn resolve_base_dir_none_returns_cwd() {
+        let result = resolve_base_dir(None).unwrap();
+        assert_eq!(result, std::env::current_dir().unwrap());
+    }
+
+    // ── display_path ──
+
+    #[test]
+    fn display_path_relative_inside_base() {
+        let base = Path::new("/home/user/project");
+        let path = Path::new("/home/user/project/src/main.rs");
+        assert_eq!(display_path(path, base), "src/main.rs");
+    }
+
+    #[test]
+    fn display_path_outside_base_stays_absolute() {
+        let base = Path::new("/home/user/project");
+        let path = Path::new("/etc/config.toml");
+        assert_eq!(display_path(path, base), "/etc/config.toml");
+    }
+
+    #[test]
+    fn display_path_same_path_returns_filename() {
+        let base = Path::new("/home/user/project/src/main.rs");
+        let path = Path::new("/home/user/project/src/main.rs");
+        assert_eq!(display_path(path, base), "main.rs");
+    }
+
+    // ── file_name ──
+
+    #[test]
+    fn file_name_extracts_basename() {
+        assert_eq!(file_name("/home/user/project/src/main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn file_name_bare_name_unchanged() {
+        assert_eq!(file_name("README.md"), "README.md");
     }
 
     // ── truncate_line ──
