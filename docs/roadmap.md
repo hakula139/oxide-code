@@ -61,8 +61,9 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/help`, `/init`, `/status`. See the [user guide](guide/slash-commands.md).
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/help`, `/init`, `/model`, `/status`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter and Tab completion.
+- `/model` swaps the active model mid-session and re-clamps `effort` against the new ceiling. Session-only; restart returns to the user-declared model.
 - Read-only by design — no slash command writes user config files; runtime mutations stay session-local.
 
 ### Authentication & Configuration
@@ -75,11 +76,11 @@ The direction is simple:
 
 ### Slash Commands (continuation)
 
-The first wave (`/clear`, `/config`, `/diff`, `/help`, `/init`, `/status`) plus the autocomplete popup ship under Working Today. Remaining surface:
+The first wave (`/clear`, `/config`, `/diff`, `/help`, `/init`, `/model`, `/status`) plus the autocomplete popup ship under Working Today. Remaining surface:
 
 - Session: `/resume`.
-- Mid-session swap: `/model`, `/theme`.
-- Deferred: `/compact` (summarization), `/cost` (token persistence), `/login` / `/logout` (interactive OAuth), custom user commands (templates), `/init` multi-phase flow (`AgentEvent::PromptRequest`).
+- Mid-session swap: `/theme`.
+- Deferred: `/compact` (summarization), `/cost` (token persistence), `/login` / `/logout` (interactive OAuth), custom user commands (templates), `/init` multi-phase flow (`AgentEvent::PromptRequest`), `/model` interactive picker + lossless effort across swap-backs.
 
 Persistence stance: `/model` and `/theme` mutate runtime state for the current session only; restart returns to the user-declared config. Persisting a slash-command choice across restarts is intentionally deferred until there is a clear case for it. When the case arrives, the design will be an **explicit subcommand** writing to an **explicit user-opted-in path** (e.g. `/model save claude-sonnet-4-6` writing into `~/.config/ox/config.toml.local` or similar) — never a silent merge into the user's main config file. This rejects Claude Code's `~/.claude.json` mega-file pattern (telemetry, recent files, login state, per-project state all in one silently-written blob); a single corrupt write should never erase the user's preferences, and a NixOS-style declarative config should remain valid.
 
