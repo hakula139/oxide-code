@@ -163,6 +163,7 @@ fn format_size(bytes: usize) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use indoc::indoc;
     use tempfile::TempDir;
 
     use super::*;
@@ -350,7 +351,14 @@ mod tests {
     #[test]
     fn format_diff_untracked_only_lists_files_under_heading() {
         let body = format_diff("", "new.rs\nother.rs\n");
-        assert_eq!(body, "Untracked files:\n  new.rs\n  other.rs");
+        assert_eq!(
+            body,
+            indoc! {"
+                Untracked files:
+                  new.rs
+                  other.rs"
+            },
+        );
     }
 
     #[test]
@@ -358,7 +366,13 @@ mod tests {
         let body = format_diff("diff --git a/x b/x\n+foo\n", "new.rs\n");
         assert_eq!(
             body,
-            "diff --git a/x b/x\n+foo\n\nUntracked files:\n  new.rs",
+            indoc! {"
+                diff --git a/x b/x
+                +foo
+
+                Untracked files:
+                  new.rs"
+            },
         );
     }
 

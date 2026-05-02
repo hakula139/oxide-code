@@ -375,7 +375,15 @@ mod tests {
         // model can re-request a different range.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        std::fs::write(&path, "a\nb\nc\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                a
+                b
+                c
+            "},
+        )
+        .unwrap();
         let tracker = tracker();
 
         let json = serde_json::json!({
@@ -402,7 +410,15 @@ mod tests {
     async fn read_file_with_line_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                alpha
+                beta
+                gamma
+            "},
+        )
+        .unwrap();
 
         let result = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await
@@ -414,7 +430,17 @@ mod tests {
     async fn read_file_respects_offset_and_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                a
+                b
+                c
+                d
+                e
+            "},
+        )
+        .unwrap();
 
         let result = read_file(
             path.to_str().unwrap(),

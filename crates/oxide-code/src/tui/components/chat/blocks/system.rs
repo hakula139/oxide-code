@@ -66,6 +66,8 @@ fn bar_continuation_prefix(bar_style: Style) -> Vec<Span<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
+
     use super::*;
     use crate::tui::theme::Theme;
 
@@ -82,7 +84,11 @@ mod tests {
     #[test]
     fn render_each_input_line_gets_bar_prefix() {
         let theme = Theme::default();
-        let block = SystemMessageBlock::new("first\nsecond\nthird");
+        let block = SystemMessageBlock::new(indoc! {"
+            first
+            second
+            third
+        "});
         let lines = block.render(&ctx_at(60, &theme));
         assert_eq!(lines.len(), 3);
         for (i, expected) in ["first", "second", "third"].iter().enumerate() {
@@ -113,7 +119,10 @@ mod tests {
         // trailing newline; pin that contract so a future switch to
         // `split('\n')` would fail visibly here.
         let theme = Theme::default();
-        let block = SystemMessageBlock::new("alpha\nbeta\n");
+        let block = SystemMessageBlock::new(indoc! {"
+            alpha
+            beta
+        "});
         let lines = block.render(&ctx_at(60, &theme));
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1].spans[1].content, "beta");

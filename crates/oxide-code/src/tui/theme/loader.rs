@@ -775,7 +775,7 @@ mod tests {
             );
             assert!(
                 t.surface.bg.is_some(),
-                "{name}: surface must declare a bg (use \"reset\" for terminal default)",
+                r#"{name}: surface must declare a bg (use "reset" for terminal default)"#,
             );
         }
     }

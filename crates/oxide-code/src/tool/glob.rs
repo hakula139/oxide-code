@@ -617,7 +617,12 @@ mod tests {
         // through to text instead of dropping rows.
         let view = build_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
-            "weird\n\nname.rs\nnext.rs",
+            indoc! {"
+                weird
+
+                name.rs
+                next.rs"
+            },
             &ToolMetadata::default(),
         );
         assert!(view.is_none());

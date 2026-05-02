@@ -237,14 +237,14 @@ mod tests {
             Some(theme.diff_del_row()),
         );
         let mut out = Vec::new();
-        renderer.render(&mut out, 14, "println!(\"x\");", theme.error());
+        renderer.render(&mut out, 14, r#"println!("x");"#, theme.error());
 
         let row = out.first().expect("renders one line");
         let contents: Vec<&str> = row.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(contents[0], TOOL_BORDER_CONT);
         assert_eq!(contents[1], "14");
         assert_eq!(contents[2], " - ");
-        assert_eq!(contents[3], "println!(\"x\");");
+        assert_eq!(contents[3], r#"println!("x");"#);
     }
 
     #[test]

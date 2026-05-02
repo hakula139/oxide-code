@@ -336,7 +336,11 @@ mod tests {
         // (or swapped it with del) trips here. The bg slot reaches
         // the rendered span via `Renderer::with_style`'s patch.
         let theme = Theme::default();
-        let block = GitDiffBlock::new("diff --git a/x b/x\n@@ -1 +1 @@\n+only added\n".to_owned());
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -1 +1 @@
+            +only added
+        "});
         let lines = block.render(&ctx_at(80, &theme));
         // Layout: [path header, hunk header, add row].
         let add_row = lines.last().expect("at least one row");
@@ -353,9 +357,12 @@ mod tests {
     #[test]
     fn render_del_row_carries_diff_del_row_bg() {
         let theme = Theme::default();
-        let block = GitDiffBlock::new(
-            "diff --git a/x b/x\n@@ -1 +1 @@\n-only removed\n+replacement\n".to_owned(),
-        );
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -1 +1 @@
+            -only removed
+            +replacement
+        "});
         let lines = block.render(&ctx_at(80, &theme));
         // Find the del row (the `-` content).
         let del_row = lines
@@ -376,7 +383,11 @@ mod tests {
         // rows, even though the indented lines start with two spaces
         // (which looks like a context line).
         let theme = Theme::default();
-        let block = GitDiffBlock::new("Untracked files:\n  new.txt\n  also-new.rs\n".to_owned());
+        let block = GitDiffBlock::new(indoc! {"
+            Untracked files:
+              new.txt
+              also-new.rs
+        "});
         let lines = block.render(&ctx_at(80, &theme));
         for line in &lines {
             // No row should carry the diff_add or diff_del row bg.

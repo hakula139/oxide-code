@@ -1277,7 +1277,16 @@ mod tests {
         // in `match_positions` or `line_at_byte` surfaces here.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.txt");
-        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                A
+                B
+                C
+                B
+            "},
+        )
+        .unwrap();
 
         let (_, replacements, chunks) = edit_file(
             path.to_str().unwrap(),
@@ -1330,7 +1339,16 @@ mod tests {
         // `build_diff_chunks` regresses visibly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grow.txt");
-        std::fs::write(&path, "A\nB\nC\nB\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                A
+                B
+                C
+                B
+            "},
+        )
+        .unwrap();
 
         // "B" → "X\nY" adds one line per replacement.
         let (_, _, chunks) = edit_file(
@@ -1385,7 +1403,21 @@ mod tests {
         // each prior match having shrunk the file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.txt");
-        std::fs::write(&path, "X\nY\nA\nX\nY\nB\nX\nY\nC\n").unwrap();
+        std::fs::write(
+            &path,
+            indoc! {"
+                X
+                Y
+                A
+                X
+                Y
+                B
+                X
+                Y
+                C
+            "},
+        )
+        .unwrap();
 
         // "X\nY" → "Z" drops one line per replacement.
         let (_, _, chunks) = edit_file(
@@ -1450,7 +1482,13 @@ mod tests {
         // collapses, leaving only the inserted line on the new side.
         // Line numbers on the surviving entry are preserved.
         let chunks = build_diff_chunks(
-            "x\nx\nx\nx\nfn foo()\n",
+            indoc! {"
+                x
+                x
+                x
+                x
+                fn foo()
+            "},
             "fn foo()",
             "fn foo()\n    return 42;",
             1,
