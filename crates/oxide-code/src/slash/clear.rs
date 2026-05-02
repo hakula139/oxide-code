@@ -1,5 +1,7 @@
-//! `/clear` — drops chat history client-side, then forwards
-//! [`UserAction::Clear`] so the agent loop rolls the session.
+//! `/clear` — forwards [`UserAction::Clear`] so the agent loop rolls
+//! the session, then drops the chat-history view. Order matters: if
+//! the action can't be queued, the chat stays intact and the user
+//! sees only the error.
 
 use super::context::SlashContext;
 use super::registry::SlashCommand;
@@ -17,12 +19,13 @@ impl SlashCommand for ClearCmd {
     }
 
     fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+        ctx.user_tx
+            .try_send(UserAction::Clear)
+            .map_err(|e| format!("could not signal agent to clear: {e}"))?;
         ctx.chat.clear_history();
         ctx.chat
             .push_system_message("Conversation cleared. Next message starts fresh.");
-        ctx.user_tx
-            .try_send(UserAction::Clear)
-            .map_err(|e| format!("could not signal agent to clear: {e}"))
+        Ok(())
     }
 }
 
@@ -61,8 +64,14 @@ mod tests {
     }
 
     #[test]
-    fn execute_surfaces_send_failure_when_channel_closed() {
+    fn execute_preserves_chat_when_channel_closed() {
+        // Send-first ordering — if the agent can't accept the Clear
+        // action, the visible chat must stay intact so the user isn't
+        // staring at an empty pane while seeing an error block below.
         let mut chat = ChatView::new(&Theme::default(), false);
+        chat.push_user_message("prompt".to_owned());
+        chat.push_tool_call("$", "ls");
+        let pre_count = chat.entry_count();
         let info = crate::slash::test_session_info();
         let (user_tx, user_rx) = crate::slash::test_user_tx();
         drop(user_rx);
@@ -70,10 +79,9 @@ mod tests {
         let err = ClearCmd
             .execute("", &mut fresh_ctx(&mut chat, &info, &user_tx))
             .expect_err("closed channel must error");
-        assert!(
-            err.contains("could not signal agent to clear"),
-            "actionable wording: {err}",
-        );
+        assert!(err.contains("could not signal agent to clear"), "{err}");
+        assert_eq!(chat.entry_count(), pre_count, "chat must survive failure");
+        assert!(!chat.last_is_error());
     }
 
     // ── ClearCmd metadata ──
