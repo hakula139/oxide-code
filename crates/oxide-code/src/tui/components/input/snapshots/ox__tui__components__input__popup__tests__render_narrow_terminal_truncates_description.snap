@@ -5,6 +5,7 @@ expression: "render_to_backend(&popup, 30)"
 ---
 "/help    List the available..."
 "/clear   Reset the conversa..."
+"/init    Generate or update..."
 "/status  Show session info:..."
 "/config  Show the resolved ..."
 "/diff    Show uncommitted w..."

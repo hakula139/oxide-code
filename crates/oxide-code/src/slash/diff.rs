@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use super::context::SlashContext;
-use super::registry::SlashCommand;
+use super::registry::{SlashCommand, SlashOutcome};
 
 /// Cap so a runaway binary diff can't freeze rendering. 64 KB sits
 /// comfortably above a typical PR-sized review.
@@ -29,7 +29,7 @@ impl SlashCommand for DiffCmd {
         "Show uncommitted working-tree changes (`git diff HEAD`) and the names of any untracked files"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let cwd = std::env::current_dir()
             .context("failed to read current directory")
             .map_err(|e| format!("{e:#}"))?;
@@ -39,14 +39,14 @@ impl SlashCommand for DiffCmd {
 
 /// Body of [`DiffCmd::execute`] with cwd injected as data so tests can
 /// drive it against a tempdir without touching process state.
-fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
     let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
     if text.trim().is_empty() {
         ctx.chat.push_system_message("Working tree clean.");
     } else {
         ctx.chat.push_git_diff(text);
     }
-    Ok(())
+    Ok(SlashOutcome::Local)
 }
 
 /// Gathers tracked + untracked diff text rooted at `cwd`. Falls back
@@ -220,7 +220,7 @@ mod tests {
         let info = test_session_info();
         let (user_tx, _user_rx) = test_user_tx();
         let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info, &user_tx));
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(SlashOutcome::Local));
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
     }

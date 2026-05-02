@@ -4,7 +4,7 @@
 //! sees only the error.
 
 use super::context::SlashContext;
-use super::registry::SlashCommand;
+use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 
 pub(super) struct ClearCmd;
@@ -26,14 +26,14 @@ impl SlashCommand for ClearCmd {
         false
     }
 
-    fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.user_tx
             .try_send(UserAction::Clear)
             .map_err(|e| format!("could not signal agent to clear: {e}"))?;
         ctx.chat.clear_history();
         ctx.chat
             .push_system_message("Conversation cleared. Next message starts fresh.");
-        Ok(())
+        Ok(SlashOutcome::Local)
     }
 }
 

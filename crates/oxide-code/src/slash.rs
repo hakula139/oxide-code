@@ -20,6 +20,7 @@ mod context;
 mod diff;
 mod format;
 mod help;
+mod init;
 mod matcher;
 mod parser;
 mod registry;
@@ -39,20 +40,21 @@ pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
 
 /// Resolves and runs a parsed slash command against the built-in
 /// registry. See [`dispatch_with`].
-pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
-    dispatch_with(registry::BUILT_INS, parsed, ctx);
+pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) -> Option<String> {
+    dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
 
 /// Resolves `parsed` against `commands` and runs the matching impl.
-/// Renders an `ErrorBlock` on unknown name or on `Err` from `execute`.
-/// Successful commands push their own output before returning `Ok`.
+/// Returns `Some(prompt)` for `PromptSubmit` commands so the caller
+/// can forward it to the agent loop; `None` for local / unknown /
+/// errored paths (which already pushed the appropriate chat block).
 ///
 /// Extracted so tests can drive the dispatcher with a synthetic registry.
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
     ctx: &mut SlashContext<'_>,
-) {
+) -> Option<String> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         ctx.chat.push_error(&format!(
             "unknown command: /{name}. Available: {available}. \
@@ -60,10 +62,15 @@ fn dispatch_with(
             name = parsed.name,
             available = format_available(commands),
         ));
-        return;
+        return None;
     };
-    if let Err(msg) = cmd.execute(&parsed.args, ctx) {
-        ctx.chat.push_error(&format!("/{}: {msg}", parsed.name));
+    match cmd.execute(&parsed.args, ctx) {
+        Ok(registry::SlashOutcome::Local) => None,
+        Ok(registry::SlashOutcome::PromptSubmit(prompt)) => Some(prompt),
+        Err(msg) => {
+            ctx.chat.push_error(&format!("/{}: {msg}", parsed.name));
+            None
+        }
     }
 }
 
@@ -142,7 +149,7 @@ pub(crate) fn test_user_tx() -> (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::registry::SlashCommand;
+    use crate::slash::registry::{SlashCommand, SlashOutcome};
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
@@ -226,7 +233,7 @@ mod tests {
         fn description(&self) -> &'static str {
             "test"
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
             Err("explicit failure".to_owned())
         }
     }

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
-use super::registry::SlashCommand;
+use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::file;
 use crate::util::path::tildify;
 
@@ -26,12 +26,12 @@ impl SlashCommand for ConfigCmd {
         "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let user = file::user_config_path();
         let project = file::find_project_config();
         ctx.chat
             .push_system_message(render_config(ctx.info, user.as_deref(), project.as_deref()));
-        Ok(())
+        Ok(SlashOutcome::Local)
     }
 }
 

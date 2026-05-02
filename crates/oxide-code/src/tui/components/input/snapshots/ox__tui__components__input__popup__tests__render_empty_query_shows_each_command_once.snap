@@ -5,6 +5,7 @@ expression: "render_to_backend(&popup, 60)"
 ---
 "/help    List the available slash commands and their usag..."
 "/clear   Reset the conversation context                     "
+"/init    Generate or update the project's `AGENTS.md` / `..."
 "/status  Show session info: model, version, working direc..."
 "/config  Show the resolved configuration and the layered ..."
 "/diff    Show uncommitted working-tree changes (`git diff..."
