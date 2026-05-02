@@ -150,7 +150,11 @@ fn truncate(s: String) -> String {
         .map_or(0, |(i, c)| i + c.len_utf8());
     let dropped = s.len() - cut;
     let mut t = s[..cut].to_owned();
-    _ = write!(t, "\n\n(truncated: {} more)", format_size(dropped));
+    _ = write!(
+        t,
+        "\n\n(truncated: {} more — run `git diff HEAD` for the full output)",
+        format_size(dropped),
+    );
     t
 }
 
@@ -481,11 +485,13 @@ mod tests {
         let got = truncate(s);
         // The kept prefix is exactly MAX_BYTES bytes; everything after
         // is the footer. Pin both halves so an off-by-one in either
-        // direction (kept too few or too many) fails here.
-        let footer = "\n\n(truncated: 100 B more)";
+        // direction (kept too few or too many) fails here. The actionable
+        // hint at the end is part of the contract too — silently dropping
+        // it would leave the user without a recovery path on overflow.
+        let footer = "\n\n(truncated: 100 B more — run `git diff HEAD` for the full output)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
-        assert!(got.ends_with(footer), "{}", &got[got.len() - 40..]);
+        assert!(got.ends_with(footer), "{}", &got[got.len() - 80..]);
     }
 
     #[test]
