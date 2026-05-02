@@ -15,7 +15,7 @@ impl SlashCommand for ClearCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Reset the Conversation Context"
+        "Reset the conversation context"
     }
 
     fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
