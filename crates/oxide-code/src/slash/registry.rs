@@ -30,6 +30,17 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
+    /// Whether the command is safe to dispatch while a turn is in
+    /// flight. Read-only commands (`/help`, `/status`, `/config`,
+    /// `/diff`) just push a chat block and never touch agent state, so
+    /// they run immediately even when input is disabled. State-mutating
+    /// commands (`/clear`, eventually `/model`, `/theme`) override to
+    /// `false`; the dispatcher refuses them mid-turn rather than racing
+    /// the agent's `messages` / session writer.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     /// Optional usage hint used by the error message when the command
     /// is invoked with malformed arguments. `None` means no args are
     /// expected.

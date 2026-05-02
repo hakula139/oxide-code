@@ -28,7 +28,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
-use crate::slash::{self, SessionInfo, SlashContext};
+use crate::slash::{self, SessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -278,6 +278,33 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
+                    // Slash commands stay client-side even when busy:
+                    // queueing them would forward through the agent's
+                    // `record_drained_prompts` path and persist as a
+                    // user message — see PR #58 review notes. Read-only
+                    // commands (`/help`, `/status`, ...) dispatch
+                    // immediately; state-mutating ones refuse with a
+                    // system message rather than racing the live turn.
+                    if let Some(parsed) = slash::parse_slash(text) {
+                        self.chat.push_user_message(text.clone());
+                        match slash::classify(&parsed) {
+                            SlashKind::ReadOnly | SlashKind::Unknown => {
+                                let mut ctx = SlashContext::new(
+                                    &mut self.chat,
+                                    &self.session_info,
+                                    &self.user_tx,
+                                );
+                                slash::dispatch(&parsed, &mut ctx);
+                            }
+                            SlashKind::Mutating => {
+                                self.chat.push_system_message(format!(
+                                    "/{} runs only when idle. Try again after the turn finishes.",
+                                    parsed.name,
+                                ));
+                            }
+                        }
+                        return false;
+                    }
                     // Busy: buffer for the preview pane. On a clean
                     // round boundary the agent emits `PromptDrained`
                     // and the TUI pops `pending_prompts` FIFO,
@@ -1255,6 +1282,74 @@ mod tests {
             vec!["typed-during-cancel".to_owned()],
             "held locally; finalize_idle re-fires after Cancelled lands",
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
+        // Read-only slash commands typed during a busy turn must run
+        // immediately. Otherwise the queue-drain path persists them as
+        // user prompts and the LLM ends up answering `/help` literally.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+
+        assert!(
+            app.pending_prompts.is_empty(),
+            "slash command must not queue",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command must not forward to user_tx",
+        );
+        // User-message + dispatched help block, on top of the active prompt.
+        assert_eq!(app.chat.entry_count(), 3);
+        assert!(!app.chat.last_is_error());
+    }
+
+    #[tokio::test]
+    async fn dispatch_clear_during_busy_refuses_with_system_message_no_dispatch() {
+        // State-mutating commands must refuse mid-turn — rolling the
+        // session while `messages` is still draining would race the
+        // in-flight turn into the wrong JSONL.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/clear".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "neither SubmitPrompt nor Clear must reach user_tx",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/clear runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
+        // Unknown commands route through `dispatch` so the user sees
+        // the canonical "unknown command" error with recovery hints
+        // (alternatives + `//` escape) instead of the prompt being
+        // silently sent to the LLM.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/nope".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+        ));
+        assert!(app.chat.last_is_error());
     }
 
     // ── handle_agent_event ──

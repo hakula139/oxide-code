@@ -22,6 +22,10 @@ impl SlashCommand for ClearCmd {
         "Reset the conversation context"
     }
 
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
     fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
         ctx.user_tx
             .try_send(UserAction::Clear)
@@ -101,5 +105,14 @@ mod tests {
         assert_eq!(ClearCmd.name(), "clear");
         assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
         assert!(!ClearCmd.description().is_empty());
+    }
+
+    #[test]
+    fn is_read_only_is_false_so_busy_dispatch_refuses_clear() {
+        // The trait default is `true` (read-only). `/clear` must
+        // override to `false` — otherwise the busy-turn dispatcher
+        // would run the roll mid-turn and race the live `messages` /
+        // session writer.
+        assert!(!ClearCmd.is_read_only());
     }
 }
