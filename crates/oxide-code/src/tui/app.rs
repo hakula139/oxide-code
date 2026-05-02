@@ -1251,11 +1251,12 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clear_stays_local_to_protect_the_slash_bypass() {
-        // `/clear` writes `UserAction::Clear` straight into `user_tx`
-        // from `SlashContext`, so this arm only ever fires if some new
-        // call site routes `Clear` through `dispatch_user_action`. The
-        // local `false` return guarantees the action isn't double-sent.
+    fn dispatch_clear_arm_returns_false_to_prevent_double_send() {
+        // `/clear` already forwards `UserAction::Clear` through the
+        // slash branch. The explicit `false` return on the `Clear` arm
+        // of `apply_action_locally` guards a future caller that hands
+        // `Clear` straight to `dispatch_user_action` — the action stays
+        // local so `user_tx` only sees the slash branch's send.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::Clear);
 
