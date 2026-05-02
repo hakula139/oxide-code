@@ -10,7 +10,7 @@ This is the first slash command of the **prompt-submit** kind. The cross-command
 - **Codex** (`SlashCommand::Init`) — submits a fixed prompt asking the model to create `AGENTS.md`. No interactive sub-flow.
 - **opencode** — no `/init` analog. Onboarding lives outside the slash surface.
 
-oxide-code adopts the Claude Code `OLD_INIT_PROMPT` shape: a single fixed prompt, no clarifying questions, no hooks/skills wiring. The interactive `NEW_INIT_PROMPT` flow needs `AskUserQuestion` plumbing oxide-code doesn't have today (deferred — same blocker as item 7 in `cleanup-follow-ups.md`).
+oxide-code adopts the Claude Code `OLD_INIT_PROMPT` shape: a single fixed prompt, no clarifying questions, no hooks/skills wiring. The interactive `NEW_INIT_PROMPT` flow needs `AgentEvent::PromptRequest` plumbing oxide-code doesn't have today — deferred until that lands.
 
 ## oxide-code Today
 
@@ -30,13 +30,13 @@ The agent loop's existing `SubmitPrompt` arm records the body as `Message::user(
 4. **Send-after dispatch.** Unlike `/clear` (which writes `UserAction::Clear` to `user_tx` from inside `execute`), `/init` returns the body via `SlashOutcome` and lets the App-side dispatcher decide when to flip UI state and forward. This way the turn-start side effects (input disabled, status `Streaming`) land _before_ the agent-loop-bound `SubmitPrompt` is queued — no race where the user could squeeze in a typed prompt between dispatch and forward.
 5. **The expanded body is invisible in the live session.** Only the typed `/init` line lands as a chat block. The body shows up in resumed sessions because the JSONL records `Message::user(body)` faithfully — accepted trade-off. A polish pass could add a JSONL-level "display alias" so resumed transcripts also show `/init`; not blocking anything.
 6. **No alias.** Claude Code accepts only `/init`; Codex accepts only `/init`. Adding `/setup` or `/onboard` would need a real user pull. Defer.
-7. **No interactive clarification flow.** Claude Code's `NEW_INIT_PROMPT` asks the user mid-prompt via `AskUserQuestion`. oxide-code has no `AgentEvent::PromptRequest` plumbing today (item 7 in `cleanup-follow-ups.md`). When that lands, `/init` becomes the natural first consumer.
+7. **No interactive clarification flow.** Claude Code's `NEW_INIT_PROMPT` asks the user mid-prompt via `AskUserQuestion`. oxide-code has no `AgentEvent::PromptRequest` plumbing today. When that lands, `/init` becomes the natural first consumer.
 
 ## Deferred
 
 Behaviors Claude Code's `/init` ships that oxide-code skips today, and the subsystem each gates on:
 
-1. **Multi-phase interactive flow** (`NEW_INIT_PROMPT` — phases 1–8: AskUserQuestion, hook wiring, skill suggestions, formatter detection). Lands with `AgentEvent::PromptRequest` (cleanup-follow-ups item 7). Until then `/init` ships the single-shot `OLD_INIT_PROMPT` body.
+1. **Multi-phase interactive flow** (`NEW_INIT_PROMPT` — phases 1–8: AskUserQuestion, hook wiring, skill suggestions, formatter detection). Lands with `AgentEvent::PromptRequest` plumbing. Until then `/init` ships the single-shot `OLD_INIT_PROMPT` body.
 2. **`progressMessage`** (`'analyzing your codebase'` while the model works). oxide-code's status bar already shows `Streaming` / tool names; a dedicated "analyzing" string would need a status-bar variant. Trivial to add — defer until a second prompt-submit command needs it.
 3. **`maybeMarkProjectOnboardingComplete`.** Claude Code records `/init` runs into `~/.claude.json`'s per-project onboarding state. oxide-code's stance against silent mega-file writes (decision 6 in [Slash Commands](README.md#design-decisions-for-oxide-code)) rules this out by default. If onboarding state ever matters, it lands as an explicit user-opted-in path.
 4. **Parent-of-existing-instructions detection.** Claude Code reads `.cursor/rules/`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`, `.mcp.json` and folds the load-bearing parts into CLAUDE.md. The `OLD_INIT_PROMPT` body asks the model to do this from the prompt rather than from harness-side detection — the model is already a tool-using agent, so harness pre-discovery is redundant.
