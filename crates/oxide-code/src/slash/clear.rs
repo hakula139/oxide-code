@@ -52,6 +52,24 @@ mod tests {
         SlashContext::new(chat, info, user_tx)
     }
 
+    // ── ClearCmd metadata ──
+
+    #[test]
+    fn metadata_matches_built_ins_contract() {
+        assert_eq!(ClearCmd.name(), "clear");
+        assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
+        assert!(!ClearCmd.description().is_empty());
+    }
+
+    #[test]
+    fn is_read_only_is_false_so_busy_dispatch_refuses_clear() {
+        // The trait default is `true` (read-only). `/clear` must
+        // override to `false` — otherwise the busy-turn dispatcher
+        // would run the roll mid-turn and race the live `messages` /
+        // session writer.
+        assert!(!ClearCmd.is_read_only());
+    }
+
     // ── ClearCmd::execute ──
 
     #[test]
@@ -96,23 +114,5 @@ mod tests {
         assert!(err.contains("could not signal agent to clear"), "{err}");
         assert_eq!(chat.entry_count(), pre_count, "chat must survive failure");
         assert!(!chat.last_is_error());
-    }
-
-    // ── ClearCmd metadata ──
-
-    #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(ClearCmd.name(), "clear");
-        assert_eq!(ClearCmd.aliases(), &["new", "reset"]);
-        assert!(!ClearCmd.description().is_empty());
-    }
-
-    #[test]
-    fn is_read_only_is_false_so_busy_dispatch_refuses_clear() {
-        // The trait default is `true` (read-only). `/clear` must
-        // override to `false` — otherwise the busy-turn dispatcher
-        // would run the roll mid-turn and race the live `messages` /
-        // session writer.
-        assert!(!ClearCmd.is_read_only());
     }
 }
