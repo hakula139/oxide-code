@@ -74,7 +74,8 @@ ox                                          # Start an interactive session
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
 │   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
 │   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
-│   ├── parser.rs                           # parse_slash: detect `/cmd args`; allows `:` and `.` for plugin namespaces
+│   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches (name-prefix > alias-prefix > name-substring > alias-substring)
+│   ├── parser.rs                           # parse_slash + popup_query: detect `/cmd args`; allows `:` and `.` for plugin namespaces
 │   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup_in
 │   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
@@ -116,7 +117,9 @@ ox                                          # Start an interactive session
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
-│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea)
+│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring
+│   │   ├── input/
+│   │   │   └── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold-text selected, conditional alias parens, truncating description gutter
 │   │   └── status.rs                       # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
