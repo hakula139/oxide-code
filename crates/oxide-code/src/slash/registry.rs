@@ -45,8 +45,8 @@ pub(crate) trait SlashCommand: Sync {
 
     /// Whether the command is safe to run mid-turn. Commands that
     /// touch `messages` / session state, or kick off a new turn via
-    /// [`SlashOutcome::PromptSubmit`], override to `false` so they
-    /// refuse instead of racing the live turn.
+    /// [`SlashOutcome::Action`], override to `false` so they refuse
+    /// instead of racing the live turn.
     fn is_read_only(&self) -> bool {
         true
     }
@@ -61,8 +61,8 @@ pub(crate) trait SlashCommand: Sync {
     /// Runs the command. Mutations land through `ctx`. `Err(msg)` is
     /// rendered by the dispatcher as a single `ErrorBlock` — commands
     /// must not push errors themselves. `Ok(Local)` commands push
-    /// their own informational block; `Ok(PromptSubmit)` commands
-    /// return the body for the dispatcher to forward.
+    /// their own informational block; `Ok(Action(_))` commands hand
+    /// a `UserAction` back for the dispatcher to forward.
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
 
