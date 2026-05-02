@@ -313,10 +313,9 @@ fn emit_side<'a>(out: &mut Vec<Entry<'a>>, side: Side, lines: &'a [DiffLine], bu
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::tool::DiffLine;
     use crate::tui::theme::Theme;
-
-    use super::*;
 
     /// Helper: build a single-chunk diff body with line numbers
     /// starting at 1, mirroring how `synthesize_chunk` shapes resume-

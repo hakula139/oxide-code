@@ -36,10 +36,9 @@ pub(in super::super) fn render(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::tui::glyphs::BAR;
     use crate::tui::theme::Theme;
-
-    use super::*;
 
     // ── render ──
 

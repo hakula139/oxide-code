@@ -62,9 +62,8 @@ fn footer_text(hidden: usize, truncated_by_tool: bool) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tui::theme::Theme;
-
     use super::*;
+    use crate::tui::theme::Theme;
 
     fn collect_text(lines: &[Line<'static>]) -> String {
         lines

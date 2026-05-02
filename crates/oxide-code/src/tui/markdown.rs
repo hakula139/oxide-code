@@ -4,9 +4,8 @@ mod render;
 use pulldown_cmark::{Options, Parser};
 use ratatui::text::Text;
 
-use render::MarkdownRenderer;
-
 use super::theme::Theme;
+use render::MarkdownRenderer;
 
 /// Converts a markdown string to styled ratatui [`Text`].
 ///

@@ -153,9 +153,8 @@ fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
 
 #[cfg(test)]
 mod tests {
-    use crate::tui::theme::Theme;
-
     use super::*;
+    use crate::tui::theme::Theme;
 
     // ── Renderer::render ──
 
