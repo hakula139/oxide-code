@@ -939,6 +939,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
+        // `//foo` is the documented escape for sending `/etc/hosts`-
+        // style prompts: parsed as "not a command" so the regular
+        // forward path takes over and the agent receives the bytes
+        // verbatim. Without this pinned, a future change in
+        // `apply_action_locally` (e.g., a new prefix check) could
+        // silently start consuming the escape.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the user message");
+        assert!(!app.input.is_enabled(), "streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert!(!app.chat.last_is_error());
+        let forwarded = rx.recv().await.expect("forwarded action");
+        assert!(matches!(
+            forwarded,
+            UserAction::SubmitPrompt(s) if s == "//etc/hosts",
+        ));
+    }
+
+    #[tokio::test]
     async fn dispatch_cancel_flips_status_to_cancelling_and_forwards() {
         // Cancel acknowledges the user request immediately by flipping
         // the status; the matching `AgentEvent::Cancelled` returns to
