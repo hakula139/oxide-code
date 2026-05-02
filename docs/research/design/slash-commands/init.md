@@ -14,21 +14,21 @@ oxide-code adopts the Claude Code `OLD_INIT_PROMPT` shape: a single fixed prompt
 
 ## oxide-code Today
 
-`InitCmd::execute` returns `Ok(SlashOutcome::PromptSubmit(PROMPT))` where `PROMPT` is the static body. The dispatcher (`slash::dispatch`) hands the body back to `App::apply_action_locally`, which:
+`InitCmd::execute` returns `Ok(SlashOutcome::Action(UserAction::SubmitPrompt(PROMPT)))` where `PROMPT` is the static body. The dispatcher (`slash::dispatch`) hands the action back to `App::apply_action_locally`, which:
 
 1. Pushes the typed `/init` line as a `UserMessage` block (the chat affordance).
-2. Disables input + flips status to `Streaming` (turn-start UI side effects, mirroring a typed prompt).
-3. Forwards `UserAction::SubmitPrompt(body)` through `user_tx` to the agent loop.
+2. Disables input + flips status to `Streaming` (turn-start UI side effects for `SubmitPrompt`).
+3. Forwards the action through `user_tx` to the agent loop.
 
 The agent loop's existing `SubmitPrompt` arm records the body as `Message::user(...)`, persists it to JSONL, and runs `agent_turn` — no agent-side branching for `/init`.
 
 ## Design Decisions for oxide-code
 
 1. **Prompt body = `OLD_INIT_PROMPT` adapted for `AGENTS.md`.** oxide-code's instruction loader walks both `AGENTS.md` and `CLAUDE.md` (root-to-cwd, root-level + `.claude/` at each level); AGENTS.md is the AI-coding-assistant-neutral filename also used by Codex and others, so the prompt asks the model to write AGENTS.md by default and update an existing CLAUDE.md or AGENTS.md in place rather than overwrite. Wording is concise — every line passes the "would the model get this wrong without it?" gate.
-2. **`SlashOutcome::PromptSubmit(String)` is a typed third command kind.** `SlashCommand::execute` returns `Result<SlashOutcome, String>`; the dispatcher translates `PromptSubmit` into a `UserAction::SubmitPrompt` forward. Modeling this as an enum (rather than a side-channel field on `SlashContext`) makes the third command kind self-documenting and lets the type system enforce the contract.
+2. **`SlashOutcome::Action(UserAction)` unifies the state-mutating kind.** `SlashCommand::execute` returns `Result<SlashOutcome, String>` where `Action(_)` carries the `UserAction` to forward. `/init` returns `Action(SubmitPrompt(body))`; `/clear` returns `Action(Clear)`. Slash impls never reach into `user_tx` themselves — the trait return is the only seam, and the type system enforces it.
 3. **`/init` overrides `is_read_only` to `false`.** A prompt-submit command kicks off a turn that mutates `messages` and the session writer; running it mid-turn would race the in-flight one. The busy-branch dispatcher refuses with `/init runs only when idle. Try again after the turn finishes.` — the same gate `/clear` uses. Read-only commands stay safe to fire mid-turn (`/help`, `/status`, `/diff`, `/config`).
-4. **Send-after dispatch.** Unlike `/clear` (which writes `UserAction::Clear` to `user_tx` from inside `execute`), `/init` returns the body via `SlashOutcome` and lets the App-side dispatcher decide when to flip UI state and forward. This way the turn-start side effects (input disabled, status `Streaming`) land _before_ the agent-loop-bound `SubmitPrompt` is queued — no race where the user could squeeze in a typed prompt between dispatch and forward.
-5. **The expanded body is invisible in the live session.** Only the typed `/init` line lands as a chat block. The body shows up in resumed sessions because the JSONL records `Message::user(body)` faithfully — accepted trade-off. A polish pass could add a JSONL-level "display alias" so resumed transcripts also show `/init`; not blocking anything.
+4. **Turn-start UI lands before forward.** The App-side dispatcher inspects the returned `Action` and flips input-disabled + `Streaming` _before_ `forward_to_agent` for `SubmitPrompt` (only); other actions like `Clear` forward as-is. This way no typed prompt can squeeze in between dispatch and forward.
+5. **The expanded body is invisible in the live session.** Only the typed `/init` line lands as a chat block — that's a deliberate UI choice in the App-side dispatcher. On resume, the JSONL faithfully records `Message::user(body)`, so resumed transcripts show the full body. Accepted trade-off. A polish pass could add a JSONL-level "display alias" so resumed transcripts also show `/init`; not blocking anything.
 6. **No alias.** Claude Code accepts only `/init`; Codex accepts only `/init`. Adding `/setup` or `/onboard` would need a real user pull. Defer.
 7. **No interactive clarification flow.** Claude Code's `NEW_INIT_PROMPT` asks the user mid-prompt via `AskUserQuestion`. oxide-code has no `AgentEvent::PromptRequest` plumbing today. When that lands, `/init` becomes the natural first consumer.
 
@@ -44,7 +44,7 @@ Behaviors Claude Code's `/init` ships that oxide-code skips today, and the subsy
 ## Sources
 
 - `crates/oxide-code/src/slash/init.rs` — `InitCmd`, `PROMPT`, `is_read_only` override.
-- `crates/oxide-code/src/slash/registry.rs` — `SlashOutcome { Local, PromptSubmit(String) }`, registers `InitCmd`.
-- `crates/oxide-code/src/slash.rs` — `dispatch` returns `Option<String>` (the prompt body); `dispatch_with` translates `SlashOutcome::PromptSubmit` into the return.
-- `crates/oxide-code/src/tui/app.rs` — `apply_action_locally` slash branch handles the `Some(prompt)` path: flip input + status, forward `UserAction::SubmitPrompt(body)` via `forward_to_agent`. `forward_to_agent` is the extracted helper shared with the regular dispatch path.
+- `crates/oxide-code/src/slash/registry.rs` — `SlashOutcome { Local, Action(UserAction) }`, registers `InitCmd`.
+- `crates/oxide-code/src/slash.rs` — `dispatch` returns `Option<UserAction>`; `dispatch_with` translates `SlashOutcome::Action` into the return.
+- `crates/oxide-code/src/tui/app.rs` — `apply_action_locally` slash branch handles the `Some(action)` path: for `SubmitPrompt`, flip input + status before forwarding via `forward_to_agent`; other actions forward directly.
 - `claude-code/src/commands/init.ts` — reference flow (`OLD_INIT_PROMPT` adopted, `NEW_INIT_PROMPT` deferred).

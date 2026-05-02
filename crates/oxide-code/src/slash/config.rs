@@ -90,7 +90,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::slash::{test_session_info, test_user_tx};
+    use crate::slash::test_session_info;
 
     // ── Config trait ──
 
@@ -109,8 +109,7 @@ mod tests {
 
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let (user_tx, _user_rx) = test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         ConfigCmd.execute("", &mut ctx).unwrap();
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());

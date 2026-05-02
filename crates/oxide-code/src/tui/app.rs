@@ -268,23 +268,25 @@ impl App {
                 if self.input.is_enabled() {
                     // Slash commands stay client-side: parse, run
                     // locally, never forward the typed `/cmd` line.
-                    // `PromptSubmit` outcomes hand back a synthesized
-                    // body; we forward it as a turn (input disabled,
-                    // status flipped) just like a typed prompt.
+                    // State-mutating commands return `Action(_)`; the
+                    // dispatcher hands the action back for forwarding.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         let synthesized = {
-                            let mut ctx = SlashContext::new(
-                                &mut self.chat,
-                                &self.session_info,
-                                &self.user_tx,
-                            );
+                            let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
                             slash::dispatch(&parsed, &mut ctx)
                         };
-                        if let Some(prompt) = synthesized {
-                            self.input.set_enabled(false);
-                            self.status_bar.set_status(Status::Streaming);
-                            self.forward_to_agent(UserAction::SubmitPrompt(prompt));
+                        if let Some(action) = synthesized {
+                            // SubmitPrompt starts a new turn; flip UI
+                            // state before forwarding so a typed prompt
+                            // can't squeeze in between dispatch and
+                            // forward. Other actions (e.g. Clear) just
+                            // forward.
+                            if matches!(action, UserAction::SubmitPrompt(_)) {
+                                self.input.set_enabled(false);
+                                self.status_bar.set_status(Status::Streaming);
+                            }
+                            self.forward_to_agent(action);
                         }
                         return false;
                     }
@@ -294,17 +296,13 @@ impl App {
                     true
                 } else {
                     // Mid-turn: read-only commands dispatch
-                    // immediately; mutators / prompt-submit refuse.
+                    // immediately; mutators refuse.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
                             SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let mut ctx = SlashContext::new(
-                                    &mut self.chat,
-                                    &self.session_info,
-                                    &self.user_tx,
-                                );
-                                // Read-only ⇒ never `PromptSubmit`.
+                                let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                                // Read-only ⇒ contract guarantees `Local`.
                                 _ = slash::dispatch(&parsed, &mut ctx);
                             }
                             SlashKind::Mutating => {
@@ -350,10 +348,10 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            // Unreachable on the live wiring — `/clear` writes
-            // `UserAction::Clear` straight into `user_tx`. The
-            // `false` return preserves that bypass if a future call
-            // site accidentally routes it through here.
+            // Unreachable on the live wiring — the slash branch above
+            // forwards `Action(_)` straight via `forward_to_agent`.
+            // `false` is defensive in case a future caller routes
+            // `Clear` through here.
             UserAction::Clear => false,
         }
     }

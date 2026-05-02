@@ -3,9 +3,6 @@
 //! frozen snapshot of read-only session descriptors. Splitting the two
 //! keeps the borrow story clean.
 
-use tokio::sync::mpsc;
-
-use crate::agent::event::UserAction;
 use crate::config::ConfigSnapshot;
 use crate::tui::components::chat::ChatView;
 
@@ -27,24 +24,15 @@ pub(crate) struct SessionInfo {
 
 /// Borrowed view of App-owned state for one
 /// [`super::registry::SlashCommand::execute`] call. Never stored.
-/// `user_tx` is the seam state-mutating commands use to reach the
-/// agent loop (`/clear` today; `/model`, `/theme`, `/resume` to come).
+/// State-mutating commands return [`super::registry::SlashOutcome::Action`];
+/// the dispatcher owns forwarding to the agent loop.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a SessionInfo,
-    pub(crate) user_tx: &'a mpsc::Sender<UserAction>,
 }
 
 impl<'a> SlashContext<'a> {
-    pub(crate) fn new(
-        chat: &'a mut ChatView,
-        info: &'a SessionInfo,
-        user_tx: &'a mpsc::Sender<UserAction>,
-    ) -> Self {
-        Self {
-            chat,
-            info,
-            user_tx,
-        }
+    pub(crate) fn new(chat: &'a mut ChatView, info: &'a SessionInfo) -> Self {
+        Self { chat, info }
     }
 }

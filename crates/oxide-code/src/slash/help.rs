@@ -143,8 +143,7 @@ mod tests {
         assert_eq!(Fake::CLEAR.description(), "");
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let (user_tx, _user_rx) = crate::slash::test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Local));
     }
 

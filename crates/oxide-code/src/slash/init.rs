@@ -6,6 +6,7 @@ use indoc::indoc;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
+use crate::agent::event::UserAction;
 
 pub(super) struct InitCmd;
 
@@ -23,7 +24,9 @@ impl SlashCommand for InitCmd {
     }
 
     fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::PromptSubmit(PROMPT.to_owned()))
+        Ok(SlashOutcome::Action(UserAction::SubmitPrompt(
+            PROMPT.to_owned(),
+        )))
     }
 }
 
@@ -87,16 +90,15 @@ const PROMPT: &str = indoc! {r"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::{test_session_info, test_user_tx};
+    use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
     fn run_execute() -> (SlashOutcome, ChatView) {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let (user_tx, _user_rx) = test_user_tx();
         let outcome = InitCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info, &user_tx))
+            .execute("", &mut SlashContext::new(&mut chat, &info))
             .expect("/init must succeed");
         (outcome, chat)
     }
@@ -135,7 +137,8 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                SlashOutcome::PromptSubmit(p) if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
+                SlashOutcome::Action(UserAction::SubmitPrompt(p))
+                    if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
             ),
             "prompt must target both AGENTS.md and CLAUDE.md: {outcome:?}",
         );
@@ -149,7 +152,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                SlashOutcome::PromptSubmit(p)
+                SlashOutcome::Action(UserAction::SubmitPrompt(p))
                     if p.contains("already exists") && p.contains("not overwrite")
             ),
             "prompt must instruct the model not to overwrite an existing file: {outcome:?}",

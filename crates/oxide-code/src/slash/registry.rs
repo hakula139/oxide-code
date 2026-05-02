@@ -12,16 +12,17 @@ use super::diff::DiffCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::status::StatusCmd;
+use crate::agent::event::UserAction;
 
 /// What [`SlashCommand::execute`] returns. `Local` for client-side
-/// work that finishes via `ctx`; `PromptSubmit` for `/init`-style
-/// commands that hand a synthesized prompt back for the dispatcher to
-/// forward to the agent loop. The user's typed `/name` line stays the
-/// chat affordance — the expanded body is invisible in the live view.
-#[derive(Debug, PartialEq, Eq)]
+/// work that finishes via `ctx`; `Action` for state-mutating
+/// commands that hand a [`UserAction`] back for the dispatcher to
+/// forward to the agent loop. The trait stays the only seam — slash
+/// impls never reach into `user_tx` themselves.
+#[derive(Debug, PartialEq)]
 pub(crate) enum SlashOutcome {
     Local,
-    PromptSubmit(String),
+    Action(UserAction),
 }
 
 /// A locally-dispatched command typed as `/name args`. Each command
@@ -97,8 +98,7 @@ mod tests {
     fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let (user_tx, _user_rx) = crate::slash::test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         cmd.execute(args, &mut ctx)
     }
 

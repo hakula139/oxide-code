@@ -81,7 +81,7 @@ pub(crate) enum AgentEvent {
 // ── User Actions ──
 
 /// Actions from the user that the agent loop consumes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),

@@ -40,12 +40,15 @@ pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
 
 /// Resolves and runs a parsed slash command against the built-in
 /// registry. See [`dispatch_with`].
-pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) -> Option<String> {
+pub(crate) fn dispatch(
+    parsed: &Parsed,
+    ctx: &mut SlashContext<'_>,
+) -> Option<crate::agent::event::UserAction> {
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
 
 /// Resolves `parsed` against `commands` and runs the matching impl.
-/// Returns `Some(prompt)` for `PromptSubmit` commands so the caller
+/// Returns `Some(action)` for state-mutating commands so the caller
 /// can forward it to the agent loop; `None` for local / unknown /
 /// errored paths (which already pushed the appropriate chat block).
 ///
@@ -54,7 +57,7 @@ fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
     ctx: &mut SlashContext<'_>,
-) -> Option<String> {
+) -> Option<crate::agent::event::UserAction> {
     let Some(cmd) = registry::lookup_in(commands, &parsed.name) else {
         ctx.chat.push_error(&format!(
             "unknown command: /{name}. Available: {available}. \
@@ -66,7 +69,7 @@ fn dispatch_with(
     };
     match cmd.execute(&parsed.args, ctx) {
         Ok(registry::SlashOutcome::Local) => None,
-        Ok(registry::SlashOutcome::PromptSubmit(prompt)) => Some(prompt),
+        Ok(registry::SlashOutcome::Action(action)) => Some(action),
         Err(msg) => {
             ctx.chat.push_error(&format!("/{}: {msg}", parsed.name));
             None
@@ -135,17 +138,6 @@ pub(crate) fn test_session_info() -> SessionInfo {
     }
 }
 
-/// Fresh `(Sender, Receiver)` pair for slash-command test contexts.
-/// `/clear`-style commands hold the receiver to assert what was sent;
-/// read-only commands drop it.
-#[cfg(test)]
-pub(crate) fn test_user_tx() -> (
-    tokio::sync::mpsc::Sender<crate::agent::event::UserAction>,
-    tokio::sync::mpsc::Receiver<crate::agent::event::UserAction>,
-) {
-    tokio::sync::mpsc::channel(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,8 +159,7 @@ mod tests {
             name: "help".to_owned(),
             args: String::new(),
         };
-        let (user_tx, _user_rx) = test_user_tx();
-        let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
+        let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(outcome.is_none(), "/help is Local, not PromptSubmit");
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
@@ -181,16 +172,18 @@ mod tests {
     #[test]
     fn dispatch_prompt_submit_command_returns_synthesized_body() {
         // Pin: public `dispatch` (not just `dispatch_with`) surfaces
-        // the PromptSubmit body so the App-side caller can forward it.
+        // the synthesized body so the App-side caller can forward it.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
             name: "init".to_owned(),
             args: String::new(),
         };
-        let (user_tx, _user_rx) = test_user_tx();
-        let body = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx))
-            .expect("/init must return Some(prompt)");
+        let action = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info))
+            .expect("/init must return Some(action)");
+        let crate::agent::event::UserAction::SubmitPrompt(body) = &action else {
+            panic!("expected SubmitPrompt, got {action:?}");
+        };
         assert!(
             body.contains("AGENTS.md"),
             "body must target AGENTS.md: {body}"
@@ -206,8 +199,7 @@ mod tests {
             name: "no-such-command".to_owned(),
             args: String::new(),
         };
-        let (user_tx, _user_rx) = test_user_tx();
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(
             chat.last_is_error(),
             "unknown command should land as an ErrorBlock",
@@ -224,8 +216,7 @@ mod tests {
             name: "etc".to_owned(),
             args: String::new(),
         };
-        let (user_tx, _user_rx) = test_user_tx();
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         let msg = chat.last_error_text().expect("error block present");
         assert!(msg.contains("/help"), "should list /help: {msg}");
         for cmd in registry::BUILT_INS {
@@ -279,12 +270,7 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        let (user_tx, _user_rx) = test_user_tx();
-        dispatch_with(
-            registry,
-            &parsed,
-            &mut SlashContext::new(&mut chat, &info, &user_tx),
-        );
+        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
         assert_eq!(chat.last_error_text(), Some("/failing: explicit failure"),);
     }
 
@@ -299,12 +285,7 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        let (user_tx, _user_rx) = test_user_tx();
-        dispatch_with(
-            registry,
-            &parsed,
-            &mut SlashContext::new(&mut chat, &info, &user_tx),
-        );
+        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
         assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
     }
 
