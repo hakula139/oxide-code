@@ -173,17 +173,14 @@ impl App {
         match event {
             // Esc routes through `App` because its meaning depends on
             // queue / run-state — InputArea has no view of either.
-            // Exception: while the slash popup is visible, the popup
-            // owns Esc (dismissal), so we hand the key to the input
-            // first and only fall back to App-level handling if the
-            // popup wasn't the one consuming it.
+            // Exception: when the slash popup is visible it owns Esc
+            // (dismissal); the popup-route never produces an action,
+            // so we drop the return value.
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
                 if self.input.popup_visible() {
-                    if let Some(action) = self.input.handle_event(event) {
-                        self.dispatch_user_action(action);
-                    }
+                    let _ = self.input.handle_event(event);
                 } else {
                     self.handle_esc();
                 }
