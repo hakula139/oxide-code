@@ -458,10 +458,8 @@ async fn agent_loop_task(
             // `apply_action_locally` short-circuits it before the
             // forward path, so it never reaches `recv` here.
             UserAction::Cancel | UserAction::ConfirmExit => {}
-            // `/clear` roll: snapshot tracker before clearing so the
-            // old session's JSONL keeps file state, then finalize the
-            // old session, swap in a fresh one, point the client at
-            // the new id, and notify the TUI.
+            // Snapshot tracker before clearing so the old JSONL keeps
+            // file-read state on `finalize`.
             UserAction::Clear => {
                 let snapshots = file_tracker.snapshot_all();
                 file_tracker.clear();

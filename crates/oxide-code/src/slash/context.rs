@@ -27,11 +27,8 @@ pub(crate) struct SessionInfo {
 
 /// Borrowed view of App-owned state for one
 /// [`super::registry::SlashCommand::execute`] call. Never stored.
-///
-/// `user_tx` is the universal seam for state-mutating slash commands —
-/// `/clear` pushes [`UserAction::Clear`] through it; future mutators
-/// (`/model`, `/theme`, `/resume`) will follow the same shape.
-/// Read-only commands (`/help`, `/status`, ...) ignore it.
+/// `user_tx` is the seam state-mutating commands use to reach the
+/// agent loop (`/clear` today; `/model`, `/theme`, `/resume` to come).
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a SessionInfo,

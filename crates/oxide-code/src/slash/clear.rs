@@ -1,9 +1,5 @@
-//! `/clear` — reset the conversation context.
-//!
-//! Drops the visible chat history client-side, then forwards
-//! [`UserAction::Clear`] so the agent loop finalizes the current
-//! session, starts a fresh one, and clears `Vec<Message>`. Matches
-//! Claude Code's `/clear` semantics.
+//! `/clear` — drops chat history client-side, then forwards
+//! [`UserAction::Clear`] so the agent loop rolls the session.
 
 use super::context::SlashContext;
 use super::registry::SlashCommand;
@@ -21,9 +17,6 @@ impl SlashCommand for ClearCmd {
     }
 
     fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
-        // Drop the user-message echo `apply_action_locally` pushed
-        // alongside every other prior block — the system message
-        // below makes the action unambiguous on its own.
         ctx.chat.clear_history();
         ctx.chat
             .push_system_message("Conversation cleared. Next message starts fresh.");
@@ -69,8 +62,6 @@ mod tests {
 
     #[test]
     fn execute_surfaces_send_failure_when_channel_closed() {
-        // Closed channel: try_send errors and `execute` must return
-        // that to the dispatcher, which surfaces it as `/clear: ...`.
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
         let (user_tx, user_rx) = crate::slash::test_user_tx();
@@ -89,7 +80,6 @@ mod tests {
 
     #[test]
     fn metadata_matches_built_ins_contract() {
-        // No alias for v1; description is non-empty Title Case.
         assert_eq!(ClearCmd.name(), "clear");
         assert!(!ClearCmd.description().is_empty());
         assert!(ClearCmd.aliases().is_empty());

@@ -69,10 +69,9 @@ pub(crate) enum AgentEvent {
     /// A newly-generated session title (e.g., AI-generated via Haiku). The
     /// TUI updates the status bar slot; other sinks ignore it.
     SessionTitleUpdated(String),
-    /// `/clear` rolled the session: the old JSONL is finalized, a fresh
-    /// one is open, and `id` is the new session UUID. The TUI updates
-    /// `session_info.session_id` and clears the status-bar title (the AI
-    /// title belonged to the old session). Other sinks ignore it.
+    /// `/clear` rolled the session — `id` is the new UUID. The TUI
+    /// updates `session_info.session_id` and clears the (now-stale) AI
+    /// title; other sinks ignore it.
     SessionRolled { id: String },
     /// A fatal error from the API or agent loop.
     Error(String),
@@ -85,9 +84,8 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),
-    /// `/clear` — finalize the current session, start a fresh one, and
-    /// drop the in-memory message history. The agent loop responds with
-    /// [`AgentEvent::SessionRolled`] once the new id is in place.
+    /// `/clear` — agent loop finalizes the old session, swaps in a
+    /// fresh one, and emits [`AgentEvent::SessionRolled`].
     Clear,
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
@@ -195,9 +193,7 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
-            // TUI-only affordances (queued-prompt preview, header
-            // title, mid-session id swap on `/clear`); stdio has no
-            // surface to update for any of them.
+            // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated(_)
             | AgentEvent::SessionRolled { .. } => {}

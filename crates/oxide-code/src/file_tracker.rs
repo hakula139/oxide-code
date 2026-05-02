@@ -229,9 +229,8 @@ impl FileTracker {
     }
 
     /// Drops every recorded path so the next Read / Edit / Write hits
-    /// the gate cold. `/clear` calls this when rolling the session;
-    /// snapshots from the old session are persisted into the old
-    /// JSONL by `finalize` ahead of this call.
+    /// the gate cold. `/clear` calls this after `finalize` has
+    /// persisted the snapshots into the old session's JSONL.
     pub(crate) fn clear(&self) {
         self.lock().clear();
     }

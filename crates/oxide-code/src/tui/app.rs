@@ -389,9 +389,7 @@ impl App {
             AgentEvent::SessionTitleUpdated(title) => {
                 self.status_bar.set_title(Some(title));
             }
-            // `/clear` rolled the session: rebind the id `/status` and
-            // future debug surfaces show, and clear the AI title (it
-            // belonged to the old session).
+            // Rebind `/status`-visible id; drop the now-stale AI title.
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);

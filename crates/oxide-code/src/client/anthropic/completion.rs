@@ -177,10 +177,8 @@ mod tests {
 
     #[tokio::test]
     async fn complete_sends_x_claude_code_session_id_header() {
-        // Per-request injection — pre-R1 the header lived in
-        // `default_headers`; this pins that the move kept the wire
-        // contract intact so `/clear` can roll the session id without
-        // an HTTP-client rebuild.
+        // Pins per-request injection on the non-streaming path so
+        // `/clear` can roll the id without rebuilding the client.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -194,8 +192,6 @@ mod tests {
             Some("sid-complete".to_owned()),
         )
         .unwrap();
-        // A missing header would 404 the mock and surface as an HTTP
-        // error; success proves the header is on the wire.
         client
             .complete("claude-haiku-4-5", "", "u", 40, None)
             .await

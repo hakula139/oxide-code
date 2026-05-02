@@ -110,9 +110,8 @@ impl Client {
         );
 
         // 3P gateways fingerprint absence of the full Stainless header set.
-        // `x-claude-code-session-id` is set per-request in `stream_message`
-        // / `complete` so `/clear` can roll the session id without
-        // rebuilding the HTTP client.
+        // `x-claude-code-session-id` is per-request so `/clear` can roll
+        // the id without rebuilding the HTTP client.
         headers.insert("x-app", HeaderValue::from_static("cli"));
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
         headers.insert(
@@ -170,9 +169,7 @@ impl Client {
     }
 
     /// Replaces the session id used for `x-claude-code-session-id` and
-    /// `metadata.user_id`. `/clear` calls this when rolling the
-    /// session UUID — the header is per-request so no HTTP-client
-    /// rebuild is needed.
+    /// `metadata.user_id` — called by `/clear` to roll the UUID.
     pub(crate) fn set_session_id(&mut self, id: String) {
         self.session_id = id;
     }
@@ -541,9 +538,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_session_id_propagates_to_x_claude_code_session_id_header() {
-        // The setter must reach the wire — the per-request injection
-        // re-reads `self.session_id` on every call, so this test
-        // pins both the setter and the per-request plumbing together.
+        // Pins setter + per-request plumbing together: the mock rejects
+        // any header value other than the rolled one.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -562,8 +558,6 @@ mod tests {
         )
         .unwrap();
         client.set_session_id("sid-rolled".to_owned());
-        // The mock matcher rejects requests with the wrong session-id
-        // header — success here proves the new id reached the wire.
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])
@@ -874,8 +868,6 @@ mod tests {
             Some("sid-abc".to_owned()),
         )
         .unwrap();
-        // A missing header on either matcher would 404 the mock and
-        // surface as an HTTP error; success proves both are present.
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])

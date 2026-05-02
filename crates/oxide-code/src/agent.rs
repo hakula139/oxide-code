@@ -356,12 +356,9 @@ where
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // `ConfirmExit` is TUI-only; `apply_action_locally`
-                // short-circuits it before the forward path, and the
-                // bare-REPL / headless inert channel can't produce it
-                // either. `Clear` is sent only by the slash command
-                // when input is enabled (idle), so it can't arrive
-                // mid-turn. Both arms exist for exhaustive matching.
+                // Neither variant reaches mid-turn: `ConfirmExit` is
+                // TUI-only and short-circuited by `apply_action_locally`;
+                // `Clear` is dispatched only when input is enabled.
                 Some(UserAction::ConfirmExit | UserAction::Clear) => {}
             },
             output = &mut fut => return Ok(output),
