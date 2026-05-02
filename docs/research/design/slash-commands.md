@@ -111,56 +111,34 @@ PR #55 shipped four pure-display commands plus the underlying machinery (trait, 
 
 ## /clear — Claude Code reference and oxide-code mapping
 
-Claude Code's `clearConversation` (`commands/clear/conversation.ts`)
-runs ~15 distinct steps. Most are claude-code-specific surfaces we
-don't have yet; the load-bearing core is small. Recording the
-mapping here so later state-mutating commands can lean on the same
-contract.
+Claude Code's `clearConversation` (`commands/clear/conversation.ts`) runs ~15 distinct steps. Most are claude-code-specific surfaces oxide-code doesn't yet implement; the load-bearing core is small. Mapping kept here so later state-mutating commands can lean on the same contract.
 
-| Claude Code step                                    | oxide-code today                                           | Notes                                                          |
-| --------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------- |
-| `executeSessionEndHooks('clear', ...)`              | n/a                                                        | Hook system not yet implemented.                               |
-| `tengu_cache_eviction_hint` analytics               | n/a                                                        | Prompt-cache eviction signal; not user-visible.                |
-| Preserve background tasks                           | n/a                                                        | Background-task infra (`Ctrl+B`) not yet implemented.          |
-| `setMessages(() => [])`                             | `messages.clear()` in `agent_loop_task`                    | In-memory message history.                                     |
-| `setConversationId(randomUUID())`                   | `AgentEvent::SessionRolled { id }`                         | We conflate session and conversation id; CC keeps them split.  |
-| `clearSessionCaches(preservedAgentIds)`             | partial — `FileTracker::clear`                             | CC also wipes per-agent skill / perm / cache-break caches.     |
-| `setCwd(getOriginalCwd())`                          | n/a                                                        | We don't track mid-session cwd changes.                        |
-| `readFileState.clear()`                             | `FileTracker::clear`                                       | Read-before-Edit gate state.                                   |
-| `discoveredSkillNames?.clear()`                     | n/a                                                        | Skills not yet implemented.                                    |
-| `loadedNestedMemoryPaths?.clear()`                  | n/a                                                        | Nested CLAUDE.md walk caching not yet implemented.             |
-| `fileHistory` reset                                 | n/a                                                        | Undo/snapshot history not yet implemented.                     |
-| `clearAllPlanSlugs()`                               | n/a                                                        | Plan-mode not yet implemented.                                 |
-| `clearSessionMetadata()` (title / agent)            | `status_bar.set_title(None)` in App handler                | We only have title to clear.                                   |
-| `regenerateSessionId({ setCurrentAsParent: true })` | `session::start(&store, model)` + `Client::set_session_id` | We don't yet track parent linkage.                             |
-| `resetSessionFilePointer()`                         | implicit via `session::start`                              | New JSONL file lazily materializes on first record.            |
-| `processSessionStartHooks('clear')`                 | n/a                                                        | Hooks not yet implemented.                                     |
+| Claude Code step                                    | oxide-code today                                           | Notes                                                         |
+| --------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------- |
+| `executeSessionEndHooks('clear', ...)`              | n/a                                                        | Hook system not yet implemented.                              |
+| `tengu_cache_eviction_hint` analytics               | n/a                                                        | Prompt-cache eviction signal; not user-visible.               |
+| Preserve background tasks                           | n/a                                                        | Background-task infra (`Ctrl+B`) not yet implemented.         |
+| `setMessages(() => [])`                             | `messages.clear()` in `agent_loop_task`                    | In-memory message history.                                    |
+| `setConversationId(randomUUID())`                   | `AgentEvent::SessionRolled { id }`                         | We conflate session and conversation id; CC keeps them split. |
+| `clearSessionCaches(preservedAgentIds)`             | partial — `FileTracker::clear`                             | CC also wipes per-agent skill / perm / cache-break caches.    |
+| `setCwd(getOriginalCwd())`                          | n/a                                                        | We don't track mid-session cwd changes.                       |
+| `readFileState.clear()`                             | `FileTracker::clear`                                       | Read-before-Edit gate state.                                  |
+| `discoveredSkillNames?.clear()`                     | n/a                                                        | Skills not yet implemented.                                   |
+| `loadedNestedMemoryPaths?.clear()`                  | n/a                                                        | Nested CLAUDE.md walk caching not yet implemented.            |
+| `fileHistory` reset                                 | n/a                                                        | Undo/snapshot history not yet implemented.                    |
+| `clearAllPlanSlugs()`                               | n/a                                                        | Plan-mode not yet implemented.                                |
+| `clearSessionMetadata()` (title / agent)            | `status_bar.set_title(None)` in App handler                | We only have title to clear.                                  |
+| `regenerateSessionId({ setCurrentAsParent: true })` | `session::start(&store, model)` + `Client::set_session_id` | We don't yet track parent linkage.                            |
+| `resetSessionFilePointer()`                         | implicit via `session::start`                              | New JSONL file lazily materializes on first record.           |
+| `processSessionStartHooks('clear')`                 | n/a                                                        | Hooks not yet implemented.                                    |
 
 ### Notable findings worth deferring
 
-1. **Parent session linkage.** Claude Code's
-   `regenerateSessionId({ setCurrentAsParent: true })` records the
-   old session as parent for analytics lineage and future
-   `--resume --parent-of=<id>` style queries. oxide-code generates a
-   fresh UUID with no link. Future enhancement: persist
-   `parent_session_id: Option<String>` in the session header so
-   `--list` can render a `/clear` chain.
-2. **Cache-eviction hint.** Claude Code logs a structured analytics
-   event so the prompt-cache backend evicts the cleared
-   conversation's cache. We don't yet surface analytics; if /
-   when we do, the same hint avoids paying server-side cache cost
-   for a conversation that will never be used again.
-3. **Background tasks survive `/clear`.** Foreground tasks die,
-   `isBackgrounded === true` tasks keep their per-agent caches.
-   When oxide-code grows background tasks, the clear path will need
-   the same "preserve set" predicate.
-4. **MCP reset to trigger re-init.** Claude Code wipes `mcp.clients
-   / tools / commands / resources` (preserving only
-   `pluginReconnectKey`) so the MCP layer reconnects against the
-   fresh session id. Add to `/clear` when the MCP client lands.
-5. **No confirmation prompt.** Claude Code's `/clear` is one-shot —
-   no "are you sure?". oxide-code matches. The old JSONL stays
-   resumable, so the action is reversible enough.
+1. **Parent session linkage.** Claude Code's `regenerateSessionId({ setCurrentAsParent: true })` records the old session as parent for analytics lineage and future `--resume --parent-of=<id>` style queries. oxide-code generates a fresh UUID with no link. Future enhancement: persist `parent_session_id: Option<String>` in the session header so `--list` can render a `/clear` chain.
+2. **Cache-eviction hint.** Claude Code logs a structured analytics event so the prompt-cache backend evicts the cleared conversation's cache. oxide-code doesn't yet surface analytics; when it does, the same hint avoids paying server-side cache cost for a conversation that will never be used again.
+3. **Background tasks survive `/clear`.** Foreground tasks die, `isBackgrounded === true` tasks keep their per-agent caches. When oxide-code grows background tasks, the clear path will need the same "preserve set" predicate.
+4. **MCP reset to trigger re-init.** Claude Code wipes `mcp.clients / tools / commands / resources` (preserving only `pluginReconnectKey`) so the MCP layer reconnects against the fresh session id. Add to `/clear` when the MCP client lands.
+5. **No confirmation prompt.** Claude Code's `/clear` is one-shot — no "are you sure?". oxide-code matches. The old JSONL stays resumable, so the action is reversible enough.
 
 ## Sources
 
