@@ -69,8 +69,9 @@ ox                                          # Start an interactive session
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
+│   ├── clear.rs                            # /clear — resets ChatView, finalizes session, rolls UUID via UserAction::Clear
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed app handles) + SessionInfo (frozen runtime snapshot)
+│   ├── context.rs                          # SlashContext (borrowed app handles + user_tx for state-mutators) + SessionInfo
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
 │   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
 │   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
