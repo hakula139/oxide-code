@@ -301,17 +301,22 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.error_text())
     }
 
-    /// Updates cached viewport height and syncs scroll position. Called
-    /// by [`App`](super::super::app::App) after each frame.
-    pub(crate) fn update_layout(&mut self, area: Rect) {
+    /// Updates cached viewport height and syncs scroll position.
+    /// Returns `true` when auto-scroll moved `scroll_offset`, so the
+    /// caller knows to repaint with the new offset.
+    #[must_use]
+    pub(crate) fn update_layout(&mut self, area: Rect) -> bool {
         self.viewport_height = area.height;
         self.viewport_width = area.width;
         if let Some(s) = &mut self.streaming {
             s.invalidate_cache_for_width(area.width);
         }
-        if self.auto_scroll {
-            self.scroll_to_bottom();
+        if !self.auto_scroll {
+            return false;
         }
+        let prev = self.scroll_offset;
+        self.scroll_to_bottom();
+        self.scroll_offset != prev
     }
 }
 
@@ -600,7 +605,7 @@ mod tests {
     }
 
     fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
-        chat.update_layout(Rect::new(0, 0, width, height));
+        _ = chat.update_layout(Rect::new(0, 0, width, height));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
@@ -2130,7 +2135,7 @@ mod tests {
     #[test]
     fn update_layout_sets_viewport_height() {
         let mut chat = test_chat();
-        chat.update_layout(Rect::new(0, 0, 80, 30));
+        _ = chat.update_layout(Rect::new(0, 0, 80, 30));
         assert_eq!(chat.viewport_height, 30);
     }
 
@@ -2140,14 +2145,40 @@ mod tests {
         chat.content_height.set(100);
         chat.auto_scroll = true;
 
-        chat.update_layout(Rect::new(0, 0, 80, 20));
+        let moved = chat.update_layout(Rect::new(0, 0, 80, 20));
         assert_eq!(chat.scroll_offset, 80);
+        // The `must_use` signal drives App-level repaint.
+        assert!(moved);
+    }
+
+    #[test]
+    fn update_layout_returns_false_when_offset_unchanged() {
+        // Steady-state paints must short-circuit the repaint.
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.auto_scroll = true;
+        let area = Rect::new(0, 0, 80, 20);
+        assert!(chat.update_layout(area));
+        assert!(!chat.update_layout(area));
+    }
+
+    #[test]
+    fn update_layout_paused_skips_scroll_and_keeps_offset() {
+        // Scrolled-up state: appends must not yank the viewport down.
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.scroll_offset = 25;
+        chat.auto_scroll = false;
+        let moved = chat.update_layout(Rect::new(0, 0, 80, 20));
+        assert!(!moved);
+        assert_eq!(chat.scroll_offset, 25);
+        assert_eq!(chat.viewport_height, 20);
     }
 
     #[test]
     fn update_layout_invalidates_streaming_cache_on_width_change() {
         let mut chat = test_chat();
-        chat.update_layout(Rect::new(0, 0, 80, 24));
+        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
         // Full paragraph (ends in `\n\n`) so the cache actually
         // commits — a single `\n` no longer triggers advance_cache.
         chat.append_stream_token("a complete paragraph\n\n");
@@ -2155,7 +2186,7 @@ mod tests {
         assert_ne!(s.rendered_len(), 0);
         assert_eq!(s.cached_width(), 80);
 
-        chat.update_layout(Rect::new(0, 0, 40, 24));
+        _ = chat.update_layout(Rect::new(0, 0, 40, 24));
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_len(), 0);
         assert_eq!(s.rendered_boundary(), 0);
@@ -2686,7 +2717,7 @@ mod tests {
             assert_eq!(s.cached_width(), 0);
         }
 
-        chat.update_layout(Rect::new(0, 0, 80, 24));
+        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
         chat.append_stream_token("second paragraph\n\n");
         {
             let s = chat.streaming.as_ref().unwrap();

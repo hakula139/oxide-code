@@ -465,7 +465,14 @@ impl App {
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
         })?;
-        self.chat.update_layout(chat_area);
+        // Auto-scroll re-clamps `scroll_offset` against the
+        // freshly-measured content height, so the paint above used a
+        // stale offset; repaint once so new blocks land in-viewport.
+        if self.chat.update_layout(chat_area) {
+            draw_sync(terminal, |frame| {
+                self.draw_frame(frame);
+            })?;
+        }
         Ok(())
     }
 
@@ -1399,7 +1406,8 @@ mod tests {
             metadata: crate::tool::ToolMetadata::default(),
         });
         assert_eq!(app.chat.entry_count(), before + 1);
-        let text = rendered_text(&mut app, 60, 6);
+        // Viewport must fit header + body or auto-scroll hides the header.
+        let text = rendered_text(&mut app, 60, 8);
         assert!(
             text.contains("(result)"),
             "orphan End with no pending call should use the generic fallback, got:\n{text}",
@@ -1662,6 +1670,21 @@ mod tests {
         assert!(begin < end, "sync update must bracket the rendered frame");
     }
 
+    #[test]
+    fn render_repaints_when_slash_dispatch_grows_content_past_viewport() {
+        // Regression: pre-fix, slash output landed below the viewport
+        // until the user scrolled — the post-paint `update_layout`
+        // re-clamp arrived too late for the same frame.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+        // Tight viewport guarantees /help overflows.
+        let text = rendered_text(&mut app, 60, 12);
+        assert!(
+            text.contains("//etc/hosts"),
+            "tail of /help body must be in the viewport after the first render, got:\n{text}",
+        );
+    }
+
     // ── draw_frame ──
 
     fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
@@ -1672,7 +1695,15 @@ mod tests {
                 chat_area = app.draw_frame(frame);
             })
             .unwrap();
-        app.chat.update_layout(chat_area);
+        // Mirror `App::render`'s second-pass repaint so the captured
+        // buffer matches what the user actually sees.
+        if app.chat.update_layout(chat_area) {
+            terminal
+                .draw(|frame| {
+                    app.draw_frame(frame);
+                })
+                .unwrap();
+        }
         terminal.backend().clone()
     }
 
