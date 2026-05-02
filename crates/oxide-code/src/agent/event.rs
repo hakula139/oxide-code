@@ -66,9 +66,12 @@ pub(crate) enum AgentEvent {
     /// Same teardown as [`Self::TurnComplete`] plus an `(interrupted)`
     /// marker on the partial assistant block.
     Cancelled,
-    /// A newly-generated session title (e.g., AI-generated via Haiku). The
-    /// TUI updates the status bar slot; other sinks ignore it.
-    SessionTitleUpdated(String),
+    /// A newly-generated session title (e.g., AI-generated via Haiku).
+    /// `session_id` scopes the event to the session that produced it —
+    /// the TUI ignores titles for sessions other than its current one,
+    /// so a slow Haiku call straddling a `/clear` doesn't paint the
+    /// old title onto the new session. Stdio sinks ignore it.
+    SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — `id` is the new UUID. The TUI
     /// updates `session_info.session_id` and clears the (now-stale) AI
     /// title; other sinks ignore it.
@@ -195,7 +198,7 @@ impl StdioSink {
             }
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
-            | AgentEvent::SessionTitleUpdated(_)
+            | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
@@ -365,7 +368,10 @@ mod tests {
     fn render_prompt_drained_and_session_title_are_silent() {
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
-            AgentEvent::SessionTitleUpdated("New title".to_owned()),
+            AgentEvent::SessionTitleUpdated {
+                session_id: "sid".to_owned(),
+                title: "New title".to_owned(),
+            },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
             assert!(stdout.is_empty());

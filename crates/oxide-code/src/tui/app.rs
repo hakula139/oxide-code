@@ -386,8 +386,13 @@ impl App {
                 self.chat.push_interrupted_marker();
                 self.finalize_idle();
             }
-            AgentEvent::SessionTitleUpdated(title) => {
-                self.status_bar.set_title(Some(title));
+            // Drop titles for sessions other than the one we're showing
+            // — a slow Haiku call straddling `/clear` would otherwise
+            // paint the old session's title onto the fresh one.
+            AgentEvent::SessionTitleUpdated { session_id, title } => {
+                if session_id == self.session_info.session_id {
+                    self.status_bar.set_title(Some(title));
+                }
             }
             // Rebind `/status`-visible id; drop the now-stale AI title.
             AgentEvent::SessionRolled { id } => {
@@ -1238,14 +1243,31 @@ mod tests {
     // ── handle_agent_event ──
 
     #[test]
-    fn handle_session_title_updated_overwrites_existing_title() {
-        // AI titles arrive after the first-prompt title is already
-        // showing in the bar — the handler must overwrite, not append
-        // or silently ignore.
+    fn handle_session_title_updated_overwrites_existing_title_for_current_session() {
         let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated("AI-generated".to_owned()));
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+            session_id: app.session_info.session_id.clone(),
+            title: "AI-generated".to_owned(),
+        });
         assert_eq!(app.status_bar.title(), Some("AI-generated"));
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_title_updated_drops_event_for_stale_session_id() {
+        // Title task spawned before `/clear` finishes after the roll;
+        // its event must not paint the old session's title onto the
+        // current one.
+        let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+            session_id: "different-session".to_owned(),
+            title: "Stale title".to_owned(),
+        });
+        assert_eq!(
+            app.status_bar.title(),
+            Some("First prompt"),
+            "current-session title must survive a stale event",
+        );
     }
 
     #[test]
