@@ -46,7 +46,7 @@ impl SlashCommand for DiffCmd {
 fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
     let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
     if text.trim().is_empty() {
-        ctx.chat.push_system_message("No uncommitted changes.");
+        ctx.chat.push_system_message("Working tree clean.");
     } else {
         ctx.chat.push_git_diff(text);
     }
@@ -310,7 +310,7 @@ mod tests {
         // Pre-first-commit path: `has_head` is false, so we fall back
         // to `git diff --cached`, which is empty. No untracked files
         // either. Result must be the empty string so the execute path
-        // renders "No uncommitted changes."
+        // renders "Working tree clean."
         let (_dir, repo) = fresh_repo();
         assert_eq!(collect_diff_in(&repo).unwrap(), "");
     }
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn format_diff_both_empty_yields_empty_string() {
-        // The execute path treats empty as "No uncommitted changes" —
+        // The execute path treats empty as "Working tree clean." —
         // pin the contract here so a future change in trim semantics
         // doesn't accidentally start emitting "Untracked files:" alone.
         assert_eq!(format_diff("", ""), "");
