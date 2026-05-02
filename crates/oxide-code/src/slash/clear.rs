@@ -64,6 +64,11 @@ mod tests {
 
         assert_eq!(chat.entry_count(), 1, "only the system message remains");
         assert!(!chat.last_is_error());
+        assert_eq!(
+            chat.last_system_text(),
+            Some("Conversation cleared. Next message starts fresh."),
+            "confirmation body must match — wording regressions surface here",
+        );
         assert!(matches!(user_rx.try_recv(), Ok(UserAction::Clear)));
     }
 

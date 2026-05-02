@@ -313,6 +313,14 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.error_text())
     }
 
+    /// User-visible text of the tail block when it's a
+    /// `SystemMessageBlock`. Mirrors [`Self::last_error_text`] for
+    /// slash-command confirmation rows.
+    #[cfg(test)]
+    pub(crate) fn last_system_text(&self) -> Option<&str> {
+        self.blocks.last().and_then(|b| b.system_text())
+    }
+
     /// Updates cached viewport height and syncs scroll position.
     /// Returns `true` when auto-scroll moved `scroll_offset`, so the
     /// caller knows to repaint with the new offset.
