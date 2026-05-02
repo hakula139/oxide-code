@@ -62,7 +62,7 @@ fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
 /// rather than fail. Acceptable trade-off: the user still sees that
 /// the file exists, just under a sanitized name.
 fn collect_diff_in(cwd: &Path) -> Result<String> {
-    if !inside_git_repo(cwd) {
+    if !inside_git_repo(cwd)? {
         bail!("not inside a git repository");
     }
 
@@ -95,8 +95,18 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
     out
 }
 
-fn inside_git_repo(cwd: &Path) -> bool {
-    run_git_in(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|s| s.trim() == "true")
+/// Distinguish "git binary missing" (propagated as Err) from "git ran
+/// but we're outside a work tree" (Ok(false)). Without that split, a
+/// PATH-less git would surface as the misleading "not inside a git
+/// repository" message instead of the actionable spawn error.
+fn inside_git_repo(cwd: &Path) -> Result<bool> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to spawn git — is it installed and on PATH?")?;
+    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
 fn has_head(cwd: &Path) -> bool {
@@ -390,14 +400,14 @@ mod tests {
     #[test]
     fn inside_git_repo_returns_true_for_real_repo() {
         let (_dir, repo) = fresh_repo();
-        assert!(inside_git_repo(&repo));
+        assert!(inside_git_repo(&repo).unwrap());
     }
 
     #[test]
     fn inside_git_repo_returns_false_outside_a_repo() {
         // A bare tempdir with no `.git` is not a repo.
         let dir = tempfile::tempdir().unwrap();
-        assert!(!inside_git_repo(dir.path()));
+        assert!(!inside_git_repo(dir.path()).unwrap());
     }
 
     // ── has_head ──
