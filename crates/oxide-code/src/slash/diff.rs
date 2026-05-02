@@ -467,6 +467,15 @@ mod tests {
     }
 
     #[test]
+    fn truncate_at_exact_cap_returns_input_unchanged() {
+        // The cap gate is `<=` — input of exactly `MAX_BYTES` is
+        // in-bounds. Flipping it to `<` would silently append a
+        // truncation footer to every full-cap diff.
+        let s = "a".repeat(MAX_BYTES);
+        assert_eq!(truncate(s.clone()), s);
+    }
+
+    #[test]
     fn truncate_oversized_input_appends_footer_with_human_size() {
         let s = "a".repeat(MAX_BYTES + 100);
         let got = truncate(s);
