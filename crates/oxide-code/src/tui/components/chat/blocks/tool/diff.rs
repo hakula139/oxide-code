@@ -339,155 +339,6 @@ mod tests {
         }
     }
 
-    // ── any_chunk_has_content ──
-
-    #[test]
-    fn any_chunk_has_content_empty_chunks_returns_false() {
-        // No-change guard input: every chunk has both sides empty
-        // (e.g., a malformed transcript reaching the renderer).
-        // Used to short-circuit to the "(no change)" marker.
-        let chunks = vec![chunk_of(&[], &[])];
-        assert!(!any_chunk_has_content(&chunks));
-    }
-
-    #[test]
-    fn any_chunk_has_content_one_side_filled_returns_true() {
-        let chunks = vec![chunk_of(&["a"], &[])];
-        assert!(any_chunk_has_content(&chunks));
-        let chunks = vec![chunk_of(&[], &["b"])];
-        assert!(any_chunk_has_content(&chunks));
-    }
-
-    #[test]
-    fn any_chunk_has_content_empty_vec_returns_false() {
-        // No chunks at all — cannot happen in the live path but the
-        // renderer must still degrade gracefully.
-        assert!(!any_chunk_has_content(&[]));
-    }
-
-    // ── chunk_anchor_line ──
-
-    #[test]
-    fn chunk_anchor_line_uses_old_side_first_line() {
-        let chunk = DiffChunk {
-            old: vec![
-                DiffLine {
-                    number: 47,
-                    text: "a".to_owned(),
-                },
-                DiffLine {
-                    number: 48,
-                    text: "b".to_owned(),
-                },
-            ],
-            new: vec![DiffLine {
-                number: 47,
-                text: "X".to_owned(),
-            }],
-        };
-        assert_eq!(chunk_anchor_line(&chunk), Some(47));
-    }
-
-    #[test]
-    fn chunk_anchor_line_falls_back_to_new_side_for_pure_insertions() {
-        // Pure tail insertion: producer trim collapsed the old anchor.
-        // Anchor line falls back to the new side so the locations
-        // footer still names a meaningful position.
-        let chunk = DiffChunk {
-            old: vec![],
-            new: vec![DiffLine {
-                number: 99,
-                text: "added".to_owned(),
-            }],
-        };
-        assert_eq!(chunk_anchor_line(&chunk), Some(99));
-    }
-
-    #[test]
-    fn chunk_anchor_line_returns_none_when_both_sides_empty() {
-        let chunk = chunk_of(&[], &[]);
-        assert_eq!(chunk_anchor_line(&chunk), None);
-    }
-
-    // ── render_locations_footer ──
-
-    #[test]
-    fn render_locations_footer_lists_each_line_number() {
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render_locations_footer(&mut out, &ctx, &[12, 47, 200], theme.tool_border());
-        // Exactly one row — a regression that double-emitted would
-        // pass a `contains` check.
-        assert_eq!(out.len(), 1);
-        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.contains("applied at lines 12, 47, 200"),
-            "footer text mismatch: {text:?}",
-        );
-    }
-
-    #[test]
-    fn render_locations_footer_caps_with_and_more_suffix_past_max() {
-        // Past `MAX_LOCATIONS_DISPLAYED` (8), the footer truncates and
-        // adds "and N more" so a 50-hit `replace_all` doesn't sprawl.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let locations: Vec<usize> = (1..=10).collect();
-        let mut out = Vec::new();
-        render_locations_footer(&mut out, &ctx, &locations, theme.tool_border());
-        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.contains("applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more"),
-            "footer should cap and append remainder: {text:?}",
-        );
-    }
-
-    #[test]
-    fn render_locations_footer_singular_label_for_one_location() {
-        // The singular branch is unreachable in production (the dedup
-        // path needs `chunks.len() > 1`), but the helper must produce
-        // the right grammar if a future caller ever passes a single
-        // location.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render_locations_footer(&mut out, &ctx, &[42], theme.tool_border());
-        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            text.contains("applied at line 42") && !text.contains("lines"),
-            "singular label expected: {text:?}",
-        );
-    }
-
-    #[test]
-    fn render_locations_footer_empty_emits_nothing() {
-        // Defensive guard: if every chunk lacked an anchor line (both
-        // sides empty after trim), the footer must skip rather than
-        // emit a malformed "applied at lines " row.
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 80,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let mut out = Vec::new();
-        render_locations_footer(&mut out, &ctx, &[], theme.tool_border());
-        assert!(out.is_empty());
-    }
-
     // ── render ──
 
     fn ctx(theme: &Theme) -> RenderCtx<'_> {
@@ -637,6 +488,155 @@ mod tests {
             texts.iter().any(|t| t.contains("7 occurrences replaced")),
             "missing legacy count footer: {texts:?}",
         );
+    }
+
+    // ── render_locations_footer ──
+
+    #[test]
+    fn render_locations_footer_lists_each_line_number() {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[12, 47, 200], theme.tool_border());
+        // Exactly one row — a regression that double-emitted would
+        // pass a `contains` check.
+        assert_eq!(out.len(), 1);
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at lines 12, 47, 200"),
+            "footer text mismatch: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_caps_with_and_more_suffix_past_max() {
+        // Past `MAX_LOCATIONS_DISPLAYED` (8), the footer truncates and
+        // adds "and N more" so a 50-hit `replace_all` doesn't sprawl.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let locations: Vec<usize> = (1..=10).collect();
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &locations, theme.tool_border());
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at lines 1, 2, 3, 4, 5, 6, 7, 8 and 2 more"),
+            "footer should cap and append remainder: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_singular_label_for_one_location() {
+        // The singular branch is unreachable in production (the dedup
+        // path needs `chunks.len() > 1`), but the helper must produce
+        // the right grammar if a future caller ever passes a single
+        // location.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[42], theme.tool_border());
+        let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("applied at line 42") && !text.contains("lines"),
+            "singular label expected: {text:?}",
+        );
+    }
+
+    #[test]
+    fn render_locations_footer_empty_emits_nothing() {
+        // Defensive guard: if every chunk lacked an anchor line (both
+        // sides empty after trim), the footer must skip rather than
+        // emit a malformed "applied at lines " row.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 80,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let mut out = Vec::new();
+        render_locations_footer(&mut out, &ctx, &[], theme.tool_border());
+        assert!(out.is_empty());
+    }
+
+    // ── any_chunk_has_content ──
+
+    #[test]
+    fn any_chunk_has_content_empty_chunks_returns_false() {
+        // No-change guard input: every chunk has both sides empty
+        // (e.g., a malformed transcript reaching the renderer).
+        // Used to short-circuit to the "(no change)" marker.
+        let chunks = vec![chunk_of(&[], &[])];
+        assert!(!any_chunk_has_content(&chunks));
+    }
+
+    #[test]
+    fn any_chunk_has_content_one_side_filled_returns_true() {
+        let chunks = vec![chunk_of(&["a"], &[])];
+        assert!(any_chunk_has_content(&chunks));
+        let chunks = vec![chunk_of(&[], &["b"])];
+        assert!(any_chunk_has_content(&chunks));
+    }
+
+    #[test]
+    fn any_chunk_has_content_empty_vec_returns_false() {
+        // No chunks at all — cannot happen in the live path but the
+        // renderer must still degrade gracefully.
+        assert!(!any_chunk_has_content(&[]));
+    }
+
+    // ── chunk_anchor_line ──
+
+    #[test]
+    fn chunk_anchor_line_uses_old_side_first_line() {
+        let chunk = DiffChunk {
+            old: vec![
+                DiffLine {
+                    number: 47,
+                    text: "a".to_owned(),
+                },
+                DiffLine {
+                    number: 48,
+                    text: "b".to_owned(),
+                },
+            ],
+            new: vec![DiffLine {
+                number: 47,
+                text: "X".to_owned(),
+            }],
+        };
+        assert_eq!(chunk_anchor_line(&chunk), Some(47));
+    }
+
+    #[test]
+    fn chunk_anchor_line_falls_back_to_new_side_for_pure_insertions() {
+        // Pure tail insertion: producer trim collapsed the old anchor.
+        // Anchor line falls back to the new side so the locations
+        // footer still names a meaningful position.
+        let chunk = DiffChunk {
+            old: vec![],
+            new: vec![DiffLine {
+                number: 99,
+                text: "added".to_owned(),
+            }],
+        };
+        assert_eq!(chunk_anchor_line(&chunk), Some(99));
+    }
+
+    #[test]
+    fn chunk_anchor_line_returns_none_when_both_sides_empty() {
+        let chunk = chunk_of(&[], &[]);
+        assert_eq!(chunk_anchor_line(&chunk), None);
     }
 
     // ── entries ──
