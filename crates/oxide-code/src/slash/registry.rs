@@ -30,13 +30,10 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether the command is safe to dispatch while a turn is in
-    /// flight. Read-only commands (`/help`, `/status`, `/config`,
-    /// `/diff`) just push a chat block and never touch agent state, so
-    /// they run immediately even when input is disabled. State-mutating
-    /// commands (`/clear`, eventually `/model`, `/theme`) override to
-    /// `false`; the dispatcher refuses them mid-turn rather than racing
-    /// the agent's `messages` / session writer.
+    /// Whether the command is safe to run mid-turn. The dispatcher
+    /// fast-paths `true` commands client-side; commands that touch
+    /// `messages` or session state override to `false` so they refuse
+    /// instead of racing the live turn.
     fn is_read_only(&self) -> bool {
         true
     }

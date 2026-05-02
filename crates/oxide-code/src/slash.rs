@@ -43,34 +43,6 @@ pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
     dispatch_with(registry::BUILT_INS, parsed, ctx);
 }
 
-/// Classifies a parsed slash command for the busy-turn dispatch path.
-/// Lets callers decide whether to run the command client-side mid-turn
-/// or refuse with a "wait until idle" message — without exposing the
-/// trait or registry internals.
-pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
-    classify_in(registry::BUILT_INS, parsed)
-}
-
-fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
-    match registry::lookup_in(commands, &parsed.name) {
-        None => SlashKind::Unknown,
-        Some(cmd) if cmd.is_read_only() => SlashKind::ReadOnly,
-        Some(_) => SlashKind::Mutating,
-    }
-}
-
-/// Whether a slash command can run while the agent is busy.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SlashKind {
-    /// Safe mid-turn — dispatch immediately.
-    ReadOnly,
-    /// State-mutating — refuse mid-turn, let the user retry when idle.
-    Mutating,
-    /// Not in the registry — dispatch anyway so the user sees the
-    /// canonical "unknown command" error block with recovery hints.
-    Unknown,
-}
-
 /// Resolves `parsed` against `commands` and runs the matching impl.
 /// Renders an `ErrorBlock` on unknown name or on `Err` from `execute`.
 /// Successful commands push their own output before returning `Ok`.
@@ -106,6 +78,31 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
         _ = write!(out, "/{}", cmd.name());
     }
     out
+}
+
+/// Routes a parsed command for the busy-turn dispatch path.
+pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
+    classify_in(registry::BUILT_INS, parsed)
+}
+
+fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
+    match registry::lookup_in(commands, &parsed.name) {
+        None => SlashKind::Unknown,
+        Some(cmd) if cmd.is_read_only() => SlashKind::ReadOnly,
+        Some(_) => SlashKind::Mutating,
+    }
+}
+
+/// Whether a slash command can run while the agent is busy.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SlashKind {
+    /// Safe mid-turn — dispatch immediately.
+    ReadOnly,
+    /// State-mutating — refuse mid-turn, let the user retry when idle.
+    Mutating,
+    /// Not in the registry — dispatch anyway so the user sees the
+    /// canonical "unknown command" error block with recovery hints.
+    Unknown,
 }
 
 /// Shared test fixture — a fully-populated `SessionInfo` for the

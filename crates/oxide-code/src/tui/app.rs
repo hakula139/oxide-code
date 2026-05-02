@@ -180,7 +180,7 @@ impl App {
                 code: KeyCode::Esc, ..
             }) => {
                 if self.input.popup_visible() {
-                    let _ = self.input.handle_event(event);
+                    _ = self.input.handle_event(event);
                 } else {
                     self.handle_esc();
                 }
@@ -278,13 +278,10 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
-                    // Slash commands stay client-side even when busy:
-                    // queueing them would forward through the agent's
-                    // `record_drained_prompts` path and persist as a
-                    // user message — see PR #58 review notes. Read-only
-                    // commands (`/help`, `/status`, ...) dispatch
-                    // immediately; state-mutating ones refuse with a
-                    // system message rather than racing the live turn.
+                    // Slash commands stay client-side mid-turn —
+                    // queueing forwards them through the agent and
+                    // persists them as user prompts. Read-only ones
+                    // dispatch immediately; state-mutating ones refuse.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {

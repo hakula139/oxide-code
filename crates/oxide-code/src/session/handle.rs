@@ -866,7 +866,7 @@ mod tests {
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("seed")).await;
 
-        let _ = roll(&mut session, &store, &tracker, "test-model").await;
+        _ = roll(&mut session, &store, &tracker, "test-model").await;
 
         assert!(
             tracker.snapshot_all().is_empty(),
