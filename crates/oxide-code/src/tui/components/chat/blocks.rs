@@ -113,6 +113,16 @@ pub(super) trait ChatBlock {
     fn error_text(&self) -> Option<&str> {
         None
     }
+
+    /// The block's user-visible message when the block is a
+    /// [`SystemMessageBlock`] — `None` otherwise. Same purpose as
+    /// [`Self::error_text`] but for slash-command confirmation rows.
+    ///
+    /// [`SystemMessageBlock`]: super::blocks::system::SystemMessageBlock
+    #[cfg(test)]
+    fn system_text(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ── Shared Helpers ──

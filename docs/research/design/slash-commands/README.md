@@ -106,8 +106,9 @@ Existing scaffolding the design leans on: `tui/components/chat/blocks.rs` define
 8. **No `/quit` or `/exit` in v1.** Claude Code has neither. Ctrl+C×2 / Ctrl+D already exit oxide-code; the slash variants would be redundant.
 9. **`/config` is read-only in v1.** Prints the resolved effective config + layered file paths. An interactive editor lands later behind a writable-path check.
 10. **Built-in only in v1.** The trait registry leaves room for `~/.config/ox/commands/*.md` discovery later.
+11. **Read-only commands fast-path the busy turn.** `SlashCommand::is_read_only` defaults to `true`; the dispatcher runs read-only commands client-side even when input is disabled. State-mutating commands override to `false` and refuse mid-turn with a system message — queueing them through the prompt buffer would persist them as user messages and forward to the LLM.
 
-PR #55 shipped four pure-display commands plus the underlying machinery (trait, parser, registry, `SlashContext`, `SystemMessageBlock`, `GitDiffBlock`): `/help`, `/status`, `/config` (read-only), `/diff`. Adding a new command is now one file plus one slice entry. Follow-up PRs land the popup overlay, the state-mutating commands (`/clear` with aliases `/new` / `/reset`, `/init`, `/theme`, `/resume`), and `/model` mid-session swap. Deferred: `/compact` (no summarization call yet), `/cost` (no token persistence yet), `/login` / `/logout` (interactive OAuth), `/config` editor mode, custom markdown commands.
+Per-command design lives alongside this doc in the same directory as commands earn the depth: see [/clear](clear.md). Simple read-only commands (`/help`, `/status`, `/config`, `/diff`) ride the surface decisions above without their own doc.
 
 ## Sources
 
@@ -121,3 +122,5 @@ PR #55 shipped four pure-display commands plus the underlying machinery (trait, 
 - `crates/oxide-code/src/session/resolver.rs` — `resolve_session`, `ResumeMode`. Reused for `/resume`.
 - `crates/oxide-code/src/agent.rs:78-105` — `AgentClient` trait the model-swap design pivots around.
 - `crates/oxide-code/src/client/anthropic.rs` — `Client` ownership point; mid-session model mutation lands here.
+- `claude-code/src/commands/clear/conversation.ts` — `clearConversation` reference flow for `/clear`.
+- `claude-code/src/bootstrap/state.ts::regenerateSessionId` — parent-session-id linkage on roll (deferred).

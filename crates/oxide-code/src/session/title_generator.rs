@@ -102,7 +102,10 @@ async fn generate_and_record(
     let outcome = session.append_ai_title(title.clone()).await;
     sink.session_write_error(outcome.failure.as_deref());
 
-    _ = sink.send(AgentEvent::SessionTitleUpdated(title));
+    _ = sink.send(AgentEvent::SessionTitleUpdated {
+        session_id: session.session_id().to_owned(),
+        title,
+    });
     Ok(())
 }
 
@@ -268,7 +271,7 @@ mod tests {
             .expect("channel closed before event");
 
         assert!(
-            matches!(&event, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth"),
+            matches!(&event, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix auth"),
             "unexpected event: {event:?}",
         );
     }
@@ -325,7 +328,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Fix login")),
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix login")),
             "sink got SessionTitleUpdated: {events:?}",
         );
     }
@@ -357,7 +360,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Add OAuth auth")),
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Add OAuth auth")),
             "sink got SessionTitleUpdated: {events:?}",
         );
     }
@@ -388,7 +391,7 @@ mod tests {
             !sink
                 .events()
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(_))),
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
             "no title event on parse failure",
         );
     }
@@ -425,7 +428,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated(t) if t == "Fix auth")),
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix auth")),
             "SessionTitleUpdated expected even after write failure: {events:?}",
         );
     }

@@ -21,7 +21,7 @@ use super::store::{
     SessionData, SessionStore, load_session_data_from_path, open_append_at,
     read_session_id_from_path,
 };
-use crate::file_tracker::FileSnapshot;
+use crate::file_tracker::{FileSnapshot, FileTracker};
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
@@ -179,6 +179,17 @@ impl SessionHandle {
             .await
     }
 
+    /// Finalize and tear down: writes the summary, surfaces a flush
+    /// error (if any), and shuts the actor down. Returns the failure
+    /// message so callers can route it as fits their context (warn-log
+    /// after the TUI has torn down, [`AgentSink::session_write_error`]
+    /// while the sink is still live).
+    pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
+        let outcome = self.finish(snapshots).await;
+        self.shutdown().await;
+        outcome.failure
+    }
+
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
     /// after the current batch flushes, then awaits the join handle.
     /// Cmd-driven exit (rather than waiting for every clone's
@@ -266,6 +277,40 @@ pub(crate) struct ResumedSession {
 /// lazily on the first record cmd.
 pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
     spawn_actor(SessionState::fresh(store.clone(), model))
+}
+
+/// Outcome of [`roll`]: the new session id plus any flush failure
+/// from finalizing the old session. Caller decides where to surface
+/// the failure (sink for live UI, warn-log post-teardown).
+pub(crate) struct RollOutcome {
+    pub(crate) new_id: String,
+    pub(crate) finalize_failure: Option<String>,
+}
+
+/// Rolls `session` to a fresh handle and finalizes the old one. Two
+/// orderings matter: snapshot **before** clear (so the snapshots
+/// survive into the old JSONL via `finalize`), and replace **before**
+/// finalize (so the new session is in place before the old handle is
+/// consumed).
+///
+/// Caller must update any state derived from the session id (HTTP
+/// client header, in-memory message log) — this helper does not.
+pub(crate) async fn roll(
+    session: &mut SessionHandle,
+    store: &SessionStore,
+    file_tracker: &FileTracker,
+    model: &str,
+) -> RollOutcome {
+    let snapshots = file_tracker.snapshot_all();
+    file_tracker.clear();
+    let new_session = start(store, model);
+    let new_id = new_session.session_id().to_owned();
+    let old_session = std::mem::replace(session, new_session);
+    let finalize_failure = old_session.finalize(snapshots).await;
+    RollOutcome {
+        new_id,
+        finalize_failure,
+    }
 }
 
 /// Resume by session ID — loads, sanitizes, opens for append, spawns
@@ -686,6 +731,37 @@ mod tests {
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
 
+    // ── finalize ──
+
+    #[tokio::test]
+    async fn finalize_writes_summary_then_returns_none_on_success() {
+        // Pins the success contract: summary lands on disk and the
+        // returned failure is `None`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert!(failure.is_none(), "healthy finalize reports no failure");
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            content.contains(r#""type":"summary""#),
+            "summary lands on disk: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_returns_failure_when_actor_dead() {
+        // Dead-actor path must surface so callers can route the
+        // failure (warn-log on exit, sink on `/clear` roll).
+        let handle = testing::dead("dead");
+        let failure = handle.finalize(Vec::new()).await;
+        assert!(failure.is_some(), "dead handle finalize surfaces failure");
+    }
+
     // ── shutdown ──
 
     #[tokio::test]
@@ -734,6 +810,73 @@ mod tests {
         assert!(
             test_session_file(dir.path(), handle.session_id()).exists(),
             "first record_message should materialize the session file",
+        );
+    }
+
+    // ── roll ──
+
+    #[tokio::test]
+    async fn roll_swaps_session_in_place_and_finalizes_old_with_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let mut session = start(&store, "test-model");
+        let original_id = session.session_id().to_owned();
+        session.record_message(Message::user("original")).await;
+
+        let outcome = roll(&mut session, &store, &tracker, "test-model").await;
+
+        assert_ne!(outcome.new_id, original_id, "id must roll");
+        assert_eq!(
+            session.session_id(),
+            outcome.new_id,
+            "new session swapped in place",
+        );
+        assert!(
+            outcome.finalize_failure.is_none(),
+            "healthy roll reports no failure",
+        );
+
+        let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
+            .expect("old session file lands on disk");
+        assert!(
+            old_jsonl.contains(r#""type":"summary""#),
+            "old JSONL gets a summary entry: {old_jsonl}",
+        );
+        assert!(
+            old_jsonl.contains(&original_id),
+            "old JSONL header carries the original id: {old_jsonl}",
+        );
+    }
+
+    #[tokio::test]
+    async fn roll_persists_tracker_snapshots_into_old_session_then_clears_tracker() {
+        // Snapshot-before-clear: snapshots from the live tracker must
+        // land in the OLD JSONL via finalize, and the tracker must be
+        // empty afterwards so the new session starts cold.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let seed = dir.path().join("seed.txt");
+        std::fs::write(&seed, b"hello").unwrap();
+        crate::file_tracker::testing::seed_full_read(&tracker, &seed);
+        assert!(!tracker.snapshot_all().is_empty(), "tracker seeded");
+
+        let mut session = start(&store, "test-model");
+        let original_id = session.session_id().to_owned();
+        session.record_message(Message::user("seed")).await;
+
+        _ = roll(&mut session, &store, &tracker, "test-model").await;
+
+        assert!(
+            tracker.snapshot_all().is_empty(),
+            "tracker cleared after roll",
+        );
+        let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
+            .expect("old session file lands on disk");
+        assert!(
+            old_jsonl.contains("seed.txt"),
+            "snapshot survived into old JSONL: {old_jsonl}",
         );
     }
 

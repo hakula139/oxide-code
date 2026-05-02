@@ -22,6 +22,11 @@ impl SystemMessageBlock {
 }
 
 impl ChatBlock for SystemMessageBlock {
+    #[cfg(test)]
+    fn system_text(&self) -> Option<&str> {
+        Some(&self.text)
+    }
+
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let bar_style = ctx.theme.accent();
         let body_style = ctx.theme.text();

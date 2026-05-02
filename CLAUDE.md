@@ -56,7 +56,7 @@ ox                                          # Start an interactive session
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
-│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path constructors
+│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path/roll constructors + lifecycle
 │   ├── handle/
 │   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
@@ -64,13 +64,15 @@ ox                                          # Start an interactive session
 │   ├── path.rs                             # Filesystem-safe project subdirectory derivation (sanitize_cwd)
 │   ├── resolver.rs                         # CLI `--continue` argument resolution (ResumeMode, resolve_session)
 │   ├── sanitize.rs                         # Resume-time transcript repair (drop unresolved / orphan tool blocks, collapse roles, sentinels)
+│   ├── snapshots/                          # `cargo insta` baseline JSONL byte-shape snapshots for `actor` round-trip tests
 │   ├── state.rs                            # SessionState: pure-data lifecycle struct owned by the actor (uuid chain, counts, finish gating)
 │   ├── store.rs                            # SessionStore / SessionWriter (BufWriter-backed): file I/O, XDG path, listing
 │   └── title_generator.rs                  # Background AI title generation (Haiku) with detached task
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
+│   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed app handles) + SessionInfo (frozen runtime snapshot)
+│   ├── context.rs                          # SlashContext (borrowed app handles + user_tx for state-mutators) + SessionInfo
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
 │   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
 │   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
@@ -119,7 +121,8 @@ ox                                          # Start an interactive session
 │   │   │       └── user.rs                 # UserMessage
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring
 │   │   ├── input/
-│   │   │   └── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold-text selected, conditional alias parens, truncating description gutter
+│   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold-text selected, conditional alias parens, truncating description gutter
+│   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   └── status.rs                       # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)

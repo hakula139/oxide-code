@@ -66,9 +66,14 @@ pub(crate) enum AgentEvent {
     /// Same teardown as [`Self::TurnComplete`] plus an `(interrupted)`
     /// marker on the partial assistant block.
     Cancelled,
-    /// A newly-generated session title (e.g., AI-generated via Haiku). The
-    /// TUI updates the status bar slot; other sinks ignore it.
-    SessionTitleUpdated(String),
+    /// AI-generated session title; `session_id` scopes the event so a
+    /// slow Haiku call straddling `/clear` doesn't paint onto the
+    /// fresh session.
+    SessionTitleUpdated { session_id: String, title: String },
+    /// `/clear` rolled the session — `id` is the new UUID. The TUI
+    /// updates `session_info.session_id` and clears the (now-stale) AI
+    /// title; other sinks ignore it.
+    SessionRolled { id: String },
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -80,6 +85,9 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),
+    /// `/clear` — agent loop finalizes the old session, swaps in a
+    /// fresh one, and emits [`AgentEvent::SessionRolled`].
+    Clear,
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -186,9 +194,10 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
-            // Both are TUI-only affordances (queued-prompt preview /
-            // header title); stdio has no surface to update.
-            AgentEvent::PromptDrained(_) | AgentEvent::SessionTitleUpdated(_) => {}
+            // TUI-only — no stdio surface to update.
+            AgentEvent::PromptDrained(_)
+            | AgentEvent::SessionTitleUpdated { .. }
+            | AgentEvent::SessionRolled { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 writeln!(stdout)?;
@@ -357,7 +366,10 @@ mod tests {
     fn render_prompt_drained_and_session_title_are_silent() {
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
-            AgentEvent::SessionTitleUpdated("New title".to_owned()),
+            AgentEvent::SessionTitleUpdated {
+                session_id: "sid".to_owned(),
+                title: "New title".to_owned(),
+            },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
             assert!(stdout.is_empty());

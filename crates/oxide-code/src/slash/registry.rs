@@ -5,6 +5,7 @@
 //! new command is one file plus one slice entry — no central match
 //! arm, no enum variant.
 
+use super::clear::ClearCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
 use super::diff::DiffCmd;
@@ -29,6 +30,14 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
+    /// Whether the command is safe to run mid-turn. The dispatcher
+    /// fast-paths `true` commands client-side; commands that touch
+    /// `messages` or session state override to `false` so they refuse
+    /// instead of racing the live turn.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     /// Optional usage hint used by the error message when the command
     /// is invoked with malformed arguments. `None` means no args are
     /// expected.
@@ -45,7 +54,8 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Every built-in v1 command. Order is presentation order in `/help`
 /// and the popup, so the most frequently-used commands sit first.
-pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[&HelpCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
+pub(super) const BUILT_INS: &[&dyn SlashCommand] =
+    &[&HelpCmd, &ClearCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
 
 /// Resolves `name` by canonical name first, then aliases. Generic
 /// over the slice so tests can drive it against a synthetic registry.
@@ -73,7 +83,8 @@ mod tests {
     fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<(), String> {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
         cmd.execute(args, &mut ctx)
     }
 

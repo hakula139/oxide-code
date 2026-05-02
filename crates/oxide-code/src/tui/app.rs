@@ -28,7 +28,7 @@ use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
-use crate::slash::{self, SessionInfo, SlashContext};
+use crate::slash::{self, SessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -180,7 +180,7 @@ impl App {
                 code: KeyCode::Esc, ..
             }) => {
                 if self.input.popup_visible() {
-                    let _ = self.input.handle_event(event);
+                    _ = self.input.handle_event(event);
                 } else {
                     self.handle_esc();
                 }
@@ -268,7 +268,8 @@ impl App {
                     // accounting / model context all stay clean.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                        let mut ctx =
+                            SlashContext::new(&mut self.chat, &self.session_info, &self.user_tx);
                         slash::dispatch(&parsed, &mut ctx);
                         return false;
                     }
@@ -277,6 +278,30 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
+                    // Slash commands stay client-side mid-turn —
+                    // queueing forwards them through the agent and
+                    // persists them as user prompts. Read-only ones
+                    // dispatch immediately; state-mutating ones refuse.
+                    if let Some(parsed) = slash::parse_slash(text) {
+                        self.chat.push_user_message(text.clone());
+                        match slash::classify(&parsed) {
+                            SlashKind::ReadOnly | SlashKind::Unknown => {
+                                let mut ctx = SlashContext::new(
+                                    &mut self.chat,
+                                    &self.session_info,
+                                    &self.user_tx,
+                                );
+                                slash::dispatch(&parsed, &mut ctx);
+                            }
+                            SlashKind::Mutating => {
+                                self.chat.push_system_message(format!(
+                                    "/{} runs only when idle. Try again after the turn finishes.",
+                                    parsed.name,
+                                ));
+                            }
+                        }
+                        return false;
+                    }
                     // Busy: buffer for the preview pane. On a clean
                     // round boundary the agent emits `PromptDrained`
                     // and the TUI pops `pending_prompts` FIFO,
@@ -311,6 +336,11 @@ impl App {
                 self.should_quit = true;
                 true
             }
+            // Unreachable on the live wiring — `/clear` writes
+            // `UserAction::Clear` straight into `user_tx`. The
+            // `false` return preserves that bypass if a future call
+            // site accidentally routes it through here.
+            UserAction::Clear => false,
         }
     }
 
@@ -379,8 +409,18 @@ impl App {
                 self.chat.push_interrupted_marker();
                 self.finalize_idle();
             }
-            AgentEvent::SessionTitleUpdated(title) => {
-                self.status_bar.set_title(Some(title));
+            // Drop titles for sessions other than the one we're showing
+            // — a slow Haiku call straddling `/clear` would otherwise
+            // paint the old session's title onto the fresh one.
+            AgentEvent::SessionTitleUpdated { session_id, title } => {
+                if session_id == self.session_info.session_id {
+                    self.status_bar.set_title(Some(title));
+                }
+            }
+            // Rebind `/status`-visible id; drop the now-stale AI title.
+            AgentEvent::SessionRolled { id } => {
+                self.session_info.session_id = id;
+                self.status_bar.set_title(None);
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -1193,6 +1233,23 @@ mod tests {
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
 
+    #[test]
+    fn dispatch_clear_stays_local_to_protect_the_slash_bypass() {
+        // `/clear` writes `UserAction::Clear` straight into `user_tx`
+        // from `SlashContext`, so this arm only ever fires if some new
+        // call site routes `Clear` through `dispatch_user_action`. The
+        // local `false` return guarantees the action isn't double-sent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::Clear);
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "Clear must not reach user_tx via dispatch_user_action",
+        );
+        assert!(!app.should_quit);
+        assert_eq!(app.chat.entry_count(), 0);
+    }
+
     #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: between the user pressing Esc
@@ -1223,16 +1280,125 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
+        // Read-only slash commands typed during a busy turn must run
+        // immediately. Otherwise the queue-drain path persists them as
+        // user prompts and the LLM ends up answering `/help` literally.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
+
+        assert!(
+            app.pending_prompts.is_empty(),
+            "slash command must not queue",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "slash command must not forward to user_tx",
+        );
+        // User-message + dispatched help block, on top of the active prompt.
+        assert_eq!(app.chat.entry_count(), 3);
+        assert!(!app.chat.last_is_error());
+    }
+
+    #[tokio::test]
+    async fn dispatch_clear_during_busy_refuses_with_system_message_no_dispatch() {
+        // State-mutating commands must refuse mid-turn — rolling the
+        // session while `messages` is still draining would race the
+        // in-flight turn into the wrong JSONL.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/clear".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "neither SubmitPrompt nor Clear must reach user_tx",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/clear runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
+        // Unknown commands route through `dispatch` so the user sees
+        // the canonical "unknown command" error with recovery hints
+        // (alternatives + `//` escape) instead of the prompt being
+        // silently sent to the LLM.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/nope".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+        ));
+        assert!(app.chat.last_is_error());
+    }
+
     // ── handle_agent_event ──
 
     #[test]
-    fn handle_session_title_updated_overwrites_existing_title() {
-        // AI titles arrive after the first-prompt title is already
-        // showing in the bar — the handler must overwrite, not append
-        // or silently ignore.
+    fn handle_session_title_updated_overwrites_existing_title_for_current_session() {
         let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
-        app.handle_agent_event(AgentEvent::SessionTitleUpdated("AI-generated".to_owned()));
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+            session_id: app.session_info.session_id.clone(),
+            title: "AI-generated".to_owned(),
+        });
         assert_eq!(app.status_bar.title(), Some("AI-generated"));
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_title_updated_drops_event_for_stale_session_id() {
+        // Title task spawned before `/clear` finishes after the roll;
+        // its event must not paint the old session's title onto the
+        // current one.
+        let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
+        app.handle_agent_event(AgentEvent::SessionTitleUpdated {
+            session_id: "different-session".to_owned(),
+            title: "Stale title".to_owned(),
+        });
+        assert_eq!(
+            app.status_bar.title(),
+            Some("First prompt"),
+            "current-session title must survive a stale event",
+        );
+    }
+
+    #[test]
+    fn handle_session_rolled_rebinds_session_id_and_drops_stale_title() {
+        // `/clear` swaps the session UUID; the App must rebind the
+        // `/status`-visible id so it reflects the live session, and
+        // wipe the now-stale AI title so the bar isn't lying about
+        // which conversation is on screen.
+        let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
+        let original_id = app.session_info.session_id.clone();
+        app.handle_agent_event(AgentEvent::SessionRolled {
+            id: "rolled-session".to_owned(),
+        });
+
+        assert_eq!(
+            app.session_info.session_id, "rolled-session",
+            "session id must rebind to the rolled session",
+        );
+        assert_ne!(app.session_info.session_id, original_id);
+        assert!(
+            app.status_bar.title().is_none(),
+            "stale AI title must be cleared on roll",
+        );
         assert!(app.dirty);
     }
 

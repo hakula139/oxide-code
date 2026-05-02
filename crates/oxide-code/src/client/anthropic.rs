@@ -110,11 +110,9 @@ impl Client {
         );
 
         // 3P gateways fingerprint absence of the full Stainless header set.
+        // `x-claude-code-session-id` is per-request so `/clear` can roll
+        // the id without rebuilding the HTTP client.
         headers.insert("x-app", HeaderValue::from_static("cli"));
-        headers.insert(
-            "x-claude-code-session-id",
-            HeaderValue::from_str(&session_id)?,
-        );
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
         headers.insert(
             "x-stainless-package-version",
@@ -168,6 +166,18 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Replaces the id used for `x-claude-code-session-id` and
+    /// `metadata.user_id`. Debug-asserts header-value validity;
+    /// callers feed UUID v4s from `SessionHandle`, so failure is a
+    /// programmer error.
+    pub(crate) fn set_session_id(&mut self, id: String) {
+        debug_assert!(
+            HeaderValue::from_str(&id).is_ok(),
+            "session id must be a legal HTTP header value: {id:?}",
+        );
+        self.session_id = id;
     }
 
     /// Stream a message response from the Anthropic API.
@@ -249,9 +259,10 @@ impl Client {
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
+        let session_id = self.session_id.clone();
 
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, betas, body, &tx).await;
+            let result = stream_sse(&http, &url, betas, session_id, body, &tx).await;
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
@@ -527,6 +538,56 @@ mod tests {
                 "error should mention header: {err:#}",
             );
         }
+    }
+
+    // ── Client::set_session_id ──
+
+    #[tokio::test]
+    async fn set_session_id_propagates_to_header_and_metadata_user_id() {
+        // Pins both wire surfaces — the mock matches the rolled id in
+        // the header (wrong value 404s) and the assertion below pins
+        // the embedded JSON in `metadata.user_id`.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-claude-code-session-id", "sid-rolled"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body()),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = Client::new(
+            test_config(server.uri(), Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            Some("sid-original".to_owned()),
+        )
+        .unwrap();
+        client.set_session_id("sid-rolled".to_owned());
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let received = server.received_requests().await.expect("recorded requests");
+        assert_eq!(received.len(), 1, "exactly one streamed call");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("request body is JSON");
+        let user_id = body["metadata"]["user_id"]
+            .as_str()
+            .expect("metadata.user_id is a string");
+        assert!(
+            user_id.contains("sid-rolled"),
+            "metadata.user_id carries the new session id: {user_id}",
+        );
+        assert!(
+            !user_id.contains("sid-original"),
+            "old session id must not leak into the body: {user_id}",
+        );
     }
 
     // ── Client::stream_message ──
@@ -830,8 +891,6 @@ mod tests {
             Some("sid-abc".to_owned()),
         )
         .unwrap();
-        // A missing header on either matcher would 404 the mock and
-        // surface as an HTTP error; success proves both are present.
         collect_events(
             client
                 .stream_message(&[Message::user("hi")], &[], None, &[])

@@ -275,6 +275,18 @@ impl ChatView {
         self.blocks.push(Box::new(InterruptedMarker));
     }
 
+    /// Reset to fresh-construction shape: drop blocks, streaming /
+    /// thinking buffers, scroll position. Theme, `show_thinking`, and
+    /// viewport sizes stay — they mirror terminal state.
+    pub(crate) fn clear_history(&mut self) {
+        self.blocks.clear();
+        self.streaming = None;
+        self.thinking_buffer.clear();
+        self.scroll_offset = 0;
+        self.content_height.set(0);
+        self.auto_scroll = true;
+    }
+
     /// Number of committed chat blocks. Exposed for observable state in
     /// sibling-module tests (`tui::app`) so they don't need to reach
     /// through the private `blocks` field.
@@ -299,6 +311,14 @@ impl ChatView {
     #[cfg(test)]
     pub(crate) fn last_error_text(&self) -> Option<&str> {
         self.blocks.last().and_then(|b| b.error_text())
+    }
+
+    /// User-visible text of the tail block when it's a
+    /// `SystemMessageBlock`. Mirrors [`Self::last_error_text`] for
+    /// slash-command confirmation rows.
+    #[cfg(test)]
+    pub(crate) fn last_system_text(&self) -> Option<&str> {
+        self.blocks.last().and_then(|b| b.system_text())
     }
 
     /// Updates cached viewport height and syncs scroll position.
@@ -2095,6 +2115,34 @@ mod tests {
         );
     }
 
+    // ── clear_history ──
+
+    #[test]
+    fn clear_history_drops_blocks_streaming_thinking_and_resets_scroll() {
+        let mut chat = test_chat();
+        chat.push_user_message("user prompt".to_owned());
+        chat.push_tool_call("$", "ls");
+        chat.append_stream_token("partial reply");
+        chat.append_thinking_token("considering");
+        chat.scroll_offset = 25;
+        chat.content_height.set(100);
+        chat.auto_scroll = false;
+        chat.viewport_height = 24;
+        chat.viewport_width = 80;
+
+        chat.clear_history();
+
+        assert_eq!(chat.entry_count(), 0);
+        assert!(chat.streaming.is_none());
+        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!(chat.content_height.get(), 0);
+        assert!(chat.auto_scroll);
+        // Viewport mirrors terminal state, not conversation state.
+        assert_eq!(chat.viewport_height, 24);
+        assert_eq!(chat.viewport_width, 80);
+    }
+
     // ── last_is_error ──
 
     #[test]
@@ -2128,6 +2176,41 @@ mod tests {
     fn last_is_error_false_when_no_blocks() {
         let chat = test_chat();
         assert!(!chat.last_is_error());
+    }
+
+    // ── last_system_text ──
+
+    #[test]
+    fn last_system_text_returns_body_for_system_message() {
+        // Pins the `Some` branch so a regression in
+        // `SystemMessageBlock::system_text` would surface here as well
+        // as in the slash-command tests that consume the accessor.
+        let mut chat = test_chat();
+        chat.push_system_message("hello there");
+        assert_eq!(chat.last_system_text(), Some("hello there"));
+    }
+
+    #[test]
+    fn last_system_text_default_is_none_for_non_system_blocks() {
+        // Exercises the trait-default `system_text` impl on every
+        // non-system variant — the accessor must not surface user /
+        // tool / error block text as if it were a slash-command
+        // confirmation.
+        let mut chat = test_chat();
+        chat.push_user_message("a user prompt".into());
+        assert_eq!(chat.last_system_text(), None);
+
+        chat.push_tool_call("$", "ls");
+        assert_eq!(chat.last_system_text(), None);
+
+        chat.push_error("boom");
+        assert_eq!(chat.last_system_text(), None);
+    }
+
+    #[test]
+    fn last_system_text_none_when_no_blocks() {
+        let chat = test_chat();
+        assert_eq!(chat.last_system_text(), None);
     }
 
     // ── update_layout ──

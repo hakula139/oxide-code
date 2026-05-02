@@ -20,12 +20,14 @@ pub(super) async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
     betas: String,
+    session_id: String,
     body: String,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
     let response = http
         .post(url)
         .header("anthropic-beta", betas)
+        .header("x-claude-code-session-id", session_id)
         .body(body)
         .send()
         .await?;
@@ -244,9 +246,16 @@ mod tests {
         let http = reqwest::Client::new();
         let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(1);
         let url = format!("{}/messages", server.uri());
-        let err = stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
-            .await
-            .expect_err("expected overflow error");
+        let err = stream_sse(
+            &http,
+            &url,
+            String::new(),
+            "sid-test".to_owned(),
+            "{}".to_owned(),
+            &tx,
+        )
+        .await
+        .expect_err("expected overflow error");
         assert!(
             format!("{err:#}").contains("exceeded"),
             "overflow message: {err:#}",
@@ -288,9 +297,16 @@ mod tests {
         let http = reqwest::Client::new();
         let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(8);
         let url = format!("{}/messages", server.uri());
-        stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
-            .await
-            .unwrap();
+        stream_sse(
+            &http,
+            &url,
+            String::new(),
+            "sid-test".to_owned(),
+            "{}".to_owned(),
+            &tx,
+        )
+        .await
+        .unwrap();
         drop(tx);
 
         let mut events = Vec::new();
@@ -330,9 +346,16 @@ mod tests {
         let http = reqwest::Client::new();
         let (tx, mut rx) = mpsc::channel::<Result<StreamEvent>>(8);
         let url = format!("{}/messages", server.uri());
-        stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx)
-            .await
-            .unwrap();
+        stream_sse(
+            &http,
+            &url,
+            String::new(),
+            "sid-test".to_owned(),
+            "{}".to_owned(),
+            &tx,
+        )
+        .await
+        .unwrap();
         drop(tx);
 
         let mut events = Vec::new();
@@ -372,7 +395,15 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(1);
         drop(rx);
         let url = format!("{}/messages", server.uri());
-        let result = stream_sse(&http, &url, String::new(), "{}".to_owned(), &tx).await;
+        let result = stream_sse(
+            &http,
+            &url,
+            String::new(),
+            "sid-test".to_owned(),
+            "{}".to_owned(),
+            &tx,
+        )
+        .await;
         assert!(matches!(result, Ok(())), "graceful shutdown: {result:?}");
     }
 

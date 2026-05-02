@@ -61,7 +61,8 @@ The direction is simple:
 
 ### Slash Commands
 
-- `/help`, `/diff`, `/status`, `/config` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock`.
+- `/help`, `/diff`, `/status`, `/config`, `/clear` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock`.
+- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops the in-memory message history and file-tracker state, points the API client at the new id, and clears the AI title. The old session stays resumable via `ox -c <old-id>`. State-mutating commands forward through `SlashContext.user_tx`; the agent loop owns the lifecycle. Title-generator events carry their session id so a slow Haiku call straddling `/clear` doesn't paint the old title onto the fresh session.
 - Autocomplete popup: typing `/` opens a two-column overlay above the input with name + description rows; Up / Down navigate, Tab completes `/{name}` plus a trailing space, Enter submits, Esc dismisses. Selected row paints normal-bold; the rest are dim. Ranks name-prefix > alias-prefix > name-substring > alias-substring; aliases parenthesize only the alias the user typed.
 - Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
 - Aliases display inline in `/help` (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.
@@ -77,9 +78,9 @@ The direction is simple:
 
 ### Slash Commands (continuation)
 
-The first wave (`/help`, `/diff`, `/status`, `/config`) plus the autocomplete popup ship under Working Today. Remaining v1 surface:
+The first wave (`/help`, `/diff`, `/status`, `/config`, `/clear`) plus the autocomplete popup ship under Working Today. Remaining v1 surface:
 
-- Session: `/clear`, `/resume`.
+- Session: `/resume`.
 - Mid-session swap: `/model`, `/theme`.
 - Workflow: `/init` (submits a fixed prompt that asks the model to author `CLAUDE.md` / `AGENTS.md`).
 - Deferred: `/compact` (needs a summarization call we don't have), `/cost` (needs token persistence we don't have), `/login` / `/logout` (interactive OAuth), custom user commands (markdown templates).

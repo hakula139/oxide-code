@@ -54,6 +54,7 @@ impl Client {
             .http
             .post(&url)
             .header("anthropic-beta", betas)
+            .header("x-claude-code-session-id", &self.session_id)
             .body(body)
             .send()
             .await?;
@@ -157,7 +158,7 @@ struct CompletionResponse {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::super::betas::{
@@ -173,6 +174,29 @@ mod tests {
     }
 
     // ── Client::complete ──
+
+    #[tokio::test]
+    async fn complete_sends_x_claude_code_session_id_header() {
+        // Pins per-request injection on the non-streaming path so
+        // `/clear` can roll the id without rebuilding the client.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-claude-code-session-id", "sid-complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(completion_body("ok")))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(
+            test_config(server.uri(), api_key(), "claude-haiku-4-5"),
+            Some("sid-complete".to_owned()),
+        )
+        .unwrap();
+        client
+            .complete("claude-haiku-4-5", "", "u", 40, None)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn complete_happy_path_returns_assistant_text() {

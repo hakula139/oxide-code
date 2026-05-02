@@ -14,6 +14,7 @@
 //! session-local; restart returns to the user-declared config (see
 //! `docs/research/design/slash-commands.md` § Design Decisions 6).
 
+mod clear;
 mod config;
 mod context;
 mod diff;
@@ -79,6 +80,31 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     out
 }
 
+/// Routes a parsed command for the busy-turn dispatch path.
+pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
+    classify_in(registry::BUILT_INS, parsed)
+}
+
+fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
+    match registry::lookup_in(commands, &parsed.name) {
+        None => SlashKind::Unknown,
+        Some(cmd) if cmd.is_read_only() => SlashKind::ReadOnly,
+        Some(_) => SlashKind::Mutating,
+    }
+}
+
+/// Whether a slash command can run while the agent is busy.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SlashKind {
+    /// Safe mid-turn — dispatch immediately.
+    ReadOnly,
+    /// State-mutating — refuse mid-turn, let the user retry when idle.
+    Mutating,
+    /// Not in the registry — dispatch anyway so the user sees the
+    /// canonical "unknown command" error block with recovery hints.
+    Unknown,
+}
+
 /// Shared test fixture — a fully-populated `SessionInfo` for the
 /// per-command test modules.
 #[cfg(test)]
@@ -102,6 +128,17 @@ pub(crate) fn test_session_info() -> SessionInfo {
     }
 }
 
+/// Fresh `(Sender, Receiver)` pair for slash-command test contexts.
+/// `/clear`-style commands hold the receiver to assert what was sent;
+/// read-only commands drop it.
+#[cfg(test)]
+pub(crate) fn test_user_tx() -> (
+    tokio::sync::mpsc::Sender<crate::agent::event::UserAction>,
+    tokio::sync::mpsc::Receiver<crate::agent::event::UserAction>,
+) {
+    tokio::sync::mpsc::channel(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,7 +160,8 @@ mod tests {
             name: "help".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
         // Pin: SystemMessageBlock inherits `error_text` default `None`
@@ -140,7 +178,8 @@ mod tests {
             name: "no-such-command".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         assert!(
             chat.last_is_error(),
             "unknown command should land as an ErrorBlock",
@@ -157,7 +196,8 @@ mod tests {
             name: "etc".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         let msg = chat.last_error_text().expect("error block present");
         assert!(msg.contains("/help"), "should list /help: {msg}");
         for cmd in registry::BUILT_INS {
@@ -211,7 +251,12 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch_with(
+            registry,
+            &parsed,
+            &mut SlashContext::new(&mut chat, &info, &user_tx),
+        );
         assert_eq!(chat.last_error_text(), Some("/failing: explicit failure"),);
     }
 
@@ -226,7 +271,45 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch_with(
+            registry,
+            &parsed,
+            &mut SlashContext::new(&mut chat, &info, &user_tx),
+        );
         assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
+    }
+
+    // ── classify ──
+
+    #[test]
+    fn classify_built_in_read_only_command_is_read_only() {
+        let parsed = Parsed {
+            name: "help".to_owned(),
+            args: String::new(),
+        };
+        assert_eq!(classify(&parsed), SlashKind::ReadOnly);
+    }
+
+    #[test]
+    fn classify_built_in_state_mutating_command_is_mutating() {
+        // `/clear` overrides the trait default; aliases route to the
+        // same impl so they classify the same way.
+        for name in ["clear", "new", "reset"] {
+            let parsed = Parsed {
+                name: name.to_owned(),
+                args: String::new(),
+            };
+            assert_eq!(classify(&parsed), SlashKind::Mutating, "{name}");
+        }
+    }
+
+    #[test]
+    fn classify_unknown_command_is_unknown() {
+        let parsed = Parsed {
+            name: "no-such-thing".to_owned(),
+            args: String::new(),
+        };
+        assert_eq!(classify(&parsed), SlashKind::Unknown);
     }
 }
