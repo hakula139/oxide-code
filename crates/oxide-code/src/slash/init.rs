@@ -1,7 +1,6 @@
-//! `/init` — synthesizes a prompt asking the model to author or
-//! update the project's `AGENTS.md` / `CLAUDE.md`. Returns
-//! [`SlashOutcome::PromptSubmit`]; the dispatcher forwards the body
-//! to the agent loop. See `docs/research/design/slash-commands/init.md`.
+//! `/init` — synthesizes a prompt asking the model to author or update
+//! the project's `AGENTS.md` / `CLAUDE.md`. See
+//! `docs/research/design/slash-commands/init.md`.
 
 use indoc::indoc;
 
@@ -16,7 +15,7 @@ impl SlashCommand for InitCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Generate or update the project's `AGENTS.md` / `CLAUDE.md` instruction file"
+        "Generate or update the project's `AGENTS.md` / `CLAUDE.md`"
     }
 
     fn is_read_only(&self) -> bool {
@@ -28,35 +27,60 @@ impl SlashCommand for InitCmd {
     }
 }
 
-/// Body forwarded to the agent loop on `/init`. Adapted from Claude
-/// Code's `OLD_INIT_PROMPT` for the AGENTS.md / CLAUDE.md convention.
+/// Body forwarded to the agent loop on `/init`. Single-shot prompt;
+/// the multi-phase interactive flow needs `AgentEvent::PromptRequest`
+/// plumbing not yet implemented (see `init.md` § Deferred).
 const PROMPT: &str = indoc! {r"
-    Please analyze this codebase and create an `AGENTS.md` file at the project root that future AI coding assistants (oxide-code, Claude Code, Codex, etc.) will read when working on it.
+    Please analyze this codebase and create an `AGENTS.md` file at the project
+    root that future AI coding assistants will read when working on it.
 
-    If `AGENTS.md` or `CLAUDE.md` already exists, do not overwrite it. Read it, propose specific improvements as a diff, and explain why each change matters. Prefer updating the file with the broader scope (`AGENTS.md`) when both exist.
+    If neither `AGENTS.md` nor `CLAUDE.md` exists, create `AGENTS.md`. If one
+    already exists, do not overwrite it — propose specific improvements as a
+    diff and explain why each change matters. If both exist, update each in
+    place rather than migrating between them.
 
     Include only what an agent would get wrong without it:
-    1. Build / lint / test commands the agent can't infer from manifest files. Include any flags or sequences that differ from the language defaults (e.g., how to run a single test).
-    2. High-level architecture that requires reading multiple files to understand — modules, layering, ownership, and the data flow between them.
-    3. Project-specific conventions that diverge from language defaults (import grouping, error-handling style, naming, blank-line rules).
-    4. Non-obvious gotchas — required env vars, platform constraints, workflow quirks, or constraints not obvious from the code.
+
+    1. Build / lint / test commands the agent can't infer from manifest files.
+       Include any flags or sequences that differ from the language defaults
+       (e.g., how to run a single test).
+    2. High-level architecture that requires reading multiple files to
+       understand — modules, layering, ownership, and the data flow between
+       them.
+    3. Project-specific conventions that diverge from language defaults
+       (import grouping, error-handling style, naming, blank-line rules).
+    4. External constraints the code can't reveal — required env vars,
+       platform-only behavior, services that must be running, workflow steps
+       the agent can't infer.
 
     Exclude:
-    - Standard language conventions the agent already knows (`cargo test`, `npm test`, etc.).
-    - File-by-file structure or component lists — these are discoverable via `glob` / `ls`.
+
+    - Standard language conventions the agent already knows (`cargo test`,
+      `npm test`, etc.).
+    - File-by-file structure or component lists — these are discoverable via
+      `glob` / `ls`.
     - Generic development advice (`write tests`, `handle errors`).
-    - Information that changes frequently — reference the source file by relative path so the agent reads the current version.
+    - Information that changes frequently — reference the source file by
+      relative path so the agent reads the current version.
+    - Sections you can't ground in files you actually read (no fabricated
+      `Common Tasks`, `Tips for Development`, or `Support` headers).
 
-    Be specific. `Use 2-space indentation in TypeScript` is better than `Format code properly`. Every line should answer `what would a fresh agent get wrong without this?` — if the answer is `nothing`, cut the line.
+    Be specific. `Use 2-space indentation in TypeScript` is better than `Format
+    code properly`. Don't restate the same fact in multiple sections. Every
+    line should answer `what would a fresh agent get wrong without this?` —
+    if the answer is `nothing`, cut the line.
 
-    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists, fold the load-bearing parts into `AGENTS.md` instead of duplicating them.
+    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or
+    `.github/copilot-instructions.md` exists, extract the load-bearing parts
+    (commands, conventions, gotchas) and merge them into `AGENTS.md` without
+    duplication. Skip prose that restates language defaults.
 
     Prefix the file with:
 
     ```
     # AGENTS.md
 
-    This file provides guidance to AI coding assistants (oxide-code, Claude Code, Codex, etc.) when working with code in this repository.
+    This file provides guidance to AI coding assistants (Claude Code, Codex, oxide-code, and others) when working with code in this repository.
     ```
 "};
 
