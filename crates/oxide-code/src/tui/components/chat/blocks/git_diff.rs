@@ -482,6 +482,31 @@ mod tests {
     }
 
     #[test]
+    fn render_advances_line_numbers_through_context_rows() {
+        // Context rows advance both old_ln and new_ln. Pin both
+        // directions in one fixture: `+third` rides new_ln (which the
+        // context bumped from 2 to 3), `-fourth` rides old_ln (which
+        // the context bumped from 1 to 2). Dropping either increment
+        // would mis-number one of the surrounding marker rows.
+        let theme = Theme::default();
+        let block = GitDiffBlock::new(indoc! {"
+            diff --git a/x b/x
+            @@ -1,3 +1,3 @@
+            +first
+             middle
+            +third
+            -fourth
+        "});
+        let lines = block.render(&ctx_at(80, &theme));
+        let body = &lines[2..];
+        let numbers: Vec<String> = body
+            .iter()
+            .map(|line| line.spans[1].content.trim().to_owned())
+            .collect();
+        assert_eq!(numbers, vec!["1", "2", "3", "2"]);
+    }
+
+    #[test]
     fn render_corrupt_hunk_body_falls_through_to_defensive_row() {
         // Inside a hunk, a line without `+`, `-`, or ` ` is malformed.
         // It must render as a plain bordered row (no number gutter, no
