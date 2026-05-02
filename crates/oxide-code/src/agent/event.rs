@@ -91,12 +91,7 @@ pub(crate) enum UserAction {
     SubmitPrompt(String),
     /// `/clear` — finalize the current session, start a fresh one, and
     /// drop the in-memory message history. The agent loop responds with
-    /// [`AgentEvent::SessionRolled`] once the new id is in place. The
-    /// TUI dispatches this from the `/clear` slash command.
-    #[expect(
-        dead_code,
-        reason = "agent-loop handler wired in step 9; slash command forwards in step 7"
-    )]
+    /// [`AgentEvent::SessionRolled`] once the new id is in place.
     Clear,
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,

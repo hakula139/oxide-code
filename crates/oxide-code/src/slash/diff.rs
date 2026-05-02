@@ -218,7 +218,8 @@ mod tests {
 
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info, &user_tx));
         assert_eq!(result, Ok(()));
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
@@ -236,7 +237,8 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        execute_in(&repo, &mut SlashContext::new(&mut chat, &info, &user_tx))
             .expect("clean repo execute_in is Ok");
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
@@ -254,7 +256,8 @@ mod tests {
         std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        execute_in(&repo, &mut SlashContext::new(&mut chat, &info))
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        execute_in(&repo, &mut SlashContext::new(&mut chat, &info, &user_tx))
             .expect("dirty repo execute_in is Ok");
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
@@ -271,8 +274,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let err = execute_in(dir.path(), &mut SlashContext::new(&mut chat, &info))
-            .expect_err("execute_in must error outside a repo");
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        let err = execute_in(
+            dir.path(),
+            &mut SlashContext::new(&mut chat, &info, &user_tx),
+        )
+        .expect_err("execute_in must error outside a repo");
         assert!(err.contains("not inside a git repository"), "{err}");
     }
 

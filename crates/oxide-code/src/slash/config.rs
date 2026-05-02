@@ -109,7 +109,8 @@ mod tests {
 
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
+        let (user_tx, _user_rx) = crate::slash::test_user_tx();
+        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
         ConfigCmd.execute("", &mut ctx).unwrap();
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());

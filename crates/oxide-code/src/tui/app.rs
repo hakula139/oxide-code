@@ -268,7 +268,8 @@ impl App {
                     // accounting / model context all stay clean.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                        let mut ctx =
+                            SlashContext::new(&mut self.chat, &self.session_info, &self.user_tx);
                         slash::dispatch(&parsed, &mut ctx);
                         return false;
                     }

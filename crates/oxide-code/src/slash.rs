@@ -14,6 +14,7 @@
 //! session-local; restart returns to the user-declared config (see
 //! `docs/research/design/slash-commands.md` § Design Decisions 6).
 
+mod clear;
 mod config;
 mod context;
 mod diff;
@@ -102,6 +103,17 @@ pub(crate) fn test_session_info() -> SessionInfo {
     }
 }
 
+/// Fresh `(Sender, Receiver)` pair for slash-command test contexts.
+/// `/clear`-style commands hold the receiver to assert what was sent;
+/// read-only commands drop it.
+#[cfg(test)]
+pub(crate) fn test_user_tx() -> (
+    tokio::sync::mpsc::Sender<crate::agent::event::UserAction>,
+    tokio::sync::mpsc::Receiver<crate::agent::event::UserAction>,
+) {
+    tokio::sync::mpsc::channel(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,7 +135,8 @@ mod tests {
             name: "help".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
         // Pin: SystemMessageBlock inherits `error_text` default `None`
@@ -140,7 +153,8 @@ mod tests {
             name: "no-such-command".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         assert!(
             chat.last_is_error(),
             "unknown command should land as an ErrorBlock",
@@ -157,7 +171,8 @@ mod tests {
             name: "etc".to_owned(),
             args: String::new(),
         };
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
         let msg = chat.last_error_text().expect("error block present");
         assert!(msg.contains("/help"), "should list /help: {msg}");
         for cmd in registry::BUILT_INS {
@@ -211,7 +226,12 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch_with(
+            registry,
+            &parsed,
+            &mut SlashContext::new(&mut chat, &info, &user_tx),
+        );
         assert_eq!(chat.last_error_text(), Some("/failing: explicit failure"),);
     }
 
@@ -226,7 +246,12 @@ mod tests {
             args: String::new(),
         };
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
-        dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
+        let (user_tx, _user_rx) = test_user_tx();
+        dispatch_with(
+            registry,
+            &parsed,
+            &mut SlashContext::new(&mut chat, &info, &user_tx),
+        );
         assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
     }
 }

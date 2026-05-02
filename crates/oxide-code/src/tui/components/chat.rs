@@ -275,6 +275,18 @@ impl ChatView {
         self.blocks.push(Box::new(InterruptedMarker));
     }
 
+    /// Reset to fresh-construction shape: drop blocks, streaming /
+    /// thinking buffers, scroll position. Theme, `show_thinking`, and
+    /// viewport sizes stay — they mirror terminal state.
+    pub(crate) fn clear_history(&mut self) {
+        self.blocks.clear();
+        self.streaming = None;
+        self.thinking_buffer.clear();
+        self.scroll_offset = 0;
+        self.content_height.set(0);
+        self.auto_scroll = true;
+    }
+
     /// Number of committed chat blocks. Exposed for observable state in
     /// sibling-module tests (`tui::app`) so they don't need to reach
     /// through the private `blocks` field.
@@ -2093,6 +2105,34 @@ mod tests {
             !text.contains(BAR),
             "error block should render without the left bar: {text}"
         );
+    }
+
+    // ── clear_history ──
+
+    #[test]
+    fn clear_history_drops_blocks_streaming_thinking_and_resets_scroll() {
+        let mut chat = test_chat();
+        chat.push_user_message("user prompt".to_owned());
+        chat.push_tool_call("$", "ls");
+        chat.append_stream_token("partial reply");
+        chat.append_thinking_token("considering");
+        chat.scroll_offset = 25;
+        chat.content_height.set(100);
+        chat.auto_scroll = false;
+        chat.viewport_height = 24;
+        chat.viewport_width = 80;
+
+        chat.clear_history();
+
+        assert_eq!(chat.entry_count(), 0);
+        assert!(chat.streaming.is_none());
+        assert!(chat.thinking_buffer.is_empty());
+        assert_eq!(chat.scroll_offset, 0);
+        assert_eq!(chat.content_height.get(), 0);
+        assert!(chat.auto_scroll);
+        // Viewport mirrors terminal state, not conversation state.
+        assert_eq!(chat.viewport_height, 24);
+        assert_eq!(chat.viewport_width, 80);
     }
 
     // ── last_is_error ──
