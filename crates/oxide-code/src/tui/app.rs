@@ -173,9 +173,21 @@ impl App {
         match event {
             // Esc routes through `App` because its meaning depends on
             // queue / run-state — InputArea has no view of either.
+            // Exception: while the slash popup is visible, the popup
+            // owns Esc (dismissal), so we hand the key to the input
+            // first and only fall back to App-level handling if the
+            // popup wasn't the one consuming it.
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
-            }) => self.handle_esc(),
+            }) => {
+                if self.input.popup_visible() {
+                    if let Some(action) = self.input.handle_event(event) {
+                        self.dispatch_user_action(action);
+                    }
+                } else {
+                    self.handle_esc();
+                }
+            }
             Event::Key(..) => {
                 // Input area handles typing, submit, and quit.
                 if let Some(action) = self.input.handle_event(event) {
@@ -466,10 +478,12 @@ impl App {
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
         let input_height = self.input.height();
         let preview_height = self.preview_height();
+        let popup_height = self.input.popup_height();
         let chunks = Layout::vertical([
             Constraint::Length(2),              // status bar (content + border)
             Constraint::Min(1),                 // chat view
             Constraint::Length(preview_height), // queued-prompt preview (0 when empty)
+            Constraint::Length(popup_height),   // slash-command popup (0 when hidden)
             Constraint::Length(input_height),   // input area
         ])
         .split(frame.area());
@@ -479,7 +493,10 @@ impl App {
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
-        self.input.render(frame, chunks[3]);
+        if popup_height > 0 {
+            self.input.render_popup(frame, chunks[3]);
+        }
+        self.input.render(frame, chunks[4]);
         chunks[1]
     }
 

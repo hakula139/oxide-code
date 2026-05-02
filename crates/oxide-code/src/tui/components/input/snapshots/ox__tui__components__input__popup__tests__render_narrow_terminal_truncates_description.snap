@@ -1,0 +1,9 @@
+---
+source: crates/oxide-code/src/tui/components/input/popup.rs
+assertion_line: 363
+expression: "render_to_backend(&popup, 30)"
+---
+"/help    List the available..."
+"/status  Show session info:..."
+"/config  Show the resolved ..."
+"/diff    Show uncommitted w..."
