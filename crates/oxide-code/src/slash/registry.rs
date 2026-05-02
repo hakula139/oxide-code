@@ -66,10 +66,12 @@ pub(crate) trait SlashCommand: Sync {
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
 
-/// Every built-in command. Order is presentation order in `/help`
-/// and the popup, so the most frequently-used commands sit first.
+/// Every built-in command. Alphabetical for stable presentation in
+/// `/help` and the empty-query popup; the matcher already sorts
+/// alphabetically within each tier when filtering, so this keeps
+/// every popup state consistent.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &HelpCmd, &ClearCmd, &InitCmd, &StatusCmd, &ConfigCmd, &DiffCmd,
+    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &StatusCmd,
 ];
 
 /// Resolves `name` by canonical name first, then aliases. Generic

@@ -956,12 +956,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
-        // Typing `/` opens the popup; Enter on the highlighted row
-        // submits `/{name}` through the existing dispatch path. The
-        // first BUILT_IN is /help, so the chat should land a system
-        // message (the help block), not forward to the agent.
+        // Typing `/h` filters the popup to /help; Enter on the
+        // highlighted row submits it through the existing dispatch
+        // path. /help is read-only, so the chat lands a system
+        // message instead of forwarding to the agent.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
 
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
@@ -980,9 +981,12 @@ mod tests {
     #[test]
     fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
         // Tab on a popup row inserts `/{name} ` and hides the popup —
-        // the user is now in args-typing mode.
+        // the user is now in args-typing mode. Filter to /help first
+        // so the test pins the completion shape independent of the
+        // BUILT_INS-ordered first row.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
 
         app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 

@@ -61,7 +61,7 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in: `/help`, `/clear` (aliases `/new`, `/reset`), `/init`, `/diff`, `/status`, `/config`. See the [user guide](guide/slash-commands.md).
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/help`, `/init`, `/status`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter and Tab completion.
 - Read-only by design — no slash command writes user config files; runtime mutations stay session-local.
 
@@ -75,7 +75,7 @@ The direction is simple:
 
 ### Slash Commands (continuation)
 
-The first wave (`/help`, `/diff`, `/status`, `/config`, `/clear`, `/init`) plus the autocomplete popup ship under Working Today. Remaining surface:
+The first wave (`/clear`, `/config`, `/diff`, `/help`, `/init`, `/status`) plus the autocomplete popup ship under Working Today. Remaining surface:
 
 - Session: `/resume`.
 - Mid-session swap: `/model`, `/theme`.

@@ -230,10 +230,9 @@ mod tests {
         let popup = popup_with_query(Some(""));
         assert!(popup.is_visible());
         let names: Vec<&str> = popup.matches.iter().map(|m| m.name).collect();
-        // Pin against the live registry — if BUILT_INS reorders, this
-        // test moves with it (which is the right invariant).
+        // BUILT_INS is alphabetical, so empty-query first row is `/clear`.
         assert!(!names.is_empty());
-        assert_eq!(names[0], "help");
+        assert_eq!(names[0], "clear");
     }
 
     #[test]

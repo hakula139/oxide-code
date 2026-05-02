@@ -6,12 +6,12 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 
 | Command                             | Description                                                          |
 | ----------------------------------- | -------------------------------------------------------------------- |
-| `/help`                             | List available commands.                                             |
 | `/clear` (aliases `/new`, `/reset`) | Start a fresh session. The previous one stays resumable via `ox -c`. |
-| `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.          |
-| `/diff`                             | Show `git diff HEAD` plus untracked files, capped at 64 KB.          |
-| `/status`                           | Show model, working directory, version, auth, session id.            |
 | `/config`                           | Show the resolved configuration and the file paths it merged.        |
+| `/diff`                             | Show `git diff HEAD` plus untracked files, capped at 64 KB.          |
+| `/help`                             | List available commands.                                             |
+| `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.          |
+| `/status`                           | Show model, working directory, version, auth, session id.            |
 
 ## Autocomplete Popup
 
@@ -30,7 +30,7 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/help`, `/diff`, `/status`, `/config`) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`) refuse mid-turn — wait for the current turn to finish, then retry.
+Read-only commands (`/config`, `/diff`, `/help`, `/status`) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`) refuse mid-turn — wait for the current turn to finish, then retry.
 
 ## Stance: No Silent Config Writes
 
