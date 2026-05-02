@@ -359,8 +359,10 @@ where
                 // `ConfirmExit` is TUI-only; `apply_action_locally`
                 // short-circuits it before the forward path, and the
                 // bare-REPL / headless inert channel can't produce it
-                // either. The arm exists only for exhaustive matching.
-                Some(UserAction::ConfirmExit) => {}
+                // either. `Clear` is sent only by the slash command
+                // when input is enabled (idle), so it can't arrive
+                // mid-turn. Both arms exist for exhaustive matching.
+                Some(UserAction::ConfirmExit | UserAction::Clear) => {}
             },
             output = &mut fut => return Ok(output),
         }

@@ -311,6 +311,12 @@ impl App {
                 self.should_quit = true;
                 true
             }
+            // `/clear`'s slash command pushes `UserAction::Clear`
+            // straight into `user_tx` via `SlashContext`, so this arm
+            // never fires from the App's `dispatch_user_action` path.
+            // Reserved for exhaustiveness; if it ever lands, refusing
+            // to forward keeps the bypass invariant explicit.
+            UserAction::Clear => false,
         }
     }
 
@@ -381,6 +387,13 @@ impl App {
             }
             AgentEvent::SessionTitleUpdated(title) => {
                 self.status_bar.set_title(Some(title));
+            }
+            // `/clear` rolled the session: rebind the id `/status` and
+            // future debug surfaces show, and clear the AI title (it
+            // belonged to the old session).
+            AgentEvent::SessionRolled { id } => {
+                self.session_info.session_id = id;
+                self.status_bar.set_title(None);
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);

@@ -69,6 +69,15 @@ pub(crate) enum AgentEvent {
     /// A newly-generated session title (e.g., AI-generated via Haiku). The
     /// TUI updates the status bar slot; other sinks ignore it.
     SessionTitleUpdated(String),
+    /// `/clear` rolled the session: the old JSONL is finalized, a fresh
+    /// one is open, and `id` is the new session UUID. The TUI updates
+    /// `session_info.session_id` and clears the status-bar title (the AI
+    /// title belonged to the old session). Other sinks ignore it.
+    #[expect(
+        dead_code,
+        reason = "App handler wired here; emit site lands with the agent-loop /clear roll"
+    )]
+    SessionRolled { id: String },
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -80,6 +89,15 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     /// Submit a prompt to the agent.
     SubmitPrompt(String),
+    /// `/clear` — finalize the current session, start a fresh one, and
+    /// drop the in-memory message history. The agent loop responds with
+    /// [`AgentEvent::SessionRolled`] once the new id is in place. The
+    /// TUI dispatches this from the `/clear` slash command.
+    #[expect(
+        dead_code,
+        reason = "agent-loop handler wired in step 9; slash command forwards in step 7"
+    )]
+    Clear,
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -186,9 +204,12 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
-            // Both are TUI-only affordances (queued-prompt preview /
-            // header title); stdio has no surface to update.
-            AgentEvent::PromptDrained(_) | AgentEvent::SessionTitleUpdated(_) => {}
+            // TUI-only affordances (queued-prompt preview, header
+            // title, mid-session id swap on `/clear`); stdio has no
+            // surface to update for any of them.
+            AgentEvent::PromptDrained(_)
+            | AgentEvent::SessionTitleUpdated(_)
+            | AgentEvent::SessionRolled { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 writeln!(stdout)?;
