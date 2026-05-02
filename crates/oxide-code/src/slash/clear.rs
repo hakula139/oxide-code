@@ -62,7 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only_is_false_so_busy_dispatch_refuses_clear() {
+    fn is_read_only_is_false() {
         // The trait default is `true` (read-only). `/clear` must
         // override to `false` — otherwise the busy-turn dispatcher
         // would run the roll mid-turn and race the live `messages` /

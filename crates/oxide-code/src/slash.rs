@@ -168,13 +168,34 @@ mod tests {
             args: String::new(),
         };
         let (user_tx, _user_rx) = test_user_tx();
-        dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
+        let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx));
+        assert!(outcome.is_none(), "/help is Local, not PromptSubmit");
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
         // Pin: SystemMessageBlock inherits `error_text` default `None`
         // — flipping that default would let non-error blocks claim
         // error wording.
         assert_eq!(chat.last_error_text(), None);
+    }
+
+    #[test]
+    fn dispatch_prompt_submit_command_returns_synthesized_body() {
+        // Pin: public `dispatch` (not just `dispatch_with`) surfaces
+        // the PromptSubmit body so the App-side caller can forward it.
+        let mut chat = fresh_chat();
+        let info = test_session_info();
+        let parsed = Parsed {
+            name: "init".to_owned(),
+            args: String::new(),
+        };
+        let (user_tx, _user_rx) = test_user_tx();
+        let body = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info, &user_tx))
+            .expect("/init must return Some(prompt)");
+        assert!(
+            body.contains("AGENTS.md"),
+            "body must target AGENTS.md: {body}"
+        );
+        assert_eq!(chat.entry_count(), 0, "the typed line is pushed by the App");
     }
 
     #[test]
@@ -300,9 +321,9 @@ mod tests {
 
     #[test]
     fn classify_built_in_state_mutating_command_is_mutating() {
-        // `/clear` overrides the trait default; aliases route to the
-        // same impl so they classify the same way.
-        for name in ["clear", "new", "reset"] {
+        // `/clear` (rolls state) and `/init` (starts turn) both
+        // override `is_read_only`. Aliases route to the same impl.
+        for name in ["clear", "new", "reset", "init"] {
             let parsed = Parsed {
                 name: name.to_owned(),
                 args: String::new(),

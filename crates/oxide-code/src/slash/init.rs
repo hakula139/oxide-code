@@ -91,26 +91,28 @@ mod tests {
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
-    fn run_execute() -> (Result<SlashOutcome, String>, ChatView) {
+    fn run_execute() -> (SlashOutcome, ChatView) {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let (user_tx, _user_rx) = test_user_tx();
-        let result = InitCmd.execute("", &mut SlashContext::new(&mut chat, &info, &user_tx));
-        (result, chat)
+        let outcome = InitCmd
+            .execute("", &mut SlashContext::new(&mut chat, &info, &user_tx))
+            .expect("/init must succeed");
+        (outcome, chat)
     }
 
     // ── InitCmd metadata ──
 
     #[test]
     fn metadata_matches_built_ins_contract() {
+        // Description non-emptiness covered by registry's built-ins test.
         assert_eq!(InitCmd.name(), "init");
         assert!(InitCmd.aliases().is_empty());
-        assert!(!InitCmd.description().is_empty());
         assert!(InitCmd.usage().is_none());
     }
 
     #[test]
-    fn is_read_only_is_false_so_busy_dispatch_refuses_init() {
+    fn is_read_only_is_false() {
         // Override is load-bearing: a parallel turn would race the
         // in-flight one over `messages` / the session writer.
         assert!(!InitCmd.is_read_only());
@@ -119,44 +121,38 @@ mod tests {
     // ── InitCmd::execute ──
 
     #[test]
-    fn execute_returns_prompt_submit_with_non_empty_body() {
-        let (result, _chat) = run_execute();
-        let SlashOutcome::PromptSubmit(prompt) =
-            result.expect("/init must succeed when nothing is wrong with ctx")
-        else {
-            panic!("/init must return PromptSubmit, not Local");
-        };
-        assert!(!prompt.is_empty(), "/init prompt must not be empty");
-    }
-
-    #[test]
     fn execute_does_not_push_chat_blocks() {
         // The agent loop's response stream is the only block source —
         // an extra push here would land before the typed `/init` row.
-        let (_result, chat) = run_execute();
+        let (_outcome, chat) = run_execute();
         assert_eq!(chat.entry_count(), 0);
     }
 
     #[test]
     fn execute_prompt_targets_agents_md_and_claude_md() {
-        let (result, _chat) = run_execute();
-        let SlashOutcome::PromptSubmit(prompt) = result.unwrap() else {
-            unreachable!("see test above");
-        };
-        assert!(prompt.contains("AGENTS.md"), "prompt missing AGENTS.md");
-        assert!(prompt.contains("CLAUDE.md"), "prompt missing CLAUDE.md");
+        // Subsumes non-emptiness.
+        let (outcome, _chat) = run_execute();
+        assert!(
+            matches!(
+                &outcome,
+                SlashOutcome::PromptSubmit(p) if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
+            ),
+            "prompt must target both AGENTS.md and CLAUDE.md: {outcome:?}",
+        );
     }
 
     #[test]
     fn execute_prompt_says_do_not_overwrite_existing_file() {
-        // The "don't clobber existing instructions" rule is load-bearing.
-        let (result, _chat) = run_execute();
-        let SlashOutcome::PromptSubmit(prompt) = result.unwrap() else {
-            unreachable!("see test above");
-        };
+        // Conjunction pins the actual rule — `contains("overwrite")`
+        // alone would pass `"please overwrite all existing files"`.
+        let (outcome, _chat) = run_execute();
         assert!(
-            prompt.contains("not overwrite") || prompt.contains("not silently overwrite"),
-            "prompt must instruct the model not to overwrite an existing file: {prompt}",
+            matches!(
+                &outcome,
+                SlashOutcome::PromptSubmit(p)
+                    if p.contains("already exists") && p.contains("not overwrite")
+            ),
+            "prompt must instruct the model not to overwrite an existing file: {outcome:?}",
         );
     }
 }

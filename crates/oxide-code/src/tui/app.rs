@@ -1352,16 +1352,19 @@ mod tests {
         assert!(!app.input.is_enabled(), "Streaming disables input");
         assert_eq!(app.status_bar.status(), &Status::Streaming);
         let forwarded = rx.recv().await.expect("synthesized prompt forwarded");
-        let UserAction::SubmitPrompt(body) = forwarded else {
-            panic!("expected SubmitPrompt, got {forwarded:?}");
-        };
-        assert!(body.contains("AGENTS.md"), "expected expansion: {body}");
-        assert_ne!(body, "/init", "the agent must see the expanded body");
+        assert!(
+            matches!(
+                &forwarded,
+                UserAction::SubmitPrompt(body) if body.contains("AGENTS.md") && body != "/init"
+            ),
+            "expected SubmitPrompt with expanded body, got {forwarded:?}",
+        );
     }
 
     #[tokio::test]
     async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
-        // `is_read_only=false` ⇒ Mutating ⇒ refuse mid-turn.
+        // Mutating ⇒ refuse. The typed `/init` row still lands; only
+        // the synthesized body is suppressed.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1372,6 +1375,11 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "no synthesized prompt must reach user_tx mid-turn",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            3,
+            "active prompt + typed /init + system refusal",
         );
         let body = app.chat.last_system_text().expect("refusal system message");
         assert!(
