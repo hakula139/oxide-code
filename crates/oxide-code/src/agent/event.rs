@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::config::Effort;
 use crate::tool::ToolRegistry;
 
 // ── Visible Markers ──
@@ -74,6 +75,16 @@ pub(crate) enum AgentEvent {
     /// updates `session_info.session_id` and clears the (now-stale) AI
     /// title; other sinks ignore it.
     SessionRolled { id: String },
+    /// `/model` swapped the active model. The agent loop carries the
+    /// already-resolved values back so the TUI updates
+    /// `session_info.model` / `session_info.config.model_id` /
+    /// `session_info.config.effort` and the status bar without
+    /// re-deriving caps.
+    ModelSwitched {
+        model_id: String,
+        marketing: String,
+        effort: Option<Effort>,
+    },
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -88,6 +99,11 @@ pub(crate) enum UserAction {
     /// `/clear` — agent loop finalizes the old session, swaps in a
     /// fresh one, and emits [`AgentEvent::SessionRolled`].
     Clear,
+    /// `/model <id>` — agent loop calls
+    /// [`Client::set_model`](crate::client::anthropic::Client::set_model)
+    /// and emits [`AgentEvent::ModelSwitched`]. The id is the canonical
+    /// `MODELS` row id resolved by the slash command.
+    SwitchModel(String),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -197,7 +213,8 @@ impl StdioSink {
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated { .. }
-            | AgentEvent::SessionRolled { .. } => {}
+            | AgentEvent::SessionRolled { .. }
+            | AgentEvent::ModelSwitched { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 writeln!(stdout)?;

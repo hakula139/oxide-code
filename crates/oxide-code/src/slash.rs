@@ -22,6 +22,7 @@ mod format;
 mod help;
 mod init;
 mod matcher;
+mod model;
 mod parser;
 mod registry;
 mod status;

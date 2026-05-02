@@ -82,6 +82,13 @@ impl StatusBar {
         self.title = title.filter(|t| !t.trim().is_empty());
     }
 
+    /// Replaces the model label between `ox` and the status slot.
+    /// Called on `/model` swap — the bar keeps its own copy rather
+    /// than re-reading `session_info` per frame.
+    pub(crate) fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+
     pub(crate) fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.spinner_frame = 0;
@@ -102,6 +109,13 @@ impl StatusBar {
     #[cfg(test)]
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// Current model label. Used by the App-side `ModelSwitched`
+    /// test to pin the swap without a render-and-grep.
+    #[cfg(test)]
+    pub(crate) fn model(&self) -> &str {
+        &self.model
     }
 
     /// Advances the spinner animation. Returns `true` if the frame
@@ -301,6 +315,27 @@ mod tests {
         let mut bar = test_bar();
         bar.set_title(Some("   \n".to_owned()));
         assert!(bar.title.is_none());
+    }
+
+    // ── set_model ──
+
+    #[test]
+    fn set_model_replaces_displayed_model_label() {
+        // Pin both the cached field and the rendered frame so a
+        // future render-time lookup of `session_info.model` would
+        // still pass the field check but fail the render check.
+        let mut bar = test_bar();
+        bar.set_model("Claude Opus 4.7".to_owned());
+        assert_eq!(bar.model(), "Claude Opus 4.7");
+        let output = render_top_row(&mut bar, 80);
+        assert!(
+            output.contains("Claude Opus 4.7"),
+            "new label must reach the rendered bar: {output:?}",
+        );
+        assert!(
+            !output.contains("test-model"),
+            "old label must not survive: {output:?}",
+        );
     }
 
     // ── set_status ──

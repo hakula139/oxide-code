@@ -11,6 +11,7 @@ use super::context::SlashContext;
 use super::diff::DiffCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
+use super::model::ModelCmd;
 use super::status::StatusCmd;
 use crate::agent::event::UserAction;
 
@@ -71,7 +72,7 @@ pub(crate) trait SlashCommand: Sync {
 /// alphabetically within each tier when filtering, so this keeps
 /// every popup state consistent.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &StatusCmd,
+    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
 ];
 
 /// Resolves `name` by canonical name first, then aliases. Generic

@@ -356,10 +356,11 @@ where
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Neither variant reaches mid-turn: `ConfirmExit` is
-                // TUI-only and short-circuited by `apply_action_locally`;
-                // `Clear` is dispatched only when input is enabled.
-                Some(UserAction::ConfirmExit | UserAction::Clear) => {}
+                // None reach mid-turn: `ConfirmExit` is short-circuited
+                // by `apply_action_locally`; `Clear` / `SwitchModel`
+                // are mutating commands the dispatcher refuses while
+                // a turn is live.
+                Some(UserAction::ConfirmExit | UserAction::Clear | UserAction::SwitchModel(_)) => {}
             },
             output = &mut fut => return Ok(output),
         }

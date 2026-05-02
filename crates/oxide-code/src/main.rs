@@ -468,6 +468,16 @@ async fn agent_loop_task(
                     warn!("session-rolled event dropped: {e}");
                 }
             }
+            UserAction::SwitchModel(id) => {
+                let swap = client.set_model(id);
+                if let Err(e) = sink.send(AgentEvent::ModelSwitched {
+                    model_id: swap.model_id,
+                    marketing: swap.marketing,
+                    effort: swap.effort,
+                }) {
+                    warn!("model-switched event dropped: {e}");
+                }
+            }
             UserAction::Quit => break,
         }
     }

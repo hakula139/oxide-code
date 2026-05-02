@@ -352,8 +352,8 @@ impl App {
             // Unreachable on the live wiring — the slash branch above
             // forwards `Action(_)` straight via `forward_to_agent`.
             // `false` is defensive in case a future caller routes
-            // `Clear` through here.
-            UserAction::Clear => false,
+            // `Clear` / `SwitchModel` through here.
+            UserAction::Clear | UserAction::SwitchModel(_) => false,
         }
     }
 
@@ -434,6 +434,26 @@ impl App {
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
+            }
+            // Refresh both surfaces that read the previous model:
+            // the status bar caches its own label, and `session_info`
+            // backs `/status` / `/config`.
+            AgentEvent::ModelSwitched {
+                model_id,
+                marketing,
+                effort,
+            } => {
+                let confirmation = match effort {
+                    Some(level) => {
+                        format!("Switched to {marketing} ({model_id}) · effort {level}.")
+                    }
+                    None => format!("Switched to {marketing} ({model_id})."),
+                };
+                self.status_bar.set_model(marketing.clone());
+                self.session_info.model = marketing;
+                self.session_info.config.model_id = model_id;
+                self.session_info.config.effort = effort;
+                self.chat.push_system_message(confirmation);
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -1440,6 +1460,49 @@ mod tests {
             Some("First prompt"),
             "current-session title must survive a stale event",
         );
+    }
+
+    #[test]
+    fn handle_model_switched_updates_session_info_status_bar_and_pushes_confirmation() {
+        // Three surfaces refresh in one shot: `session_info` (backs
+        // `/status` and `/config`), the status-bar label, and the
+        // chat with a confirmation block.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ModelSwitched {
+            model_id: "claude-sonnet-4-6".to_owned(),
+            marketing: "Claude Sonnet 4.6".to_owned(),
+            effort: Some(crate::config::Effort::High),
+        });
+
+        assert_eq!(app.session_info.model, "Claude Sonnet 4.6");
+        assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::High)
+        );
+        assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert!(body.contains("Claude Sonnet 4.6"), "{body}");
+        assert!(body.contains("claude-sonnet-4-6"), "{body}");
+        assert!(body.contains("effort high"), "effort included: {body}");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_model_switched_with_effort_none_omits_effort_clause() {
+        // Models that can't accept `effort` drop the field entirely;
+        // the confirmation must skip the trailing `· effort ...`
+        // rather than render `effort none`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ModelSwitched {
+            model_id: "claude-haiku-4-5".to_owned(),
+            marketing: "Claude Haiku 4.5".to_owned(),
+            effort: None,
+        });
+        assert_eq!(app.session_info.config.effort, None);
+        let body = app.chat.last_system_text().unwrap();
+        assert!(body.contains("Claude Haiku 4.5"), "{body}");
+        assert!(!body.contains("effort"), "no effort clause: {body}");
     }
 
     #[test]
