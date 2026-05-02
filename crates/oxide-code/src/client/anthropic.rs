@@ -168,11 +168,9 @@ impl Client {
         &self.session_id
     }
 
-    /// Replaces the session id used for `x-claude-code-session-id` and
-    /// `metadata.user_id` — called by `/clear` to roll the UUID. The
-    /// debug-assert guards the in-house contract: callers always feed
-    /// us a `session_id` from `SessionHandle`, which mints UUID v4s,
-    /// so a value that wouldn't survive `HeaderValue::from_str` is a
+    /// Replaces the id used for `x-claude-code-session-id` and
+    /// `metadata.user_id`. Debug-asserts header-value validity;
+    /// callers feed UUID v4s from `SessionHandle`, so failure is a
     /// programmer error.
     pub(crate) fn set_session_id(&mut self, id: String) {
         debug_assert!(
@@ -546,10 +544,9 @@ mod tests {
 
     #[tokio::test]
     async fn set_session_id_propagates_to_header_and_metadata_user_id() {
-        // Pins setter + per-request plumbing on both wire surfaces:
-        // the header (matched by the mock — wrong id 404s) and the
-        // body's metadata.user_id (a stringified JSON object that
-        // contains session_id alongside device_id).
+        // Pins both wire surfaces — the mock matches the rolled id in
+        // the header (wrong value 404s) and the assertion below pins
+        // the embedded JSON in `metadata.user_id`.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))

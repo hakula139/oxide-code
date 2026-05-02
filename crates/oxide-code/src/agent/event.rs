@@ -66,11 +66,9 @@ pub(crate) enum AgentEvent {
     /// Same teardown as [`Self::TurnComplete`] plus an `(interrupted)`
     /// marker on the partial assistant block.
     Cancelled,
-    /// A newly-generated session title (e.g., AI-generated via Haiku).
-    /// `session_id` scopes the event to the session that produced it —
-    /// the TUI ignores titles for sessions other than its current one,
-    /// so a slow Haiku call straddling a `/clear` doesn't paint the
-    /// old title onto the new session. Stdio sinks ignore it.
+    /// AI-generated session title; `session_id` scopes the event so a
+    /// slow Haiku call straddling `/clear` doesn't paint onto the
+    /// fresh session.
     SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — `id` is the new UUID. The TUI
     /// updates `session_info.session_id` and clears the (now-stale) AI

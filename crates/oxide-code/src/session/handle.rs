@@ -287,16 +287,14 @@ pub(crate) struct RollOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Atomically rolls the session: snapshots the file-tracker into the
-/// outgoing session's JSONL, clears the tracker, swaps `session` in
-/// place for a fresh handle, and finalizes the old one. Two pairs
-/// matter: snapshot **before** clear (so the snapshots survive into
-/// the old JSONL via `finalize`), and replace **before** finalize (so
-/// the new session is in place before the old handle is consumed).
+/// Rolls `session` to a fresh handle and finalizes the old one. Two
+/// orderings matter: snapshot **before** clear (so the snapshots
+/// survive into the old JSONL via `finalize`), and replace **before**
+/// finalize (so the new session is in place before the old handle is
+/// consumed).
 ///
-/// Caller must update any state derived from the session id (the
-/// HTTP client header, in-memory message log) before the next turn —
-/// this helper does not touch them.
+/// Caller must update any state derived from the session id (HTTP
+/// client header, in-memory message log) — this helper does not.
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -737,11 +735,8 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_writes_summary_then_returns_none_on_success() {
-        // finalize's two visible contracts: the summary lands on disk
-        // (proving finish ran) and the join completes (proving shutdown
-        // ran). Returning None pins that a healthy session reports no
-        // failure — the warn-log / sink-error branches at call sites
-        // depend on this.
+        // Pins the success contract: summary lands on disk and the
+        // returned failure is `None`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -760,9 +755,8 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_returns_failure_when_actor_dead() {
-        // The whole point of returning the failure: the dead-actor
-        // path surfaces so the caller can route it (warn-log in TUI
-        // exit, sink in REPL / headless / `/clear` roll).
+        // Dead-actor path must surface so callers can route the
+        // failure (warn-log on exit, sink on `/clear` roll).
         let handle = testing::dead("dead");
         let failure = handle.finalize(Vec::new()).await;
         assert!(failure.is_some(), "dead handle finalize surfaces failure");

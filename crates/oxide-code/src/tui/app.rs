@@ -339,11 +339,10 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            // `/clear`'s slash command pushes `UserAction::Clear`
-            // straight into `user_tx` via `SlashContext`, so this arm
-            // never fires from the App's `dispatch_user_action` path.
-            // Reserved for exhaustiveness; if it ever lands, refusing
-            // to forward keeps the bypass invariant explicit.
+            // Unreachable on the live wiring — `/clear` writes
+            // `UserAction::Clear` straight into `user_tx`. The
+            // `false` return preserves that bypass if a future call
+            // site accidentally routes it through here.
             UserAction::Clear => false,
         }
     }
