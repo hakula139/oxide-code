@@ -27,11 +27,8 @@ impl SlashCommand for HelpCmd {
     }
 }
 
-/// Plain-text help body. Heading on its own line, blank separator,
-/// then a key-value table where the key is the display label and the
-/// value is the command description. A trailing escape-hint footer
-/// teaches the user how to send a literal slash to the model — today
-/// the only path to discovering that is typing an unknown command.
+/// Heading + key-value table + escape-hint footer. The footer is the
+/// only discoverable path to `//foo` short of typing an unknown command.
 fn render_help() -> String {
     let labels: Vec<String> = BUILT_INS.iter().map(|c| display_label(*c)).collect();
     let rows = labels
@@ -77,9 +74,8 @@ mod tests {
         let mut lines = body.lines();
         assert_eq!(lines.next(), Some("Available Commands"));
         assert_eq!(lines.next(), Some(""), "heading separated by blank line");
-        // Each registered command appears as a row whose body contains
-        // its slash-prefixed canonical name. Skipping the popup-format
-        // alias presentation here — `display_label` already covers it.
+        // Alias presentation is `display_label`'s test concern; here
+        // we just confirm every canonical name appears.
         for cmd in BUILT_INS {
             let needle = format!("/{}", cmd.name());
             assert!(
@@ -91,9 +87,8 @@ mod tests {
 
     #[test]
     fn render_help_includes_escape_tip_footer() {
-        // The `//foo` escape is otherwise only discoverable by typing
-        // an unknown command — pin the footer so a regression that
-        // drops it costs the user a worst-case onboarding path.
+        // `//foo` is otherwise only discoverable through the unknown-
+        // command error; the footer is the documented path.
         let body = render_help();
         assert!(body.contains("`//`"), "footer missing tip body: {body}");
         assert!(
@@ -104,10 +99,8 @@ mod tests {
 
     #[test]
     fn render_help_aligns_descriptions_to_a_shared_gutter() {
-        // Pin the actual gutter column the renderer agreed on, not just
-        // "all rows match each other" — a uniformly broken renderer
-        // would still pass the latter. Expected column = "  " row
-        // prefix + longest label width + "  " gap.
+        // Pin the absolute column, not just "all rows match" — a
+        // uniformly broken renderer would pass the latter.
         let body = render_help();
         let longest = BUILT_INS
             .iter()
@@ -135,19 +128,15 @@ mod tests {
 
     #[test]
     fn display_label_with_aliases_lists_them_in_parens() {
-        // Pinned with a fake command instead of a registered one so
-        // the test doesn't break when /clear's alias list later
-        // changes — the format rule itself is what we're locking.
+        // Synthetic fixture so the test pins the format rule, not a
+        // future built-in's alias list.
         assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
     }
 
     #[test]
     fn fake_fixture_stub_methods_satisfy_trait_contract() {
-        // `display_label` only reads name / aliases / usage off the
-        // fixture, leaving description + execute as required-but-unused
-        // stubs. Exercise them once here so the fixture's trait surface
-        // doesn't sit as silently-uncovered scaffolding — and so a
-        // future edit that flipped execute to Err can't slip past.
+        // `display_label` reads only name/aliases/usage; exercise the
+        // unused trait slots here so they aren't silently uncovered.
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -160,11 +149,9 @@ mod tests {
 
     #[test]
     fn display_label_with_usage_appends_hint_after_name() {
-        // No live built-in carries a usage hint today, so the
-        // `usage()` branch in `display_label` is dead in the registry.
-        // Drive a synthetic command to pin both the no-alias + usage
-        // shape (`/model <model-id>`) and the both-present shape
-        // (`/clear (new, reset) <args>`).
+        // No live built-in carries a usage hint, so the `usage()`
+        // branch is dead in the registry — drive synthetic fixtures
+        // to pin both usage-only and aliases+usage shapes.
         assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
         assert_eq!(
             display_label(&Fake::CLEAR_WITH_USAGE),
@@ -172,10 +159,8 @@ mod tests {
         );
     }
 
-    /// Synthetic `SlashCommand` whose metadata flips per `Fake::*`
-    /// constructor — lets `display_label` tests exercise the no-alias /
-    /// alias-only / usage-only / both-present matrix without spinning
-    /// up a fresh struct per case.
+    /// Synthetic command flipped per `Fake::*` constructor — covers the
+    /// no-alias / alias-only / usage-only / both-present matrix.
     struct Fake {
         name: &'static str,
         aliases: &'static [&'static str],

@@ -1,19 +1,14 @@
-//! Inputs handed to [`SlashCommand::execute`].
-//!
-//! [`SlashContext`] holds borrowed handles to App-owned state each
-//! command might mutate (chat, ...). [`SessionInfo`] is a frozen
-//! snapshot of the read-only descriptors `/status` and `/config`
-//! print: model name, cwd, auth method, session id. Splitting the
-//! two keeps the borrow story clean — execution never holds an
-//! exclusive borrow on `&App` just to read the cwd string.
+//! Inputs handed to [`SlashCommand::execute`]. [`SlashContext`] holds
+//! borrowed handles to App-owned mutable state; [`SessionInfo`] is a
+//! frozen snapshot of read-only session descriptors. Splitting the two
+//! keeps the borrow story clean.
 
 use crate::config::ConfigSnapshot;
 use crate::tui::components::chat::ChatView;
 
-/// Read-only snapshot of session-level descriptors. Built once per
-/// process at TUI startup and never mutated. Embeds the
-/// [`ConfigSnapshot`] so `/config` reads its fields without a second
-/// plumbing path.
+/// Read-only snapshot of session-level descriptors. Built once at TUI
+/// startup; embeds [`ConfigSnapshot`] so `/config` reads its fields
+/// without a second plumbing path.
 pub(crate) struct SessionInfo {
     /// Marketing display name (e.g. `"Claude Sonnet 4.6"`).
     pub(crate) model: String,
@@ -27,9 +22,8 @@ pub(crate) struct SessionInfo {
     pub(crate) config: ConfigSnapshot,
 }
 
-/// Borrowed view of App-owned state plus a session snapshot for the
-/// duration of one [`super::registry::SlashCommand::execute`] call.
-/// Constructed by the dispatcher, never stored.
+/// Borrowed view of App-owned state for one
+/// [`super::registry::SlashCommand::execute`] call. Never stored.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a SessionInfo,

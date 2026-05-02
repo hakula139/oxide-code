@@ -14,8 +14,8 @@ use anyhow::{Context, Result, bail};
 use super::context::SlashContext;
 use super::registry::SlashCommand;
 
-/// Cap diff output so a 1 GB binary diff can't freeze rendering.
-/// 64 KB sits comfortably above a typical PR-sized review.
+/// Cap so a runaway binary diff can't freeze rendering. 64 KB sits
+/// comfortably above a typical PR-sized review.
 const MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) struct DiffCmd;
@@ -37,12 +37,8 @@ impl SlashCommand for DiffCmd {
     }
 }
 
-/// Body of [`DiffCmd::execute`] with the cwd injected as data so tests
-/// can drive it against a tempdir without touching process state.
-/// Empty trees still emit a friendly marker via the same
-/// `SystemMessageBlock` `/help` and `/status` use; non-empty diffs go
-/// through `GitDiffBlock` so red / green row backgrounds and the
-/// line-number gutter mirror the Edit-tool diff body.
+/// Body of [`DiffCmd::execute`] with cwd injected as data so tests can
+/// drive it against a tempdir without touching process state.
 fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
     let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
     if text.trim().is_empty() {
@@ -54,15 +50,10 @@ fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<(), String> {
 }
 
 /// Gathers tracked + untracked diff text rooted at `cwd`. Falls back
-/// to `git diff --cached` when HEAD doesn't resolve (fresh repo) so
-/// the command still produces useful output before the first commit.
-/// `cwd` is taken as data (not from process state) so tests can run
-/// against a tempdir without racing other parallel tests.
-///
-/// Untracked filenames pass through `String::from_utf8_lossy`; a path
-/// containing non-UTF-8 bytes will render with `U+FFFD` substitutes
-/// rather than fail. Acceptable trade-off: the user still sees that
-/// the file exists, just under a sanitized name.
+/// to `git diff --cached` when HEAD doesn't resolve (fresh repo) so the
+/// command still produces useful output before the first commit. Paths
+/// with non-UTF-8 bytes render with `U+FFFD` substitutes rather than
+/// fail.
 fn collect_diff_in(cwd: &Path) -> Result<String> {
     if !inside_git_repo(cwd)? {
         bail!("not inside a git repository");
@@ -80,9 +71,8 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
 
 fn format_diff(tracked: &str, untracked: &str) -> String {
     let mut out = String::new();
-    // Strip only the trailing line break git appends — keep any
-    // trailing whitespace on real context/change lines so a diff that
-    // legitimately includes trailing spaces lands byte-for-byte.
+    // Strip only git's trailing newline — keep any in-line trailing
+    // whitespace on real context/change lines.
     let tracked = tracked.trim_end_matches('\n');
     if !tracked.trim().is_empty() {
         out.push_str(tracked);
@@ -100,10 +90,9 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
     out
 }
 
-/// Distinguish "git binary missing" (propagated as Err) from "git ran
-/// but we're outside a work tree" (Ok(false)). Without that split, a
-/// PATH-less git would surface as the misleading "not inside a git
-/// repository" message instead of the actionable spawn error.
+/// Distinguish "git binary missing" (Err) from "git ran but we're
+/// outside a work tree" (Ok(false)) so the user sees the actionable
+/// spawn error instead of the misleading "not inside a git repository".
 fn inside_git_repo(cwd: &Path) -> Result<bool> {
     let out = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -137,8 +126,7 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Cuts on a UTF-8 boundary so the prefix is always ≤ [`MAX_BYTES`],
-/// then appends a one-line footer naming the dropped size in KB
-/// (more readable than a raw byte count when the cap is in tens of KB).
+/// then appends a one-line footer naming the dropped size.
 fn truncate(s: String) -> String {
     if s.len() <= MAX_BYTES {
         return s;
@@ -158,10 +146,9 @@ fn truncate(s: String) -> String {
     t
 }
 
-/// Render a byte count as a short human-readable size: `< 1 KB` →
-/// `"N B"`, `< 1 MB` → `"N.N KB"`, otherwise `"N.N MB"`. The
-/// fractional digit is integer truncation (not rounding) — sufficient
-/// for the truncation footer and deterministic across platforms.
+/// Render a byte count as `"N B"`, `"N.N KB"`, or `"N.N MB"`. The
+/// fractional digit is integer-truncated (not rounded) for
+/// deterministic output across platforms.
 fn format_size(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = KB * 1024;
@@ -187,13 +174,10 @@ mod tests {
 
     use super::*;
 
-    // The git-IO sections below shell out to the real `git` binary
-    // against a tempdir so each test exercises the real IO path
-    // without racing other parallel tests on the process cwd. CI
-    // runners and local dev shells both have `git` on PATH.
+    // The git-IO tests below shell out to a real `git` binary against
+    // a tempdir to avoid racing other parallel tests on the process cwd.
 
     /// Spawn `git args...` against `cwd`, panicking on failure.
-    /// Used by tests to set up tempdir state.
     fn git_setup(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
             .args(args)
@@ -207,11 +191,8 @@ mod tests {
         );
     }
 
-    /// Build a tempdir initialized as a git repo, with `user.email`
-    /// and `user.name` configured (otherwise `git commit` fails on
-    /// hermetic CI runners with no global config). Returns the
-    /// `TempDir` (drop it to clean up) and an owned `PathBuf` so
-    /// tests don't fight the lifetime borrow.
+    /// Tempdir initialized as a git repo with `user.email` and
+    /// `user.name` set (else `git commit` fails on hermetic CI runners).
     fn fresh_repo() -> (TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_owned();
@@ -225,9 +206,8 @@ mod tests {
 
     #[test]
     fn execute_forwards_process_cwd_through_execute_in() {
-        // `cargo test` runs with the workspace root as cwd — itself a
-        // git repo — so the wrapper round-trips through `current_dir`
-        // and `execute_in` without error. No test mutates cwd.
+        // `cargo test` runs from the workspace root (a git repo) so the
+        // wrapper round-trips through `current_dir` without error.
         use crate::slash::test_session_info;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
@@ -244,9 +224,7 @@ mod tests {
 
     #[test]
     fn execute_in_clean_repo_pushes_no_changes_marker() {
-        // Empty diff → friendly marker, not a blank message. Drives
-        // `execute_in` end-to-end so the system-message dispatch lands
-        // in test coverage, not just `collect_diff_in`.
+        // Empty diff → friendly marker, not a blank message.
         use crate::slash::test_session_info;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
@@ -262,10 +240,8 @@ mod tests {
 
     #[test]
     fn execute_in_dirty_repo_pushes_diff_text() {
-        // Dirty tree → the diff body itself reaches the chat as a
-        // SystemMessageBlock. Pin that the call doesn't error and that
-        // exactly one block landed (no double-push between the
-        // empty-trim guard and the body branch).
+        // Pin exactly one block lands — no double-push between the
+        // empty-trim guard and the body branch.
         use crate::slash::test_session_info;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
@@ -282,9 +258,8 @@ mod tests {
 
     #[test]
     fn execute_in_outside_a_repo_returns_err_string() {
-        // The trait boundary stringifies `anyhow::Error` — pin that
-        // the actionable "not inside a git repository" wording reaches
-        // the dispatcher's error wrapper rather than a Debug noise.
+        // Pin the actionable wording survives the `anyhow → String`
+        // boundary on the trait return type.
         use crate::slash::test_session_info;
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
@@ -311,10 +286,9 @@ mod tests {
 
     #[test]
     fn collect_diff_in_fresh_repo_is_empty_when_nothing_staged() {
-        // Pre-first-commit path: `has_head` is false, so we fall back
-        // to `git diff --cached`, which is empty. No untracked files
-        // either. Result must be the empty string so the execute path
-        // renders "Working tree clean."
+        // Pre-first-commit path: `has_head` is false, so we fall back to
+        // `git diff --cached` (empty). Empty result drives the execute
+        // path's "Working tree clean." marker.
         let (_dir, repo) = fresh_repo();
         assert_eq!(collect_diff_in(&repo).unwrap(), "");
     }
@@ -343,10 +317,8 @@ mod tests {
 
     #[test]
     fn collect_diff_in_separates_tracked_changes_from_untracked_list() {
-        // Both arms populated: tracked diff + untracked filenames.
-        // The empty-line separator pinned in `format_diff_combined_*`
-        // is tested at the unit level; here we verify the two pieces
-        // co-exist in real `git` output, not just synthetic strings.
+        // Both arms populated, exercising real git output (the
+        // synthetic separator case is pinned in `format_diff_*`).
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("a.txt"), "first\n").unwrap();
         git_setup(&repo, &["add", "a.txt"]);
@@ -369,9 +341,8 @@ mod tests {
 
     #[test]
     fn format_diff_keeps_trailing_whitespace_on_diff_lines() {
-        // Real diffs can include trailing-whitespace edits — the
-        // formatter must touch only the trailing newline git appends,
-        // not in-line whitespace bytes.
+        // Real diffs can include trailing-whitespace edits; only git's
+        // trailing newline gets stripped.
         let body = format_diff(" context  \n+added  \n", "");
         assert_eq!(body, " context  \n+added  ");
     }
@@ -406,9 +377,8 @@ mod tests {
 
     #[test]
     fn format_diff_both_empty_yields_empty_string() {
-        // The execute path treats empty as "Working tree clean." —
-        // pin the contract here so a future change in trim semantics
-        // doesn't accidentally start emitting "Untracked files:" alone.
+        // Pin so a trim-semantics change can't emit "Untracked files:"
+        // alone with no body.
         assert_eq!(format_diff("", ""), "");
         assert_eq!(format_diff("   \n", "  \n"), "");
     }
@@ -449,10 +419,8 @@ mod tests {
 
     #[test]
     fn run_git_in_propagates_stderr_on_failure() {
-        // `cat-file` of a non-existent SHA yields a stable, version-
-        // independent error message ("Not a valid object name ...").
-        // Avoid relying on flag-parser error wording — that drifts
-        // across git versions.
+        // `cat-file` of a missing SHA gives stable, version-independent
+        // wording — flag-parser errors drift across git versions.
         let (_dir, repo) = fresh_repo();
         let err = run_git_in(&repo, &["cat-file", "-t", "deadbeef"]).unwrap_err();
         let msg = format!("{err:#}");
@@ -472,9 +440,8 @@ mod tests {
 
     #[test]
     fn truncate_at_exact_cap_returns_input_unchanged() {
-        // The cap gate is `<=` — input of exactly `MAX_BYTES` is
-        // in-bounds. Flipping it to `<` would silently append a
-        // truncation footer to every full-cap diff.
+        // Boundary: gate is `<=`, so MAX_BYTES is in-bounds. Flipping
+        // to `<` would footer every full-cap diff.
         let s = "a".repeat(MAX_BYTES);
         assert_eq!(truncate(s.clone()), s);
     }
@@ -483,11 +450,8 @@ mod tests {
     fn truncate_oversized_input_appends_footer_with_human_size() {
         let s = "a".repeat(MAX_BYTES + 100);
         let got = truncate(s);
-        // The kept prefix is exactly MAX_BYTES bytes; everything after
-        // is the footer. Pin both halves so an off-by-one in either
-        // direction (kept too few or too many) fails here. The actionable
-        // hint at the end is part of the contract too — silently dropping
-        // it would leave the user without a recovery path on overflow.
+        // Pin kept prefix and footer separately — an off-by-one in
+        // either direction or a dropped recovery hint must fail here.
         let footer = "\n\n(truncated: 100 B more — run `git diff HEAD` for the full output)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
@@ -496,16 +460,12 @@ mod tests {
 
     #[test]
     fn truncate_cuts_on_utf8_boundary_and_never_exceeds_max_bytes() {
-        // The cap is a strict ≤ contract — the kept prefix must NOT
-        // exceed MAX_BYTES even when the boundary lands inside a
-        // multi-byte char. Build a string whose final char straddles
-        // the cap; the cut must back up to the preceding boundary.
+        // Final char straddles the cap; cut must back up to the
+        // preceding boundary so the prefix never exceeds MAX_BYTES.
         let prefix = "a".repeat(MAX_BYTES - 1);
         let s = format!("{prefix}€trailing"); // '€' is 3 bytes
         let got = truncate(s);
         let footer_start = got.find("\n\n(truncated:").expect("footer present");
-        // Kept prefix ends well before the cap (one byte short of the
-        // straddling '€'), confirming no overshoot.
         assert_eq!(footer_start, MAX_BYTES - 1);
         assert!(got.is_char_boundary(footer_start));
     }
@@ -514,10 +474,8 @@ mod tests {
 
     #[test]
     fn format_size_truncates_to_one_decimal_for_kb() {
-        // The fractional digit is integer truncation, not rounding —
-        // pin both branches at the boundary (1023 B vs 1024 = 1.0 KB)
-        // and at the rollover into MB (1023.9 KB vs 1.0 MB) so an
-        // off-by-one in the `<` comparison would fail visibly.
+        // Fractional digit is integer truncation; pin both unit
+        // boundaries so an off-by-one in `<` would fail visibly.
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(1023), "1023 B");

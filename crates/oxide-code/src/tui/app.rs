@@ -894,11 +894,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_slash_command_renders_locally_without_forwarding() {
-        // Slash commands stay client-side: the typed text lands as a
-        // user-message block, the command's output lands as a second
-        // block, and the agent loop never sees the prompt. Pin the
-        // full path through `apply_action_locally` so a regression
-        // that fell through to `user_tx.try_send` would fail here.
+        // Slash commands must stay client-side: user message + command
+        // output land in chat, agent loop never sees the prompt.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
 
@@ -916,8 +913,6 @@ mod tests {
             !app.chat.last_is_error(),
             "/help must not produce an error block",
         );
-        // The channel must not receive anything — `try_recv` returns
-        // `Empty` when the queue is drained but the sender is alive.
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -940,12 +935,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_double_slash_escapes_command_and_forwards_literal() {
-        // `//foo` is the documented escape for sending `/etc/hosts`-
-        // style prompts: parsed as "not a command" so the regular
-        // forward path takes over and the agent receives the bytes
-        // verbatim. Without this pinned, a future change in
-        // `apply_action_locally` (e.g., a new prefix check) could
-        // silently start consuming the escape.
+        // `//foo` parses as "not a command", so the agent receives the
+        // bytes verbatim — pin so a future prefix check can't swallow it.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("//etc/hosts".to_owned()));
 

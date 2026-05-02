@@ -1,22 +1,18 @@
 //! Slash-command surface.
 //!
 //! [`parse_slash`] decides whether a submitted prompt is a slash
-//! command; [`dispatch`] resolves the parsed command against the
-//! registry and runs it. The TUI's `App::apply_action_locally` calls
-//! both: an unmatched prompt continues to the agent loop, a matched
-//! one stays local.
+//! command; [`dispatch`] resolves it against the registry and runs it.
+//! Each command is a [`registry::SlashCommand`] impl in its own
+//! submodule — adding one is one file plus one entry in
+//! [`registry::BUILT_INS`].
 //!
-//! Each command is a `SlashCommand` impl in its own submodule. Adding
-//! a new command means one file plus one entry in [`registry::BUILT_INS`].
+//! Output: every command pushes a `SystemMessageBlock` (info / results)
+//! or an `ErrorBlock` (unknown command, bad args) to the chat. No modal
+//! overlays.
 //!
-//! Output: every command pushes either a `SystemMessageBlock` (info /
-//! results) or an `ErrorBlock` (unknown command, bad args) to the
-//! chat. No modal overlays, no toasts.
-//!
-//! Persistence: slash commands never write to user config files
-//! (see `docs/research/design/slash-commands.md` § Design Decisions
-//! 6). Mutations are session-local; restart returns to the
-//! user-declared config.
+//! Persistence: commands never write user config files. Mutations are
+//! session-local; restart returns to the user-declared config (see
+//! `docs/research/design/slash-commands.md` § Design Decisions 6).
 
 mod config;
 mod context;
@@ -37,14 +33,10 @@ pub(crate) fn dispatch(parsed: &Parsed, ctx: &mut SlashContext<'_>) {
 }
 
 /// Resolves `parsed` against `commands` and runs the matching impl.
-/// Renders an `ErrorBlock` on unknown name or on `Err` returned by
-/// the command; successful commands push their own informational
-/// output (`SystemMessageBlock`) before returning `Ok`.
+/// Renders an `ErrorBlock` on unknown name or on `Err` from `execute`.
+/// Successful commands push their own output before returning `Ok`.
 ///
-/// Extracted so tests can drive the dispatcher with a synthetic
-/// registry — exercising the alias-resolution and error-wrapping
-/// branches against fake commands rather than reimplementing the
-/// dispatcher's tail in test code.
+/// Extracted so tests can drive the dispatcher with a synthetic registry.
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
@@ -64,9 +56,7 @@ fn dispatch_with(
     }
 }
 
-/// Comma-separated `/name` list for the unknown-command hint. Writes
-/// directly into a single `String` to avoid the `Vec<String> + join`
-/// double allocation.
+/// Comma-separated `/name` list for the unknown-command hint.
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -79,9 +69,8 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     out
 }
 
-/// Shared test fixture — a fully-populated `SessionInfo` so per-command
-/// tests don't repeat the boilerplate. Lives at the module root so
-/// every sibling `slash::*::tests` module can pull it in.
+/// Shared test fixture — a fully-populated `SessionInfo` for the
+/// per-command test modules.
 #[cfg(test)]
 pub(crate) fn test_session_info() -> SessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
@@ -133,10 +122,8 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_command_message_lists_available_and_escape_hint() {
-        // The error message must surface (a) what to try instead and
-        // (b) the `//foo` escape so the user can send the literal text.
-        // Without these, the user has no way to discover the command
-        // set or to send `/etc/hosts`-style prompts.
+        // The error must surface alternatives (commands) and the
+        // `//foo` escape — those are the user's two recovery paths.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -167,19 +154,17 @@ mod tests {
         dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
-        // The last block is a SystemMessageBlock, which inherits the
-        // ChatBlock::error_text default returning None. Pin that so a
-        // refactor that flipped the default to Some(_) — and silently
-        // started letting non-error blocks claim error wording — fails
-        // here.
+        // Pin: SystemMessageBlock inherits `error_text` default `None`
+        // — flipping that default would let non-error blocks claim
+        // error wording.
         assert_eq!(chat.last_error_text(), None);
     }
 
     // ── dispatch_with ──
 
-    /// Synthetic command with two aliases that always returns `Err` —
-    /// drives the real dispatcher's alias-resolution and error-wrapping
-    /// branches against a registry whose contents the test controls.
+    /// Synthetic command with two aliases that always errors — drives
+    /// the dispatcher's alias-resolution and error-wrapping branches
+    /// against a test-controlled registry.
     struct Failing;
     impl registry::SlashCommand for Failing {
         fn name(&self) -> &'static str {
@@ -198,11 +183,8 @@ mod tests {
 
     #[test]
     fn failing_fixture_metadata_matches_what_dispatcher_tests_assume() {
-        // The dispatcher tests below rely on `Failing` carrying both
-        // aliases and a deliberate `Err`. Pin the metadata directly so
-        // a fixture edit that drifted from those assumptions trips
-        // here — and so the trait's required `description` slot isn't
-        // a silently-uncovered stub.
+        // Pin so a fixture drift (one alias missing, no Err) fails
+        // here rather than silently misleading the dispatcher tests.
         assert_eq!(Failing.name(), "failing");
         assert_eq!(Failing.aliases(), &["bust", "boom"]);
         assert_eq!(Failing.description(), "test");
@@ -210,11 +192,8 @@ mod tests {
 
     #[test]
     fn dispatch_with_command_failure_renders_error_block_prefixed_with_name() {
-        // Pin the dispatcher's actual error-wrapping shape: an `Err`
-        // returned by a command must land as `/name: msg` in an
-        // ErrorBlock. Driven through `dispatch_with` so the test
-        // exercises the real production path, not a hand-rolled
-        // reimplementation of its tail.
+        // `Err` from `execute` must land as `/name: msg`. Driven through
+        // the real `dispatch_with`, not a reimplementation of its tail.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -228,10 +207,8 @@ mod tests {
 
     #[test]
     fn dispatch_with_alias_routes_to_canonical_impl() {
-        // Submitting an alias must run the same impl as the canonical
-        // name — and the dispatcher's error wrapping must use the
-        // typed name (the alias), not the canonical one, so the user
-        // sees what they typed echoed back.
+        // Alias must run the canonical impl — and the error wrapping
+        // must echo the typed name back (the alias), not the canonical.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {

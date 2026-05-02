@@ -25,11 +25,9 @@ impl SlashCommand for StatusCmd {
     }
 }
 
-/// Render the snapshot as a `key  value` table. Keys are pre-defined
-/// here (not extracted from `SessionInfo`'s field names) so the output
-/// stays stable when the struct grows. `Model ID` sits next to the
-/// marketing-name `Model` so the user debugging a routing issue can
-/// see both at a glance — matching the pair `/config` shows.
+/// `key  value` table. Keys live here (not derived from struct field
+/// names) so the rendered labels stay stable when the struct grows.
+/// `Model ID` sits next to `Model` so a routing-debug glance shows both.
 fn render_status(info: &SessionInfo) -> String {
     let rows: [(&str, &str); 6] = [
         ("Model", &info.model),
@@ -53,18 +51,14 @@ mod tests {
 
     #[test]
     fn status_metadata_exposes_canonical_name_and_description() {
-        // Pin the user-visible name + description so an edit that
-        // accidentally sends them through `tr` lowercase or rephrases
-        // the gutter copy fails CI here, not in a manual smoke test.
+        // Pin canonical name + non-empty description.
         assert_eq!(StatusCmd.name(), "status");
         assert!(!StatusCmd.description().is_empty());
     }
 
     #[test]
     fn status_execute_pushes_a_non_error_block() {
-        // Trait-method end-to-end: `execute` must return `Ok(())` and
-        // leave a single non-error block in the chat. Pins the
-        // success-path contract the dispatcher relies on.
+        // Trait-method end-to-end success path.
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -88,10 +82,8 @@ mod tests {
 
     #[test]
     fn render_status_emits_one_row_per_session_field() {
-        // Every `SessionInfo` field reaches the user — a regression
-        // that drops a row (e.g., by truncating the array) would fail
-        // here before it can ship. Pin the row count too so an
-        // accidental row drop doesn't slip past the per-value checks.
+        // Pin every field reaches the user, plus the row count — a
+        // dropped row mustn't slip past the per-value checks.
         let info = test_session_info();
         let body = render_status(&info);
         for needle in [
@@ -110,10 +102,8 @@ mod tests {
 
     #[test]
     fn render_status_aligns_values_to_a_shared_gutter() {
-        // The longest key sets the gutter; every row's value must land
-        // at the same byte offset so the value column reads as a clean
-        // stripe. Pin the actual expected offset (not just "all rows
-        // agree") — a uniformly broken renderer would otherwise pass.
+        // Pin the absolute column, not just "all rows agree" — a
+        // uniformly broken renderer would pass the latter.
         let info = test_session_info();
         let values = [
             info.model.as_str(),

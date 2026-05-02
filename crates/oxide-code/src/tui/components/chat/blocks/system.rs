@@ -1,11 +1,6 @@
-//! System message block — multi-line slash-command output, rendered
-//! with a `▎` left-bar in `accent` and the body in `text`.
-//!
-//! Used by `/help`, `/status`, `/config`, `/diff`, and `/init`
-//! confirmation. Errors keep their own `ErrorBlock` styling — the
-//! left-bar variant is reserved for informational output so the user
-//! can scan a transcript and tell at a glance which lines are
-//! agent-emitted vs. command-emitted.
+//! Slash-command output block: a `▎` left-bar in `accent` plus body
+//! in `text`. Errors keep their own `ErrorBlock` styling so a
+//! transcript scan distinguishes informational from error output.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -42,8 +37,8 @@ impl ChatBlock for SystemMessageBlock {
             out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
         }
         if out.is_empty() {
-            // Empty content still gets a single bar so the block is
-            // visible — better than silently dropping the call.
+            // Empty content → single bar so the block is visible
+            // rather than silently dropped.
             out.push(Line::from(Span::styled(
                 TOOL_BORDER_PREFIX.to_owned(),
                 bar_style,
@@ -53,9 +48,8 @@ impl ChatBlock for SystemMessageBlock {
     }
 }
 
-/// Continuation-line prefix that keeps the `▎` aligned under the first
-/// line's bar. The bar span carries `bar_style` so theme overrides
-/// flow through to the wrapped rows.
+/// Wrap-continuation prefix that keeps `▎` aligned under the first
+/// line's bar and carries `bar_style` for theme overrides.
 fn bar_continuation_prefix(bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = TOOL_BORDER_PREFIX
         .find(BAR)
@@ -102,9 +96,8 @@ mod tests {
 
     #[test]
     fn render_empty_text_still_emits_a_bar_line() {
-        // Tests / edge cases that hand in an empty payload should
-        // still produce a visible block — silently swallowing it
-        // would hide a bug at the call site.
+        // Empty payload still produces a visible block — silently
+        // swallowing it would hide a bug at the call site.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("");
         let lines = block.render(&ctx_at(60, &theme));
@@ -115,9 +108,8 @@ mod tests {
 
     #[test]
     fn render_trailing_newline_does_not_emit_extra_blank_row() {
-        // `str::lines()` already drops the final empty fragment from a
-        // trailing newline; pin that contract so a future switch to
-        // `split('\n')` would fail visibly here.
+        // Pin `str::lines()` semantics — `split('\n')` would emit an
+        // extra empty trailing row.
         let theme = Theme::default();
         let block = SystemMessageBlock::new(indoc! {"
             alpha
@@ -130,17 +122,15 @@ mod tests {
 
     #[test]
     fn render_wraps_long_body_under_bar_at_viewport_width() {
-        // A body line wider than the viewport (e.g. a long path in
-        // `/config Sources` or a long `git diff` line) used to clip;
-        // it must wrap with continuation lines that re-emit the bar
-        // so the block reads as one visual unit.
+        // Wrapped continuation lines must re-emit the bar so the
+        // block reads as one visual unit.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("alpha beta gamma delta epsilon zeta");
         let lines = block.render(&ctx_at(16, &theme));
         assert!(lines.len() >= 2, "expected wrap, got {lines:#?}");
         for (i, line) in lines.iter().enumerate() {
-            // First line emits the bar+space as one span; continuation
-            // splits into [bar, space] so the bar carries `accent`.
+            // First row: bar+space as one span. Continuation: split
+            // into [bar, space] so the bar carries `accent`.
             assert!(
                 line.spans[0].content.starts_with(BAR),
                 "row {i} bar prefix missing: {:?}",
@@ -152,9 +142,8 @@ mod tests {
 
     #[test]
     fn render_per_logical_line_wraps_independently() {
-        // Two source lines, each exceeding the viewport, must wrap
-        // separately — a body that mistakenly joined them would
-        // appear as one wrapped paragraph instead of two blocks.
+        // Two long source lines wrap separately; a body that joined
+        // them would render as one paragraph.
         let theme = Theme::default();
         let block = SystemMessageBlock::new(
             "first really long line of text\nsecond really long line of text",

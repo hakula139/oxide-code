@@ -1,27 +1,18 @@
-//! Shared rendering helpers for the slash-command output blocks.
-//!
-//! `/help`, `/status`, and `/config` all render a heading followed by
-//! a key-value table; this module owns the single implementation of
-//! both pieces so the three commands stay visually parallel without
-//! re-rolling spacing rules per-call. Keys are byte-aligned because
-//! every key in the slash module is ASCII.
+//! Shared heading + key-value table renderer for `/help`, `/status`,
+//! and `/config`. Keys are byte-aligned because every key in the slash
+//! module is ASCII.
 
 use std::fmt::Write as _;
 
-/// Two-space prefix on every row, leaving room for the eventual
-/// `▎` left-bar that `SystemMessageBlock` prepends.
+/// Row prefix; leaves room for the `▎` left-bar `SystemMessageBlock`
+/// prepends.
 const ROW_PREFIX: &str = "  ";
 
-/// Two-space gap between the key column and the value column —
-/// wider than one space so the eye sees them as separate columns,
-/// narrower than four so the value column doesn't drift right on
-/// long keys.
+/// Gap between key and value columns.
 const COL_GAP: &str = "  ";
 
-/// Append a `Heading` line + blank separator + key-value table to
-/// `out`. When `out` already has content, prepends a blank line so
-/// successive sections sit one blank apart — the shape `/config`
-/// uses for its `Resolved config` / `Source files` pair.
+/// Append `Heading` + blank line + key-value table. Successive sections
+/// are separated by a single blank line (the `/config` two-section shape).
 pub(super) fn write_kv_section<'a>(
     out: &mut String,
     heading: &str,
@@ -35,9 +26,8 @@ pub(super) fn write_kv_section<'a>(
     write_kv_table(out, rows);
 }
 
-/// Append a `key  value` table to `out`, aligning every value
-/// column to a gutter wide enough for the longest key. Empty input
-/// is a no-op so callers can branch on whether to emit a heading.
+/// Append a `key  value` table aligned to the longest key. Empty
+/// input is a no-op so callers can branch on whether to emit a heading.
 pub(super) fn write_kv_table<'a>(
     out: &mut String,
     rows: impl IntoIterator<Item = (&'a str, &'a str)> + Clone,
@@ -73,10 +63,8 @@ mod tests {
 
     #[test]
     fn write_kv_section_second_section_inserts_blank_separator() {
-        // A `/config`-style two-section render: the second call must
-        // leave exactly one blank line between the prior table and
-        // the next heading. Pin the byte sequence so a regression
-        // that drops or doubles the blank fails here.
+        // The `/config` two-section shape: exactly one blank line
+        // separates successive headings.
         let mut out = String::new();
         write_kv_section(&mut out, "First", [("a", "1")]);
         write_kv_section(&mut out, "Second", [("b", "2")]);
@@ -93,10 +81,7 @@ mod tests {
     fn write_kv_table_aligns_value_column_to_longest_key() {
         let mut out = String::new();
         write_kv_table(&mut out, [("a", "1"), ("longer", "2"), ("mid", "3")]);
-        // Each row's value column starts at the same byte offset —
-        // assert that offset directly so a regression that loses the
-        // padding fails here, not silently in a higher-level
-        // snapshot.
+        // Pin the absolute byte offset, not just "all rows agree".
         let value_cols: Vec<usize> = out
             .lines()
             .map(|l| l.find(|c: char| c.is_ascii_digit()).expect("value present"))
@@ -111,9 +96,8 @@ mod tests {
 
     #[test]
     fn write_kv_table_empty_input_writes_nothing() {
-        // Empty `rows` short-circuits before any allocation. Pin the
-        // contract so a future "always emit a header row" tweak
-        // can't regress callers that branch on `out.is_empty()`.
+        // Pin so callers branching on `out.is_empty()` can't be
+        // regressed by an "always emit a header" tweak.
         let mut out = String::from("preexisting");
         write_kv_table(&mut out, std::iter::empty::<(&str, &str)>());
         assert_eq!(out, "preexisting");
@@ -121,8 +105,7 @@ mod tests {
 
     #[test]
     fn write_kv_table_single_row_uses_zero_padding() {
-        // `gutter == key.len()` ⇒ no padding spaces. Pin so a
-        // refactor that always pads at least one space fails here.
+        // `gutter == key.len()` ⇒ no padding.
         let mut out = String::new();
         write_kv_table(&mut out, [("only", "value")]);
         assert_eq!(out, "  only  value\n");
@@ -130,8 +113,8 @@ mod tests {
 
     #[test]
     fn write_kv_table_each_row_ends_in_newline() {
-        // `writeln!` adds a trailing `\n`; verify the contract so a
-        // switch to `write!` would fail visibly here.
+        // Pin trailing `\n` so a switch from `writeln!` to `write!`
+        // would fail here.
         let mut out = String::new();
         write_kv_table(&mut out, [("a", "1"), ("b", "2")]);
         assert_eq!(out.matches('\n').count(), 2);

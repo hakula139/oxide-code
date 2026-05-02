@@ -1,12 +1,7 @@
-//! `GitDiffBlock` — render a `git diff` output with the same visual
-//! treatment as the Edit-tool diff body.
-//!
-//! Reuses `numbered_row::Renderer` and `bordered_row::render` from the
-//! tool block tree so a slash `/diff` and an Edit tool result share
-//! one aesthetic: red row bg on `-` lines, green row bg on `+` lines,
-//! dim hunk headers, line numbers in a left gutter. The block is
-//! parsed lazily on `render`; `GitDiffBlock` itself just owns the raw
-//! text plus the optional truncation footer the producer appended.
+//! `GitDiffBlock` — `git diff` rendered with the Edit-tool diff
+//! aesthetic (red `-` rows, green `+` rows, dim hunk headers, line-
+//! number gutter). Reuses `numbered_row` / `bordered_row` from the tool
+//! tree. The block owns raw text and parses it lazily on `render`.
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;
@@ -69,25 +64,21 @@ impl ChatBlock for GitDiffBlock {
                 || line.starts_with("new file ")
                 || line.starts_with("deleted file ")
             {
-                // Metadata git emits between "diff --git" and the first
-                // hunk; the path header already names the file, so
-                // these rows are noise.
+                // Metadata between "diff --git" and the first hunk;
+                // the path header already names the file.
             } else if let Some((o, n)) = parse_hunk_starts(line) {
                 old_ln = o;
                 new_ln = n;
                 in_hunk = true;
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             } else if line.is_empty() {
-                // A truly empty line (no leading space) ends the
-                // current hunk — well-formed unified diffs prefix
-                // context with " ", so a zero-byte line is a section
-                // break before the untracked heading or the
-                // truncation footer.
+                // Zero-byte line ends the hunk: unified-diff context
+                // is always prefixed with " ", so an empty line marks
+                // a section break (untracked heading, truncation footer).
                 in_hunk = false;
                 bordered_row::render(&mut out, ctx, border, String::new(), ctx.theme.dim());
             } else if !in_hunk {
-                // Outside a hunk: untracked-files heading, untracked
-                // file paths, truncation footer.
+                // Untracked heading / paths / truncation footer.
                 let style = if line.starts_with("Untracked") || line.starts_with("(truncated") {
                     ctx.theme.dim()
                 } else {
@@ -105,10 +96,8 @@ impl ChatBlock for GitDiffBlock {
                 old_ln += 1;
                 new_ln += 1;
             } else {
-                // Defensive — well-formed unified diffs always prefix
-                // hunk-body lines with `+`, `-`, or ` `. Render as a
-                // plain bordered row so corrupt input still surfaces
-                // visually instead of silently misaligning numbers.
+                // Corrupt hunk body — render as plain row instead of
+                // silently misaligning the line-number gutter.
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             }
         }
@@ -120,11 +109,8 @@ impl ChatBlock for GitDiffBlock {
     }
 }
 
-/// Returns the "a" path of a `diff --git a/X b/Y` line, or `None` when
-/// the line isn't a file header. The "a" / "b" prefixes are git's
-/// standard markers; for new / deleted files git emits `/dev/null` on
-/// one side, but the other side still carries the real path so we
-/// always have something to show.
+/// "a" path of a `diff --git a/X b/Y` line, or `None` when not a
+/// file header.
 fn parse_diff_git_path(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("diff --git ")?;
     let after_a = rest.strip_prefix("a/")?;
@@ -132,9 +118,8 @@ fn parse_diff_git_path(line: &str) -> Option<&str> {
     Some(&after_a[..space])
 }
 
-/// Parses `@@ -A,B +C,D @@ ...` (or `@@ -A +C @@` when count is 1) and
-/// returns the starting line numbers of the two sides. `None` when the
-/// line isn't a hunk header.
+/// Starting line numbers from `@@ -A,B +C,D @@` (or `@@ -A +C @@` when
+/// count is 1). `None` when not a hunk header.
 fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
     let after_minus = line.strip_prefix("@@ -")?;
     let old_start = parse_first_number(after_minus)?;
@@ -144,26 +129,20 @@ fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
-/// Parses the leading integer up to the next `,` or ` `. Used by both
-/// the start-only branch (`@@ -A`) and the count branch (`@@ -A,B`).
+/// Leading integer up to the next `,` or ` `.
 fn parse_first_number(s: &str) -> Option<usize> {
     let stop = s.find([',', ' ']).unwrap_or(s.len());
     s[..stop].parse().ok()
 }
 
-/// Returns the body of a `+`/`-` line *unless* it's the diff metadata
-/// `+++ b/X` / `--- a/X`. Walking the metadata branch first keeps the
-/// caller from having to track which `+`/`-` lines are real content.
+/// Body of a `+`/`-` line, but not the `+++ b/X` / `--- a/X` metadata.
 fn strip_marker(line: &str, marker: char) -> Option<&str> {
     line.strip_prefix(marker)
         .filter(|rest| !rest.starts_with(marker))
 }
 
-/// Width of the line-number column — the highest line number across
-/// every hunk's `(start + count - 1)`. Computed globally so the gutter
-/// stays at one width across the whole diff (consistent with the
-/// Edit-tool diff body, which renders one chunk at a time but pins
-/// the column to that chunk's max).
+/// Decimal-digit width of the highest line number across all hunks.
+/// Computed globally so the gutter stays one width through the diff.
 fn max_line_number_width(text: &str) -> usize {
     let mut max_ln: usize = 0;
     for line in text.lines() {
@@ -174,9 +153,7 @@ fn max_line_number_width(text: &str) -> usize {
     max_ln.to_string().len().max(1)
 }
 
-/// Highest line number a hunk header refers to on either side —
-/// `start + count - 1` for whichever is larger. `count` defaults to 1
-/// when the header omits the `,B` suffix.
+/// Highest line number a hunk header refers to on either side.
 fn parse_hunk_extents(line: &str) -> Option<usize> {
     let after_minus = line.strip_prefix("@@ -")?;
     let old_extent = parse_range_extent(after_minus)?;
@@ -186,9 +163,7 @@ fn parse_hunk_extents(line: &str) -> Option<usize> {
     Some(old_extent.max(new_extent))
 }
 
-/// `start[,count]` → `start + count - 1`. Mirrors the unified-diff
-/// `@@` convention: `@@ -27,20` means lines 27..=46. A bare `@@ -27`
-/// means a single line at 27.
+/// `start[,count]` → `start + count - 1`. Bare `start` ⇒ one line.
 fn parse_range_extent(s: &str) -> Option<usize> {
     let stop = s.find([',', ' ']).unwrap_or(s.len());
     let start: usize = s[..stop].parse().ok()?;
@@ -242,7 +217,7 @@ mod tests {
 
     #[test]
     fn parse_hunk_starts_without_counts() {
-        // Single-line hunks omit the ",B" suffix — `@@ -42 +43 @@`.
+        // Single-line hunks omit the ",B" suffix.
         assert_eq!(parse_hunk_starts("@@ -42 +43 @@"), Some((42, 43)));
     }
 
@@ -262,11 +237,8 @@ mod tests {
 
     #[test]
     fn strip_marker_rejects_diff_metadata_double_marker() {
-        // `+++ b/path` and `--- a/path` would otherwise look like add /
-        // del lines if the renderer didn't filter them out before
-        // reaching this branch — pin the safety net so a refactor that
-        // dropped the metadata-skip branch above doesn't render them as
-        // green/red rows.
+        // Safety net: if the renderer's metadata-skip branch ever
+        // drops, `+++ b/X` / `--- a/X` must not render as green/red.
         assert_eq!(strip_marker("+++ b/path", '+'), None);
         assert_eq!(strip_marker("--- a/path", '-'), None);
     }
@@ -275,17 +247,14 @@ mod tests {
 
     #[test]
     fn max_line_number_width_uses_largest_hunk_extent() {
-        // Asymmetric hunk: old extent 1, new extent 10. Dropping the
-        // `.max()` in `parse_hunk_extents` would return the smaller
-        // side and collapse the gutter to width 1.
+        // Asymmetric extents: dropping `.max()` would collapse to 1.
         let text = "@@ -1,1 +1,10 @@";
         assert_eq!(max_line_number_width(text), 2);
     }
 
     #[test]
     fn max_line_number_width_floors_at_one_when_no_hunks() {
-        // The renderer never collapses the gutter to zero; otherwise the
-        // separator would butt against the bar prefix.
+        // Floor at 1 — width 0 would butt the separator against the bar.
         assert_eq!(max_line_number_width(""), 1);
         assert_eq!(max_line_number_width("Untracked files:\n  foo"), 1);
     }
@@ -294,9 +263,8 @@ mod tests {
 
     #[test]
     fn parse_hunk_extents_returns_max_of_old_and_new_sides() {
-        // Pin the `.max()` directly so a future refactor can't drop it
-        // silently — the integration test above only catches the case
-        // where the loss changes the rendered gutter width.
+        // Pin `.max()` directly; the integration test above only
+        // catches losses that change the rendered gutter width.
         assert_eq!(parse_hunk_extents("@@ -1,1 +1,10 @@"), Some(10));
         assert_eq!(parse_hunk_extents("@@ -100,5 +1,1 @@"), Some(104));
     }
@@ -315,8 +283,7 @@ mod tests {
 
     #[test]
     fn parse_range_extent_with_count_is_start_plus_count_minus_one() {
-        // `27,20` covers lines 27..=46. The `saturating_sub(1)` is
-        // load-bearing: count=1 must give extent=27, not 28.
+        // count=1 must give extent=start, not start+1.
         assert_eq!(parse_range_extent("27,20"), Some(46));
         assert_eq!(parse_range_extent("27,1"), Some(27));
     }
@@ -331,9 +298,6 @@ mod tests {
 
     #[test]
     fn render_emits_path_header_then_hunk_then_body_rows() {
-        // Use `indoc!` so the single leading space on " context" survives
-        // — `\<newline>` line continuation would strip it and route the
-        // line through the defensive branch instead of strip_prefix(' ').
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/foo.rs b/foo.rs
@@ -355,8 +319,8 @@ mod tests {
 
     #[test]
     fn render_skips_index_and_marker_lines() {
-        // `index ...`, `--- a/path`, `+++ b/path` are all noise; the
-        // path header from `diff --git` already names the file.
+        // `index`, `--- a/X`, `+++ b/X` are all skipped — the path
+        // header already names the file.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/foo.rs b/foo.rs
@@ -370,10 +334,8 @@ mod tests {
 
     #[test]
     fn render_add_row_carries_diff_add_row_bg() {
-        // Pin the green-row-bg path so a refactor that dropped the
-        // diff_add_row argument from the add renderer construction
-        // (or swapped it with del) trips here. The bg slot reaches
-        // the rendered span via `Renderer::with_style`'s patch.
+        // Pin: dropping or swapping `diff_add_row` on the renderer
+        // construction would trip here.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -381,10 +343,9 @@ mod tests {
             +only added
         "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Layout: [path header, hunk header, add row].
+        // Layout: [path header, hunk header, add row]. Inner spans
+        // (number, separator, text) carry the bg; the bar stays clear.
         let add_row = lines.last().expect("at least one row");
-        // Inner spans (number, separator, text) carry diff_add_row bg
-        // patched via `Style::patch`. The bar prefix span stays clear.
         let bgs: Vec<_> = add_row.spans.iter().map(|s| s.style.bg).collect();
         assert_eq!(bgs[0], None, "bar prefix must stay clear");
         assert!(
@@ -403,7 +364,6 @@ mod tests {
             +replacement
         "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Find the del row (the `-` content).
         let del_row = lines
             .iter()
             .find(|line| line.spans.iter().any(|s| s.content.as_ref() == " - "))
@@ -417,10 +377,8 @@ mod tests {
 
     #[test]
     fn render_untracked_section_outside_hunks_emits_plain_rows() {
-        // After all hunks the producer appends "Untracked files:" plus
-        // indented file paths. None of those should land as green / red
-        // rows, even though the indented lines start with two spaces
-        // (which looks like a context line).
+        // Indented untracked paths must not paint as context rows
+        // even though their leading spaces look like one.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             Untracked files:
@@ -429,7 +387,6 @@ mod tests {
         "});
         let lines = block.render(&ctx_at(80, &theme));
         for line in &lines {
-            // No row should carry the diff_add or diff_del row bg.
             for span in &line.spans {
                 assert!(
                     span.style.bg != theme.diff_add.bg && span.style.bg != theme.diff_del.bg,
@@ -441,8 +398,7 @@ mod tests {
 
     #[test]
     fn render_truncation_footer_after_hunks_renders_dim() {
-        // The producer appends "(truncated: N KB more)" as a separate
-        // paragraph. It must read as a dim footer, not a +/-/ctx row.
+        // Truncation footer must read as a dim row, not +/-/ctx.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -459,9 +415,7 @@ mod tests {
 
     #[test]
     fn render_walks_line_numbers_per_hunk_starts() {
-        // Numbers must come from the @@ header, not be 1-based per
-        // chunk index. A hunk starting at -27 / +27 must render `27`
-        // for the first - and + lines, then `28` for the second, etc.
+        // Numbers come from the `@@` header, not 1-based per chunk.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -472,8 +426,7 @@ mod tests {
             +delta
         "});
         let lines = block.render(&ctx_at(80, &theme));
-        // Body rows are after path header + hunk header (2 entries).
-        let body = &lines[2..];
+        let body = &lines[2..]; // skip path + hunk headers
         let numbers: Vec<String> = body
             .iter()
             .map(|line| line.spans[1].content.trim().to_owned())
@@ -483,11 +436,8 @@ mod tests {
 
     #[test]
     fn render_advances_line_numbers_through_context_rows() {
-        // Context rows advance both old_ln and new_ln. Pin both
-        // directions in one fixture: `+third` rides new_ln (which the
-        // context bumped from 2 to 3), `-fourth` rides old_ln (which
-        // the context bumped from 1 to 2). Dropping either increment
-        // would mis-number one of the surrounding marker rows.
+        // Pin both increments via one fixture: `+third` rides new_ln
+        // (bumped 2→3 by context), `-fourth` rides old_ln (1→2).
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -508,10 +458,8 @@ mod tests {
 
     #[test]
     fn render_corrupt_hunk_body_falls_through_to_defensive_row() {
-        // Inside a hunk, a line without `+`, `-`, or ` ` is malformed.
-        // It must render as a plain bordered row (no number gutter, no
-        // add / del bg) and must not bump line numbers — otherwise the
-        // gutter drifts on the rest of the hunk.
+        // Corrupt body line → plain bordered row, no number, no bg,
+        // and no number-bump (else the rest of the hunk drifts).
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -538,8 +486,8 @@ mod tests {
             );
         }
 
-        // Surrounding `+` rows keep numbers 1 and 2 — the corrupt line
-        // consumed no slot on either side.
+        // Surrounding `+` rows keep 1 and 2 — corrupt line consumed
+        // no number slot on either side.
         let plus_numbers: Vec<String> = [&body[0], &body[2]]
             .iter()
             .map(|line| line.spans[1].content.trim().to_owned())
@@ -551,8 +499,7 @@ mod tests {
 
     #[test]
     fn block_kind_is_other() {
-        // `Result` kind forces blank-before spacing in chat view; pin
-        // `Other` so a copy-paste from `ToolResultBlock` doesn't drift.
+        // `Result` kind would force blank-before spacing; pin `Other`.
         let block = GitDiffBlock::new("diff --git a/x b/x\n");
         assert!(matches!(block.block_kind(), BlockKind::Other));
     }
