@@ -1210,6 +1210,23 @@ mod tests {
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
 
+    #[test]
+    fn dispatch_clear_stays_local_to_protect_the_slash_bypass() {
+        // `/clear` writes `UserAction::Clear` straight into `user_tx`
+        // from `SlashContext`, so this arm only ever fires if some new
+        // call site routes `Clear` through `dispatch_user_action`. The
+        // local `false` return guarantees the action isn't double-sent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::Clear);
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "Clear must not reach user_tx via dispatch_user_action",
+        );
+        assert!(!app.should_quit);
+        assert_eq!(app.chat.entry_count(), 0);
+    }
+
     #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: between the user pressing Esc
@@ -1268,6 +1285,30 @@ mod tests {
             Some("First prompt"),
             "current-session title must survive a stale event",
         );
+    }
+
+    #[test]
+    fn handle_session_rolled_rebinds_session_id_and_drops_stale_title() {
+        // `/clear` swaps the session UUID; the App must rebind the
+        // `/status`-visible id so it reflects the live session, and
+        // wipe the now-stale AI title so the bar isn't lying about
+        // which conversation is on screen.
+        let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
+        let original_id = app.session_info.session_id.clone();
+        app.handle_agent_event(AgentEvent::SessionRolled {
+            id: "rolled-session".to_owned(),
+        });
+
+        assert_eq!(
+            app.session_info.session_id, "rolled-session",
+            "session id must rebind to the rolled session",
+        );
+        assert_ne!(app.session_info.session_id, original_id);
+        assert!(
+            app.status_bar.title().is_none(),
+            "stale AI title must be cleared on roll",
+        );
+        assert!(app.dirty);
     }
 
     #[test]

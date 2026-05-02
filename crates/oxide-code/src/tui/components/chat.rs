@@ -2178,6 +2178,41 @@ mod tests {
         assert!(!chat.last_is_error());
     }
 
+    // ── last_system_text ──
+
+    #[test]
+    fn last_system_text_returns_body_for_system_message() {
+        // Pins the `Some` branch so a regression in
+        // `SystemMessageBlock::system_text` would surface here as well
+        // as in the slash-command tests that consume the accessor.
+        let mut chat = test_chat();
+        chat.push_system_message("hello there");
+        assert_eq!(chat.last_system_text(), Some("hello there"));
+    }
+
+    #[test]
+    fn last_system_text_default_is_none_for_non_system_blocks() {
+        // Exercises the trait-default `system_text` impl on every
+        // non-system variant — the accessor must not surface user /
+        // tool / error block text as if it were a slash-command
+        // confirmation.
+        let mut chat = test_chat();
+        chat.push_user_message("a user prompt".into());
+        assert_eq!(chat.last_system_text(), None);
+
+        chat.push_tool_call("$", "ls");
+        assert_eq!(chat.last_system_text(), None);
+
+        chat.push_error("boom");
+        assert_eq!(chat.last_system_text(), None);
+    }
+
+    #[test]
+    fn last_system_text_none_when_no_blocks() {
+        let chat = test_chat();
+        assert_eq!(chat.last_system_text(), None);
+    }
+
     // ── update_layout ──
 
     #[test]
