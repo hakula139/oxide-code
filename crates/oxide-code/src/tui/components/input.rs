@@ -979,4 +979,74 @@ mod tests {
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "a"));
     }
+
+    // ── popup routing ──
+
+    /// Drive the input into a popup-visible state by typing a `/`,
+    /// so popup-key tests start from a known fixture.
+    fn input_with_popup() -> InputArea {
+        let mut input = test_input();
+        input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(input.popup_visible(), "typing `/` opens the popup");
+        input
+    }
+
+    #[test]
+    fn handle_event_popup_down_advances_selection() {
+        let mut input = input_with_popup();
+        let initial = input.popup.selected().map(|m| m.name).unwrap();
+        let action = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(action.is_none(), "Down is consumed silently");
+        let after = input.popup.selected().map(|m| m.name).unwrap();
+        assert_ne!(initial, after, "Down moves to a different command");
+    }
+
+    #[test]
+    fn handle_event_popup_up_reverses_selection() {
+        let mut input = input_with_popup();
+        input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        let after_down = input.popup.selected().map(|m| m.name).unwrap();
+        input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+        let after_up = input.popup.selected().map(|m| m.name).unwrap();
+        assert_ne!(after_down, after_up, "Up reverses Down");
+    }
+
+    #[test]
+    fn handle_event_popup_visible_passes_unhandled_keys_to_textarea() {
+        // Char keys are not popup nav — they fall through to the
+        // textarea so refining the query keeps working.
+        let mut input = input_with_popup();
+        let action = input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["/h"]);
+        assert!(input.popup_visible(), "popup stays visible while typing");
+    }
+
+    #[test]
+    fn handle_event_popup_visible_ignores_non_key_events() {
+        // Resize and other non-key events reach handle_event when
+        // routed directly; popup must let them pass without panicking.
+        let mut input = input_with_popup();
+        let action = input.handle_event(&Event::Resize(80, 24));
+        assert!(action.is_none());
+        assert!(input.popup_visible());
+    }
+
+    // ── render_popup ──
+
+    #[test]
+    fn render_popup_paints_when_visible() {
+        let input = input_with_popup();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, input.popup_height());
+                input.render_popup(frame, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first = buffer.cell(Position::new(0, 0)).unwrap().symbol();
+        assert!(!first.is_empty(), "popup row paints something at (0,0)");
+    }
 }

@@ -288,4 +288,19 @@ mod tests {
     fn best_match_returns_none_when_neither_name_nor_alias_match() {
         assert!(best_match("zzz", &CLEAR).is_none());
     }
+
+    // ── Fake fixture ──
+
+    #[test]
+    fn fake_execute_is_a_no_op_ok() {
+        // Pin the trait stub so registries that include Fake never
+        // trip a panic during dispatch.
+        let mut chat = crate::tui::components::chat::ChatView::new(
+            &crate::tui::theme::Theme::default(),
+            false,
+        );
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        assert!(HELP.execute("anything", &mut ctx).is_ok());
+    }
 }

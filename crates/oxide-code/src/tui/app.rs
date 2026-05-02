@@ -726,6 +726,66 @@ mod tests {
         assert!(app.should_quit);
     }
 
+    #[tokio::test]
+    async fn run_with_events_marks_dirty_when_spinner_frame_advances() {
+        // Streaming spinner flips frames after 5 * 16ms = 80ms, so
+        // sleep past that to drive `status_bar.tick()` truthy.
+        let (mut app, _rx, agent_tx) = test_app(None);
+        app.status_bar.set_status(Status::Streaming);
+        app.dirty = false;
+
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+        let driver = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop(agent_tx);
+        });
+
+        app.run_with_events(
+            &mut terminal,
+            futures::stream::pending::<std::io::Result<Event>>(),
+        )
+        .await
+        .unwrap();
+        driver.await.unwrap();
+
+        assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn run_with_events_pumps_crossterm_and_agent_events_through_select() {
+        // Pin the crossterm and agent arms of the select! loop:
+        // a key reaches the input, a stream token disables it, and
+        // closing the agent channel ends the loop.
+        let (mut app, _rx, agent_tx) = test_app(None);
+        let (mut terminal, _buf) = crossterm_test_terminal(60, 8);
+
+        let key = Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let stream = futures::stream::iter(vec![key]).chain(futures::stream::pending());
+
+        let agent_tx_clone = agent_tx.clone();
+        let driver = tokio::spawn(async move {
+            agent_tx_clone
+                .send(AgentEvent::StreamToken("hi".into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(TICK_INTERVAL * 2).await;
+            drop(agent_tx);
+        });
+
+        app.run_with_events(&mut terminal, stream).await.unwrap();
+        driver.await.unwrap();
+
+        assert!(app.should_quit);
+        assert_eq!(app.input.lines(), vec!["x"], "crossterm key reached input");
+        assert!(
+            !app.input.is_enabled(),
+            "agent StreamToken disabled the input",
+        );
+    }
+
     // ── handle_crossterm_event ──
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -1670,6 +1730,21 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(Some("narrow"));
         app.chat.push_user_message("hi".into());
         insta::assert_snapshot!(render_app(&mut app, 40, 8));
+    }
+
+    #[test]
+    fn draw_frame_renders_slash_popup_above_input_when_visible() {
+        // Typing `/` opens the popup; draw_frame must reserve a band
+        // above the input and paint at least one command row into it.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.input.popup_visible());
+
+        let text = rendered_text(&mut app, 60, 14);
+        assert!(
+            text.contains("/help"),
+            "popup must paint at least one canonical command row: {text}",
+        );
     }
 
     #[test]
