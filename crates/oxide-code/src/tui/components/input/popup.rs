@@ -297,8 +297,8 @@ mod tests {
 
     #[test]
     fn height_matches_match_count_below_cap() {
-        // BUILT_INS today has 4 commands, so empty query is below the
-        // cap. The popup occupies exactly that many rows.
+        // BUILT_INS sits below `MAX_VISIBLE_ROWS`, so empty query
+        // renders every command and the popup occupies that many rows.
         let popup = popup_with_query(Some(""));
         assert_eq!(usize::from(popup.height()), popup.matches.len());
     }
