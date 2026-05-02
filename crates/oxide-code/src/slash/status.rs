@@ -34,7 +34,7 @@ fn render_status(info: &SessionInfo) -> String {
     let rows: [(&str, &str); 6] = [
         ("Model", &info.model),
         ("Model ID", &info.config.model_id),
-        ("CWD", &info.cwd),
+        ("Working Directory", &info.cwd),
         ("Version", info.version),
         ("Auth", info.config.auth_label),
         ("Session ID", &info.session_id),
@@ -131,10 +131,10 @@ mod tests {
             .zip(values)
             .map(|(line, value)| line.find(value).expect("value missing from row"))
             .collect();
-        // Longest label is "Session ID" (10) ⇒ prefix(2) + 10 + gap(2) = 14.
+        // Longest label is "Working Directory" (17) ⇒ prefix(2) + 17 + gap(2) = 21.
         assert!(
-            cols.iter().all(|c| *c == 14),
-            "value columns not aligned at col 14: {cols:?}",
+            cols.iter().all(|c| *c == 21),
+            "value columns not aligned at col 21: {cols:?}",
         );
     }
 }
