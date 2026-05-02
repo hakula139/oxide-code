@@ -237,7 +237,8 @@ impl App {
     }
 
     /// Send `action` to the agent loop; channel errors land as a chat
-    /// error block. Reused by the `PromptSubmit` slash branch.
+    /// error block. Reused by the slash `Action(_)` branch — both
+    /// `Action(SubmitPrompt(_))` and `Action(Clear)` flow through here.
     fn forward_to_agent(&mut self, action: UserAction) {
         if let Err(e) = self.user_tx.try_send(action) {
             match e {
