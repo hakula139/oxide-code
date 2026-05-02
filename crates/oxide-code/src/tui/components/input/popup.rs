@@ -420,7 +420,7 @@ mod tests {
             })
             .collect();
         let backend = render_to_backend(&popup, 30);
-        let rendered = format!("{}", backend);
+        let rendered = format!("{backend}");
         assert!(
             rendered.contains("(2 more)"),
             "footer must surface the hidden count: {rendered}",
