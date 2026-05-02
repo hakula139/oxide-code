@@ -179,6 +179,17 @@ impl SessionHandle {
             .await
     }
 
+    /// Finalize and tear down: writes the summary, surfaces a flush
+    /// error (if any), and shuts the actor down. Returns the failure
+    /// message so callers can route it as fits their context (warn-log
+    /// after the TUI has torn down, [`AgentSink::session_write_error`]
+    /// while the sink is still live).
+    pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
+        let outcome = self.finish(snapshots).await;
+        self.shutdown().await;
+        outcome.failure
+    }
+
     /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
     /// after the current batch flushes, then awaits the join handle.
     /// Cmd-driven exit (rather than waiting for every clone's
@@ -684,6 +695,41 @@ mod tests {
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
+
+    // ── finalize ──
+
+    #[tokio::test]
+    async fn finalize_writes_summary_then_returns_none_on_success() {
+        // finalize's two visible contracts: the summary lands on disk
+        // (proving finish ran) and the join completes (proving shutdown
+        // ran). Returning None pins that a healthy session reports no
+        // failure — the warn-log / sink-error branches at call sites
+        // depend on this.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+
+        let failure = handle.finalize(Vec::new()).await;
+
+        assert!(failure.is_none(), "healthy finalize reports no failure");
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            content.contains(r#""type":"summary""#),
+            "summary lands on disk: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_returns_failure_when_actor_dead() {
+        // The whole point of returning the failure: the dead-actor
+        // path surfaces so the caller can route it (warn-log in TUI
+        // exit, sink in REPL / headless / `/clear` roll).
+        let handle = testing::dead("dead");
+        let failure = handle.finalize(Vec::new()).await;
+        assert!(failure.is_some(), "dead handle finalize surfaces failure");
     }
 
     // ── shutdown ──

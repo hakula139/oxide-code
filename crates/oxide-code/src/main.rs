@@ -364,13 +364,10 @@ async fn run_tui(
         _ => {}
     }
 
-    // Summary write after abort, no sink available — actor warn-logs
-    // the cause.
-    let outcome = session.finish(file_tracker.snapshot_all()).await;
-    if let Some(msg) = outcome.failure {
+    // Summary write after abort — sink is gone, so warn-log on failure.
+    if let Some(msg) = session.finalize(file_tracker.snapshot_all()).await {
         warn!("session finish failed: {msg}");
     }
-    session.shutdown().await;
 
     result
 }
@@ -547,9 +544,8 @@ async fn bare_repl(
     }
     .await;
 
-    let outcome = session.finish(file_tracker.snapshot_all()).await;
-    sink.session_write_error(outcome.failure.as_deref());
-    session.shutdown().await;
+    let failure = session.finalize(file_tracker.snapshot_all()).await;
+    sink.session_write_error(failure.as_deref());
 
     // `tokio::io::stdin()` spawns a blocking thread that cannot be
     // cancelled (see tokio::io::stdin docs), so on a signal-induced
@@ -610,9 +606,8 @@ async fn headless(
             Ok(())
         }
     };
-    let outcome = session.finish(file_tracker.snapshot_all()).await;
-    sink.session_write_error(outcome.failure.as_deref());
-    session.shutdown().await;
+    let failure = session.finalize(file_tracker.snapshot_all()).await;
+    sink.session_write_error(failure.as_deref());
 
     // Mirror `bare_repl`: on signal exit, skip runtime Drop so any
     // outstanding HTTP / reqwest connection pool doesn't hold the
