@@ -169,8 +169,16 @@ impl Client {
     }
 
     /// Replaces the session id used for `x-claude-code-session-id` and
-    /// `metadata.user_id` — called by `/clear` to roll the UUID.
+    /// `metadata.user_id` — called by `/clear` to roll the UUID. The
+    /// debug-assert guards the in-house contract: callers always feed
+    /// us a `session_id` from `SessionHandle`, which mints UUID v4s,
+    /// so a value that wouldn't survive `HeaderValue::from_str` is a
+    /// programmer error.
     pub(crate) fn set_session_id(&mut self, id: String) {
+        debug_assert!(
+            HeaderValue::from_str(&id).is_ok(),
+            "session id must be a legal HTTP header value: {id:?}",
+        );
         self.session_id = id;
     }
 
