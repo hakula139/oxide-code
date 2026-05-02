@@ -18,7 +18,7 @@ impl SlashCommand for HelpCmd {
     }
 
     fn description(&self) -> &'static str {
-        "show available commands"
+        "Show available commands"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {

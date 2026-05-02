@@ -31,7 +31,7 @@ impl SlashCommand for ConfigCmd {
     }
 
     fn description(&self) -> &'static str {
-        "show resolved config and source files"
+        "Show resolved config and source files"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {

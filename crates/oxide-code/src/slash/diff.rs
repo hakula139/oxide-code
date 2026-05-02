@@ -26,7 +26,7 @@ impl SlashCommand for DiffCmd {
     }
 
     fn description(&self) -> &'static str {
-        "show uncommitted git changes"
+        "Show uncommitted git changes"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
