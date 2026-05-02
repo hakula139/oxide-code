@@ -110,11 +110,10 @@ impl Client {
         );
 
         // 3P gateways fingerprint absence of the full Stainless header set.
+        // `x-claude-code-session-id` is set per-request in `stream_message`
+        // / `complete` so `/clear` can roll the session id without
+        // rebuilding the HTTP client.
         headers.insert("x-app", HeaderValue::from_static("cli"));
-        headers.insert(
-            "x-claude-code-session-id",
-            HeaderValue::from_str(&session_id)?,
-        );
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
         headers.insert(
             "x-stainless-package-version",
@@ -249,9 +248,10 @@ impl Client {
         let (tx, rx) = mpsc::channel(64);
         let http = self.http.clone();
         let betas = compute_betas(&self.config.model, &self.config.auth, true, false).join(",");
+        let session_id = self.session_id.clone();
 
         tokio::spawn(async move {
-            let result = stream_sse(&http, &url, betas, body, &tx).await;
+            let result = stream_sse(&http, &url, betas, session_id, body, &tx).await;
             if let Err(e) = result {
                 _ = tx.send(Err(e)).await;
             }
