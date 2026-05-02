@@ -545,9 +545,11 @@ mod tests {
     // ── Client::set_session_id ──
 
     #[tokio::test]
-    async fn set_session_id_propagates_to_x_claude_code_session_id_header() {
-        // Pins setter + per-request plumbing together: the mock rejects
-        // any header value other than the rolled one.
+    async fn set_session_id_propagates_to_header_and_metadata_user_id() {
+        // Pins setter + per-request plumbing on both wire surfaces:
+        // the header (matched by the mock — wrong id 404s) and the
+        // body's metadata.user_id (a stringified JSON object that
+        // contains session_id alongside device_id).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -573,6 +575,22 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let received = server.received_requests().await.expect("recorded requests");
+        assert_eq!(received.len(), 1, "exactly one streamed call");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("request body is JSON");
+        let user_id = body["metadata"]["user_id"]
+            .as_str()
+            .expect("metadata.user_id is a string");
+        assert!(
+            user_id.contains("sid-rolled"),
+            "metadata.user_id carries the new session id: {user_id}",
+        );
+        assert!(
+            !user_id.contains("sid-original"),
+            "old session id must not leak into the body: {user_id}",
+        );
     }
 
     // ── Client::stream_message ──
