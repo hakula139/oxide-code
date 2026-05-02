@@ -118,7 +118,7 @@ Persistence stance: `/model` and `/theme` mutate runtime state for the current s
 
 ### Workflow Skills
 
-- User-extensible commands backed by prompt templates: `/init`, `/review`, `/commit`.
+- User-extensible templates that can override built-ins or add new ones (e.g. project-local `~/.claude/commands/review.md`). Built-ins like `/init` ship under Working Today.
 - Auth slash commands: `/login`, `/logout`.
 - Configurable instruction directories beyond `.claude/`.
 
