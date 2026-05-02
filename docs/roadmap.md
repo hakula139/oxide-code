@@ -61,13 +61,9 @@ The direction is simple:
 
 ### Slash Commands
 
-- `/help`, `/diff`, `/status`, `/config`, `/clear`, `/init` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop.
-- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops in-memory state, and clears the AI title. The old session stays resumable via `ox -c <old-id>`.
-- `/init` forwards a synthesized prompt asking the model to author or update the project's `AGENTS.md` / `CLAUDE.md`. Only the typed `/init` line is visible in chat; the body is sent invisibly.
-- Autocomplete popup: typing `/` opens a two-column overlay above the input with name + description rows; Up / Down navigate, Tab completes `/{name}` plus a trailing space, Enter submits, Esc dismisses. Selected row paints normal-bold; the rest are dim. Ranks name-prefix > alias-prefix > name-substring > alias-substring; aliases parenthesize only the alias the user typed.
-- Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
-- Aliases display inline in `/help` (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.
-- Read-only by design: no slash command writes to user config files. Mutations to runtime state (`/model`, `/theme`) will be session-local on a NixOS-style declarative setup, restart returns to the user-declared values.
+- Built-in: `/help`, `/clear` (aliases `/new`, `/reset`), `/init`, `/diff`, `/status`, `/config`. See the [user guide](guide/slash-commands.md).
+- Autocomplete popup on typing `/`, with ranked filter and Tab completion.
+- Read-only by design — no slash command writes user config files; runtime mutations stay session-local.
 
 ### Authentication & Configuration
 

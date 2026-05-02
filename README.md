@@ -40,6 +40,7 @@ ox
 | ----------------------------------------------- | ------------------------------------------------ |
 | [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                  |
 | [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment    |
+| [Slash Commands](docs/guide/slash-commands.md)  | Built-in client-side commands and autocomplete   |
 | [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules  |
 | [Sessions](docs/guide/sessions.md)              | Session persistence, listing, and resume         |
 | [Theming](docs/guide/theming.md)                | Built-in palettes, custom themes, slot overrides |
