@@ -2163,6 +2163,19 @@ mod tests {
     }
 
     #[test]
+    fn update_layout_paused_skips_scroll_and_keeps_offset() {
+        // Scrolled-up state: appends must not yank the viewport down.
+        let mut chat = test_chat();
+        chat.content_height.set(100);
+        chat.scroll_offset = 25;
+        chat.auto_scroll = false;
+        let moved = chat.update_layout(Rect::new(0, 0, 80, 20));
+        assert!(!moved);
+        assert_eq!(chat.scroll_offset, 25);
+        assert_eq!(chat.viewport_height, 20);
+    }
+
+    #[test]
     fn update_layout_invalidates_streaming_cache_on_width_change() {
         let mut chat = test_chat();
         _ = chat.update_layout(Rect::new(0, 0, 80, 24));
