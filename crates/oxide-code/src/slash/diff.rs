@@ -78,8 +78,11 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
 
 fn format_diff(tracked: &str, untracked: &str) -> String {
     let mut out = String::new();
-    let tracked = tracked.trim_end();
-    if !tracked.is_empty() {
+    // Strip only the trailing line break git appends — keep any
+    // trailing whitespace on real context/change lines so a diff that
+    // legitimately includes trailing spaces lands byte-for-byte.
+    let tracked = tracked.trim_end_matches('\n');
+    if !tracked.trim().is_empty() {
         out.push_str(tracked);
     }
     let untracked = untracked.trim();
@@ -356,6 +359,15 @@ mod tests {
     fn format_diff_tracked_only_renders_verbatim() {
         let body = format_diff("diff --git a/x b/x\n+foo\n", "");
         assert_eq!(body, "diff --git a/x b/x\n+foo");
+    }
+
+    #[test]
+    fn format_diff_keeps_trailing_whitespace_on_diff_lines() {
+        // Real diffs can include trailing-whitespace edits — the
+        // formatter must touch only the trailing newline git appends,
+        // not in-line whitespace bytes.
+        let body = format_diff(" context  \n+added  \n", "");
+        assert_eq!(body, " context  \n+added  ");
     }
 
     #[test]
