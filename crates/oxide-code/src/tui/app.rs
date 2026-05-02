@@ -233,6 +233,12 @@ impl App {
         if !self.apply_action_locally(&action) {
             return;
         }
+        self.forward_to_agent(action);
+    }
+
+    /// Send `action` to the agent loop; channel errors land as a chat
+    /// error block. Reused by the `PromptSubmit` slash branch.
+    fn forward_to_agent(&mut self, action: UserAction) {
         if let Err(e) = self.user_tx.try_send(action) {
             match e {
                 mpsc::error::TrySendError::Closed(_) => {
@@ -260,17 +266,26 @@ impl App {
         match action {
             UserAction::SubmitPrompt(text) => {
                 if self.input.is_enabled() {
-                    // Slash commands stay client-side: parse first, run
-                    // locally, never forward to the agent loop. The
-                    // typed text still lands as a user-message block so
-                    // the chat shows what the user typed; nothing is
-                    // recorded into `Message`s, so resume / token
-                    // accounting / model context all stay clean.
+                    // Slash commands stay client-side: parse, run
+                    // locally, never forward the typed `/cmd` line.
+                    // `PromptSubmit` outcomes hand back a synthesized
+                    // body; we forward it as a turn (input disabled,
+                    // status flipped) just like a typed prompt.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let mut ctx =
-                            SlashContext::new(&mut self.chat, &self.session_info, &self.user_tx);
-                        slash::dispatch(&parsed, &mut ctx);
+                        let synthesized = {
+                            let mut ctx = SlashContext::new(
+                                &mut self.chat,
+                                &self.session_info,
+                                &self.user_tx,
+                            );
+                            slash::dispatch(&parsed, &mut ctx)
+                        };
+                        if let Some(prompt) = synthesized {
+                            self.input.set_enabled(false);
+                            self.status_bar.set_status(Status::Streaming);
+                            self.forward_to_agent(UserAction::SubmitPrompt(prompt));
+                        }
                         return false;
                     }
                     self.chat.push_user_message(text.clone());
@@ -278,10 +293,8 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
-                    // Slash commands stay client-side mid-turn —
-                    // queueing forwards them through the agent and
-                    // persists them as user prompts. Read-only ones
-                    // dispatch immediately; state-mutating ones refuse.
+                    // Mid-turn: read-only commands dispatch
+                    // immediately; mutators / prompt-submit refuse.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
@@ -291,7 +304,8 @@ impl App {
                                     &self.session_info,
                                     &self.user_tx,
                                 );
-                                slash::dispatch(&parsed, &mut ctx);
+                                // Read-only ⇒ never `PromptSubmit`.
+                                _ = slash::dispatch(&parsed, &mut ctx);
                             }
                             SlashKind::Mutating => {
                                 self.chat.push_system_message(format!(
@@ -1324,6 +1338,44 @@ mod tests {
         let body = app.chat.last_system_text().expect("refusal system message");
         assert!(
             body.contains("/clear runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_forwards_synthesized_prompt_and_flips_to_streaming() {
+        // The chat shows only `/init`; the agent must receive the body.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
+        assert!(!app.input.is_enabled(), "Streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("synthesized prompt forwarded");
+        let UserAction::SubmitPrompt(body) = forwarded else {
+            panic!("expected SubmitPrompt, got {forwarded:?}");
+        };
+        assert!(body.contains("AGENTS.md"), "expected expansion: {body}");
+        assert_ne!(body, "/init", "the agent must see the expanded body");
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
+        // `is_read_only=false` ⇒ Mutating ⇒ refuse mid-turn.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no synthesized prompt must reach user_tx mid-turn",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/init runs only when idle"),
             "refusal must name the command and gate: {body}",
         );
     }
