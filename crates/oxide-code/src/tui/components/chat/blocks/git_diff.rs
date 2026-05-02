@@ -275,9 +275,11 @@ mod tests {
 
     #[test]
     fn max_line_number_width_uses_largest_hunk_extent() {
-        // `27,20` → 46, `1000,3` → 1002. Width = "1002".len() = 4.
-        let text = "@@ -27,20 +27,20 @@\n@@ -1000,3 +1000,3 @@";
-        assert_eq!(max_line_number_width(text), 4);
+        // Asymmetric hunk: old extent 1, new extent 10. Dropping the
+        // `.max()` in `parse_hunk_extents` would return the smaller
+        // side and collapse the gutter to width 1.
+        let text = "@@ -1,1 +1,10 @@";
+        assert_eq!(max_line_number_width(text), 2);
     }
 
     #[test]
@@ -286,6 +288,43 @@ mod tests {
         // separator would butt against the bar prefix.
         assert_eq!(max_line_number_width(""), 1);
         assert_eq!(max_line_number_width("Untracked files:\n  foo"), 1);
+    }
+
+    // ── parse_hunk_extents ──
+
+    #[test]
+    fn parse_hunk_extents_returns_max_of_old_and_new_sides() {
+        // Pin the `.max()` directly so a future refactor can't drop it
+        // silently — the integration test above only catches the case
+        // where the loss changes the rendered gutter width.
+        assert_eq!(parse_hunk_extents("@@ -1,1 +1,10 @@"), Some(10));
+        assert_eq!(parse_hunk_extents("@@ -100,5 +1,1 @@"), Some(104));
+    }
+
+    #[test]
+    fn parse_hunk_extents_handles_omitted_counts() {
+        assert_eq!(parse_hunk_extents("@@ -42 +43 @@"), Some(43));
+    }
+
+    #[test]
+    fn parse_hunk_extents_returns_none_for_non_hunk() {
+        assert_eq!(parse_hunk_extents("plain"), None);
+    }
+
+    // ── parse_range_extent ──
+
+    #[test]
+    fn parse_range_extent_with_count_is_start_plus_count_minus_one() {
+        // `27,20` covers lines 27..=46. The `saturating_sub(1)` is
+        // load-bearing: count=1 must give extent=27, not 28.
+        assert_eq!(parse_range_extent("27,20"), Some(46));
+        assert_eq!(parse_range_extent("27,1"), Some(27));
+    }
+
+    #[test]
+    fn parse_range_extent_without_count_is_just_start() {
+        assert_eq!(parse_range_extent("42"), Some(42));
+        assert_eq!(parse_range_extent("42 @@"), Some(42));
     }
 
     // ── render ──
