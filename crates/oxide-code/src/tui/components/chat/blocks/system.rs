@@ -131,12 +131,13 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             // First row: bar+space as one span. Continuation: split
             // into [bar, space] so the bar carries `accent`.
+            let head = &line.spans[0];
+            let content = head.content.as_ref();
             assert!(
-                line.spans[0].content.starts_with(BAR),
-                "row {i} bar prefix missing: {:?}",
-                line.spans[0].content,
+                content.starts_with(BAR),
+                "row {i} bar prefix missing: {content:?}",
             );
-            assert_eq!(line.spans[0].style, theme.accent());
+            assert_eq!(head.style, theme.accent());
         }
     }
 

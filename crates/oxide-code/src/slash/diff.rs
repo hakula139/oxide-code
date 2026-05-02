@@ -115,14 +115,22 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("failed to spawn git {}", args.join(" ")))?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let msg = stderr.trim();
-        if msg.is_empty() {
-            bail!("git {} failed", args.join(" "));
-        }
-        bail!("{msg}");
+        bail!("{}", git_failure_message(args, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Picks the user-facing failure message: trimmed stderr if non-empty,
+/// otherwise a synthetic `git <args> failed` so blank-stderr exits don't
+/// surface as the empty string.
+fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
+    let s = String::from_utf8_lossy(stderr);
+    let msg = s.trim();
+    if msg.is_empty() {
+        format!("git {} failed", args.join(" "))
+    } else {
+        msg.to_owned()
+    }
 }
 
 /// Cuts on a UTF-8 boundary so the prefix is always ≤ [`MAX_BYTES`],
@@ -184,11 +192,8 @@ mod tests {
             .current_dir(cwd)
             .output()
             .expect("git available on PATH");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr),
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?} failed: {stderr}");
     }
 
     /// Tempdir initialized as a git repo with `user.email` and
@@ -273,6 +278,22 @@ mod tests {
     }
 
     // ── collect_diff_in ──
+
+    #[test]
+    fn collect_diff_in_surfaces_spawn_failure_when_git_missing() {
+        // Drives the `inside_git_repo` Err arm through to `collect_diff_in`'s
+        // `?` propagation: with git off the PATH the spawn-context message
+        // must surface so users see *which* git invocation could not start.
+        let (_dir, repo) = fresh_repo();
+        temp_env::with_var("PATH", Some(""), || {
+            let err = collect_diff_in(&repo).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("failed to spawn git"),
+                "spawn-failure context drift, got: {msg}",
+            );
+        });
+    }
 
     #[test]
     fn collect_diff_in_returns_error_outside_a_repo() {
@@ -418,15 +439,58 @@ mod tests {
     // ── run_git_in ──
 
     #[test]
+    fn run_git_in_wraps_spawn_failure_with_args_in_context() {
+        // Forcing `git` off the PATH drives the `with_context` arm — the
+        // spawn-failure context message must name the args so users see
+        // *which* git invocation couldn't start.
+        let (_dir, repo) = fresh_repo();
+        temp_env::with_var("PATH", Some(""), || {
+            let err = run_git_in(&repo, &["status"]).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("failed to spawn git status"),
+                "context message drift, got: {msg}",
+            );
+        });
+    }
+
+    #[test]
     fn run_git_in_propagates_stderr_on_failure() {
         // `cat-file` of a missing SHA gives stable, version-independent
         // wording — flag-parser errors drift across git versions.
         let (_dir, repo) = fresh_repo();
         let err = run_git_in(&repo, &["cat-file", "-t", "deadbeef"]).unwrap_err();
         let msg = format!("{err:#}");
+        // Pre-evaluate both alternatives so a `||` short-circuit can't
+        // leave the second arm unexecuted on git versions where the
+        // SHA itself is echoed back.
+        let has_sha = msg.contains("deadbeef");
+        let has_not_valid = msg.to_ascii_lowercase().contains("not a valid");
         assert!(
-            msg.contains("deadbeef") || msg.to_ascii_lowercase().contains("not a valid"),
+            has_sha || has_not_valid,
             "expected git error to surface, got: {msg}",
+        );
+    }
+
+    // ── git_failure_message ──
+
+    #[test]
+    fn git_failure_message_falls_back_to_synthetic_when_stderr_blank() {
+        // Empty / whitespace-only stderr would surface as the empty
+        // string without the fallback — `git status failed` is the
+        // user-facing diagnostic in that case.
+        assert_eq!(git_failure_message(&["status"], b""), "git status failed",);
+        assert_eq!(
+            git_failure_message(&["diff", "HEAD"], b"  \n\t\n  "),
+            "git diff HEAD failed",
+        );
+    }
+
+    #[test]
+    fn git_failure_message_passes_through_trimmed_stderr() {
+        assert_eq!(
+            git_failure_message(&["status"], b"  fatal: not a git repo\n"),
+            "fatal: not a git repo",
         );
     }
 
@@ -455,7 +519,8 @@ mod tests {
         let footer = "\n\n(truncated: 100 B more — run `git diff HEAD` for the full output)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
-        assert!(got.ends_with(footer), "{}", &got[got.len() - 80..]);
+        let tail = &got[got.len() - 80..];
+        assert!(got.ends_with(footer), "footer drift, tail: {tail}");
     }
 
     #[test]
