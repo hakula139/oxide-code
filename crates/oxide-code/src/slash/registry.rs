@@ -64,6 +64,18 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::slash::context::SlashContext;
+    use crate::tui::components::chat::ChatView;
+    use crate::tui::theme::Theme;
+
+    /// Drives `cmd.execute` against a fresh in-memory chat so synthetic
+    /// fixtures can pin their trait stubs without per-test boilerplate.
+    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<(), String> {
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        cmd.execute(args, &mut ctx)
+    }
 
     // ── BUILT_INS contract ──
 
@@ -78,32 +90,99 @@ mod tests {
         );
     }
 
+    /// Every `(canonical, alias)` pair where the alias overlaps a
+    /// canonical name in `commands`. Empty ⇒ namespace is disjoint.
+    fn alias_collisions<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<(&'a str, &'a str)> {
+        let names: HashSet<_> = commands.iter().map(|c| c.name()).collect();
+        commands
+            .iter()
+            .flat_map(|cmd| {
+                cmd.aliases()
+                    .iter()
+                    .filter(|alias| names.contains(*alias))
+                    .map(move |alias| (cmd.name(), *alias))
+            })
+            .collect()
+    }
+
+    /// Canonical names of commands missing a non-empty name or
+    /// description. Empty ⇒ every command satisfies the metadata contract.
+    fn empty_metadata_offenders<'a>(commands: &[&'a dyn SlashCommand]) -> Vec<&'a str> {
+        commands
+            .iter()
+            .filter(|c| c.name().is_empty() || c.description().is_empty())
+            .map(|c| c.name())
+            .collect()
+    }
+
     #[test]
     fn built_ins_aliases_do_not_collide_with_any_canonical_name() {
         // Alias / name namespace is shared on lookup; an overlap routes
         // a typed name to the wrong impl.
-        let names: HashSet<_> = BUILT_INS.iter().map(|c| c.name()).collect();
-        for cmd in BUILT_INS {
-            for alias in cmd.aliases() {
-                assert!(
-                    !names.contains(alias),
-                    "alias `{alias}` of `/{}` collides with another canonical name",
-                    cmd.name(),
-                );
+        let collisions = alias_collisions(BUILT_INS);
+        assert!(collisions.is_empty(), "alias collisions: {collisions:?}");
+    }
+
+    #[test]
+    fn alias_collisions_finds_a_synthetic_overlap() {
+        // BUILT_INS has no aliases today, so the collision branch needs
+        // a synthetic registry to execute. `ColliderCmd`'s alias `help`
+        // overlaps `HelpCmd`'s canonical name.
+        struct ColliderCmd;
+        impl SlashCommand for ColliderCmd {
+            fn name(&self) -> &'static str {
+                "collider"
+            }
+            fn aliases(&self) -> &'static [&'static str] {
+                &["help"]
+            }
+            fn description(&self) -> &'static str {
+                "collide"
+            }
+            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+                Ok(())
             }
         }
+        let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
+        assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
+
+        // Pin the synthetic fixture's trait stubs — `alias_collisions`
+        // only reads name+aliases, so without these the description and
+        // execute bodies would stay unexercised.
+        assert_eq!(ColliderCmd.description(), "collide");
+        assert_eq!(run_execute(&ColliderCmd, ""), Ok(()));
     }
 
     #[test]
     fn built_ins_have_non_empty_name_and_description() {
-        for cmd in BUILT_INS {
-            assert!(!cmd.name().is_empty(), "empty canonical name");
-            assert!(
-                !cmd.description().is_empty(),
-                "/{}: empty description",
-                cmd.name(),
-            );
+        let offenders = empty_metadata_offenders(BUILT_INS);
+        assert!(
+            offenders.is_empty(),
+            "commands with empty name or description: {offenders:?}",
+        );
+    }
+
+    #[test]
+    fn empty_metadata_offenders_flags_a_synthetic_violator() {
+        // Drive the offender-collection branch — BUILT_INS satisfies
+        // the contract, so a positive case is needed for coverage.
+        struct EmptyDescCmd;
+        impl SlashCommand for EmptyDescCmd {
+            fn name(&self) -> &'static str {
+                "no-desc"
+            }
+            fn description(&self) -> &'static str {
+                ""
+            }
+            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
+                Ok(())
+            }
         }
+        assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
+
+        // Pin the synthetic fixture's execute stub — the offender helper
+        // never invokes it.
+        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(()));
     }
 
     // ── lookup_in ──
@@ -130,17 +209,10 @@ mod tests {
     fn aliased_cmd_fixture_satisfies_trait_contract() {
         // Pin so a fixture drift fails here rather than silently
         // misleading the lookup_in tests.
-        use crate::slash::context::SlashContext;
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
         assert_eq!(AliasedCmd.name(), "primary");
         assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
         assert_eq!(AliasedCmd.description(), "fake");
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        assert_eq!(AliasedCmd.execute("", &mut ctx), Ok(()));
+        assert_eq!(run_execute(&AliasedCmd, ""), Ok(()));
     }
 
     #[test]
@@ -155,8 +227,7 @@ mod tests {
         // one so a mutation flipping `||` to `&&` fails here.
         let registry: &[&dyn SlashCommand] = &[&AliasedCmd];
         for alias in ["alt", "shortcut"] {
-            let cmd =
-                lookup_in(registry, alias).unwrap_or_else(|| panic!("alias `{alias}` resolved"));
+            let cmd = lookup_in(registry, alias).expect("alias must resolve");
             assert_eq!(cmd.name(), "primary");
         }
     }
