@@ -233,6 +233,13 @@ impl App {
         if !self.apply_action_locally(&action) {
             return;
         }
+        self.forward_to_agent(action);
+    }
+
+    /// Send `action` to the agent loop; channel errors land as a chat
+    /// error block. Reused by the slash `Action(_)` branch — both
+    /// `Action(SubmitPrompt(_))` and `Action(Clear)` flow through here.
+    fn forward_to_agent(&mut self, action: UserAction) {
         if let Err(e) = self.user_tx.try_send(action) {
             match e {
                 mpsc::error::TrySendError::Closed(_) => {
@@ -260,17 +267,28 @@ impl App {
         match action {
             UserAction::SubmitPrompt(text) => {
                 if self.input.is_enabled() {
-                    // Slash commands stay client-side: parse first, run
-                    // locally, never forward to the agent loop. The
-                    // typed text still lands as a user-message block so
-                    // the chat shows what the user typed; nothing is
-                    // recorded into `Message`s, so resume / token
-                    // accounting / model context all stay clean.
+                    // Slash commands stay client-side: parse, run
+                    // locally, never forward the typed `/cmd` line.
+                    // State-mutating commands return `Action(_)`; the
+                    // dispatcher hands the action back for forwarding.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let mut ctx =
-                            SlashContext::new(&mut self.chat, &self.session_info, &self.user_tx);
-                        slash::dispatch(&parsed, &mut ctx);
+                        let synthesized = {
+                            let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                            slash::dispatch(&parsed, &mut ctx)
+                        };
+                        if let Some(action) = synthesized {
+                            // SubmitPrompt starts a new turn; flip UI
+                            // state before forwarding so a typed prompt
+                            // can't squeeze in between dispatch and
+                            // forward. Other actions (e.g. Clear) just
+                            // forward.
+                            if matches!(action, UserAction::SubmitPrompt(_)) {
+                                self.input.set_enabled(false);
+                                self.status_bar.set_status(Status::Streaming);
+                            }
+                            self.forward_to_agent(action);
+                        }
                         return false;
                     }
                     self.chat.push_user_message(text.clone());
@@ -278,20 +296,15 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
-                    // Slash commands stay client-side mid-turn —
-                    // queueing forwards them through the agent and
-                    // persists them as user prompts. Read-only ones
-                    // dispatch immediately; state-mutating ones refuse.
+                    // Mid-turn: read-only commands dispatch
+                    // immediately; mutators refuse.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
                             SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let mut ctx = SlashContext::new(
-                                    &mut self.chat,
-                                    &self.session_info,
-                                    &self.user_tx,
-                                );
-                                slash::dispatch(&parsed, &mut ctx);
+                                let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                                // Read-only ⇒ contract guarantees `Local`.
+                                _ = slash::dispatch(&parsed, &mut ctx);
                             }
                             SlashKind::Mutating => {
                                 self.chat.push_system_message(format!(
@@ -336,10 +349,10 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            // Unreachable on the live wiring — `/clear` writes
-            // `UserAction::Clear` straight into `user_tx`. The
-            // `false` return preserves that bypass if a future call
-            // site accidentally routes it through here.
+            // Unreachable on the live wiring — the slash branch above
+            // forwards `Action(_)` straight via `forward_to_agent`.
+            // `false` is defensive in case a future caller routes
+            // `Clear` through here.
             UserAction::Clear => false,
         }
     }
@@ -944,12 +957,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_popup_enter_dispatches_canonical_command() {
-        // Typing `/` opens the popup; Enter on the highlighted row
-        // submits `/{name}` through the existing dispatch path. The
-        // first BUILT_IN is /help, so the chat should land a system
-        // message (the help block), not forward to the agent.
+        // Typing `/h` filters the popup to /help; Enter on the
+        // highlighted row submits it through the existing dispatch
+        // path. /help is read-only, so the chat lands a system
+        // message instead of forwarding to the agent.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(app.input.popup_visible());
 
         app.handle_crossterm_event(&key_event(KeyCode::Enter, KeyModifiers::NONE));
@@ -968,9 +982,12 @@ mod tests {
     #[test]
     fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
         // Tab on a popup row inserts `/{name} ` and hides the popup —
-        // the user is now in args-typing mode.
+        // the user is now in args-typing mode. Filter to /help first
+        // so the test pins the completion shape independent of the
+        // BUILT_INS-ordered first row.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
 
         app.handle_crossterm_event(&key_event(KeyCode::Tab, KeyModifiers::NONE));
 
@@ -1234,11 +1251,12 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clear_stays_local_to_protect_the_slash_bypass() {
-        // `/clear` writes `UserAction::Clear` straight into `user_tx`
-        // from `SlashContext`, so this arm only ever fires if some new
-        // call site routes `Clear` through `dispatch_user_action`. The
-        // local `false` return guarantees the action isn't double-sent.
+    fn dispatch_clear_arm_returns_false_to_prevent_double_send() {
+        // `/clear` already forwards `UserAction::Clear` through the
+        // slash branch. The explicit `false` return on the `Clear` arm
+        // of `apply_action_locally` guards a future caller that hands
+        // `Clear` straight to `dispatch_user_action` — the action stays
+        // local so `user_tx` only sees the slash branch's send.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::Clear);
 
@@ -1324,6 +1342,52 @@ mod tests {
         let body = app.chat.last_system_text().expect("refusal system message");
         assert!(
             body.contains("/clear runs only when idle"),
+            "refusal must name the command and gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_forwards_synthesized_prompt_and_flips_to_streaming() {
+        // The chat shows only `/init`; the agent must receive the body.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+
+        assert_eq!(app.chat.entry_count(), 1, "only the typed `/init` line");
+        assert!(!app.input.is_enabled(), "Streaming disables input");
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        let forwarded = rx.recv().await.expect("synthesized prompt forwarded");
+        assert!(
+            matches!(
+                &forwarded,
+                UserAction::SubmitPrompt(body) if body.contains("AGENTS.md") && body != "/init"
+            ),
+            "expected SubmitPrompt with expanded body, got {forwarded:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_during_busy_refuses_with_system_message_no_forward() {
+        // Mutating ⇒ refuse. The typed `/init` row still lands; only
+        // the synthesized body is suppressed.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/init".to_owned()));
+
+        assert!(app.pending_prompts.is_empty());
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no synthesized prompt must reach user_tx mid-turn",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            3,
+            "active prompt + typed /init + system refusal",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/init runs only when idle"),
             "refusal must name the command and gate: {body}",
         );
     }

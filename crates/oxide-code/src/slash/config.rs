@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
-use super::registry::SlashCommand;
+use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::file;
 use crate::util::path::tildify;
 
@@ -26,12 +26,12 @@ impl SlashCommand for ConfigCmd {
         "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let user = file::user_config_path();
         let project = file::find_project_config();
         ctx.chat
             .push_system_message(render_config(ctx.info, user.as_deref(), project.as_deref()));
-        Ok(())
+        Ok(SlashOutcome::Local)
     }
 }
 
@@ -90,7 +90,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::slash::{test_session_info, test_user_tx};
+    use crate::slash::test_session_info;
 
     // ── Config trait ──
 
@@ -109,8 +109,7 @@ mod tests {
 
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let (user_tx, _user_rx) = test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         ConfigCmd.execute("", &mut ctx).unwrap();
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());

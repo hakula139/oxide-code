@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use super::context::SlashContext;
 use super::format::write_kv_section;
-use super::registry::{BUILT_INS, SlashCommand};
+use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
 
 pub(crate) struct HelpCmd;
 
@@ -21,9 +21,9 @@ impl SlashCommand for HelpCmd {
         "List the available slash commands and their usage hints"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.chat.push_system_message(render_help());
-        Ok(())
+        Ok(SlashOutcome::Local)
     }
 }
 
@@ -143,9 +143,8 @@ mod tests {
         assert_eq!(Fake::CLEAR.description(), "");
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let (user_tx, _user_rx) = crate::slash::test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
-        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(()));
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Local));
     }
 
     #[test]
@@ -199,8 +198,8 @@ mod tests {
         fn usage(&self) -> Option<&'static str> {
             self.usage
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-            Ok(())
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Ok(SlashOutcome::Local)
         }
     }
 }

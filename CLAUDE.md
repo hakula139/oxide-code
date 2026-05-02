@@ -72,13 +72,14 @@ ox                                          # Start an interactive session
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed app handles + user_tx for state-mutators) + SessionInfo
+│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo) — slash impls hand state-mutating work back via SlashOutcome::Action, never reach into user_tx
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
 │   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
 │   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
+│   ├── init.rs                             # /init — synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt; returns SlashOutcome::Action(SubmitPrompt)
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches (name-prefix > alias-prefix > name-substring > alias-substring)
 │   ├── parser.rs                           # parse_slash + popup_query: detect `/cmd args`; allows `:` and `.` for plugin namespaces
-│   ├── registry.rs                         # SlashCommand trait + BUILT_INS slice + alias-aware lookup_in
+│   ├── registry.rs                         # SlashCommand trait + SlashOutcome { Local, Action(UserAction) } + BUILT_INS slice + alias-aware lookup_in
 │   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/

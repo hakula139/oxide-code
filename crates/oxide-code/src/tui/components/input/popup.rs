@@ -230,10 +230,9 @@ mod tests {
         let popup = popup_with_query(Some(""));
         assert!(popup.is_visible());
         let names: Vec<&str> = popup.matches.iter().map(|m| m.name).collect();
-        // Pin against the live registry — if BUILT_INS reorders, this
-        // test moves with it (which is the right invariant).
+        // BUILT_INS is alphabetical, so empty-query first row is `/clear`.
         assert!(!names.is_empty());
-        assert_eq!(names[0], "help");
+        assert_eq!(names[0], "clear");
     }
 
     #[test]
@@ -298,8 +297,8 @@ mod tests {
 
     #[test]
     fn height_matches_match_count_below_cap() {
-        // BUILT_INS today has 4 commands, so empty query is below the
-        // cap. The popup occupies exactly that many rows.
+        // BUILT_INS sits below `MAX_VISIBLE_ROWS`, so empty query
+        // renders every command and the popup occupies that many rows.
         let popup = popup_with_query(Some(""));
         assert_eq!(usize::from(popup.height()), popup.matches.len());
     }

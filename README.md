@@ -20,6 +20,7 @@ Early development. What works today:
 - Agent loop with extended thinking and tool-use round-trip
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
+- Slash commands with `/`-triggered autocomplete: `/clear`, `/config`, `/diff`, `/help`, `/init`, `/status`
 - `CLAUDE.md` / `AGENTS.md` instruction-file discovery
 - Session persistence with JSONL conversation logs, listing, and resume
 - Per-session file-change tracking with a Read-before-Edit gate and on-disk drift detection
@@ -36,13 +37,7 @@ ox
 
 ## Documentation
 
-| Document                                        | Description                                      |
-| ----------------------------------------------- | ------------------------------------------------ |
-| [Quickstart](docs/guide/quickstart.md)          | Install, first run, basic usage                  |
-| [Configuration](docs/guide/configuration.md)    | API credentials, model selection, environment    |
-| [Instruction Files](docs/guide/instructions.md) | CLAUDE.md / AGENTS.md setup and discovery rules  |
-| [Sessions](docs/guide/sessions.md)              | Session persistence, listing, and resume         |
-| [Theming](docs/guide/theming.md)                | Built-in palettes, custom themes, slot overrides |
+See the [user guide](docs/guide/) for installation, configuration, slash commands, instruction files, sessions, and theming.
 
 ## Building from Source
 

@@ -61,12 +61,9 @@ The direction is simple:
 
 ### Slash Commands
 
-- `/help`, `/diff`, `/status`, `/config`, `/clear` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock`.
-- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops the in-memory message history and file-tracker state, points the API client at the new id, and clears the AI title. The old session stays resumable via `ox -c <old-id>`. State-mutating commands forward through `SlashContext.user_tx`; the agent loop owns the lifecycle. Title-generator events carry their session id so a slow Haiku call straddling `/clear` doesn't paint the old title onto the fresh session.
-- Autocomplete popup: typing `/` opens a two-column overlay above the input with name + description rows; Up / Down navigate, Tab completes `/{name}` plus a trailing space, Enter submits, Esc dismisses. Selected row paints normal-bold; the rest are dim. Ranks name-prefix > alias-prefix > name-substring > alias-substring; aliases parenthesize only the alias the user typed.
-- Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
-- Aliases display inline in `/help` (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.
-- Read-only by design: no slash command writes to user config files. Mutations to runtime state (`/model`, `/theme`) will be session-local on a NixOS-style declarative setup, restart returns to the user-declared values.
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/help`, `/init`, `/status`. See the [user guide](guide/slash-commands.md).
+- Autocomplete popup on typing `/`, with ranked filter and Tab completion.
+- Read-only by design — no slash command writes user config files; runtime mutations stay session-local.
 
 ### Authentication & Configuration
 
@@ -78,12 +75,11 @@ The direction is simple:
 
 ### Slash Commands (continuation)
 
-The first wave (`/help`, `/diff`, `/status`, `/config`, `/clear`) plus the autocomplete popup ship under Working Today. Remaining v1 surface:
+The first wave (`/clear`, `/config`, `/diff`, `/help`, `/init`, `/status`) plus the autocomplete popup ship under Working Today. Remaining surface:
 
 - Session: `/resume`.
 - Mid-session swap: `/model`, `/theme`.
-- Workflow: `/init` (submits a fixed prompt that asks the model to author `CLAUDE.md` / `AGENTS.md`).
-- Deferred: `/compact` (needs a summarization call we don't have), `/cost` (needs token persistence we don't have), `/login` / `/logout` (interactive OAuth), custom user commands (markdown templates).
+- Deferred: `/compact` (summarization), `/cost` (token persistence), `/login` / `/logout` (interactive OAuth), custom user commands (templates), `/init` multi-phase flow (`AgentEvent::PromptRequest`).
 
 Persistence stance: `/model` and `/theme` mutate runtime state for the current session only; restart returns to the user-declared config. Persisting a slash-command choice across restarts is intentionally deferred until there is a clear case for it. When the case arrives, the design will be an **explicit subcommand** writing to an **explicit user-opted-in path** (e.g. `/model save claude-sonnet-4-6` writing into `~/.config/ox/config.toml.local` or similar) — never a silent merge into the user's main config file. This rejects Claude Code's `~/.claude.json` mega-file pattern (telemetry, recent files, login state, per-project state all in one silently-written blob); a single corrupt write should never erase the user's preferences, and a NixOS-style declarative config should remain valid.
 
@@ -122,7 +118,7 @@ Persistence stance: `/model` and `/theme` mutate runtime state for the current s
 
 ### Workflow Skills
 
-- User-extensible commands backed by prompt templates: `/init`, `/review`, `/commit`.
+- User-extensible templates that can override built-ins or add new ones (e.g. project-local `~/.claude/commands/review.md`). Built-ins like `/init` ship under Working Today.
 - Auth slash commands: `/login`, `/logout`.
 - Configurable instruction directories beyond `.claude/`.
 

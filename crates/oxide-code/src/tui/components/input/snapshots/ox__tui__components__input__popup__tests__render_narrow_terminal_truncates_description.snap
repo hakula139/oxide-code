@@ -3,8 +3,9 @@ source: crates/oxide-code/src/tui/components/input/popup.rs
 assertion_line: 374
 expression: "render_to_backend(&popup, 30)"
 ---
-"/help    List the available..."
 "/clear   Reset the conversa..."
-"/status  Show session info:..."
 "/config  Show the resolved ..."
 "/diff    Show uncommitted w..."
+"/help    List the available..."
+"/init    Generate or update..."
+"/status  Show session info:..."

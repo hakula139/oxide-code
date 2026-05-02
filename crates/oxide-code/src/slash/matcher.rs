@@ -111,6 +111,7 @@ fn on_alias(cmd: &dyn SlashCommand, alias: &'static str) -> MatchedCommand {
 #[cfg(test)]
 mod tests {
     use super::super::context::SlashContext;
+    use super::super::registry::SlashOutcome;
     use super::*;
 
     /// Synthetic registry fixture so tests pin the matcher's
@@ -131,8 +132,8 @@ mod tests {
         fn description(&self) -> &'static str {
             self.description
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-            Ok(())
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Ok(SlashOutcome::Local)
         }
     }
 
@@ -291,8 +292,7 @@ mod tests {
             false,
         );
         let info = crate::slash::test_session_info();
-        let (user_tx, _user_rx) = crate::slash::test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         assert!(HELP.execute("anything", &mut ctx).is_ok());
     }
 }

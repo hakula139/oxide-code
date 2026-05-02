@@ -10,7 +10,20 @@ use super::config::ConfigCmd;
 use super::context::SlashContext;
 use super::diff::DiffCmd;
 use super::help::HelpCmd;
+use super::init::InitCmd;
 use super::status::StatusCmd;
+use crate::agent::event::UserAction;
+
+/// What [`SlashCommand::execute`] returns. `Local` for client-side
+/// work that finishes via `ctx`; `Action` for state-mutating
+/// commands that hand a [`UserAction`] back for the dispatcher to
+/// forward to the agent loop. The trait stays the only seam — slash
+/// impls never reach into `user_tx` themselves.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SlashOutcome {
+    Local,
+    Action(UserAction),
+}
 
 /// A locally-dispatched command typed as `/name args`. Each command
 /// owns its display metadata so help and popup rows render from the
@@ -30,9 +43,9 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether the command is safe to run mid-turn. The dispatcher
-    /// fast-paths `true` commands client-side; commands that touch
-    /// `messages` or session state override to `false` so they refuse
+    /// Whether the command is safe to run mid-turn. Commands that
+    /// touch `messages` / session state, or kick off a new turn via
+    /// [`SlashOutcome::Action`], override to `false` so they refuse
     /// instead of racing the live turn.
     fn is_read_only(&self) -> bool {
         true
@@ -47,15 +60,19 @@ pub(crate) trait SlashCommand: Sync {
 
     /// Runs the command. Mutations land through `ctx`. `Err(msg)` is
     /// rendered by the dispatcher as a single `ErrorBlock` — commands
-    /// must not push errors themselves. Successful runs push their own
-    /// informational block (typically `SystemMessageBlock`) before `Ok`.
-    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String>;
+    /// must not push errors themselves. `Ok(Local)` commands push
+    /// their own informational block; `Ok(Action(_))` commands hand
+    /// a `UserAction` back for the dispatcher to forward.
+    fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
 
-/// Every built-in v1 command. Order is presentation order in `/help`
-/// and the popup, so the most frequently-used commands sit first.
-pub(super) const BUILT_INS: &[&dyn SlashCommand] =
-    &[&HelpCmd, &ClearCmd, &StatusCmd, &ConfigCmd, &DiffCmd];
+/// Every built-in command. Alphabetical for stable presentation in
+/// `/help` and the empty-query popup; the matcher already sorts
+/// alphabetically within each tier when filtering, so this keeps
+/// every popup state consistent.
+pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
+    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &StatusCmd,
+];
 
 /// Resolves `name` by canonical name first, then aliases. Generic
 /// over the slice so tests can drive it against a synthetic registry.
@@ -80,11 +97,10 @@ mod tests {
 
     /// Runs `cmd.execute` against a fresh in-memory chat. Lets synthetic
     /// fixtures pin their trait stubs without per-test boilerplate.
-    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<(), String> {
+    fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<SlashOutcome, String> {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
-        let (user_tx, _user_rx) = crate::slash::test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         cmd.execute(args, &mut ctx)
     }
 
@@ -150,8 +166,8 @@ mod tests {
             fn description(&self) -> &'static str {
                 "collide"
             }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-                Ok(())
+            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+                Ok(SlashOutcome::Local)
             }
         }
         let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
@@ -159,7 +175,7 @@ mod tests {
 
         // Exercise the trait stubs the helper doesn't reach.
         assert_eq!(ColliderCmd.description(), "collide");
-        assert_eq!(run_execute(&ColliderCmd, ""), Ok(()));
+        assert_eq!(run_execute(&ColliderCmd, ""), Ok(SlashOutcome::Local));
     }
 
     #[test]
@@ -183,14 +199,14 @@ mod tests {
             fn description(&self) -> &'static str {
                 ""
             }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-                Ok(())
+            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+                Ok(SlashOutcome::Local)
             }
         }
         assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
 
         // Exercise the execute stub the offender helper doesn't reach.
-        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(()));
+        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(SlashOutcome::Local));
     }
 
     // ── lookup_in ──
@@ -208,8 +224,8 @@ mod tests {
         fn description(&self) -> &'static str {
             "fake"
         }
-        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<(), String> {
-            Ok(())
+        fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+            Ok(SlashOutcome::Local)
         }
     }
 
@@ -220,7 +236,7 @@ mod tests {
         assert_eq!(AliasedCmd.name(), "primary");
         assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
         assert_eq!(AliasedCmd.description(), "fake");
-        assert_eq!(run_execute(&AliasedCmd, ""), Ok(()));
+        assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Local));
     }
 
     #[test]

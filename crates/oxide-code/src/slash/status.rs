@@ -6,7 +6,7 @@
 
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
-use super::registry::SlashCommand;
+use super::registry::{SlashCommand, SlashOutcome};
 
 pub(crate) struct StatusCmd;
 
@@ -19,9 +19,9 @@ impl SlashCommand for StatusCmd {
         "Show session info: model, version, working directory, auth source, and session ID"
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.chat.push_system_message(render_status(ctx.info));
-        Ok(())
+        Ok(SlashOutcome::Local)
     }
 }
 
@@ -45,7 +45,7 @@ fn render_status(info: &SessionInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slash::{test_session_info, test_user_tx};
+    use crate::slash::test_session_info;
 
     // ── Status trait ──
 
@@ -64,8 +64,7 @@ mod tests {
 
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let (user_tx, _user_rx) = test_user_tx();
-        let mut ctx = SlashContext::new(&mut chat, &info, &user_tx);
+        let mut ctx = SlashContext::new(&mut chat, &info);
         StatusCmd.execute("", &mut ctx).unwrap();
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
