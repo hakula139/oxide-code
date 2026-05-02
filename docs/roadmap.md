@@ -61,9 +61,9 @@ The direction is simple:
 
 ### Slash Commands
 
-- `/help`, `/diff`, `/status`, `/config`, `/clear`, `/init` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock` (or, for `/init`, forwarded back to the agent as a synthesized prompt).
-- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops the in-memory message history and file-tracker state, points the API client at the new id, and clears the AI title. The old session stays resumable via `ox -c <old-id>`. State-mutating commands forward through `SlashContext.user_tx`; the agent loop owns the lifecycle. Title-generator events carry their session id so a slow Haiku call straddling `/clear` doesn't paint the old title onto the fresh session.
-- `/init` synthesizes a fixed prompt asking the model to author or update the project's `AGENTS.md` / `CLAUDE.md`, then forwards it to the agent loop as the next user turn. The user sees only the typed `/init` line; the wall-of-text body is invisible in the live session. Three-kinds outcome enum (`SlashOutcome { Local, PromptSubmit(String) }`) on `SlashCommand::execute` carries the body back to the dispatcher — no ad-hoc side channels.
+- `/help`, `/diff`, `/status`, `/config`, `/clear`, `/init` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop.
+- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops in-memory state, and clears the AI title. The old session stays resumable via `ox -c <old-id>`.
+- `/init` forwards a synthesized prompt asking the model to author or update the project's `AGENTS.md` / `CLAUDE.md`. Only the typed `/init` line is visible in chat; the body is sent invisibly.
 - Autocomplete popup: typing `/` opens a two-column overlay above the input with name + description rows; Up / Down navigate, Tab completes `/{name}` plus a trailing space, Enter submits, Esc dismisses. Selected row paints normal-bold; the rest are dim. Ranks name-prefix > alias-prefix > name-substring > alias-substring; aliases parenthesize only the alias the user typed.
 - Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
 - Aliases display inline in `/help` (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.
@@ -83,7 +83,7 @@ The first wave (`/help`, `/diff`, `/status`, `/config`, `/clear`, `/init`) plus 
 
 - Session: `/resume`.
 - Mid-session swap: `/model`, `/theme`.
-- Deferred: `/compact` (needs a summarization call we don't have), `/cost` (needs token persistence we don't have), `/login` / `/logout` (interactive OAuth), custom user commands (markdown templates), `/init`'s multi-phase interactive flow (needs `AgentEvent::PromptRequest` plumbing).
+- Deferred: `/compact` (summarization), `/cost` (token persistence), `/login` / `/logout` (interactive OAuth), custom user commands (templates), `/init` multi-phase flow (`AgentEvent::PromptRequest`).
 
 Persistence stance: `/model` and `/theme` mutate runtime state for the current session only; restart returns to the user-declared config. Persisting a slash-command choice across restarts is intentionally deferred until there is a clear case for it. When the case arrives, the design will be an **explicit subcommand** writing to an **explicit user-opted-in path** (e.g. `/model save claude-sonnet-4-6` writing into `~/.config/ox/config.toml.local` or similar) — never a silent merge into the user's main config file. This rejects Claude Code's `~/.claude.json` mega-file pattern (telemetry, recent files, login state, per-project state all in one silently-written blob); a single corrupt write should never erase the user's preferences, and a NixOS-style declarative config should remain valid.
 
