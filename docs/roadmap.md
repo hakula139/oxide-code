@@ -62,7 +62,7 @@ The direction is simple:
 ### Slash Commands
 
 - `/help`, `/diff`, `/status`, `/config`, `/clear` — every command is a one-file `SlashCommand` impl in `slash/`, dispatched locally before reaching the agent loop, output as a `SystemMessageBlock`.
-- `/clear` rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops the in-memory message history and file-tracker state, points the API client at the new id, and clears the AI title. The old session stays resumable via `ox -c <old-id>`. State-mutating commands forward through `SlashContext.user_tx`; the agent loop owns the lifecycle.
+- `/clear` (aliases `/new`, `/reset`) rolls the session UUID: finalizes the current JSONL, opens a fresh one, drops the in-memory message history and file-tracker state, points the API client at the new id, and clears the AI title. The old session stays resumable via `ox -c <old-id>`. State-mutating commands forward through `SlashContext.user_tx`; the agent loop owns the lifecycle. Title-generator events carry their session id so a slow Haiku call straddling `/clear` doesn't paint the old title onto the fresh session.
 - Autocomplete popup: typing `/` opens a two-column overlay above the input with name + description rows; Up / Down navigate, Tab completes `/{name}` plus a trailing space, Enter submits, Esc dismisses. Selected row paints normal-bold; the rest are dim. Ranks name-prefix > alias-prefix > name-substring > alias-substring; aliases parenthesize only the alias the user typed.
 - Names accept ASCII letters / digits plus `_`, `-`, `:`, `.` so a future plugin-namespace layer (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
 - Aliases display inline in `/help` (`/clear (new, reset)` shape); typing any alias routes to the canonical impl.

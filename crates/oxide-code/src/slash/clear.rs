@@ -36,12 +36,13 @@ impl SlashCommand for ClearCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::{SessionInfo, test_session_info, test_user_tx};
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
     fn fresh_ctx<'a>(
         chat: &'a mut ChatView,
-        info: &'a crate::slash::SessionInfo,
+        info: &'a SessionInfo,
         user_tx: &'a tokio::sync::mpsc::Sender<UserAction>,
     ) -> SlashContext<'a> {
         SlashContext::new(chat, info, user_tx)
@@ -55,8 +56,8 @@ mod tests {
         chat.push_user_message("prompt".to_owned());
         chat.push_tool_call("$", "ls");
         chat.push_user_message("/clear".to_owned());
-        let info = crate::slash::test_session_info();
-        let (user_tx, mut user_rx) = crate::slash::test_user_tx();
+        let info = test_session_info();
+        let (user_tx, mut user_rx) = test_user_tx();
 
         ClearCmd
             .execute("", &mut fresh_ctx(&mut chat, &info, &user_tx))
@@ -81,8 +82,8 @@ mod tests {
         chat.push_user_message("prompt".to_owned());
         chat.push_tool_call("$", "ls");
         let pre_count = chat.entry_count();
-        let info = crate::slash::test_session_info();
-        let (user_tx, user_rx) = crate::slash::test_user_tx();
+        let info = test_session_info();
+        let (user_tx, user_rx) = test_user_tx();
         drop(user_rx);
 
         let err = ClearCmd
