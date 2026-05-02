@@ -23,7 +23,7 @@ impl SlashCommand for ConfigCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Show resolved config and source files"
+        "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {

@@ -36,6 +36,20 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')
 }
 
+/// Popup-trigger predicate. Returns the in-progress query (the
+/// buffer's leading `/` stripped) when `buffer` reads as a slash
+/// command being typed — `/`, `/c`, `/clear` — and `None` otherwise:
+/// plain prompts, the `//foo` escape, or anything once whitespace
+/// appears (user has committed to typing args). Leading whitespace
+/// is tolerated to match [`parse_slash`].
+pub(crate) fn popup_query(buffer: &str) -> Option<&str> {
+    let rest = buffer.trim_start().strip_prefix('/')?;
+    if rest.starts_with('/') || !rest.chars().all(is_name_char) {
+        return None;
+    }
+    Some(rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +131,58 @@ mod tests {
         assert!(parse_slash("/foo🦀").is_none());
         assert!(parse_slash("/foo!").is_none());
         assert!(parse_slash("/foo,bar").is_none());
+    }
+
+    // ── popup_query ──
+
+    #[test]
+    fn popup_query_bare_slash_returns_empty_query() {
+        // Just `/` is the popup's "show full registry" state.
+        assert_eq!(popup_query("/"), Some(""));
+    }
+
+    #[test]
+    fn popup_query_partial_name_returns_typed_chars() {
+        assert_eq!(popup_query("/cl"), Some("cl"));
+        assert_eq!(popup_query("/clear"), Some("clear"));
+    }
+
+    #[test]
+    fn popup_query_tolerates_leading_whitespace() {
+        // Match parse_slash's leading-whitespace handling so the
+        // popup follows the same syntax rules as dispatch.
+        assert_eq!(popup_query("   /he"), Some("he"));
+    }
+
+    #[test]
+    fn popup_query_hides_once_whitespace_appears() {
+        // Trailing space, mid-word space, leading-then-trailing — any
+        // internal whitespace means the user is typing args.
+        assert!(popup_query("/clear ").is_none());
+        assert!(popup_query("/clear arg").is_none());
+        assert!(popup_query("/cl ear").is_none());
+    }
+
+    #[test]
+    fn popup_query_hides_for_double_slash_escape() {
+        // `//foo` routes to the model literally, so the popup must
+        // not surface command suggestions.
+        assert!(popup_query("//etc/hosts").is_none());
+        assert!(popup_query("//").is_none());
+    }
+
+    #[test]
+    fn popup_query_hides_for_plain_prompts() {
+        assert!(popup_query("hello").is_none());
+        assert!(popup_query("explain /etc/hosts").is_none());
+        assert!(popup_query("").is_none());
+    }
+
+    #[test]
+    fn popup_query_hides_when_name_chars_violated() {
+        // Mirror parse_slash's name-char rule: if it can't parse,
+        // the popup shouldn't pretend it might.
+        assert!(popup_query("/foo🦀").is_none());
+        assert!(popup_query("/foo!").is_none());
     }
 }

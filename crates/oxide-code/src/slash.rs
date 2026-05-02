@@ -19,12 +19,22 @@ mod context;
 mod diff;
 mod format;
 mod help;
+mod matcher;
 mod parser;
 mod registry;
 mod status;
 
 pub(crate) use context::{SessionInfo, SlashContext};
-pub(crate) use parser::{Parsed, parse_slash};
+pub(crate) use matcher::MatchedCommand;
+pub(crate) use parser::{Parsed, parse_slash, popup_query};
+
+/// Filter the built-in registry against a popup query (the buffer
+/// with the leading `/` stripped). Convenience wrapper around
+/// [`matcher::filter_and_rank`] so the popup component never touches
+/// `BUILT_INS` directly.
+pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
+    matcher::filter_and_rank(query, registry::BUILT_INS)
+}
 
 /// Resolves and runs a parsed slash command against the built-in
 /// registry. See [`dispatch_with`].

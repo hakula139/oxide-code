@@ -1,0 +1,9 @@
+---
+source: crates/oxide-code/src/tui/components/input/popup.rs
+assertion_line: 317
+expression: "render_to_backend(&popup, 60)"
+---
+"/help    List the available slash commands and their usag..."
+"/status  Show session info: model, version, working direc..."
+"/config  Show the resolved configuration and the layered ..."
+"/diff    Show uncommitted working-tree changes (`git diff..."

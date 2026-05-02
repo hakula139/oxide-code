@@ -11,5 +11,5 @@
     }
   ],
   "dictionaries": ["project-words"],
-  "ignorePaths": ["Cargo.lock", "pnpm-lock.yaml"]
+  "ignorePaths": ["Cargo.lock", "pnpm-lock.yaml", "**/snapshots/*.snap"]
 }

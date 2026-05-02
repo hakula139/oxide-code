@@ -1,3 +1,5 @@
+mod popup;
+
 use std::cell::Cell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -9,13 +11,24 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
+use self::popup::SlashPopup;
 use crate::agent::event::UserAction;
+use crate::slash::popup_query;
 use crate::tui::component::Component;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
+
+/// Outcome of routing a keystroke through the slash popup. The three
+/// variants encode "consumed with action", "consumed silently", and
+/// "popup let it pass through to the textarea path".
+enum PopupKey {
+    Action(UserAction),
+    Consumed,
+    Pass,
+}
 
 /// Placeholder copy keyed off `(enabled, has_queued)`. Visible only
 /// while the buffer is empty.
@@ -50,6 +63,10 @@ const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds anoth
 pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
+    /// Slash-command autocomplete overlay. Visible iff the buffer
+    /// reads as a slash query (see [`popup_query`]); App reads
+    /// height through [`Self::popup_height`].
+    popup: SlashPopup,
     enabled: bool,
     /// Whether the surrounding [`App`](super::super::app::App) has any
     /// queued prompts pending dispatch — drives the idle placeholder
@@ -80,6 +97,7 @@ impl InputArea {
             textarea,
             enabled: true,
             has_queued: false,
+            popup: SlashPopup::new(theme),
             last_width: Cell::new(0),
             scroll_top: Cell::new(0),
         };
@@ -137,6 +155,24 @@ impl InputArea {
         let content_lines = self.visual_line_count();
         content_lines.min(MAX_VISIBLE_LINES) + 2
     }
+
+    /// Whether the popup has rows to draw. App reads this to gate
+    /// Esc routing so popup-dismiss wins over queue / cancel.
+    pub(crate) fn popup_visible(&self) -> bool {
+        self.popup.is_visible()
+    }
+
+    /// Rows the popup needs in the surrounding layout. Zero when
+    /// hidden so the input keeps its natural height.
+    pub(crate) fn popup_height(&self) -> u16 {
+        self.popup.height()
+    }
+
+    /// Render the popup band into `area`. Caller is responsible for
+    /// reserving `popup_height()` rows above the input.
+    pub(crate) fn render_popup(&self, frame: &mut Frame, area: Rect) {
+        self.popup.render(frame, area);
+    }
 }
 
 impl Component for InputArea {
@@ -176,6 +212,17 @@ impl Component for InputArea {
             });
         }
 
+        // Popup-routed nav keys take priority over plain typing while
+        // the popup is visible. App-level Esc is gated by
+        // `popup_visible` so it routes here when the popup owns the key.
+        if self.popup.is_visible() {
+            match self.handle_popup_key(event) {
+                PopupKey::Action(action) => return Some(action),
+                PopupKey::Consumed => return None,
+                PopupKey::Pass => {}
+            }
+        }
+
         if let Event::Key(KeyEvent {
             code: KeyCode::Enter,
             modifiers,
@@ -187,6 +234,7 @@ impl Component for InputArea {
             // which crossterm parses as Alt+Enter.
             if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
                 self.textarea.insert_newline();
+                self.refresh_popup();
                 return None;
             }
             return self.submit();
@@ -202,6 +250,7 @@ impl Component for InputArea {
         // Typing flows through in both states so the user can compose
         // a follow-up that the queue will fire after the current turn.
         self.textarea.input(event.clone());
+        self.refresh_popup();
         None
     }
 
@@ -285,6 +334,74 @@ impl InputArea {
     }
 
     // ── Private Helpers ──
+
+    /// Route a key through the slash popup when it owns focus. Tab
+    /// and Enter only route here under no modifiers so Shift+Enter
+    /// keeps inserting newlines.
+    fn handle_popup_key(&mut self, event: &Event) -> PopupKey {
+        let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event
+        else {
+            return PopupKey::Pass;
+        };
+        match code {
+            KeyCode::Up => {
+                self.popup.select_prev();
+                PopupKey::Consumed
+            }
+            KeyCode::Down => {
+                self.popup.select_next();
+                PopupKey::Consumed
+            }
+            KeyCode::Esc => {
+                self.popup.set_query(None);
+                PopupKey::Consumed
+            }
+            KeyCode::Tab if modifiers.is_empty() => {
+                self.popup_complete_to_buffer();
+                PopupKey::Consumed
+            }
+            KeyCode::Enter if modifiers.is_empty() => match self.popup_submit_selected() {
+                Some(action) => PopupKey::Action(action),
+                None => PopupKey::Consumed,
+            },
+            _ => PopupKey::Pass,
+        }
+    }
+
+    /// Tab handler: replace the buffer with `/{canonical} ` so the
+    /// user can type args next, and hide the popup (now in args mode).
+    fn popup_complete_to_buffer(&mut self) {
+        let Some(name) = self.popup.selected().map(|m| m.name) else {
+            return;
+        };
+        self.set_text(&format!("/{name} "));
+        self.popup.set_query(None);
+    }
+
+    /// Enter handler: submit `/{canonical}` and clear the buffer.
+    /// Routes through `UserAction::SubmitPrompt` so the existing
+    /// dispatch path runs the slash command.
+    fn popup_submit_selected(&mut self) -> Option<UserAction> {
+        let name = self.popup.selected()?.name;
+        self.textarea.select_all();
+        self.textarea.cut();
+        self.scroll_top.set(0);
+        self.popup.set_query(None);
+        Some(UserAction::SubmitPrompt(format!("/{name}")))
+    }
+
+    /// Recompute the popup query from the current buffer. Called after
+    /// any keystroke that mutates the textarea. Multi-line content
+    /// hides the popup — slash commands are single-line.
+    fn refresh_popup(&mut self) {
+        let query = match self.textarea.lines() {
+            [single] => popup_query(single),
+            _ => None,
+        };
+        self.popup.set_query(query);
+    }
 
     /// Whether `event` is one of the chat-scroll keys reserved for the
     /// surrounding `ChatView` while the input is busy.
@@ -860,5 +977,75 @@ mod tests {
 
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UserAction::SubmitPrompt(s)) if s == "a"));
+    }
+
+    // ── popup routing ──
+
+    /// Drive the input into a popup-visible state by typing a `/`,
+    /// so popup-key tests start from a known fixture.
+    fn input_with_popup() -> InputArea {
+        let mut input = test_input();
+        input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(input.popup_visible(), "typing `/` opens the popup");
+        input
+    }
+
+    #[test]
+    fn handle_event_popup_down_advances_selection() {
+        let mut input = input_with_popup();
+        let initial = input.popup.selected().map(|m| m.name).unwrap();
+        let action = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(action.is_none(), "Down is consumed silently");
+        let after = input.popup.selected().map(|m| m.name).unwrap();
+        assert_ne!(initial, after, "Down moves to a different command");
+    }
+
+    #[test]
+    fn handle_event_popup_up_reverses_selection() {
+        let mut input = input_with_popup();
+        input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        let after_down = input.popup.selected().map(|m| m.name).unwrap();
+        input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+        let after_up = input.popup.selected().map(|m| m.name).unwrap();
+        assert_ne!(after_down, after_up, "Up reverses Down");
+    }
+
+    #[test]
+    fn handle_event_popup_visible_passes_unhandled_keys_to_textarea() {
+        // Char keys are not popup nav — they fall through to the
+        // textarea so refining the query keeps working.
+        let mut input = input_with_popup();
+        let action = input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["/h"]);
+        assert!(input.popup_visible(), "popup stays visible while typing");
+    }
+
+    #[test]
+    fn handle_event_popup_visible_ignores_non_key_events() {
+        // Resize and other non-key events reach handle_event when
+        // routed directly; popup must let them pass without panicking.
+        let mut input = input_with_popup();
+        let action = input.handle_event(&Event::Resize(80, 24));
+        assert!(action.is_none());
+        assert!(input.popup_visible());
+    }
+
+    // ── render_popup ──
+
+    #[test]
+    fn render_popup_paints_when_visible() {
+        let input = input_with_popup();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, 40, input.popup_height());
+                input.render_popup(frame, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let first = buffer.cell(Position::new(0, 0)).unwrap().symbol();
+        assert!(!first.is_empty(), "popup row paints something at (0,0)");
     }
 }
