@@ -239,6 +239,16 @@ mod tests {
     }
 
     #[test]
+    fn filter_and_rank_alias_substring_lands_below_other_tiers() {
+        // Pin the alias-substring branch (the lowest tier) — the
+        // query "se" appears mid-string in /clear's "reset" alias
+        // but doesn't match name or alias prefix on a sibling.
+        let rows = filter_and_rank("se", &registry());
+        assert_eq!(names(&rows), vec!["clear"]);
+        assert_eq!(rows[0].matched_alias, Some("reset"));
+    }
+
+    #[test]
     fn filter_and_rank_query_is_case_insensitive() {
         // Uppercase query must match lowercase canonical names. Pin
         // both prefix and substring cases since they take separate

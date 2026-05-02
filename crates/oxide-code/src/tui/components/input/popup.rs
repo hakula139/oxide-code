@@ -276,6 +276,19 @@ mod tests {
     }
 
     #[test]
+    fn select_prev_decrements_when_not_at_top() {
+        // Pin the non-wrap branch — the decrement path is otherwise
+        // dead because select_prev() from row 0 always wraps.
+        let mut popup = popup_with_query(Some(""));
+        popup.select_next();
+        popup.select_next();
+        assert_eq!(popup.selected, 2);
+
+        popup.select_prev();
+        assert_eq!(popup.selected, 1);
+    }
+
+    #[test]
     fn select_next_on_empty_popup_is_a_noop() {
         let mut popup = popup_with_query(None);
         popup.select_next();
@@ -375,5 +388,42 @@ mod tests {
             matched_alias: Some("new"),
         }];
         insta::assert_snapshot!(render_to_backend(&popup, 60));
+    }
+
+    #[test]
+    fn render_hidden_popup_emits_nothing() {
+        // The hidden-popup early-return in render() is otherwise
+        // unreached — App's draw method gates by height(), so the
+        // function only fires when the popup chose to be visible.
+        let popup = popup_with_query(None);
+        let backend = render_to_backend(&popup, 60);
+        let buf = backend.buffer();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = buf.cell(ratatui::layout::Position::new(x, y)).unwrap();
+                assert_eq!(cell.symbol(), " ", "hidden popup must paint nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn render_overflow_emits_n_more_footer_when_matches_exceed_cap() {
+        // Cap is 8; a hand-rolled list of 10 commands triggers the
+        // "… (N more)" footer. Live registry is too small to drive
+        // this branch.
+        let mut popup = SlashPopup::new(&theme());
+        popup.matches = (0..10)
+            .map(|i| MatchedCommand {
+                name: Box::leak(format!("cmd{i}").into_boxed_str()),
+                description: "fake",
+                matched_alias: None,
+            })
+            .collect();
+        let backend = render_to_backend(&popup, 30);
+        let rendered = format!("{}", backend);
+        assert!(
+            rendered.contains("(2 more)"),
+            "footer must surface the hidden count: {rendered}",
+        );
     }
 }
