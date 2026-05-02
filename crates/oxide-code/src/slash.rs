@@ -181,12 +181,13 @@ mod tests {
         };
         let action = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info))
             .expect("/init must return Some(action)");
-        let crate::agent::event::UserAction::SubmitPrompt(body) = &action else {
-            panic!("expected SubmitPrompt, got {action:?}");
-        };
         assert!(
-            body.contains("AGENTS.md"),
-            "body must target AGENTS.md: {body}"
+            matches!(
+                &action,
+                crate::agent::event::UserAction::SubmitPrompt(body)
+                    if body.contains("AGENTS.md")
+            ),
+            "expected SubmitPrompt with AGENTS.md body, got {action:?}",
         );
         assert_eq!(chat.entry_count(), 0, "the typed line is pushed by the App");
     }
