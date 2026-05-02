@@ -34,7 +34,7 @@ use config::Config;
 use file_tracker::FileTracker;
 use message::Message;
 use prompt::environment::marketing_name;
-use session::handle::{ResumedSession, SessionHandle, start as start_session};
+use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
@@ -458,19 +458,15 @@ async fn agent_loop_task(
             // `apply_action_locally` short-circuits it before the
             // forward path, so it never reaches `recv` here.
             UserAction::Cancel | UserAction::ConfirmExit => {}
-            // Snapshot tracker before clearing so the old JSONL keeps
-            // file-read state on `finalize`.
             UserAction::Clear => {
-                let snapshots = file_tracker.snapshot_all();
-                file_tracker.clear();
-                let new_session = start_session(&store, client.model());
-                let new_id = new_session.session_id().to_owned();
-                let old_session = std::mem::replace(&mut session, new_session);
-                let failure = old_session.finalize(snapshots).await;
-                sink.session_write_error(failure.as_deref());
-                client.set_session_id(new_id.clone());
+                let outcome =
+                    roll_session(&mut session, &store, &file_tracker, client.model()).await;
+                sink.session_write_error(outcome.finalize_failure.as_deref());
+                client.set_session_id(outcome.new_id.clone());
                 messages.clear();
-                _ = sink.send(AgentEvent::SessionRolled { id: new_id });
+                if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
+                    warn!("session-rolled event dropped: {e}");
+                }
             }
             UserAction::Quit => break,
         }
