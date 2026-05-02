@@ -169,6 +169,14 @@ impl Client {
         &self.session_id
     }
 
+    /// Replaces the session id used for `x-claude-code-session-id` and
+    /// `metadata.user_id`. `/clear` calls this when rolling the
+    /// session UUID — the header is per-request so no HTTP-client
+    /// rebuild is needed.
+    pub(crate) fn set_session_id(&mut self, id: String) {
+        self.session_id = id;
+    }
+
     /// Stream a message response from the Anthropic API.
     ///
     /// `system_sections` ship as individual `system` text blocks so
@@ -527,6 +535,42 @@ mod tests {
                 "error should mention header: {err:#}",
             );
         }
+    }
+
+    // ── Client::set_session_id ──
+
+    #[tokio::test]
+    async fn set_session_id_propagates_to_x_claude_code_session_id_header() {
+        // The setter must reach the wire — the per-request injection
+        // re-reads `self.session_id` on every call, so this test
+        // pins both the setter and the per-request plumbing together.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-claude-code-session-id", "sid-rolled"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(text_stream_body()),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = Client::new(
+            test_config(server.uri(), Auth::ApiKey("k".to_owned()), TEST_MODEL),
+            Some("sid-original".to_owned()),
+        )
+        .unwrap();
+        client.set_session_id("sid-rolled".to_owned());
+        // The mock matcher rejects requests with the wrong session-id
+        // header — success here proves the new id reached the wire.
+        collect_events(
+            client
+                .stream_message(&[Message::user("hi")], &[], None, &[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     // ── Client::stream_message ──

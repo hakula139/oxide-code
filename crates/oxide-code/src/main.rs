@@ -34,7 +34,7 @@ use config::Config;
 use file_tracker::FileTracker;
 use message::Message;
 use prompt::environment::marketing_name;
-use session::handle::{ResumedSession, SessionHandle};
+use session::handle::{ResumedSession, SessionHandle, start as start_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
@@ -178,6 +178,7 @@ async fn async_main() -> Result<()> {
         tools,
         resumed,
         file_tracker,
+        store,
     )
     .await
 }
@@ -267,7 +268,7 @@ async fn shutdown_signal() {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "wires the full TUI surface (client, display config, resumed state, tool registry, file tracker); a builder would obscure which dependencies run_tui owns vs. borrows"
+    reason = "wires the full TUI surface (client, display config, resumed state, tool registry, file tracker, store); a builder would obscure which dependencies run_tui owns vs. borrows"
 )]
 async fn run_tui(
     client: &Client,
@@ -278,6 +279,7 @@ async fn run_tui(
     tools: Arc<ToolRegistry>,
     resumed: ResumedSession,
     file_tracker: Arc<FileTracker>,
+    store: SessionStore,
 ) -> Result<()> {
     let ResumedSession {
         handle: session,
@@ -329,6 +331,8 @@ async fn run_tui(
     let agent_handle = {
         let client = client.clone();
         let session = session.clone();
+        let store = store.clone();
+        let file_tracker = Arc::clone(&file_tracker);
         tokio::spawn(async move {
             agent_loop_task(
                 client,
@@ -337,6 +341,8 @@ async fn run_tui(
                 user_rx,
                 session,
                 resumed_messages,
+                store,
+                file_tracker,
             )
             .await
         })
@@ -374,20 +380,28 @@ async fn run_tui(
 
 /// Drives the TUI's agent loop: reads `UserAction`s from `user_rx`,
 /// runs each `SubmitPrompt` through [`agent_turn`], and forwards the
-/// outcome to the [`tui::event::ChannelSink`].
+/// outcome to the [`tui::event::ChannelSink`]. Owns the live
+/// [`SessionHandle`] and [`Client`] so `/clear` can roll both
+/// in-place without bouncing the values back to `run_tui`.
 ///
 /// `Error` and `TurnComplete` are mutually exclusive — the TUI's
 /// `Error` handler runs the same teardown as `TurnComplete` (drain
 /// queue, re-enable input), so emitting both after a failed turn
 /// would double-drain `pending_prompts`'s head. Each [`TurnAbort`]
 /// arm emits exactly one terminal event.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "session lifecycle (store, handle, file tracker) lives here for /clear; bundling into a struct would just rename the dependencies"
+)]
 async fn agent_loop_task(
-    client: Client,
+    mut client: Client,
     tools: Arc<ToolRegistry>,
     sink: tui::event::ChannelSink,
     mut user_rx: mpsc::Receiver<UserAction>,
-    session: SessionHandle,
+    mut session: SessionHandle,
     resumed_messages: Vec<Message>,
+    store: SessionStore,
+    file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let mut messages: Vec<Message> = resumed_messages;
 
@@ -442,9 +456,24 @@ async fn agent_loop_task(
             // `Cancel` arrives idle when the user hammered Esc /
             // Ctrl+C with no turn in flight. `ConfirmExit` is TUI-only;
             // `apply_action_locally` short-circuits it before the
-            // forward path, so it never reaches `recv` here. `Clear`
-            // is a placeholder — the roll lands in a follow-up commit.
-            UserAction::Cancel | UserAction::ConfirmExit | UserAction::Clear => {}
+            // forward path, so it never reaches `recv` here.
+            UserAction::Cancel | UserAction::ConfirmExit => {}
+            // `/clear` roll: snapshot tracker before clearing so the
+            // old session's JSONL keeps file state, then finalize the
+            // old session, swap in a fresh one, point the client at
+            // the new id, and notify the TUI.
+            UserAction::Clear => {
+                let snapshots = file_tracker.snapshot_all();
+                file_tracker.clear();
+                let new_session = start_session(&store, client.model());
+                let new_id = new_session.session_id().to_owned();
+                let old_session = std::mem::replace(&mut session, new_session);
+                let failure = old_session.finalize(snapshots).await;
+                sink.session_write_error(failure.as_deref());
+                client.set_session_id(new_id.clone());
+                messages.clear();
+                _ = sink.send(AgentEvent::SessionRolled { id: new_id });
+            }
             UserAction::Quit => break,
         }
     }

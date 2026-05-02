@@ -228,6 +228,14 @@ impl FileTracker {
             .collect()
     }
 
+    /// Drops every recorded path so the next Read / Edit / Write hits
+    /// the gate cold. `/clear` calls this when rolling the session;
+    /// snapshots from the old session are persisted into the old
+    /// JSONL by `finalize` ahead of this call.
+    pub(crate) fn clear(&self) {
+        self.lock().clear();
+    }
+
     /// Restores tracker state from session JSONL. Re-`stat()`s each
     /// snapshot: survivors (mtime + size match) reload; mismatches
     /// and missing files drop silently so the model re-Reads on first
@@ -829,6 +837,21 @@ mod tests {
     fn snapshot_all_empty_tracker_returns_empty_vec() {
         let snaps = FileTracker::default().snapshot_all();
         assert!(snaps.is_empty());
+    }
+
+    // ── clear ──
+
+    #[test]
+    fn clear_drops_recorded_reads_so_subsequent_snapshot_is_empty() {
+        let tracker = FileTracker::default();
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        _ = tracker.record_read(Path::new("/tmp/a"), b"a", mtime, 1, LastView::Full);
+        _ = tracker.record_read(Path::new("/tmp/b"), b"b", mtime, 1, LastView::Full);
+        assert_eq!(tracker.snapshot_all().len(), 2);
+
+        tracker.clear();
+
+        assert!(tracker.snapshot_all().is_empty());
     }
 
     // ── restore_verified ──

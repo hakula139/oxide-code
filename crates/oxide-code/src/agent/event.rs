@@ -73,10 +73,6 @@ pub(crate) enum AgentEvent {
     /// one is open, and `id` is the new session UUID. The TUI updates
     /// `session_info.session_id` and clears the status-bar title (the AI
     /// title belonged to the old session). Other sinks ignore it.
-    #[expect(
-        dead_code,
-        reason = "App handler wired here; emit site lands with the agent-loop /clear roll"
-    )]
     SessionRolled { id: String },
     /// A fatal error from the API or agent loop.
     Error(String),
