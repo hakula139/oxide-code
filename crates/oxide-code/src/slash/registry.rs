@@ -68,8 +68,8 @@ mod tests {
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
-    /// Drives `cmd.execute` against a fresh in-memory chat so synthetic
-    /// fixtures can pin their trait stubs without per-test boilerplate.
+    /// Runs `cmd.execute` against a fresh in-memory chat. Lets synthetic
+    /// fixtures pin their trait stubs without per-test boilerplate.
     fn run_execute(cmd: &dyn SlashCommand, args: &str) -> Result<(), String> {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
@@ -146,9 +146,7 @@ mod tests {
         let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
         assert_eq!(alias_collisions(registry), vec![("collider", "help")]);
 
-        // Pin the synthetic fixture's trait stubs — `alias_collisions`
-        // only reads name+aliases, so without these the description and
-        // execute bodies would stay unexercised.
+        // Exercise the trait stubs the helper doesn't reach.
         assert_eq!(ColliderCmd.description(), "collide");
         assert_eq!(run_execute(&ColliderCmd, ""), Ok(()));
     }
@@ -180,8 +178,7 @@ mod tests {
         }
         assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
 
-        // Pin the synthetic fixture's execute stub — the offender helper
-        // never invokes it.
+        // Exercise the execute stub the offender helper doesn't reach.
         assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(()));
     }
 

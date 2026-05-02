@@ -120,9 +120,8 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Picks the user-facing failure message: trimmed stderr if non-empty,
-/// otherwise a synthetic `git <args> failed` so blank-stderr exits don't
-/// surface as the empty string.
+/// Trimmed stderr if non-empty, else `git <args> failed` so a
+/// blank-stderr exit doesn't surface as the empty string.
 fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
     let msg = s.trim();
@@ -429,9 +428,8 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let err = run_git_in(&repo, &["cat-file", "-t", "deadbeef"]).unwrap_err();
         let msg = format!("{err:#}");
-        // Pre-evaluate both alternatives so a `||` short-circuit can't
-        // leave the second arm unexecuted on git versions where the
-        // SHA itself is echoed back.
+        // Both arms eager — `||` short-circuit would otherwise leave
+        // the right arm unexecuted on git versions that echo the SHA.
         let has_sha = msg.contains("deadbeef");
         let has_not_valid = msg.to_ascii_lowercase().contains("not a valid");
         assert!(
@@ -452,9 +450,8 @@ mod tests {
 
     #[test]
     fn git_failure_message_falls_back_to_synthetic_when_stderr_blank() {
-        // Empty / whitespace-only stderr would surface as the empty
-        // string without the fallback — `git status failed` is the
-        // user-facing diagnostic in that case.
+        // Without the fallback an empty / whitespace-only stderr would
+        // surface as the empty string.
         assert_eq!(git_failure_message(&["status"], b""), "git status failed",);
         assert_eq!(
             git_failure_message(&["diff", "HEAD"], b"  \n\t\n  "),
