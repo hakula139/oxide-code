@@ -30,7 +30,9 @@ impl SlashCommand for DiffCmd {
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<(), String> {
-        let cwd = std::env::current_dir().map_err(|e| format!("{e:#}"))?;
+        let cwd = std::env::current_dir()
+            .context("failed to read current directory")
+            .map_err(|e| format!("{e:#}"))?;
         execute_in(&cwd, ctx)
     }
 }
