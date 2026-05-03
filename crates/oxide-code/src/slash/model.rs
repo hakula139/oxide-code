@@ -15,9 +15,10 @@ use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
 /// context window on models whose capability row has `context_1m`.
 const TAG_1M: &str = "[1m]";
 
-/// Curated UI surface for the list view. Manual swap accepts any id
-/// from [`MODELS`] plus its `[1m]` variant where `context_1m` is true.
-const SELECTABLE: &[&str] = &[
+/// Curated roster shown by bare `/model`. Manual swap resolves against
+/// the full [`MODELS`] table — this constant only governs what the list
+/// view displays.
+const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
     "claude-sonnet-4-6",
@@ -146,11 +147,11 @@ fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
 /// Renders the selectable model table with active marker.
 fn render_model_list(info: &SessionInfo) -> String {
     let active = info.config.model_id.as_str();
-    let labels: Vec<String> = SELECTABLE
+    let labels: Vec<String> = LISTED_MODELS
         .iter()
         .map(|id| label_for(id, *id == active))
         .collect();
-    let descriptions: Vec<String> = SELECTABLE.iter().map(|id| description_for(id)).collect();
+    let descriptions: Vec<String> = LISTED_MODELS.iter().map(|id| description_for(id)).collect();
     let rows = labels
         .iter()
         .zip(&descriptions)
@@ -161,7 +162,7 @@ fn render_model_list(info: &SessionInfo) -> String {
 
     out.push_str("\nSwitch: /model <id>  (aliases: opus, sonnet, haiku)");
 
-    if !SELECTABLE.contains(&active) {
+    if !LISTED_MODELS.contains(&active) {
         _ = write!(
             out,
             "\n\nCurrent model: {active} (not in the selectable list).",
@@ -243,11 +244,11 @@ mod tests {
     #[test]
     fn execute_no_args_lists_every_selectable_in_declared_order() {
         // Pin the row order — a mutation reversing or sorting the
-        // SELECTABLE iteration would survive a per-row contains check.
+        // LISTED_MODELS iteration would survive a per-row contains check.
         let (chat, _) = run_execute("");
         let body = chat.last_system_text().unwrap();
         let mut last_idx = 0usize;
-        for id in SELECTABLE {
+        for id in LISTED_MODELS {
             let idx = body
                 .find(id)
                 .unwrap_or_else(|| panic!("missing {id}: {body}"));
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn execute_no_args_marks_only_the_active_row() {
-        // Active row is the exact-match against SELECTABLE.
+        // Active row is the exact-match against LISTED_MODELS.
         // `claude-opus-4-7` (bare) marks only itself, never
         // `claude-opus-4-7[1m]` — `[1m]` distinctness matters.
         let mut chat = ChatView::new(&Theme::default(), false);
@@ -336,7 +337,7 @@ mod tests {
     #[test]
     fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
         // Pass-through tier returns exact table rows unchanged, including
-        // non-SELECTABLE older rows and 1M variants.
+        // non-LISTED_MODELS older rows and 1M variants.
         for id in [
             "claude-opus-4-7",
             "claude-opus-4-7[1m]",
@@ -568,7 +569,7 @@ mod tests {
             .filter(|l| l.contains("claude-") && l.contains("Claude"))
             .map(|l| l.find("Claude").expect("description present"))
             .collect();
-        assert_eq!(value_cols.len(), SELECTABLE.len(), "row count: {body}");
+        assert_eq!(value_cols.len(), LISTED_MODELS.len(), "row count: {body}");
         assert!(
             value_cols.windows(2).all(|w| w[0] == w[1]),
             "columns not aligned: {value_cols:?} — body: {body}",
@@ -580,7 +581,7 @@ mod tests {
         let body = render("claude-opus-4-7");
         // Every [1m] entry must carry the `(1M context)` suffix
         // so users can tell variants apart in the list.
-        for id in SELECTABLE.iter().filter(|id| id.ends_with("[1m]")) {
+        for id in LISTED_MODELS.iter().filter(|id| id.ends_with("[1m]")) {
             let row = body
                 .lines()
                 .find(|l| l.contains(id))
