@@ -62,19 +62,9 @@ impl StreamingAssistant {
         }
     }
 
-    /// Advances the cache: renders newly committed paragraphs
-    /// (everything up to the last `\n\n` paragraph boundary) and stores
-    /// them so subsequent frames skip re-parsing the stable prefix.
-    ///
-    /// Splitting at `\n\n` rather than `\n` is what preserves
-    /// inter-paragraph spacing: pulldown-cmark emits a blank separator
-    /// between adjacent block-level elements only when it sees them in
-    /// the same input. Committing chunk-by-chunk on line boundaries
-    /// would feed the renderer fragments that each parse as a
-    /// standalone paragraph, collapsing the gap between them.
-    ///
-    /// Defers until the viewport has been measured so the markdown
-    /// renderer receives a real wrap width.
+    /// Caches rendered lines up to the last `\n\n` boundary.
+    /// Splitting at `\n\n` (not `\n`) preserves inter-paragraph spacing
+    /// that pulldown-cmark only emits in a single-pass parse.
     pub(crate) fn advance_cache(&mut self, ctx: &RenderCtx<'_>, continues_turn: bool) {
         if ctx.width == 0 {
             return;
@@ -103,12 +93,7 @@ impl StreamingAssistant {
         self.cached_width = ctx.width;
     }
 
-    /// Render the streaming state into `out`.
-    ///
-    /// `continues_turn` is `true` when the preceding block is committed
-    /// assistant text (same logical turn); it suppresses the leading
-    /// icon and blank-line gap so streaming tokens flow into the block
-    /// above.
+    /// Renders streaming content; `continues_turn` suppresses the leading gap.
     pub(crate) fn render_into(
         &self,
         out: &mut Vec<Line<'static>>,

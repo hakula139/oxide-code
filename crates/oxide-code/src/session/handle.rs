@@ -28,11 +28,7 @@ use crate::tool::ToolMetadata;
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// A tool round bursts three cmds at once (assistant + tool-result +
-/// sidecar batch via [`tokio::join!`]); concurrent senders (the
-/// detached title-generator) can race with that burst. Codex uses
-/// 256; 1024 buys headroom even when several agent loops share one
-/// session through cloned handles, without paying for it in memory.
+/// Headroom for burst tool-round writes + concurrent title-generator.
 const CHANNEL_CAPACITY: usize = 1024;
 
 // ── SessionHandle ──
@@ -44,20 +40,11 @@ pub(crate) struct SessionHandle {
     cmd_tx: mpsc::Sender<SessionCmd>,
     session_id: Arc<str>,
     shared: Arc<SharedState>,
-    /// Drained by [`Self::shutdown`] once every cloned sender has
-    /// dropped. `Mutex<Option<_>>` so the first caller takes the
-    /// join, subsequent shutdowns no-op.
+    /// First `shutdown` takes the join; subsequent calls no-op.
     actor_join: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
-/// Failure-surfacing state shared between the actor and every
-/// [`SessionHandle`] clone. `std::sync::Mutex` is fine here — locks are
-/// held for microseconds and there's no cross-task workflow to coordinate.
-///
-/// The two sticky-once flags cover qualitatively different errors and
-/// must not share a slot: a one-batch flush failure is local damage,
-/// whereas an actor-gone signal means every subsequent write is lost.
-/// Conflating them lets the milder failure mask the more severe one.
+/// Sticky-once failure flags shared between actor and handle clones.
 #[derive(Default)]
 pub(super) struct SharedState {
     /// First batch-flush failure has surfaced through a caller's ack.
@@ -86,16 +73,12 @@ impl SharedState {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
 
-    /// `true` on the first actor-gone surface; sticky `false` afterwards.
-    /// Independent of [`Self::surface_first_flush_failure`] so a prior
-    /// flush error doesn't silence the news that the actor died.
+    /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_actor_gone(&self) -> bool {
         !self.actor_gone_surfaced.swap(true, Ordering::AcqRel)
     }
 
-    /// Drains the most recent flush error, if any. Returned for inclusion
-    /// in the actor-gone message so callers see "actor stopped: disk
-    /// full" instead of just "actor stopped".
+    /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
         self.last_flush_failure.lock().ok().and_then(|s| s.clone())
     }
@@ -215,11 +198,7 @@ impl SessionHandle {
         }
     }
 
-    /// Send a cmd whose ack is an [`Outcome`] and await it, falling
-    /// back to the actor-gone path on send / recv failure. Shared by
-    /// every method except [`Self::record_message`], which uses
-    /// [`RecordOutcome`] (carrying the AI-title seed) and so cannot
-    /// route through here without polluting the common path.
+    /// Sends a cmd and awaits the `Outcome` ack; falls back to actor-gone on failure.
     async fn dispatch_outcome(&self, cmd: SessionCmd, rx: oneshot::Receiver<Outcome>) -> Outcome {
         if self.cmd_tx.send(cmd).await.is_err() {
             return Outcome {
@@ -231,11 +210,7 @@ impl SessionHandle {
         })
     }
 
-    /// "Actor task is unreachable" surfaced exactly once via its own
-    /// sticky flag — independent of flush-error surfacing so a prior
-    /// disk hiccup doesn't silence the news that the actor died. If the
-    /// actor recorded an I/O failure before exiting, the underlying
-    /// cause is included in the message.
+    /// Surfaces actor-gone failure once, including the underlying I/O cause if known.
     fn actor_gone_failure(&self) -> Option<String> {
         if !self.shared.surface_first_actor_gone() {
             return None;

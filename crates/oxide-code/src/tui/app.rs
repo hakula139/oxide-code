@@ -55,14 +55,9 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
-    /// Bridges [`AgentEvent::ToolCallStart`] to its matching
-    /// [`AgentEvent::ToolCallEnd`]. The End arm looks up `name` +
-    /// `input` to build a structured [`ToolResultView`] and falls
-    /// back to `label` when the tool emits `title: None`.
+    /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
     pending_calls: PendingCalls,
-    /// Prompts the user submitted while a turn was in flight. Drained
-    /// in FIFO order at each turn boundary; Esc on idle pops the most
-    /// recent entry back into the input for editing.
+    /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     should_quit: bool,
     /// Whether state has changed since the last render.
@@ -207,14 +202,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Esc routing:
-    ///
-    /// - busy → cancel the in-flight turn
-    /// - idle with a non-empty queue AND empty input → pop the most
-    ///   recent queued prompt back into the input for editing
-    /// - idle with content already in the input → no-op (refuse to
-    ///   clobber the user's draft; they must clear it first)
-    /// - idle with an empty queue → no-op (textarea has no use for Esc)
+    /// Routes Esc: cancel if busy, pop queue if idle+empty, else no-op.
     fn handle_esc(&mut self) {
         if !self.input.is_enabled() {
             self.dispatch_user_action(UserAction::Cancel);
@@ -226,12 +214,7 @@ impl App {
         }
     }
 
-    /// Translate a user action into UI state changes, then forward it to the
-    /// agent loop over the bounded channel. A `Closed` error means the agent
-    /// task has died; surface that so the user isn't left staring at a
-    /// wedged "Streaming" status. `Full` is implausible (input is disabled
-    /// while streaming, so at most one in-flight action at a time), but
-    /// worth treating symmetrically if it ever trips.
+    /// Applies UI side-effects then forwards to the agent channel.
     fn dispatch_user_action(&mut self, action: UserAction) {
         if !self.apply_action_locally(&action) {
             return;
@@ -259,13 +242,7 @@ impl App {
         }
     }
 
-    /// Apply the UI-state side of an action and report whether it
-    /// should also be forwarded to the agent loop. Mid-turn submits
-    /// during a `Cancelling` acknowledgement window stay local —
-    /// forwarding them would race the cancel signal and let a
-    /// fresh prompt jump ahead of `pending_prompts`'s existing head
-    /// when the agent's outer `recv` picks it up before
-    /// `AgentEvent::Cancelled` reaches `finalize_idle`.
+    /// Applies UI-state changes; returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
             UserAction::SubmitPrompt(text) => {
@@ -469,27 +446,15 @@ impl App {
         self.finalize_idle();
     }
 
-    /// Shared tail for every turn-end path (normal, error, cancelled):
-    /// drop orphan tool calls, drop the spinner, re-enable input,
-    /// then dispatch any queued follow-up so the next turn fires
-    /// without waiting on the user.
+    /// Resets to idle: clears orphan calls, re-enables input, drains queued prompts.
     fn finalize_idle(&mut self) {
-        // A tool call whose matching `ToolCallEnd` didn't arrive by
-        // turn end is orphaned — either the agent loop dropped the
-        // pairing (bug) or the tool crashed before emitting a result.
-        // Either way, the entry will never be consumed; clearing at
-        // the turn boundary bounds `pending_calls` to at most one
-        // turn's worth of in-flight calls.
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
         self.drain_pending_prompt();
     }
 
-    /// Pops the front of [`Self::pending_prompts`] (FIFO) and dispatches
-    /// it as a fresh submit. Cancellation does not auto-clear the
-    /// queue: a user who interrupted typically still wants their
-    /// planned follow-up.
+    /// Pops the front of the queue and dispatches as a fresh submit.
     fn drain_pending_prompt(&mut self) {
         if let Some(prompt) = self.pending_prompts.pop_front() {
             self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
@@ -497,17 +462,11 @@ impl App {
         self.sync_input_queue_hint();
     }
 
-    /// Mirrors [`Self::pending_prompts`] non-emptiness onto the input
-    /// area so its footer hint can swap to the queue-aware row.
     fn sync_input_queue_hint(&mut self) {
         self.input.set_has_queued(!self.pending_prompts.is_empty());
     }
 
-    /// Sets a busy status only when the bar isn't already showing a
-    /// terminal user-acknowledgement (`Cancelling`, `ExitArmed`) —
-    /// otherwise a late stream / tool event buffered in the agent
-    /// channel would overwrite the hint before the user has had time
-    /// to react.
+    /// Sets busy status unless a user-acknowledgement status is showing.
     fn set_active_status(&mut self, status: Status) {
         if !matches!(
             self.status_bar.status(),

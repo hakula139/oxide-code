@@ -45,15 +45,7 @@ pub(super) struct SessionState {
     finished: bool,
 }
 
-/// Lifecycle states for the underlying file:
-///
-/// - `Pending` — header staged, file not yet on disk. A fresh session
-///   that exits before the first record cmd leaves no file behind.
-/// - `Active` — file open, [`BufWriter`][std::io::BufWriter] healthy.
-/// - `Broken` — last batch errored mid-flush. `BufWriter`'s buffer is
-///   undefined after a partial write per std docs, so the next batch
-///   reopens the file with [`SessionStore::open_append`] instead of
-///   letting one transient hiccup poison every subsequent flush.
+/// Writer lifecycle: lazy-create, healthy, or poisoned after a partial write.
 enum WriterStatus {
     Pending { header: Entry },
     Active(SessionWriter),
@@ -97,10 +89,7 @@ impl SessionState {
         }
     }
 
-    /// Build the entries one `record_message` would emit and update
-    /// bookkeeping. Returns the AI-title seed only on a fresh session's
-    /// first user-text message. Pure transform; flushing is the
-    /// caller's job.
+    /// Builds entries for one message; returns AI-title seed on first user-text.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,
@@ -137,14 +126,7 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Builds the closing entries (one [`Entry::FileSnapshot`] per
-    /// supplied snapshot, then an [`Entry::Summary`]) or an empty vec
-    /// for a no-op finish. Latches `finished = true` either way.
-    /// Snapshots precede the summary so the summary stays the final
-    /// clean-exit marker; the caller (typically `main.rs` via
-    /// [`SessionHandle::finish`]) drains the tracker just before
-    /// sending the cmd, keeping `SessionState` free of any
-    /// `Arc<FileTracker>` coupling.
+    /// Builds snapshot + summary closing entries, or empty vec for no-op finish.
     pub(super) fn finish_entries(
         &mut self,
         snapshots: Vec<FileSnapshot>,
@@ -154,9 +136,8 @@ impl SessionState {
             return Vec::new();
         }
         self.finished = true;
-        // Check `message_count`, not `writer_status`: a `Record + Finish`
-        // batch defers materialization to `flush_entries`, so the writer
-        // is still `Pending` when this runs.
+        // message_count rather than writer status — writer may still be Pending in a
+        // batched Finish.
         if self.message_count == 0 {
             return Vec::new();
         }
@@ -174,9 +155,7 @@ impl SessionState {
         entries
     }
 
-    /// Buffer every entry then flush once. Materializes or reopens the
-    /// file as needed; a transient open / header / flush failure leaves
-    /// the writer in a state that retries cleanly on the next batch.
+    /// Writes entries in one flush; transitions writer on failure for next-batch retry.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -197,13 +176,9 @@ impl SessionState {
         result
     }
 
-    /// Yields the writer to flush into, transitioning from Pending /
-    /// Broken as needed. On open failure restores the pre-call state so
-    /// the next batch retries with the same intent (Pending keeps its
-    /// header, Broken stays Broken).
+    /// Returns a writer, transitioning from Pending or Broken as needed.
     fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
-        // Replace with Broken so the borrow checker lets us own the
-        // current variant — caller restores Active or Broken below.
+        // Temporarily swap with Broken to take ownership.
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
             WriterStatus::Active(w) => Ok(w),
             WriterStatus::Pending { header } => match self.store.create(&header) {
@@ -236,10 +211,6 @@ fn current_dir_string() -> String {
     format_current_dir(std::env::current_dir())
 }
 
-/// Pure formatter split out for unit testing — the cwd-failure branch
-/// is otherwise unreachable from a portable test (deleting the cwd
-/// from under a running process is OS-dependent and races with the
-/// runtime).
 fn format_current_dir(result: std::io::Result<std::path::PathBuf>) -> String {
     match result {
         Ok(p) => p.display().to_string(),

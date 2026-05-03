@@ -37,12 +37,7 @@ use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::component::Component;
 use crate::tui::theme::Theme;
 
-/// Scrollable chat message list with markdown rendering, tool call
-/// display, and thinking block support.
-///
-/// Renders blocks vertically and auto-scrolls to the bottom on new
-/// content. The user can scroll up to review history; new content
-/// pauses auto-scroll until the user scrolls back to the bottom.
+/// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
     // Config
     theme: Theme,
@@ -85,15 +80,7 @@ impl ChatView {
         }
     }
 
-    /// Populate the chat from resumed session messages.
-    ///
-    /// Projects the transcript into [`Interaction`]s so the resumed view
-    /// matches live rendering — paired tool calls and results appear
-    /// together, orphan results get a fallback label, and
-    /// `RedactedThinking` / whitespace-only blocks are dropped upstream.
-    /// Thinking blocks are always pushed; [`AssistantThinking::visible`]
-    /// collapses them to zero when `show_thinking` is off, so flipping
-    /// the toggle at runtime doesn't require reloading the session.
+    /// Populates from resumed transcript, projecting the same block shapes as live rendering.
     pub(crate) fn load_history(
         &mut self,
         messages: &[Message],
@@ -161,10 +148,7 @@ impl ChatView {
         }
     }
 
-    /// Appends a user message to the chat. Finalizes any in-flight
-    /// streaming buffer first — a fresh user turn implicitly ends the
-    /// previous assistant turn's text, mirroring [`push_tool_call`](Self::push_tool_call)
-    /// and [`push_interrupted_marker`](Self::push_interrupted_marker).
+    /// Appends a user message, flushing any in-flight streaming buffer.
     pub(crate) fn push_user_message(&mut self, text: String) {
         self.commit_streaming();
         self.blocks.push(Box::new(UserMessage::new(text)));
@@ -212,11 +196,7 @@ impl ChatView {
         self.blocks.push(Box::new(AssistantThinking::new(text)));
     }
 
-    /// Appends a tool call entry with its icon and label.
-    ///
-    /// Finalizes any in-flight streaming buffer first — a tool call
-    /// implicitly ends the current assistant turn's text, so callers
-    /// don't need to remember to `commit_streaming()` beforehand.
+    /// Appends a tool call, flushing any in-flight streaming buffer.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
         self.commit_streaming();
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));

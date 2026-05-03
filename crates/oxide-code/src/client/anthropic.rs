@@ -64,13 +64,8 @@ pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
-    /// Per-machine id sent in `metadata.user_id.device_id`, lazily
-    /// minted under `$XDG_DATA_HOME/ox/user-id` at construction.
     device_id: String,
-    /// Whether `config.base_url` points at the first-party Anthropic
-    /// API. Cached at construction so per-request paths don't re-parse
-    /// the URL — gates `cache_control.scope: "global"`, which 3P
-    /// gateways reject downstream of tool definitions.
+    /// Cached 1P check — gates `scope: "global"` in `cache_control`.
     is_first_party: bool,
 }
 
@@ -94,9 +89,6 @@ impl Client {
             }
         }
 
-        // `anthropic-beta` is set per-request in `stream_message` /
-        // `complete` because the accepted set varies by model and call
-        // type — see [`betas::compute_betas`].
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
         headers.insert(
             "anthropic-dangerous-direct-browser-access",
@@ -109,9 +101,7 @@ impl Client {
             HeaderValue::from_str(&format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))?,
         );
 
-        // 3P gateways fingerprint absence of the full Stainless header set.
-        // `x-claude-code-session-id` is per-request so `/clear` can roll
-        // the id without rebuilding the HTTP client.
+        // 3P gateways fingerprint the Stainless header set.
         headers.insert("x-app", HeaderValue::from_static("cli"));
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
         headers.insert(
@@ -291,11 +281,7 @@ impl Client {
     }
 }
 
-/// Builds the `metadata.user_id` field as a stringified JSON object.
-///
-/// Field order matters: gateways reject anything but `device_id,
-/// account_uuid, session_id`. A typed struct (not `serde_json::json!`)
-/// preserves declaration order on the wire — `json!` would alphabetize.
+/// Stringified `metadata.user_id`. Field order is load-bearing (gateway check).
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {
@@ -313,14 +299,7 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     RequestMetadata { user_id }
 }
 
-/// Assembles the `system` block sequence shared by streaming and
-/// one-shot paths. Order is load-bearing: billing's `cch=00000`
-/// placeholder must serialize first so [`billing::inject_cch`]'s
-/// single-occurrence replacement is unambiguous, and the identity
-/// prefix must occupy its own block on non-Haiku OAuth.
-///
-/// Empty `extras` entries are dropped so callers can hand in optional
-/// sections without `if !text.is_empty()` guards at every site.
+/// System blocks in wire order. Order is load-bearing for billing injection.
 fn build_system_blocks<'a, const N: usize>(
     billing_header: Option<&'a str>,
     extras: [(&'a str, Option<CacheControl>); N],

@@ -1,40 +1,8 @@
 //! Ground-truth table of known Claude models.
 //!
-//! Centralizes everything that needs to branch on the target model:
-//! marketing name, knowledge cutoff, and API capabilities (interleaved
-//! thinking, context management, effort control, 1M context, structured
-//! outputs). One table, one lookup, every caller reads the same booleans —
-//! so the one place we edit when a new model ships is here.
-//!
-//! Matching is substring-based on `id_substr` with more-specific entries
-//! first, so `claude-opus-4-6` wins over `claude-opus-4`. An unknown model
-//! string falls through to the family base row (e.g. `claude-opus-4`),
-//! which carries conservative capability flags — we'd rather under-send
-//! an experimental beta than 400 a request.
-//!
-//! Capability flags mirror the third-party-gateway branch of the upstream
-//! `modelSupports*` predicates (substring rules) and a few client-side
-//! additions that come from the migration guide + live packet captures
-//! (per-version allowlists):
-//!
-//! - `interleaved_thinking` ← `modelSupportsISP` — substring `opus-4` or
-//!   `sonnet-4`.
-//! - `context_management` ← `modelSupportsContextManagement` — substring
-//!   `opus-4`, `sonnet-4`, or `haiku-4`.
-//! - `context_1m` ← `modelSupports1M` — substring `claude-sonnet-4` or
-//!   `opus-4-6`.
-//! - `effort` ← `modelSupportsEffort` — substring `opus-4-6` or
-//!   `sonnet-4-6`.
-//! - `effort_max` — explicit allowlist: Opus 4.6, Opus 4.7.
-//! - `effort_xhigh` — explicit allowlist: Opus 4.7.
-//! - `structured_outputs` ← `modelSupportsStructuredOutputs` — explicit
-//!   allowlist: opus-4-1 / 4-5 / 4-6, sonnet-4-5 / 4-6, haiku-4-5.
-//!
-//! `capability_flags_match_upstream_predicates` in the test module locks
-//! every row to the substring predicates above so a mis-bump fails CI
-//! loudly. Flags that are allowlist-shaped (`effort_max`, `effort_xhigh`,
-//! `structured_outputs`) are exercised by per-flag enumeration tests
-//! because they don't reduce to a substring rule.
+//! Each row carries marketing name, cutoff, and capability flags gating
+//! beta headers and body fields. Matching is substring-based; more-specific
+//! entries come first.
 
 use std::borrow::Cow;
 
@@ -93,23 +61,7 @@ pub(crate) struct Capabilities {
     pub(crate) structured_outputs: bool,
 }
 
-/// Ordered table of known Claude models. More-specific prefixes come
-/// before their family stems so lookup's first-match rule routes
-/// `claude-opus-4-6` to the 4.6 row, not the `claude-opus-4` base.
-///
-/// Capability flags are spelled out per row with no inheritance —
-/// upstream's `modelSupports*` predicates are independent per flag and
-/// the allowlist / substring shape varies by predicate (see the
-/// module-level doc), so every row is the canonical reference for its
-/// own model. Bumping for a new model is a single-row edit: copy the
-/// nearest sibling and flip the flags that the upstream predicate(s)
-/// change.
-///
-/// The one intentional divergence from the substring-predicate rules:
-/// Opus 4.7 postdates the upstream snapshot we have on hand, so it
-/// inherits 4.6's monotonic-capability projection for `effort`,
-/// `context_management`, and `1M`. 4.7 uniquely adds `effort_xhigh`;
-/// `effort_max` is Opus-only per the migration guide (4.6 + 4.7).
+/// Ordered table: most-specific substring first. No inheritance between rows.
 pub(crate) const MODELS: &[ModelInfo] = &[
     // Upstream predates 4.7; substring-derived flags inherit 4.6 as a
     // monotonic projection, and `effort_xhigh` is the one 4.7-only

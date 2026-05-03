@@ -1,22 +1,7 @@
-//! `/model` — list selectable models or swap the active one mid-session.
+//! `/model` — list selectable models or swap the active one.
 //!
-//! Bare `/model` lists the curated [`SELECTABLE`] set with the active
-//! row marked. `/model <arg>` resolves through four tiers against the
-//! broader [`crate::model::MODELS`] table: alias map, exact / dated-id
-//! pass-through, unique suffix (so `opus-4` lands on `claude-opus-4`
-//! rather than 5-way ambiguous), then unique substring. Manual entry of
-//! older or dated ids works even though the curated list only surfaces 4.7.
-//! On a unique match, the dispatcher hands
-//! [`UserAction::SwitchModel`] to the agent loop, which calls
-//! [`Client::set_model`](crate::client::anthropic::Client::set_model)
-//! and emits [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched).
-//!
-//! `[1m]` is a first-class variant — `/model opus-4-7` means non-1M
-//! Opus 4.7; `/model opus-4-7[1m]` means the 1M variant. Typing `[1m]`
-//! on a model whose capability table row has `context_1m: false`
-//! (e.g. Haiku 4.5) is rejected upfront so the user gets a clear
-//! signal instead of a silent fallback to 200K context. See `model.md`
-//! § Design Decisions.
+//! Resolution tiers: alias → exact / dated-id → unique suffix → unique substring.
+//! `[1m]` is a first-class variant; rejected on models without `context_1m`.
 
 use std::fmt::Write as _;
 
@@ -40,9 +25,7 @@ const SELECTABLE: &[&str] = &[
     "claude-haiku-4-5",
 ];
 
-/// Short aliases for the bare (non-`[1m]`) form. The resolver strips
-/// `[1m]` before alias lookup, so `opus[1m]` works without a separate
-/// entry — `haiku[1m]` then errors uniformly via the capability check.
+/// Short aliases resolved before suffix / substring matching.
 const ALIASES: &[(&str, &str)] = &[
     ("opus", "claude-opus-4-7"),
     ("sonnet", "claude-sonnet-4-6"),
@@ -81,10 +64,7 @@ impl SlashCommand for ModelCmd {
     }
 }
 
-/// Strip `[1m]`, resolve the base id, re-attach `[1m]` only when the
-/// model supports it. Splitting the tag from identity lets `opus[1m]`
-/// reuse the bare alias and `haiku[1m]` fail uniformly with one check.
-/// Args are lowercased so `/model OPUS` matches `/effort XHIGH`.
+/// Strips `[1m]`, resolves base, re-attaches if supported. Case-insensitive.
 fn resolve_model_arg(arg: &str) -> Result<String, String> {
     let arg = arg.to_ascii_lowercase();
     let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
@@ -163,10 +143,7 @@ fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
         .collect()
 }
 
-/// `* id  marketing` table with a legend header. Active row marker is
-/// an exact match between [`SessionInfo`]'s `config.model_id` and a
-/// [`SELECTABLE`] entry — `[1m]` distinctness matters because the
-/// 1M-tagged variant is a separate selectable row.
+/// Renders the selectable model table with active marker.
 fn render_model_list(info: &SessionInfo) -> String {
     let active = info.config.model_id.as_str();
     let labels: Vec<String> = SELECTABLE
@@ -193,17 +170,12 @@ fn render_model_list(info: &SessionInfo) -> String {
     out
 }
 
-/// `* id` on the active row, `  id` otherwise. Width-aligned by
-/// [`write_kv_table`]'s gutter so the marker column stays straight.
 fn label_for(id: &'static str, active: bool) -> String {
     let marker = if active { '*' } else { ' ' };
     format!("{marker} {id}")
 }
 
-/// Marketing name + ` (1M context)` when the id carries the `[1m]`
-/// opt-in tag. [`marketing_or_id`] falls back to the raw id for
-/// unknown rows; `[1m]` is stripped by the substring lookup, so
-/// the marketing name comes from the bare row.
+/// Marketing name, appending `(1M context)` for `[1m]` variants.
 fn description_for(id: &'static str) -> String {
     let name = marketing_or_id(id);
     if id.ends_with("[1m]") {
