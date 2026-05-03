@@ -180,23 +180,21 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-resolves the stored effort pick
-    /// against the new caps. Returns the effective effort for display.
+    /// Swaps the active model and re-clamps `config.effort` against
+    /// the new caps. Returns the effective effort for display.
     pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
-        let effort = caps.resolve_effort(self.config.effort_pick);
+        let effort = caps.resolve_effort(self.config.effort);
         self.config.effort = effort;
         self.config.model = model;
         effort
     }
 
     /// Swaps the active effort, clamped against the current model's
-    /// caps. `pick = None` means `auto` — fall back to the model
-    /// default. Returns the resolved effort.
-    pub(crate) fn set_effort(&mut self, pick: Option<Effort>) -> Option<Effort> {
+    /// caps. Returns the resolved effort.
+    pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&self.config.model);
-        let effort = caps.resolve_effort(pick);
-        self.config.effort_pick = pick;
+        let effort = caps.clamp_effort(pick);
         self.config.effort = effort;
         effort
     }
@@ -613,17 +611,8 @@ mod tests {
 
     // ── Client::set_model ──
 
-    fn client_with(model: &str, effort_pick: Option<Effort>) -> Client {
+    fn client_with(model: &str, effort: Option<Effort>) -> Client {
         let mut cfg = test_config(OFFLINE_URL, api_key(), model);
-        cfg.effort_pick = effort_pick;
-        let caps = crate::model::capabilities_for(model);
-        cfg.effort = caps.resolve_effort(effort_pick);
-        Client::new(cfg, Some("sid".to_owned())).unwrap()
-    }
-
-    fn client_with_effective_effort(model: &str, effort: Option<Effort>) -> Client {
-        let mut cfg = test_config(OFFLINE_URL, api_key(), model);
-        cfg.effort_pick = effort;
         cfg.effort = effort;
         Client::new(cfg, Some("sid".to_owned())).unwrap()
     }
@@ -660,12 +649,6 @@ mod tests {
                 Some(Effort::Xhigh),
             ),
             (
-                "claude-sonnet-4-6",
-                None,
-                "claude-opus-4-7",
-                Some(Effort::Xhigh),
-            ),
-            (
                 "claude-opus-4-7",
                 Some(Effort::High),
                 "claude-opus-5-0",
@@ -678,10 +661,6 @@ mod tests {
             assert_eq!(
                 client.config.effort, expect,
                 "{from_model} → {swap_to}: stored effort",
-            );
-            assert_eq!(
-                client.config.effort_pick, from_effort,
-                "{from_model} → {swap_to}: stored pick",
             );
             assert_eq!(client.model(), swap_to, "{swap_to}: stored id");
         }
@@ -702,40 +681,28 @@ mod tests {
     #[test]
     fn set_effort_resolves_pick_against_active_model_caps() {
         // Each row is one resolution arm: pass-through, clamp-down,
-        // auto → model default, and explicit-on-no-tier collapses
-        // to None. Tested through `&mut self` to cover both the
-        // returned value and the stored field in one pass.
+        // and explicit-on-no-tier collapses to None. Tested through
+        // `&mut self` to cover both returned and stored effort.
         for (model, initial, pick, expect) in [
             (
                 "claude-opus-4-7",
                 Some(Effort::High),
-                Some(Effort::Xhigh),
+                Effort::Xhigh,
                 Some(Effort::Xhigh),
             ),
             (
                 "claude-sonnet-4-6",
                 Some(Effort::High),
-                Some(Effort::Xhigh),
+                Effort::Xhigh,
                 Some(Effort::High),
             ),
-            (
-                "claude-opus-4-7",
-                Some(Effort::Low),
-                None,
-                Some(Effort::Xhigh),
-            ),
-            ("claude-haiku-4-5", None, Some(Effort::High), None),
-            ("claude-haiku-4-5", None, None, None),
+            ("claude-haiku-4-5", None, Effort::High, None),
         ] {
-            let mut client = client_with_effective_effort(model, initial);
+            let mut client = client_with(model, initial);
             assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
             assert_eq!(
                 client.config.effort, expect,
                 "{model} pick={pick:?}: stored effort",
-            );
-            assert_eq!(
-                client.config.effort_pick, pick,
-                "{model} pick={pick:?}: stored pick",
             );
         }
     }

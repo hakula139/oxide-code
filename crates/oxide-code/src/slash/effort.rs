@@ -2,8 +2,7 @@
 //!
 //! Bare lists the levels for the active model with the current marked
 //! and unsupported levels annotated. `/effort <level>` swaps to that
-//! tier; `/effort auto` (alias `unset`) clears the user pick so the
-//! model's default kicks in. The agent loop calls
+//! tier. The agent loop calls
 //! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
 //! which clamps against the active model's caps.
 
@@ -15,9 +14,6 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
-
-/// Keywords that clear the user pick so the model default kicks in.
-const AUTO_KEYWORDS: &[&str] = &["auto", "unset"];
 
 pub(super) struct EffortCmd;
 
@@ -35,7 +31,7 @@ impl SlashCommand for EffortCmd {
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some("[<level>|auto]")
+        Some("[<level>]")
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -49,7 +45,7 @@ impl SlashCommand for EffortCmd {
         // a clear user mistake — surface upfront instead of letting it
         // silently resolve to None.
         let caps = capabilities_for(&ctx.info.config.model_id);
-        if pick.is_some() && !caps.effort {
+        if !caps.effort {
             return Err(format!(
                 "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
                 marketing_or_id(&ctx.info.config.model_id),
@@ -59,19 +55,11 @@ impl SlashCommand for EffortCmd {
     }
 }
 
-/// Map the level keyword to `Some(Effort)`; `auto` / `unset` to `None`.
-/// Case-insensitive.
-fn parse_effort_arg(arg: &str) -> Result<Option<Effort>, String> {
+fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
     let lower = arg.to_ascii_lowercase();
-    if AUTO_KEYWORDS.contains(&lower.as_str()) {
-        return Ok(None);
-    }
-    lower.parse().map(Some).map_err(|_| {
-        format!(
-            "Unknown effort: `{arg}`. Valid: {}, auto.",
-            Effort::VALID_VALUES
-        )
-    })
+    lower
+        .parse()
+        .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))
 }
 
 /// `* level  note` table with the active marker, plus a header naming
@@ -107,10 +95,7 @@ fn render_effort_list(info: &SessionInfo) -> String {
     write_kv_table(&mut out, rows);
 
     out.push_str("\nSwitch with: /effort <level>\n");
-    out.push_str(
-        "Use /effort auto to clear (fall back to model default). \
-         Unsupported levels clamp down to the model's ceiling.",
-    );
+    out.push_str("Unsupported levels clamp down to the model's ceiling.");
     out
 }
 
@@ -140,7 +125,7 @@ mod tests {
         assert_eq!(EffortCmd.name(), "effort");
         assert!(EffortCmd.aliases().is_empty());
         assert!(!EffortCmd.description().is_empty());
-        assert_eq!(EffortCmd.usage(), Some("[<level>|auto]"));
+        assert_eq!(EffortCmd.usage(), Some("[<level>]"));
     }
 
     #[test]
@@ -148,7 +133,6 @@ mod tests {
         assert!(EffortCmd.is_read_only(""));
         assert!(EffortCmd.is_read_only("   "));
         assert!(!EffortCmd.is_read_only("xhigh"));
-        assert!(!EffortCmd.is_read_only("auto"));
     }
 
     // ── EffortCmd::execute ──
@@ -181,7 +165,10 @@ mod tests {
             "header leads the output: {body}",
         );
         assert!(body.contains("Switch with: /effort <level>"), "{body}");
-        assert!(body.contains("/effort auto"), "auto hint: {body}");
+        assert!(
+            body.contains("Unsupported levels clamp down"),
+            "clamp hint: {body}",
+        );
         for level in Effort::ALL {
             assert!(
                 body.contains(&level.to_string()),
@@ -246,20 +233,8 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchEffort(Some(level)))),
+                Ok(SlashOutcome::Action(UserAction::SwitchEffort(level))),
                 "`{arg}` should dispatch SwitchEffort({level:?})",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_auto_dispatches_switch_effort_none() {
-        for arg in ["auto", "unset", "AUTO", "  auto  "] {
-            let (_, outcome) = run_execute(arg);
-            assert_eq!(
-                outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchEffort(None))),
-                "`{arg}` should clear the pick",
             );
         }
     }
@@ -278,34 +253,29 @@ mod tests {
     }
 
     #[test]
-    fn execute_auto_on_no_tier_model_dispatches_to_clear() {
-        // `auto` on a no-effort model is harmless — nothing to clear,
-        // but the loop emits an EffortSwitched(None, None) the user
-        // can read as confirmation.
-        let (_, outcome) = run_execute_with_model("claude-haiku-4-5", "auto");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchEffort(None))),
-        );
-    }
-
-    #[test]
     fn execute_unknown_level_returns_error_listing_valid_options() {
         let (chat, outcome) = run_execute("turbo");
         let msg = outcome.expect_err("unknown level must error");
         assert!(msg.starts_with("Unknown effort: `turbo`."), "{msg}");
-        for valid in Effort::VALID_VALUES.split(", ").chain(["auto"]) {
+        for valid in Effort::VALID_VALUES.split(", ") {
             assert!(msg.contains(valid), "lists `{valid}`: {msg}");
         }
+        assert!(!msg.contains("auto"), "{msg}");
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
+    }
+
+    #[test]
+    fn execute_auto_is_unknown() {
+        let (_, outcome) = run_execute("auto");
+        let msg = outcome.expect_err("auto is not a selectable effort");
+        assert!(msg.starts_with("Unknown effort: `auto`."), "{msg}");
     }
 
     // ── parse_effort_arg ──
 
     #[test]
     fn parse_effort_arg_is_case_insensitive() {
-        assert_eq!(parse_effort_arg("XHIGH"), Ok(Some(Effort::Xhigh)));
-        assert_eq!(parse_effort_arg("MaX"), Ok(Some(Effort::Max)));
-        assert_eq!(parse_effort_arg("AUTO"), Ok(None));
+        assert_eq!(parse_effort_arg("XHIGH"), Ok(Effort::Xhigh));
+        assert_eq!(parse_effort_arg("MaX"), Ok(Effort::Max));
     }
 }

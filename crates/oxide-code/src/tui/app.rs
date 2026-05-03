@@ -660,20 +660,15 @@ fn format_swap_confirmation(
 }
 
 /// `AgentEvent::EffortSwitched` confirmation. `pick` is the user's
-/// input (`None` = `auto`); `effort` is the resolved value — the two
-/// diverge on clamp / no-tier so neither is a silent no-op.
+/// input; `effort` is the resolved value.
 fn format_effort_confirmation(
-    pick: Option<crate::config::Effort>,
+    pick: crate::config::Effort,
     effort: Option<crate::config::Effort>,
 ) -> String {
     match (pick, effort) {
-        (None, None) => "Effort cleared — model has no effort tier.".to_owned(),
-        (None, Some(level)) => format!("Effort cleared. Using {level} (model default)."),
-        (Some(p), Some(level)) if p == level => format!("Effort set to {level}."),
-        (Some(p), Some(level)) => format!("Effort set to {level} (clamped from {p})."),
-        (Some(p), None) => {
-            format!("Effort cleared — model has no effort tier (asked for {p}).")
-        }
+        (p, Some(level)) if p == level => format!("Effort set to {level}."),
+        (p, Some(level)) => format!("Effort set to {level} (clamped from {p})."),
+        (p, None) => format!("Effort unchanged — model has no effort tier (asked for {p})."),
     }
 }
 
@@ -1309,21 +1304,22 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clear_arm_returns_false_to_prevent_double_send() {
-        // `/clear` already forwards `UserAction::Clear` through the
-        // slash branch. The explicit `false` return on the `Clear` arm
-        // of `apply_action_locally` guards a future caller that hands
-        // `Clear` straight to `dispatch_user_action` — the action stays
-        // local so `user_tx` only sees the slash branch's send.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::Clear);
+    fn dispatch_local_only_actions_return_false_to_prevent_double_send() {
+        for action in [
+            UserAction::Clear,
+            UserAction::SwitchModel("claude-opus-4-7".to_owned()),
+            UserAction::SwitchEffort(crate::config::Effort::High),
+        ] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(action.clone());
 
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "Clear must not reach user_tx via dispatch_user_action",
-        );
-        assert!(!app.should_quit);
-        assert_eq!(app.chat.entry_count(), 0);
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{action:?} must not reach user_tx via dispatch_user_action",
+            );
+            assert!(!app.should_quit);
+            assert_eq!(app.chat.entry_count(), 0);
+        }
     }
 
     #[tokio::test]
@@ -1562,9 +1558,9 @@ mod tests {
         );
         assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
         let body = app.chat.last_system_text().expect("confirmation block");
-        assert!(
-            body.contains("Switched to Claude Sonnet 4.6 (claude-sonnet-4-6)"),
-            "marketing + id present: {body}",
+        assert_eq!(
+            body,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high.",
         );
         assert!(app.dirty);
     }
@@ -1614,8 +1610,7 @@ mod tests {
 
     #[test]
     fn format_swap_confirmation_marks_clamp_when_new_effort_below_previous() {
-        // The lossy-swap warning the design doc trades for simplicity:
-        // user can at least see what they just lost.
+        // The effective tier changed; surface the temporary clamp.
         let s = format_swap_confirmation(
             "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
@@ -1651,7 +1646,7 @@ mod tests {
         // change here.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::EffortSwitched {
-            pick: Some(crate::config::Effort::Xhigh),
+            pick: crate::config::Effort::Xhigh,
             effort: Some(crate::config::Effort::Xhigh),
         });
         assert_eq!(
@@ -1668,7 +1663,7 @@ mod tests {
     #[test]
     fn format_effort_confirmation_explicit_pick_matches_resolution() {
         let s = format_effort_confirmation(
-            Some(crate::config::Effort::Xhigh),
+            crate::config::Effort::Xhigh,
             Some(crate::config::Effort::Xhigh),
         );
         assert_eq!(s, "Effort set to xhigh.");
@@ -1677,37 +1672,21 @@ mod tests {
     #[test]
     fn format_effort_confirmation_clamp_surfaces_what_user_asked_for() {
         let s = format_effort_confirmation(
-            Some(crate::config::Effort::Xhigh),
+            crate::config::Effort::Xhigh,
             Some(crate::config::Effort::High),
         );
         assert_eq!(s, "Effort set to high (clamped from xhigh).");
     }
 
     #[test]
-    fn format_effort_confirmation_auto_acknowledges_clear_and_resolves_default() {
-        // /effort auto reads back as a confirmation that the user
-        // pick was cleared, then names the model default that took
-        // its place — not "Effort set to ..." which would read like
-        // the system overrode the user's input.
-        let s = format_effort_confirmation(None, Some(crate::config::Effort::Xhigh));
-        assert_eq!(s, "Effort cleared. Using xhigh (model default).");
-    }
-
-    #[test]
     fn format_effort_confirmation_pick_on_no_tier_model_surfaces_loss() {
         // The slash command preflight stops this from happening through
         // /effort, but client-driven flows could still emit it.
-        let s = format_effort_confirmation(Some(crate::config::Effort::High), None);
+        let s = format_effort_confirmation(crate::config::Effort::High, None);
         assert_eq!(
             s,
-            "Effort cleared — model has no effort tier (asked for high)."
+            "Effort unchanged — model has no effort tier (asked for high)."
         );
-    }
-
-    #[test]
-    fn format_effort_confirmation_auto_on_no_tier_model_acknowledges_no_op() {
-        let s = format_effort_confirmation(None, None);
-        assert_eq!(s, "Effort cleared — model has no effort tier.");
     }
 
     #[test]

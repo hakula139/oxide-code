@@ -84,10 +84,9 @@ pub(crate) enum AgentEvent {
         effort: Option<Effort>,
     },
     /// `/effort` swapped the active effort. `pick` is what the user
-    /// asked for (`None` = `auto`/clear), `effort` is what the model's
-    /// caps resolved it to — the two diverge on clamp / clear cases.
+    /// asked for; `effort` is what the model's caps resolved it to.
     EffortSwitched {
-        pick: Option<Effort>,
+        pick: Effort,
         effort: Option<Effort>,
     },
     /// A fatal error from the API or agent loop.
@@ -106,14 +105,12 @@ pub(crate) enum UserAction {
     Clear,
     /// `/model <id>` — agent loop calls
     /// [`Client::set_model`](crate::client::anthropic::Client::set_model)
-    /// and emits [`AgentEvent::ModelSwitched`]. `id` is a canonical
-    /// `SELECTABLE` entry resolved by the slash command.
+    /// and emits [`AgentEvent::ModelSwitched`].
     SwitchModel(String),
     /// `/effort <level>` — agent loop calls
     /// [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
-    /// and emits [`AgentEvent::EffortSwitched`]. `None` = `auto` (clear
-    /// the user pick so the model default kicks in).
-    SwitchEffort(Option<Effort>),
+    /// and emits [`AgentEvent::EffortSwitched`].
+    SwitchEffort(Effort),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -409,7 +406,7 @@ mod tests {
                 effort: Some(Effort::Xhigh),
             },
             AgentEvent::EffortSwitched {
-                pick: Some(Effort::High),
+                pick: Effort::High,
                 effort: Some(Effort::High),
             },
         ] {

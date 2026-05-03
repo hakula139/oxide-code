@@ -181,13 +181,10 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: String,
-    /// User-declared effort selection. `None` means auto: resolve from
-    /// the active model's default whenever the model changes.
-    pub(crate) effort_pick: Option<Effort>,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
     /// omitted. Resolved once at [`Config::load`]; mutated mid-session
-    /// by `/effort` and re-resolved on `/model` swaps.
+    /// by `/effort` and re-clamped on `/model` swaps.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
@@ -277,7 +274,6 @@ impl Config {
 
         Ok(Self {
             model,
-            effort_pick,
             effort,
             auth,
             base_url,
@@ -497,7 +493,6 @@ mod tests {
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.max_tokens, 64_000);
-        assert_eq!(config.effort_pick, None);
         assert_eq!(config.effort, Some(Effort::Xhigh));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(!config.show_thinking);
@@ -722,7 +717,6 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.effort_pick, Some(Effort::Low));
         assert_eq!(config.effort, Some(Effort::Low));
     }
 
@@ -739,7 +733,6 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.effort_pick, Some(Effort::Xhigh));
         assert_eq!(config.effort, Some(Effort::High));
     }
 
@@ -754,7 +747,6 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.effort_pick, Some(Effort::Max));
         assert_eq!(config.effort, None);
     }
 
@@ -772,7 +764,6 @@ mod tests {
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
-        assert_eq!(config.effort_pick, Some(Effort::Medium));
         assert_eq!(config.effort, Some(Effort::Medium));
     }
 
@@ -791,7 +782,6 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
-        assert_eq!(config.effort_pick, Some(Effort::Max));
         assert_eq!(config.effort, Some(Effort::Max));
     }
 
@@ -828,7 +818,6 @@ mod tests {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),
             model: "claude-test-1-0".to_owned(),
-            effort_pick: Some(Effort::Xhigh),
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
             prompt_cache_ttl: PromptCacheTtl::FiveMin,

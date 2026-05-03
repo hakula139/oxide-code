@@ -1279,7 +1279,7 @@ mod tests {
             UserAction::ConfirmExit,
             UserAction::Clear,
             UserAction::SwitchModel("claude-opus-4-7".to_owned()),
-            UserAction::SwitchEffort(Some(Effort::High)),
+            UserAction::SwitchEffort(Effort::High),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());
