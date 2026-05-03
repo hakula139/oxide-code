@@ -141,7 +141,7 @@ Sharing a single flag would let the milder per-batch failure mask the more sever
 
 ## Design Decisions for oxide-code
 
-Based on the research and the constraints above, the following decisions shape the implementation:
+The following decisions shaped the implementation:
 
 1. **JSONL, append-only, one file per session** — proven format, no dependencies, crash-safe with write-then-flush. Matches every reference project.
 2. **Per-project subdirectory under `$XDG_DATA_HOME/ox/sessions/`** — listings stay scoped to the project you're working in; `--all` opts into the cross-project view.

@@ -106,7 +106,7 @@ Every `thinking` block includes a `signature` field received via `signature_delt
 
 Claude Code handles credential rotation in `stripSignatureBlocks()`, which removes all thinking / redacted_thinking blocks when the active credential changes.
 
-oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default; `thinking.display` is set to `"summarized"` whenever the TUI's `show_thinking` flag is on (and omitted otherwise so 4.7's `"omitted"` default applies). Credential rotation stripping is not yet implemented (depends on Keychain OAuth support).
+oxide-code implements the full thinking data pipeline: typed `Thinking`, `RedactedThinking`, and `ServerToolUse` content blocks with proper streaming accumulation, signature handling, round-trip preservation, and trailing thinking stripping with placeholder insertion. Adaptive thinking is enabled by default; `thinking.display` is set to `"summarized"` whenever the TUI's `show_thinking` flag is on (and omitted otherwise so 4.7's `"omitted"` default applies). Credential rotation stripping is not yet implemented — when OAuth credentials rotate mid-session, stale signatures should be stripped from history before the next API call.
 
 ## Sources
 

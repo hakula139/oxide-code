@@ -88,13 +88,13 @@ Slim client-side `CommandOption` records; server-defined custom commands; toast 
 | opencode    | `CommandOption[]` from React hook               | ~12      | id, title, description, category, keybind, disabled, source         | input layer (regex)    | onSelect closures + server route               | toast / dialog / synthetic message  | filtered, max 10     | yes — server-published, not file-based  |
 | oxide-code  | trait + `&[&dyn SlashCommand]` slice            | 8        | name, aliases, description, `is_read_only`, optional usage hint     | `apply_action_locally` | `SlashOutcome` returned by `execute`           | `SystemMessageBlock` / `ErrorBlock` | tier-ranked filter   | not yet — plugin namespace reserved     |
 
-## oxide-code Today
+## oxide-code Implementation
 
-Eight built-ins ship: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical). The autocomplete popup, `//foo` literal-escape, and the busy-turn dispatch policy (read-only fast-path; mutators / prompt-submit refuse with a system message) all sit on the cross-command surface — see decisions 1–12 below for the contracts each command rides on.
+Eight built-ins are shipped: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical). The autocomplete popup, `//foo` literal-escape, and the busy-turn dispatch policy (read-only fast-path; mutators / prompt-submit refuse with a system message) all sit on the cross-command surface — see decisions 1–12 below for the contracts each command rides on.
 
 `/clear` rolls the session UUID and clears chat + file tracker. `/model` swaps the active model mid-session via `Client::set_model`; `/effort` sets an explicit effort tier. `/init` is the only prompt-submit command — synthesizes a fixed `AGENTS.md` / `CLAUDE.md` author-or-update prompt and forwards it to the agent loop. The remaining four are read-only.
 
-Still missing (will land with their respective commands): per-session token tracking (`wire::Usage` parses but drops tokens — `/cost` has no data to show), and `AgentEvent::PromptRequest` plumbing (blocks `/init`'s richer multi-phase flow and any `local-jsx`-style modal commands).
+Still missing: per-session token tracking (`wire::Usage` parses but drops tokens — `/cost` has no data to show), and `AgentEvent::PromptRequest` plumbing (blocks `/init`'s richer multi-phase flow and any `local-jsx`-style modal commands).
 
 ## Design Decisions for oxide-code
 

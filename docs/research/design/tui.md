@@ -227,7 +227,7 @@ Adopted: line-based commit with stable-prefix cache. Upgrade to block-level boun
 
 ## Design Decisions for oxide-code
 
-Based on the research, the following decisions guide the TUI implementation:
+Based on the research, the following decisions guided the TUI implementation:
 
 1. **ratatui + crossterm + tokio** as the core stack. No custom rendering engine — leverage ratatui's battle-tested double-buffer diffing.
 2. **Component trait pattern** for UI architecture. Each view (chat, input, status, tool display) is a self-contained component.
@@ -237,4 +237,4 @@ Based on the research, the following decisions guide the TUI implementation:
 6. **Custom pulldown-cmark + syntect renderer** instead of `tui-markdown`. The external crate had incorrect loose-list rendering (marker and content on separate lines) and limited control over styling. The custom renderer uses OpenAI Codex's `pending_marker` pattern for correct list handling and gives full control over heading styles, blockquote borders, and inline formatting.
 7. **Catppuccin Mocha dark theme by default** with 11 named color slots. Transparent background to respect user's terminal theme.
 8. **Two-tier tool display** — inline summary with per-tool icons, plus truncated output body (inspired by opencode's InlineTool / BlockTool pattern). Truncation at 5 lines with overflow count.
-9. **Viewport virtualization** for long conversations — only render visible messages (planned).
+9. **Viewport virtualization** for long conversations — only render visible messages (deferred).

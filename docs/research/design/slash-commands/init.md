@@ -12,7 +12,7 @@ This is the first slash command of the **prompt-submit** kind. The cross-command
 
 oxide-code adopts the Claude Code `OLD_INIT_PROMPT` shape: a single fixed prompt, no clarifying questions, no hooks/skills wiring. The interactive `NEW_INIT_PROMPT` flow needs `AgentEvent::PromptRequest` plumbing oxide-code doesn't have today — deferred until that lands.
 
-## oxide-code Today
+## oxide-code Implementation
 
 `InitCmd::execute` returns `Ok(SlashOutcome::Action(UserAction::SubmitPrompt(PROMPT)))` where `PROMPT` is the static body. The dispatcher (`slash::dispatch`) hands the action back to `App::apply_action_locally`, which:
 

@@ -27,7 +27,7 @@ Claude Code's `clearConversation` (`commands/clear/conversation.ts`) runs ~15 di
 | `resetSessionFilePointer()`                         | implicit via `session::start`                              | New JSONL file lazily materializes on first record.                             |
 | `processSessionStartHooks('clear')`                 | n/a                                                        | Hooks out of scope.                                                             |
 
-## oxide-code Today
+## oxide-code Implementation
 
 `ClearCmd::execute` (`crates/oxide-code/src/slash/clear.rs`) forwards `UserAction::Clear` to the agent loop and clears the `ChatView`. The agent's Clear arm calls `session::handle::roll`, which snapshots the file tracker, clears it, swaps `SessionHandle` in place for a fresh one, and finalizes the old handle (writing the summary line and shutting down the actor). `RollOutcome { new_id, finalize_failure }` carries the new id back to the agent loop, which updates `Client::set_session_id`, drops the in-memory `messages`, and emits `AgentEvent::SessionRolled { id }`. The TUI rebinds `session_info.session_id` and clears any AI-generated title.
 

@@ -12,7 +12,7 @@ The cross-command surface lives in [Slash Commands](README.md); this doc covers 
 
 oxide-code ships the text form first: it matches the existing slash-output pattern and covers daily one-shot swaps (`/model opus`, `/model sonnet[1m]`) without adding modal key routing.
 
-## oxide-code Today
+## oxide-code Implementation
 
 - **Bare `/model`** lists the curated five-row `SELECTABLE` set and marks the exact active row. If the active model is an older config-only id, the footer names it so a list with no starred row is not confusing.
 - **`/model <arg>`** strips a trailing `[1m]`, resolves the base, checks 1M support, then reattaches the tag. Resolution order: alias → exact / dated id → unique suffix → unique substring. Exact / dated pass-through is narrow by design, so malformed ids that merely contain a known model are rejected locally.

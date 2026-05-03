@@ -97,33 +97,29 @@ A stale `oldString` triggers a "string not found" error — the model must adjus
 | claude-code        | LRU per session    | strict           | mtime + content fallback | rehydrate from history | LRUCache (single-thread JS) |
 | codex              | none               | none             | apply-time patch context | implicit (rollout)     | `Mutex<SessionState>`       |
 | opencode           | per-file semaphore | none             | string-match failure     | n/a                    | per-file `Semaphore`        |
-| oxide-code (today) | none               | none             | none                     | n/a                    | none                        |
+| oxide-code         | per-session hash   | strict           | mtime + xxh64 fallback   | persist + verify       | `Arc<Mutex<HashMap>>`       |
 
-## oxide-code Today
+## oxide-code Implementation
 
-Read / Write / Edit tools are unit structs (`ReadTool`, `WriteTool`, `EditTool`) with no shared state. Each tool call is independent.
-
-The only existing signal for external modification is Edit's `"old_string not found in {path}"` error — a false negative if the user happens to leave the matched substring intact while changing surrounding lines. The model would then edit the file based on stale context.
-
-The session machinery already parses past tool_use / tool_result pairs via `crates/oxide-code/src/session/history.rs`. That gives us the building blocks for claude-code-style message-history rehydration if we want it. But the JSONL schema's `Entry::Unknown` `#[serde(other)]` catch-all (see `crates/oxide-code/src/session/entry.rs` and [Session Persistence § Forward Compatibility](session-persistence.md#forward-compatibility)) also makes it cheap to add a new entry type — explicit persistence is more direct than parsing message bodies and avoids coupling to sanitization shape.
+All design decisions below are shipped. The `FileTracker` (`crates/oxide-code/src/file_tracker.rs`) is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker; Edit and Write enforce the Read-before-Edit gate and mtime + xxh64 staleness check. Tracker state persists to JSONL on session finish and verifies on resume.
 
 ## Design Decisions for oxide-code
 
-The roadmap item is: skip re-reads when content hasn't changed, and guard against blind overwrites. Decisions that shape the planned implementation:
+Decisions that shaped the implementation:
 
 1. **Strict Read-before-Edit gate.** Edit and Write refuse if the file has not been **fully** Read in this session. Soft warnings the model can ignore defeat the purpose. The friction (one extra Read in flows where the model thinks it already knows the content) is cheap insurance against silent overwrites.
 2. **mtime + size fast path, content-hash slow path.** The common case (file untouched) is a single `stat()`. When mtime / size differ, re-hash the file via xxh64 (already in the dep tree); if the hash matches, treat as unchanged (Windows cloud-sync false-positive workaround à la claude-code).
 3. **Persist the tracker on session finish, verify on resume.** A new `Entry::FileSnapshot` variant rides the existing JSONL forward-compat — old readers absorb it as `Entry::Unknown` and skip past. On resume each snapshot is re-`stat()`-checked; survivors restore into the in-memory tracker. Mismatches (mtime / size drift, missing files) drop silently and the model re-Reads on first access. This trades one extra Read after resume (the cold-tracker alternative) for cleanly bridging session boundaries — the extra disk write is one line per tracked file, batched into the existing finish flush.
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process or cross-session sharing. Simpler concurrency and matches today's session-state lifecycle.
 5. **Partial-view Reads do not satisfy the gate.** A ranged Read populates `LastView::Partial { offset, limit }`. Edit / Write against a partial-view path fires the "must read fully first" error — the model only saw a slice and may be reasoning about content it hasn't seen. Claude Code's same rule, justified the same way.
-6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit; an actor-message-per-update path would force ten-plus round-trips per turn. Lock contention on a small struct with no I/O is microseconds — same exception shape as `.claude/plans/session-write-batching.md`'s `SharedState` slot.
+6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit; an actor-message-per-update path would force ten-plus round-trips per turn. Lock contention on a small struct with no I/O is microseconds — same exception shape as the session `SharedState` slot.
 7. **xxh64, not SHA-256.** Change detection, not cryptographic integrity. Already used elsewhere in the crate (billing `cch`, project-name sanitization in `session/path.rs`).
 8. **No tracker-managed file lock.** opencode's per-file `Semaphore` prevents two concurrent edits to the same file. oxide-code is single-agent today; the tracker handles the "external editor changed the file" case directly. Add the `Semaphore` when a multi-agent or parallel-tool-execution feature lands.
 
 ## Sources
 
-- `crates/oxide-code/src/session/entry.rs` — JSONL forward-compat (`Entry::Unknown` `#[serde(other)]` catch-all).
-- `crates/oxide-code/src/session/history.rs` — past tool_use / tool_result pairing (alternative resume strategy: rehydrate from message history rather than persisted snapshots).
-- `crates/oxide-code/src/tool/edit.rs:185-266` — read-before-replace flow (line 212 reads pre-edit content; line 256 writes post-edit).
-- `crates/oxide-code/src/tool/read.rs:103-195` — file open + bytes-in-memory point where post-Read hashing would slot in.
-- `crates/oxide-code/src/tool/write.rs:78-101` — `is_new` detection pattern (today's closest analog to "we touched this file").
+- `crates/oxide-code/src/file_tracker.rs` — `FileTracker`, `LastView`, `SnapshotEntry`, staleness checks, persist / restore.
+- `crates/oxide-code/src/session/entry.rs` — JSONL forward-compat (`Entry::Unknown` `#[serde(other)]` catch-all, `Entry::FileSnapshot`).
+- `crates/oxide-code/src/tool/edit.rs` — Read-before-Edit gate enforcement, staleness check before replace.
+- `crates/oxide-code/src/tool/read.rs` — `FileTracker::record_read` integration, cache-hit stub.
+- `crates/oxide-code/src/tool/write.rs` — Read-before-Write gate enforcement.
