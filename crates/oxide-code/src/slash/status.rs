@@ -27,12 +27,18 @@ impl SlashCommand for StatusCmd {
 
 /// `key  value` table. Keys live here (not derived from struct field
 /// names) so the rendered labels stay stable when the struct grows.
-/// `Model ID` sits next to `Model` so a routing-debug glance shows both.
+/// Model identity (Model, Model ID, Effort) leads so a routing-debug
+/// glance shows the trio that drives every per-request decision.
 fn render_status(info: &SessionInfo) -> String {
     let model = info.marketing_name();
-    let rows: [(&str, &str); 6] = [
+    let effort = info
+        .config
+        .effort
+        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
+    let rows: [(&str, &str); 7] = [
         ("Model", &model),
         ("Model ID", &info.config.model_id),
+        ("Effort", &effort),
         ("Working Directory", &info.cwd),
         ("Version", info.version),
         ("Auth", info.config.auth_label),
@@ -87,10 +93,12 @@ mod tests {
         // dropped row mustn't slip past the per-value checks.
         let info = test_session_info();
         let model = info.marketing_name();
+        let effort = info.config.effort.expect("fixture sets effort").to_string();
         let body = render_status(&info);
         for needle in [
             model.as_ref(),
             info.config.model_id.as_str(),
+            effort.as_str(),
             info.cwd.as_str(),
             info.version,
             info.config.auth_label,
@@ -99,7 +107,7 @@ mod tests {
             assert!(body.contains(needle), "missing `{needle}`: {body}");
         }
         let row_count = body.lines().skip(2).filter(|l| !l.is_empty()).count();
-        assert_eq!(row_count, 6, "expected 6 rendered rows: {body}");
+        assert_eq!(row_count, 7, "expected 7 rendered rows: {body}");
     }
 
     #[test]
@@ -108,9 +116,11 @@ mod tests {
         // uniformly broken renderer would pass the latter.
         let info = test_session_info();
         let model = info.marketing_name();
+        let effort = info.config.effort.expect("fixture sets effort").to_string();
         let values = [
             model.as_ref(),
             info.config.model_id.as_str(),
+            effort.as_str(),
             info.cwd.as_str(),
             info.version,
             info.config.auth_label,
@@ -129,5 +139,14 @@ mod tests {
             cols.iter().all(|c| *c == 21),
             "value columns not aligned at col 21: {cols:?}",
         );
+    }
+
+    #[test]
+    fn render_status_renders_effort_fallback_marker_when_none() {
+        // Mirror /config — `None` shows `(model default)`, never blank.
+        let mut info = test_session_info();
+        info.config.effort = None;
+        let body = render_status(&info);
+        assert!(body.contains("(model default)"), "{body}");
     }
 }

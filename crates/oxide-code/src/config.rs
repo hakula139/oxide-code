@@ -47,10 +47,10 @@ impl Auth {
 /// the `/model` swap path so the snapshot reflects the live values.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
-    pub(crate) auth_label: &'static str,
-    pub(crate) base_url: String,
     pub(crate) model_id: String,
     pub(crate) effort: Option<Effort>,
+    pub(crate) auth_label: &'static str,
+    pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) show_thinking: bool,
@@ -174,13 +174,14 @@ impl FromStr for PromptCacheTtl {
 /// Resolved configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    pub(crate) auth: Auth,
-    pub(crate) base_url: String,
     pub(crate) model: String,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
-    /// omitted. Resolved once at [`Config::load`] — callers forward.
+    /// omitted. Resolved once at [`Config::load`]; mutated mid-session
+    /// by `/effort` and re-clamped on `/model` swaps.
     pub(crate) effort: Option<Effort>,
+    pub(crate) auth: Auth,
+    pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     /// `cache_control.ttl` for every cacheable block. Default is
     /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
@@ -266,10 +267,10 @@ impl Config {
         )?;
 
         Ok(Self {
-            auth,
-            base_url,
             model,
             effort,
+            auth,
+            base_url,
             max_tokens,
             prompt_cache_ttl,
             thinking,
@@ -283,10 +284,10 @@ impl Config {
     /// into the API client so the snapshot survives the move.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
-            auth_label: self.auth.label(),
-            base_url: self.base_url.clone(),
             model_id: self.model.clone(),
             effort: self.effort,
+            auth_label: self.auth.label(),
+            base_url: self.base_url.clone(),
             max_tokens: self.max_tokens,
             prompt_cache_ttl: self.prompt_cache_ttl,
             show_thinking: self.show_thinking,

@@ -53,9 +53,9 @@ fn render_config(
     let resolved: [(&str, &str); 8] = [
         ("Model", &model),
         ("Model ID", &cfg.model_id),
-        ("Base URL", &cfg.base_url),
-        ("Auth", cfg.auth_label),
         ("Effort", &effort),
+        ("Auth", cfg.auth_label),
+        ("Base URL", &cfg.base_url),
         ("Max Tokens", &max_tokens),
         ("Prompt Cache TTL", &cache_ttl),
         ("Show Thinking", thinking),
