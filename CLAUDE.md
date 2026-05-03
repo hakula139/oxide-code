@@ -78,7 +78,7 @@ ox                                          # Start an interactive session
 │   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
 │   ├── init.rs                             # /init — synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt; returns SlashOutcome::Action(SubmitPrompt)
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches (name-prefix > alias-prefix > name-substring > alias-substring)
-│   ├── model.rs                            # /model — list models or swap mid-session via UserAction::SwitchModel; substring resolves against MODELS ids
+│   ├── model.rs                            # /model — list `SELECTABLE` models or swap mid-session; three-tier resolution (alias → exact → substring) with `[1m]` first-class
 │   ├── parser.rs                           # parse_slash + popup_query: detect `/cmd args`; allows `:` and `.` for plugin namespaces
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome { Local, Action(UserAction) } + BUILT_INS slice + alias-aware lookup_in
 │   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id

@@ -99,8 +99,8 @@ pub(crate) enum UserAction {
     Clear,
     /// `/model <id>` — agent loop calls
     /// [`Client::set_model`](crate::client::anthropic::Client::set_model)
-    /// and emits [`AgentEvent::ModelSwitched`]. The id is the canonical
-    /// `MODELS` row id resolved by the slash command.
+    /// and emits [`AgentEvent::ModelSwitched`]. `id` is a canonical
+    /// `SELECTABLE` entry resolved by the slash command.
     SwitchModel(String),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,

@@ -116,8 +116,7 @@ impl StatusBar {
         self.title.as_deref()
     }
 
-    /// Current model label. Used by the App-side `ModelSwitched`
-    /// test to pin the swap without a render-and-grep.
+    /// Current model label. Used by `ModelSwitched` tests.
     #[cfg(test)]
     pub(crate) fn model(&self) -> &str {
         &self.model
@@ -326,9 +325,9 @@ mod tests {
 
     #[test]
     fn set_model_replaces_displayed_model_label() {
-        // Pin both the cached field and the rendered frame so a
-        // future render-time lookup of `session_info.model` would
-        // still pass the field check but fail the render check.
+        // Assert both field and rendered frame so a render-time
+        // lookup of the session model couldn't sneak past the
+        // field assertion alone.
         let mut bar = test_bar();
         bar.set_model("Claude Opus 4.7".to_owned());
         assert_eq!(bar.model(), "Claude Opus 4.7");
