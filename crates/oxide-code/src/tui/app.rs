@@ -18,7 +18,6 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
-use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};

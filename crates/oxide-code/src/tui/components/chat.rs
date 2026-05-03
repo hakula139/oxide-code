@@ -27,14 +27,12 @@ use self::blocks::{
     InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
     ToolResultBlock, UserMessage, last_has_width,
 };
-use crate::agent::event::UserAction;
 use crate::agent::pending_calls::{
     FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header,
 };
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
-use crate::tui::component::Component;
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
@@ -316,8 +314,8 @@ impl ChatView {
     }
 }
 
-impl Component for ChatView {
-    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
+impl ChatView {
+    pub(crate) fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -325,10 +323,7 @@ impl Component for ChatView {
             | Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 ..
-            }) => {
-                self.scroll_up(1);
-                None
-            }
+            }) => self.scroll_up(1),
             Event::Key(KeyEvent {
                 code: KeyCode::Down,
                 ..
@@ -336,24 +331,15 @@ impl Component for ChatView {
             | Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 ..
-            }) => {
-                self.scroll_down(1);
-                None
-            }
+            }) => self.scroll_down(1),
             Event::Key(KeyEvent {
                 code: KeyCode::PageUp,
                 ..
-            }) => {
-                self.scroll_up(self.viewport_height.saturating_sub(2));
-                None
-            }
+            }) => self.scroll_up(self.viewport_height.saturating_sub(2)),
             Event::Key(KeyEvent {
                 code: KeyCode::PageDown,
                 ..
-            }) => {
-                self.scroll_down(self.viewport_height.saturating_sub(2));
-                None
-            }
+            }) => self.scroll_down(self.viewport_height.saturating_sub(2)),
             Event::Key(KeyEvent {
                 code: KeyCode::Home,
                 modifiers: KeyModifiers::CONTROL,
@@ -361,7 +347,6 @@ impl Component for ChatView {
             }) => {
                 self.scroll_offset = 0;
                 self.auto_scroll = false;
-                None
             }
             Event::Key(KeyEvent {
                 code: KeyCode::End,
@@ -370,13 +355,12 @@ impl Component for ChatView {
             }) => {
                 self.scroll_to_bottom();
                 self.auto_scroll = true;
-                None
             }
-            _ => None,
+            _ => {}
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         let text = self.build_text(area.width);
         #[expect(
             clippy::cast_possible_truncation,
@@ -2105,8 +2089,7 @@ mod tests {
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
 
-        let action = chat.handle_event(&key_event(KeyCode::Up));
-        assert!(action.is_none());
+        chat.handle_event(&key_event(KeyCode::Up));
         assert_eq!(chat.scroll_offset, 9);
         assert!(!chat.auto_scroll);
     }
@@ -2119,8 +2102,7 @@ mod tests {
         chat.scroll_offset = 10;
         chat.auto_scroll = false;
 
-        let action = chat.handle_event(&key_event(KeyCode::Down));
-        assert!(action.is_none());
+        chat.handle_event(&key_event(KeyCode::Down));
         assert_eq!(chat.scroll_offset, 11);
     }
 
@@ -2131,8 +2113,7 @@ mod tests {
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
 
-        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
-        assert!(action.is_none());
+        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
         assert_eq!(chat.scroll_offset, 9);
     }
 
@@ -2144,8 +2125,7 @@ mod tests {
         chat.scroll_offset = 10;
         chat.auto_scroll = false;
 
-        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
-        assert!(action.is_none());
+        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
         assert_eq!(chat.scroll_offset, 11);
     }
 
@@ -2198,10 +2178,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_unhandled_key_produces_no_action() {
+    fn handle_event_unhandled_key_leaves_state_unchanged() {
         let mut chat = test_chat();
-        let action = chat.handle_event(&key_event(KeyCode::Char('a')));
-        assert!(action.is_none());
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+
+        chat.handle_event(&key_event(KeyCode::Char('a')));
+        assert_eq!(chat.scroll_offset, 10);
     }
 
     // ── render ──

@@ -14,7 +14,6 @@ use unicode_width::UnicodeWidthStr;
 use self::popup::SlashPopup;
 use crate::agent::event::UserAction;
 use crate::slash::popup_query;
-use crate::tui::component::Component;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
@@ -152,8 +151,8 @@ impl InputArea {
     }
 }
 
-impl Component for InputArea {
-    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
+impl InputArea {
+    pub(crate) fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
         // Ctrl+D: quit only when idle + empty (POSIX EOF idiom).
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
@@ -226,7 +225,7 @@ impl Component for InputArea {
         None
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         // Border, marker, and textarea styling don't react to the
         // run-state — users compose mid-turn for the queue, so the
         // input always reads as live. The status bar carries the
