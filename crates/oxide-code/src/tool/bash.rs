@@ -1,3 +1,5 @@
+//! Shell command execution tool with timeout.
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;

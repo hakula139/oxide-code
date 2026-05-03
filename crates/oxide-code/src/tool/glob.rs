@@ -1,3 +1,5 @@
+//! File pattern matching tool (glob).
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;

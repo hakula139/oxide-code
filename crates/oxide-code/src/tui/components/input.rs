@@ -1,3 +1,5 @@
+//! Multi-line input area with slash-command autocomplete.
+
 mod popup;
 
 use std::cell::Cell;

@@ -1,3 +1,5 @@
+//! Word-wrap with continuation indent for styled lines.
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

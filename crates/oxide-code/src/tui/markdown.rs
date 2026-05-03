@@ -1,3 +1,5 @@
+//! Markdown-to-ratatui renderer with syntax highlighting.
+
 mod highlight;
 mod render;
 

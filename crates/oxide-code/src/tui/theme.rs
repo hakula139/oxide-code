@@ -1,3 +1,5 @@
+//! Theme palette and style helpers.
+
 use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};

@@ -1,3 +1,5 @@
+//! Instruction file discovery and loading (CLAUDE.md, AGENTS.md).
+
 use std::path::{Path, PathBuf};
 
 use indoc::indoc;

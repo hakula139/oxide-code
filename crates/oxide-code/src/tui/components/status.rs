@@ -1,3 +1,5 @@
+//! Status bar component (model, spinner, working directory).
+
 use std::time::Instant;
 
 use ratatui::Frame;

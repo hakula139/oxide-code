@@ -1,3 +1,5 @@
+//! Async retry helper for advisory file locks.
+
 use std::time::Duration;
 
 use anyhow::Result;

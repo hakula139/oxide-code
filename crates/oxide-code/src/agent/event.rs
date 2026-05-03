@@ -1,3 +1,5 @@
+//! Agent event types and the sink trait for delivering them to a UI.
+
 use std::sync::Arc;
 
 use anyhow::Result;

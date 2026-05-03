@@ -1,3 +1,5 @@
+//! Runtime environment detection for system prompt context.
+
 use std::path::Path;
 
 use indoc::formatdoc;

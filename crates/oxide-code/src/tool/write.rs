@@ -1,3 +1,5 @@
+//! File writing tool with directory creation.
+
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;

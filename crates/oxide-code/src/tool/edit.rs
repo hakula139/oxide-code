@@ -1,3 +1,5 @@
+//! Exact string replacement tool for file editing.
+
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::Path;

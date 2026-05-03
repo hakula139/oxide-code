@@ -1,3 +1,5 @@
+//! TOML config file discovery, parsing, and layered merge.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

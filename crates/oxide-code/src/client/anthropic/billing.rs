@@ -1,3 +1,5 @@
+//! Anthropic billing attestation header computation.
+
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64;

@@ -1,3 +1,5 @@
+//! File reading tool with line numbers and pagination.
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::Path;
