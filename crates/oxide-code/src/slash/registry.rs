@@ -9,8 +9,10 @@ use super::clear::ClearCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
 use super::diff::DiffCmd;
+use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
+use super::model::ModelCmd;
 use super::status::StatusCmd;
 use crate::agent::event::UserAction;
 
@@ -43,11 +45,11 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether the command is safe to run mid-turn. Commands that
-    /// touch `messages` / session state, or kick off a new turn via
-    /// [`SlashOutcome::Action`], override to `false` so they refuse
-    /// instead of racing the live turn.
-    fn is_read_only(&self) -> bool {
+    /// Whether this invocation is safe to run mid-turn. Mutating
+    /// commands return `false` to refuse instead of racing the live
+    /// turn. `args` enables per-form classification — `/model` lists
+    /// when bare and mutates when given an id.
+    fn is_read_only(&self, _args: &str) -> bool {
         true
     }
 
@@ -71,7 +73,7 @@ pub(crate) trait SlashCommand: Sync {
 /// alphabetically within each tier when filtering, so this keeps
 /// every popup state consistent.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &StatusCmd,
+    &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
 ];
 
 /// Resolves `name` by canonical name first, then aliases. Generic
@@ -232,10 +234,14 @@ mod tests {
     #[test]
     fn aliased_cmd_fixture_satisfies_trait_contract() {
         // Pin so a fixture drift fails here rather than silently
-        // misleading the lookup_in tests.
+        // misleading the lookup_in tests. The `is_read_only` calls
+        // also exercise the trait's default body — `AliasedCmd`
+        // doesn't override it.
         assert_eq!(AliasedCmd.name(), "primary");
         assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
         assert_eq!(AliasedCmd.description(), "fake");
+        assert!(AliasedCmd.is_read_only(""));
+        assert!(AliasedCmd.is_read_only("anything"));
         assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Local));
     }
 

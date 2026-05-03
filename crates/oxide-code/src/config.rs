@@ -40,16 +40,17 @@ impl Auth {
     }
 }
 
-/// Read-only view of resolved config — every field [`Config`] holds
-/// except the actual secret. Built once at startup from
-/// [`Config::snapshot`] and handed into the slash dispatcher; survives
-/// the move when [`Config`] itself is consumed by the API client.
+/// Resolved-config view — every field [`Config`] holds except the
+/// secret. Built at startup from [`Config::snapshot`] and handed into
+/// the slash dispatcher; survives the move when [`Config`] itself is
+/// consumed by the API client. `model_id` and `effort` are rebound by
+/// runtime slash-command swaps so the snapshot reflects live values.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
-    pub(crate) auth_label: &'static str,
-    pub(crate) base_url: String,
     pub(crate) model_id: String,
     pub(crate) effort: Option<Effort>,
+    pub(crate) auth_label: &'static str,
+    pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) show_thinking: bool,
@@ -91,6 +92,9 @@ pub(crate) enum Effort {
 }
 
 impl Effort {
+    pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -118,7 +122,10 @@ impl FromStr for Effort {
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::Xhigh),
             "max" => Ok(Self::Max),
-            _ => bail!("invalid effort {s:?}; expected one of: low, medium, high, xhigh, max"),
+            _ => bail!(
+                "invalid effort {s:?}; expected one of: {}",
+                Self::VALID_VALUES
+            ),
         }
     }
 }
@@ -173,13 +180,14 @@ impl FromStr for PromptCacheTtl {
 /// Resolved configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    pub(crate) auth: Auth,
-    pub(crate) base_url: String,
     pub(crate) model: String,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
-    /// omitted. Resolved once at [`Config::load`] — callers forward.
+    /// omitted. Resolved once at [`Config::load`]; mutated mid-session
+    /// by `/effort` and re-clamped on `/model` swaps.
     pub(crate) effort: Option<Effort>,
+    pub(crate) auth: Auth,
+    pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     /// `cache_control.ttl` for every cacheable block. Default is
     /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
@@ -233,10 +241,7 @@ impl Config {
             Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
             None => client.effort,
         };
-        let effort = match effort_pick {
-            Some(pick) => caps.clamp_effort(pick),
-            None => caps.default_effort(),
-        };
+        let effort = caps.resolve_effort(effort_pick);
 
         let max_tokens = env::string("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())
@@ -268,10 +273,10 @@ impl Config {
         )?;
 
         Ok(Self {
-            auth,
-            base_url,
             model,
             effort,
+            auth,
+            base_url,
             max_tokens,
             prompt_cache_ttl,
             thinking,
@@ -285,15 +290,19 @@ impl Config {
     /// into the API client so the snapshot survives the move.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
-            auth_label: self.auth.label(),
-            base_url: self.base_url.clone(),
             model_id: self.model.clone(),
             effort: self.effort,
+            auth_label: self.auth.label(),
+            base_url: self.base_url.clone(),
             max_tokens: self.max_tokens,
             prompt_cache_ttl: self.prompt_cache_ttl,
             show_thinking: self.show_thinking,
         }
     }
+}
+
+pub(crate) fn display_effort(effort: Option<Effort>) -> String {
+    effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
 
 /// Per-effort `max_tokens` default; overridden by
@@ -351,13 +360,10 @@ mod tests {
 
     #[test]
     fn effort_round_trips_through_serde_and_fromstr() {
-        for (variant, token) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-            (Effort::Xhigh, "xhigh"),
-            (Effort::Max, "max"),
-        ] {
+        for (variant, token) in Effort::ALL
+            .into_iter()
+            .zip(["low", "medium", "high", "xhigh", "max"])
+        {
             assert_eq!(serde_json::to_value(variant).unwrap(), token);
             assert_eq!(variant.to_string(), token);
             assert_eq!(token.parse::<Effort>().unwrap(), variant);
@@ -789,6 +795,14 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
         assert!(msg.contains("insane"), "{msg}");
+    }
+
+    // ── display_effort ──
+
+    #[test]
+    fn display_effort_names_effective_tier_or_no_tier() {
+        assert_eq!(display_effort(Some(Effort::High)), "high");
+        assert_eq!(display_effort(None), "(no effort tier)");
     }
 
     // ── Config::snapshot ──

@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::config::{Auth, Config};
+use crate::config::{Auth, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -178,6 +178,25 @@ impl Client {
             "session id must be a legal HTTP header value: {id:?}",
         );
         self.session_id = id;
+    }
+
+    /// Swaps the active model and re-clamps `config.effort` against
+    /// the new caps. Returns the effective effort for display.
+    pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
+        let caps = crate::model::capabilities_for(&model);
+        let effort = caps.resolve_effort(self.config.effort);
+        self.config.effort = effort;
+        self.config.model = model;
+        effort
+    }
+
+    /// Swaps the active effort, clamped against the current model's
+    /// caps. Returns the resolved effort.
+    pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
+        let caps = crate::model::capabilities_for(&self.config.model);
+        let effort = caps.clamp_effort(pick);
+        self.config.effort = effort;
+        effort
     }
 
     /// Stream a message response from the Anthropic API.
@@ -588,6 +607,104 @@ mod tests {
             !user_id.contains("sid-original"),
             "old session id must not leak into the body: {user_id}",
         );
+    }
+
+    // ── Client::set_model ──
+
+    fn client_with(model: &str, effort: Option<Effort>) -> Client {
+        let mut cfg = test_config(OFFLINE_URL, api_key(), model);
+        cfg.effort = effort;
+        Client::new(cfg, Some("sid".to_owned())).unwrap()
+    }
+
+    #[test]
+    fn set_model_resolves_effort_and_persists_full_state() {
+        // Each row pins one resolution arm: clamp-down, pass-through,
+        // no-tier clear, model-default fallback, and unknown-id (all
+        // caps false). Asserting both returned + stored effort catches
+        // the "returned but not persisted" mutation.
+        for (from_model, from_effort, swap_to, expect) in [
+            (
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+                "claude-sonnet-4-6",
+                Some(Effort::High),
+            ),
+            (
+                "claude-sonnet-4-6",
+                Some(Effort::Low),
+                "claude-opus-4-7",
+                Some(Effort::Low),
+            ),
+            (
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+                "claude-haiku-4-5",
+                None,
+            ),
+            (
+                "claude-haiku-4-5",
+                None,
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+            ),
+            (
+                "claude-opus-4-7",
+                Some(Effort::High),
+                "claude-opus-5-0",
+                None,
+            ),
+        ] {
+            let mut client = client_with(from_model, from_effort);
+            let returned = client.set_model(swap_to.to_owned());
+            assert_eq!(returned, expect, "{from_model} → {swap_to}: returned");
+            assert_eq!(
+                client.config.effort, expect,
+                "{from_model} → {swap_to}: stored effort",
+            );
+            assert_eq!(client.model(), swap_to, "{swap_to}: stored id");
+        }
+    }
+
+    #[test]
+    fn set_model_preserves_1m_tag_round_trip() {
+        // `[1m]` is a client-side opt-in; the swap must store it
+        // verbatim so per-request `compute_betas` keeps sending the
+        // 1M context beta. Regressing this drops 1M context silently.
+        let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
+        client.set_model("claude-opus-4-7[1m]".to_owned());
+        assert_eq!(client.model(), "claude-opus-4-7[1m]");
+    }
+
+    // ── Client::set_effort ──
+
+    #[test]
+    fn set_effort_resolves_pick_against_active_model_caps() {
+        // Each row is one resolution arm: pass-through, clamp-down,
+        // and explicit-on-no-tier collapses to None. Tested through
+        // `&mut self` to cover both returned and stored effort.
+        for (model, initial, pick, expect) in [
+            (
+                "claude-opus-4-7",
+                Some(Effort::High),
+                Effort::Xhigh,
+                Some(Effort::Xhigh),
+            ),
+            (
+                "claude-sonnet-4-6",
+                Some(Effort::High),
+                Effort::Xhigh,
+                Some(Effort::High),
+            ),
+            ("claude-haiku-4-5", None, Effort::High, None),
+        ] {
+            let mut client = client_with(model, initial);
+            assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
+            assert_eq!(
+                client.config.effort, expect,
+                "{model} pick={pick:?}: stored effort",
+            );
+        }
     }
 
     // ── Client::stream_message ──

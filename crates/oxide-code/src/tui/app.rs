@@ -87,8 +87,11 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
-        let mut status_bar =
-            StatusBar::new(theme, session_info.model.clone(), session_info.cwd.clone());
+        let mut status_bar = StatusBar::new(
+            theme,
+            session_info.marketing_name().into_owned(),
+            session_info.cwd.clone(),
+        );
         status_bar.set_title(title);
         Self {
             theme: theme.clone(),
@@ -352,8 +355,8 @@ impl App {
             // Unreachable on the live wiring — the slash branch above
             // forwards `Action(_)` straight via `forward_to_agent`.
             // `false` is defensive in case a future caller routes
-            // `Clear` through here.
-            UserAction::Clear => false,
+            // `Clear` / `SwitchModel` through here.
+            UserAction::Clear | UserAction::SwitchModel(_) | UserAction::SwitchEffort(_) => false,
         }
     }
 
@@ -434,6 +437,24 @@ impl App {
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
+            }
+            // The status bar caches its own label; `session_info`
+            // backs `/status` / `/config`. Marketing name derives
+            // from `model_id` so it can't drift.
+            AgentEvent::ModelSwitched { model_id, effort } => {
+                let prev_effort = self.session_info.config.effort;
+                let marketing = crate::model::marketing_or_id(&model_id);
+                let confirmation =
+                    format_swap_confirmation(&marketing, &model_id, prev_effort, effort);
+                self.status_bar.set_model(marketing.into_owned());
+                self.session_info.config.model_id = model_id;
+                self.session_info.config.effort = effort;
+                self.chat.push_system_message(confirmation);
+            }
+            AgentEvent::EffortSwitched { pick, effort } => {
+                self.session_info.config.effort = effort;
+                self.chat
+                    .push_system_message(format_effort_confirmation(pick, effort));
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -617,6 +638,40 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
+/// `AgentEvent::ModelSwitched` confirmation. Surfaces silent effort
+/// changes (cleared / clamped / model-default) the user wouldn't
+/// otherwise see.
+fn format_swap_confirmation(
+    marketing: &str,
+    model_id: &str,
+    prev_effort: Option<crate::config::Effort>,
+    new_effort: Option<crate::config::Effort>,
+) -> String {
+    let head = format!("Switched to {marketing} ({model_id})");
+    match (prev_effort, new_effort) {
+        (None, None) => format!("{head}."),
+        (Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
+        (None, Some(new)) => format!("{head} · effort {new} (model default)."),
+        (Some(prev), Some(new)) if new < prev => {
+            format!("{head} · effort {new} (clamped from {prev}).")
+        }
+        (Some(_), Some(new)) => format!("{head} · effort {new}."),
+    }
+}
+
+/// `AgentEvent::EffortSwitched` confirmation. `pick` is the user's
+/// input; `effort` is the resolved value.
+fn format_effort_confirmation(
+    pick: crate::config::Effort,
+    effort: Option<crate::config::Effort>,
+) -> String {
+    match (pick, effort) {
+        (p, Some(level)) if p == level => format!("Effort set to {level}."),
+        (p, Some(level)) => format!("Effort set to {level} (clamped from {p})."),
+        (p, None) => format!("Effort unchanged — model has no effort tier (asked for {p})."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -678,21 +733,19 @@ mod tests {
     }
 
     fn test_session_info() -> SessionInfo {
-        // Local fixture keeps the snapshot-pinned model label
-        // (`test-model`) stable; slash::test_session_info uses
-        // `Test Model` to verify the marketing-name rendering path
-        // and would churn the TUI insta snapshots on import.
+        // `model_id = "test-model"` is intentionally unknown so
+        // `marketing_or_id` falls back to the literal id, keeping
+        // every TUI insta snapshot stable as `test-model`.
         use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
         SessionInfo {
-            model: "test-model".to_owned(),
             cwd: "~/test".to_owned(),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             config: ConfigSnapshot {
                 auth_label: "API key",
                 base_url: "https://api.test.invalid".to_owned(),
-                model_id: "claude-test-1-0".to_owned(),
+                model_id: "test-model".to_owned(),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
@@ -1251,21 +1304,22 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_clear_arm_returns_false_to_prevent_double_send() {
-        // `/clear` already forwards `UserAction::Clear` through the
-        // slash branch. The explicit `false` return on the `Clear` arm
-        // of `apply_action_locally` guards a future caller that hands
-        // `Clear` straight to `dispatch_user_action` — the action stays
-        // local so `user_tx` only sees the slash branch's send.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::Clear);
+    fn dispatch_local_only_actions_return_false_to_prevent_double_send() {
+        for action in [
+            UserAction::Clear,
+            UserAction::SwitchModel("claude-opus-4-7".to_owned()),
+            UserAction::SwitchEffort(crate::config::Effort::High),
+        ] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(action.clone());
 
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "Clear must not reach user_tx via dispatch_user_action",
-        );
-        assert!(!app.should_quit);
-        assert_eq!(app.chat.entry_count(), 0);
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{action:?} must not reach user_tx via dispatch_user_action",
+            );
+            assert!(!app.should_quit);
+            assert_eq!(app.chat.entry_count(), 0);
+        }
     }
 
     #[tokio::test]
@@ -1393,6 +1447,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward() {
+        // `/model <id>` and `/effort <level>` both mutate the live
+        // Client and must wait for idle. Pinning both so a regression
+        // that special-cases only one leaks the other.
+        for (cmd, gate_phrase) in [
+            ("/model opus", "/model runs only when idle"),
+            ("/effort xhigh", "/effort runs only when idle"),
+        ] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
+
+            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{cmd}: action must not reach user_tx mid-turn",
+            );
+            let body = app.chat.last_system_text().expect("refusal system message");
+            assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_bare_slash_during_busy_runs_list_view() {
+        // The bare form is read-only via `is_read_only(args)` returning
+        // true for empty args, so it dispatches immediately even
+        // mid-turn. Regressing the args-aware classification fails here.
+        for (cmd, header_prefix) in [
+            ("/model", "Available models"),
+            ("/effort", "Effort levels for"),
+        ] {
+            let (mut app, _rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+
+            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+
+            let body = app.chat.last_system_text().expect("system block from list");
+            assert!(body.starts_with(header_prefix), "{cmd}: {body}");
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
         // Unknown commands route through `dispatch` so the user sees
         // the canonical "unknown command" error with recovery hints
@@ -1439,6 +1536,156 @@ mod tests {
             app.status_bar.title(),
             Some("First prompt"),
             "current-session title must survive a stale event",
+        );
+    }
+
+    #[test]
+    fn handle_model_switched_refreshes_status_bar_session_info_and_chat() {
+        // Three surfaces refresh in one shot: status-bar label,
+        // `session_info` (backs `/status` / `/config`), and a chat
+        // confirmation block. Marketing name is derived locally from
+        // `model_id`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ModelSwitched {
+            model_id: "claude-sonnet-4-6".to_owned(),
+            effort: Some(crate::config::Effort::High),
+        });
+
+        assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert_eq!(
+            body,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high.",
+        );
+        assert!(app.dirty);
+    }
+
+    // ── format_swap_confirmation ──
+
+    #[test]
+    fn format_swap_confirmation_both_none_omits_effort_clause() {
+        // Pin: no `effort` substring at all, never a stray "none"
+        // word. Mutation that prints `effort none.` would surface here.
+        let s = format_swap_confirmation("Claude Haiku 4.5", "claude-haiku-4-5", None, None);
+        assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
+    }
+
+    #[test]
+    fn format_swap_confirmation_clears_effort_when_new_model_drops_it() {
+        // User had a tier; new model has none. Surface the change so
+        // the user knows their effort just disappeared.
+        let s = format_swap_confirmation(
+            "Claude Haiku 4.5",
+            "claude-haiku-4-5",
+            Some(crate::config::Effort::Xhigh),
+            None,
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). Effort cleared (model has no effort tier)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_marks_default_when_previous_was_none() {
+        // None → Some means the new model's default kicked in;
+        // distinguishing this from "user's pick survived" prevents
+        // the user from thinking they chose this tier.
+        let s = format_swap_confirmation(
+            "Claude Opus 4.7",
+            "claude-opus-4-7",
+            None,
+            Some(crate::config::Effort::Xhigh),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort xhigh (model default)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_marks_clamp_when_new_effort_below_previous() {
+        // The effective tier changed; surface the temporary clamp.
+        let s = format_swap_confirmation(
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6",
+            Some(crate::config::Effort::Xhigh),
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high (clamped from xhigh)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_quiet_when_effort_unchanged() {
+        // Same tier survives — no clamp / default annotation. Pin
+        // exact format so a stray suffix (`(unchanged)`) would fail.
+        let s = format_swap_confirmation(
+            "Claude Opus 4.7",
+            "claude-opus-4-7",
+            Some(crate::config::Effort::High),
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort high.",
+        );
+    }
+
+    #[test]
+    fn handle_effort_switched_refreshes_session_info_and_pushes_confirmation() {
+        // /effort updates the snapshot effort and pushes a confirmation
+        // block. Status bar caches model, not effort, so it doesn't
+        // change here.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::EffortSwitched {
+            pick: crate::config::Effort::Xhigh,
+            effort: Some(crate::config::Effort::Xhigh),
+        });
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::Xhigh),
+        );
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert_eq!(body, "Effort set to xhigh.");
+        assert!(app.dirty);
+    }
+
+    // ── format_effort_confirmation ──
+
+    #[test]
+    fn format_effort_confirmation_explicit_pick_matches_resolution() {
+        let s = format_effort_confirmation(
+            crate::config::Effort::Xhigh,
+            Some(crate::config::Effort::Xhigh),
+        );
+        assert_eq!(s, "Effort set to xhigh.");
+    }
+
+    #[test]
+    fn format_effort_confirmation_clamp_surfaces_what_user_asked_for() {
+        let s = format_effort_confirmation(
+            crate::config::Effort::Xhigh,
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(s, "Effort set to high (clamped from xhigh).");
+    }
+
+    #[test]
+    fn format_effort_confirmation_pick_on_no_tier_model_surfaces_loss() {
+        // The slash command preflight stops this from happening through
+        // /effort, but client-driven flows could still emit it.
+        let s = format_effort_confirmation(crate::config::Effort::High, None);
+        assert_eq!(
+            s,
+            "Effort unchanged — model has no effort tier (asked for high)."
         );
     }
 

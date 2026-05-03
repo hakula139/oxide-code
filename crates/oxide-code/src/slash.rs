@@ -18,10 +18,12 @@ mod clear;
 mod config;
 mod context;
 mod diff;
+mod effort;
 mod format;
 mod help;
 mod init;
 mod matcher;
+mod model;
 mod parser;
 mod registry;
 mod status;
@@ -98,7 +100,7 @@ pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
 fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
     match registry::lookup_in(commands, &parsed.name) {
         None => SlashKind::Unknown,
-        Some(cmd) if cmd.is_read_only() => SlashKind::ReadOnly,
+        Some(cmd) if cmd.is_read_only(&parsed.args) => SlashKind::ReadOnly,
         Some(_) => SlashKind::Mutating,
     }
 }
@@ -121,15 +123,18 @@ pub(crate) enum SlashKind {
 pub(crate) fn test_session_info() -> SessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
+    // model_id resolves to a real `MODELS` row so the
+    // `info.marketing_name()` accessor produces a known marketing
+    // name in tests; switch to a non-known id only when the test
+    // explicitly exercises the unknown-id fallback.
     SessionInfo {
-        model: "Test Model".to_owned(),
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),
         config: ConfigSnapshot {
             auth_label: "API key",
             base_url: "https://api.test.invalid".to_owned(),
-            model_id: "claude-test-1-0".to_owned(),
+            model_id: "claude-opus-4-7".to_owned(),
             effort: Some(Effort::High),
             max_tokens: 32_000,
             prompt_cache_ttl: PromptCacheTtl::OneHour,

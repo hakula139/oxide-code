@@ -1,11 +1,13 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
-assertion_line: 328
+assertion_line: 327
 expression: "render_to_backend(&popup, 60)"
 ---
 "/clear   Reset the conversation context                     "
 "/config  Show the resolved configuration and the layered ..."
 "/diff    Show uncommitted working-tree changes (`git diff..."
+"/effort  List effort levels or set the active one           "
 "/help    List the available slash commands and their usag..."
 "/init    Generate or update the project's `AGENTS.md` / `..."
-"/status  Show session info: model, version, working direc..."
+"/model   List models or switch the active one               "
+"/status  Show session info: model, effort, version, worki..."

@@ -19,7 +19,7 @@ impl SlashCommand for InitCmd {
         "Generate or update the project's `AGENTS.md` / `CLAUDE.md`"
     }
 
-    fn is_read_only(&self) -> bool {
+    fn is_read_only(&self, _args: &str) -> bool {
         false
     }
 
@@ -117,7 +117,7 @@ mod tests {
     fn is_read_only_is_false() {
         // Override is load-bearing: a parallel turn would race the
         // in-flight one over `messages` / the session writer.
-        assert!(!InitCmd.is_read_only());
+        assert!(!InitCmd.is_read_only(""));
     }
 
     // ── InitCmd::execute ──

@@ -25,7 +25,7 @@ use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
 /// Maximum visible rows. Beyond this the popup truncates with a
-/// `… (N more)` footer so the input layout doesn't lose half the
+/// `... (N more)` footer so the input layout doesn't lose half the
 /// terminal to the overlay.
 const MAX_VISIBLE_ROWS: usize = 8;
 
@@ -152,7 +152,7 @@ impl SlashPopup {
         Line::from(spans)
     }
 
-    /// `… (N more)` footer when matches exceed `MAX_VISIBLE_ROWS`.
+    /// `... (N more)` footer when matches exceed `MAX_VISIBLE_ROWS`.
     /// Returned as an iterator so the caller can chain it onto the
     /// row list without an `if`-shaped branch.
     fn render_footer(&self, width: usize) -> impl Iterator<Item = Line<'static>> {
@@ -160,7 +160,7 @@ impl SlashPopup {
         let style = self.theme.dim();
         (hidden > 0)
             .then(move || {
-                let raw = format!("  … ({hidden} more)");
+                let raw = format!("  ... ({hidden} more)");
                 let text = truncate_to_width(&raw, width);
                 Line::from(Span::styled(text, style))
             })
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn render_overflow_emits_n_more_footer_when_matches_exceed_cap() {
         // Cap is 8; a hand-rolled list of 10 commands triggers the
-        // "… (N more)" footer. Live registry is too small to drive
+        // "... (N more)" footer. Live registry is too small to drive
         // this branch.
         let mut popup = SlashPopup::new(&theme());
         popup.matches = (0..10)

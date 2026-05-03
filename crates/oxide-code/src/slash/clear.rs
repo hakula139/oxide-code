@@ -20,7 +20,7 @@ impl SlashCommand for ClearCmd {
         "Reset the conversation context"
     }
 
-    fn is_read_only(&self) -> bool {
+    fn is_read_only(&self, _args: &str) -> bool {
         false
     }
 
@@ -50,10 +50,9 @@ mod tests {
 
     #[test]
     fn is_read_only_is_false() {
-        // Trait default is `true`. `/clear` overrides to `false` so
-        // the busy-turn dispatcher refuses it instead of racing the
-        // live `messages` / session writer.
-        assert!(!ClearCmd.is_read_only());
+        // Override to `false` — refuses mid-turn rather than racing
+        // the live `messages` / session writer.
+        assert!(!ClearCmd.is_read_only(""));
     }
 
     // ── ClearCmd::execute ──

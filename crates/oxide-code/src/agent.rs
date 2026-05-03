@@ -356,10 +356,16 @@ where
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Neither variant reaches mid-turn: `ConfirmExit` is
-                // TUI-only and short-circuited by `apply_action_locally`;
-                // `Clear` is dispatched only when input is enabled.
-                Some(UserAction::ConfirmExit | UserAction::Clear) => {}
+                // None reach mid-turn under the current wiring —
+                // `ConfirmExit` is intercepted by `apply_action_locally`;
+                // mutating slashes are refused by the dispatcher.
+                // Log so a regression in either gate surfaces here.
+                Some(
+                    action @ (UserAction::ConfirmExit
+                    | UserAction::Clear
+                    | UserAction::SwitchModel(_)
+                    | UserAction::SwitchEffort(_)),
+                ) => warn!("dropped mid-turn action: {action:?}"),
             },
             output = &mut fut => return Ok(output),
         }
@@ -611,7 +617,7 @@ mod tests {
     use crate::client::anthropic::wire::{
         ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
     };
-    use crate::config::Auth;
+    use crate::config::{Auth, Effort};
     use crate::message::Role;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
@@ -1264,33 +1270,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_confirm_exit_completes_turn_normally() {
-        // `ConfirmExit` only matters to the TUI's exit-arming hint; the
-        // agent must absorb stragglers silently so a buffered press
-        // during teardown doesn't kill an in-flight turn.
-        let dir = tempfile::tempdir().unwrap();
-        let session = test_session(dir.path());
-        let client = FakeClient::new(vec![text_turn("Hello!")]);
-        let tools = ToolRegistry::new(vec![]);
-        let sink = CapturingSink::new();
-        let mut messages = vec![Message::user("hi")];
-        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
-        tx.try_send(UserAction::ConfirmExit).unwrap();
+    async fn agent_turn_absorbs_stragglers_without_killing_turn() {
+        // Every variant in the catch-all arm of `await_unless_aborted`
+        // must let an in-flight turn complete. A future change that
+        // returns `TurnAbort::Cancelled` for any of these (because they
+        // "feel" mutating) would kill the turn from a buffered no-op.
+        for action in [
+            UserAction::ConfirmExit,
+            UserAction::Clear,
+            UserAction::SwitchModel("claude-opus-4-7".to_owned()),
+            UserAction::SwitchEffort(Effort::High),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            let client = FakeClient::new(vec![text_turn("Hello!")]);
+            let tools = ToolRegistry::new(vec![]);
+            let sink = CapturingSink::new();
+            let mut messages = vec![Message::user("hi")];
+            let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+            tx.try_send(action.clone()).unwrap();
 
-        agent_turn(
-            &client,
-            &tools,
-            &mut messages,
-            &empty_prompt(),
-            &sink,
-            &session,
-            &mut rx,
-        )
-        .await
-        .expect("turn must complete despite ConfirmExit");
+            agent_turn(
+                &client,
+                &tools,
+                &mut messages,
+                &empty_prompt(),
+                &sink,
+                &session,
+                &mut rx,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
 
-        assert_eq!(messages.len(), 2, "assistant message recorded");
-        drop(tx);
+            assert_eq!(
+                messages.len(),
+                2,
+                "assistant message recorded for {action:?}"
+            );
+            drop(tx);
+        }
     }
 
     #[tokio::test]

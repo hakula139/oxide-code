@@ -12,7 +12,7 @@ use std::path::Path;
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::file;
+use crate::config::{display_effort, file};
 use crate::util::path::tildify;
 
 pub(crate) struct ConfigCmd;
@@ -43,18 +43,17 @@ fn render_config(
     project_path: Option<&Path>,
 ) -> String {
     let cfg = &info.config;
-    let effort = cfg
-        .effort
-        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
+    let effort = display_effort(cfg.effort);
     let max_tokens = cfg.max_tokens.to_string();
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
     let thinking = if cfg.show_thinking { "yes" } else { "no" };
+    let model = info.marketing_name();
     let resolved: [(&str, &str); 8] = [
-        ("Model", &info.model),
+        ("Model", &model),
         ("Model ID", &cfg.model_id),
-        ("Base URL", &cfg.base_url),
-        ("Auth", cfg.auth_label),
         ("Effort", &effort),
+        ("Auth", cfg.auth_label),
+        ("Base URL", &cfg.base_url),
         ("Max Tokens", &max_tokens),
         ("Prompt Cache TTL", &cache_ttl),
         ("Show Thinking", thinking),
@@ -132,13 +131,14 @@ mod tests {
         // combination the dedicated branch tests below skip.
         let info = test_session_info();
         let cfg = &info.config;
+        let model = info.marketing_name();
         let body = render_config(&info, None, None);
         let effort = cfg
             .effort
             .map(|e| e.to_string())
             .expect("fixture sets effort = Some");
         for needle in [
-            info.model.as_str(),
+            model.as_ref(),
             cfg.model_id.as_str(),
             cfg.base_url.as_str(),
             cfg.auth_label,
@@ -158,13 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn render_config_renders_effort_fallback_marker_when_none() {
-        // `None` must render explicit "(model default)", not "None"
-        // or empty, so the user sees the fallback is intentional.
+    fn render_config_renders_no_effort_tier_when_none() {
         let mut info = test_session_info();
         info.config.effort = None;
         let body = render_config(&info, None, None);
-        assert!(body.contains("(model default)"), "{body}");
+        assert!(body.contains("(no effort tier)"), "{body}");
     }
 
     #[test]

@@ -82,6 +82,18 @@ impl StatusBar {
         self.title = title.filter(|t| !t.trim().is_empty());
     }
 
+    /// Replaces the cached model label so render doesn't re-read
+    /// `session_info` per frame. Empty input would render a doubled
+    /// separator with no label between — assert rather than silently
+    /// paint a malformed bar.
+    pub(crate) fn set_model(&mut self, model: String) {
+        debug_assert!(
+            !model.trim().is_empty(),
+            "set_model received empty / whitespace-only label",
+        );
+        self.model = model;
+    }
+
     pub(crate) fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.spinner_frame = 0;
@@ -102,6 +114,12 @@ impl StatusBar {
     #[cfg(test)]
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// Current model label. Used by `ModelSwitched` tests.
+    #[cfg(test)]
+    pub(crate) fn model(&self) -> &str {
+        &self.model
     }
 
     /// Advances the spinner animation. Returns `true` if the frame
@@ -301,6 +319,27 @@ mod tests {
         let mut bar = test_bar();
         bar.set_title(Some("   \n".to_owned()));
         assert!(bar.title.is_none());
+    }
+
+    // ── set_model ──
+
+    #[test]
+    fn set_model_replaces_displayed_model_label() {
+        // Assert both field and rendered frame so a render-time
+        // lookup of the session model couldn't sneak past the
+        // field assertion alone.
+        let mut bar = test_bar();
+        bar.set_model("Claude Opus 4.7".to_owned());
+        assert_eq!(bar.model(), "Claude Opus 4.7");
+        let output = render_top_row(&mut bar, 80);
+        assert!(
+            output.contains("Claude Opus 4.7"),
+            "new label must reach the rendered bar: {output:?}",
+        );
+        assert!(
+            !output.contains("test-model"),
+            "old label must not survive: {output:?}",
+        );
     }
 
     // ── set_status ──

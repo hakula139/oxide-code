@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::config::Effort;
 use crate::tool::ToolRegistry;
 
 // ── Visible Markers ──
@@ -74,6 +75,20 @@ pub(crate) enum AgentEvent {
     /// updates `session_info.session_id` and clears the (now-stale) AI
     /// title; other sinks ignore it.
     SessionRolled { id: String },
+    /// `/model` swapped the active model. The TUI handler refreshes
+    /// `session_info.config` and the status bar; marketing name is
+    /// derived locally via
+    /// [`marketing_or_id`](crate::model::marketing_or_id).
+    ModelSwitched {
+        model_id: String,
+        effort: Option<Effort>,
+    },
+    /// `/effort` swapped the active effort. `pick` is what the user
+    /// asked for; `effort` is what the model's caps resolved it to.
+    EffortSwitched {
+        pick: Effort,
+        effort: Option<Effort>,
+    },
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -88,6 +103,14 @@ pub(crate) enum UserAction {
     /// `/clear` — agent loop finalizes the old session, swaps in a
     /// fresh one, and emits [`AgentEvent::SessionRolled`].
     Clear,
+    /// `/model <id>` — agent loop calls
+    /// [`Client::set_model`](crate::client::anthropic::Client::set_model)
+    /// and emits [`AgentEvent::ModelSwitched`].
+    SwitchModel(String),
+    /// `/effort <level>` — agent loop calls
+    /// [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
+    /// and emits [`AgentEvent::EffortSwitched`].
+    SwitchEffort(Effort),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -197,7 +220,9 @@ impl StdioSink {
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated { .. }
-            | AgentEvent::SessionRolled { .. } => {}
+            | AgentEvent::SessionRolled { .. }
+            | AgentEvent::ModelSwitched { .. }
+            | AgentEvent::EffortSwitched { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 writeln!(stdout)?;
@@ -363,17 +388,31 @@ mod tests {
     }
 
     #[test]
-    fn render_prompt_drained_and_session_title_are_silent() {
+    fn render_tui_only_events_emit_nothing_on_either_stream() {
+        // Pin every TUI-only variant — a regression that moves any of
+        // them out of the no-op group leaks stdout / stderr noise into
+        // the headless / bare-REPL paths.
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
             AgentEvent::SessionTitleUpdated {
                 session_id: "sid".to_owned(),
                 title: "New title".to_owned(),
             },
+            AgentEvent::SessionRolled {
+                id: "rolled".to_owned(),
+            },
+            AgentEvent::ModelSwitched {
+                model_id: "claude-opus-4-7".to_owned(),
+                effort: Some(Effort::Xhigh),
+            },
+            AgentEvent::EffortSwitched {
+                pick: Effort::High,
+                effort: Some(Effort::High),
+            },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
-            assert!(stdout.is_empty());
-            assert!(stderr.is_empty());
+            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+            assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
         }
     }
 
