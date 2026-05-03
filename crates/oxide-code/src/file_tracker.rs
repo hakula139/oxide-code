@@ -1,7 +1,6 @@
 //! Per-session file-change tracker: Read-before-Edit gate with mtime + xxh64 staleness detection.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -39,6 +38,15 @@ pub(crate) enum LastView {
 pub(crate) enum GatePurpose {
     Edit,
     Write,
+}
+
+impl GatePurpose {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Edit => "editing",
+            Self::Write => "writing to",
+        }
+    }
 }
 
 impl FileTracker {
@@ -233,53 +241,14 @@ pub(crate) enum StatCheck {
     NeedsBytes { stored_hash: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
+    #[error("File {} has not been read in this session. Use the Read tool first before {} it.", .path.display(), .purpose.verb())]
     NeverRead { path: PathBuf, purpose: GatePurpose },
+    #[error("File {} has only been read partially (with offset / limit). Read the full file before {} it.", .path.display(), .purpose.verb())]
     PartialRead { path: PathBuf, purpose: GatePurpose },
+    #[error("File {} has been modified externally since it was last read. Re-read it before {} it.", .path.display(), .purpose.verb())]
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
-}
-
-impl fmt::Display for GateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let verb = match self.purpose() {
-            GatePurpose::Edit => "editing",
-            GatePurpose::Write => "writing to",
-        };
-        let path = self.path().display();
-        match self {
-            Self::NeverRead { .. } => write!(
-                f,
-                "File {path} has not been read in this session. Use the Read tool first before {verb} it.",
-            ),
-            Self::PartialRead { .. } => write!(
-                f,
-                "File {path} has only been read partially (with offset / limit). Read the full file before {verb} it.",
-            ),
-            Self::ContentDrifted { .. } => write!(
-                f,
-                "File {path} has been modified externally since it was last read. Re-read it before {verb} it.",
-            ),
-        }
-    }
-}
-
-impl GateError {
-    fn path(&self) -> &Path {
-        match self {
-            Self::NeverRead { path, .. }
-            | Self::PartialRead { path, .. }
-            | Self::ContentDrifted { path, .. } => path,
-        }
-    }
-
-    fn purpose(&self) -> GatePurpose {
-        match self {
-            Self::NeverRead { purpose, .. }
-            | Self::PartialRead { purpose, .. }
-            | Self::ContentDrifted { purpose, .. } => *purpose,
-        }
-    }
 }
 
 /// Stub returned in place of file bytes on a full re-Read of an

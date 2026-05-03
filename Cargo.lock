@@ -1597,6 +1597,7 @@ dependencies = [
  "syntect",
  "temp-env",
  "tempfile",
+ "thiserror 2.0.18",
  "time",
  "tokio",
  "toml",

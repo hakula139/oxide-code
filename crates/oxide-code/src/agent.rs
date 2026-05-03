@@ -28,31 +28,14 @@ const MAX_TOOL_ROUNDS: usize = 25;
 // ── Turn Abort ──
 
 /// Reasons a turn ends before normal completion.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
-    /// User pressed Esc / Ctrl+C.
+    #[error("turn cancelled")]
     Cancelled,
-    /// User quit or TUI dropped the channel.
+    #[error("turn quit")]
     Quit,
-    /// Stream / tool / API error.
-    Failed(anyhow::Error),
-}
-
-impl From<anyhow::Error> for TurnAbort {
-    fn from(e: anyhow::Error) -> Self {
-        Self::Failed(e)
-    }
-}
-
-impl std::fmt::Display for TurnAbort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cancelled => f.write_str("turn cancelled"),
-            Self::Quit => f.write_str("turn quit"),
-            Self::Failed(e) if f.alternate() => write!(f, "{e:#}"),
-            Self::Failed(e) => write!(f, "{e}"),
-        }
-    }
+    #[error(transparent)]
+    Failed(#[from] anyhow::Error),
 }
 
 type AbortResult<T> = std::result::Result<T, TurnAbort>;
