@@ -356,16 +356,19 @@ where
                 // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // None reach mid-turn: `ConfirmExit` is short-circuited
-                // by `apply_action_locally`; mutating slash commands
-                // (`Clear` / `SwitchModel` / `SwitchEffort`) are refused
-                // by the dispatcher while a turn is live.
+                // None reach mid-turn under the current wiring:
+                // `ConfirmExit` is short-circuited by
+                // `apply_action_locally`; mutating slash commands
+                // (`Clear` / `SwitchModel` / `SwitchEffort`) are
+                // refused by the dispatcher while a turn is live.
+                // Log if the upstream gate ever breaks so a future
+                // regression surfaces instead of vanishing silently.
                 Some(
-                    UserAction::ConfirmExit
+                    action @ (UserAction::ConfirmExit
                     | UserAction::Clear
                     | UserAction::SwitchModel(_)
-                    | UserAction::SwitchEffort(_),
-                ) => {}
+                    | UserAction::SwitchEffort(_)),
+                ) => warn!("dropped mid-turn action: {action:?}"),
             },
             output = &mut fut => return Ok(output),
         }

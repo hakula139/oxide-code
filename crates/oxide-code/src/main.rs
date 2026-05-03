@@ -455,6 +455,10 @@ async fn agent_loop_task(
                 sink.session_write_error(outcome.finalize_failure.as_deref());
                 client.set_session_id(outcome.new_id.clone());
                 messages.clear();
+                // `sink.send` only errors when the channel closed —
+                // i.e. during shutdown. The state mutation has already
+                // happened on `client`; the missing confirmation is the
+                // least of the user's problems at that point.
                 if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
                     warn!("session-rolled event dropped: {e}");
                 }
