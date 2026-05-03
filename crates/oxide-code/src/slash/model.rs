@@ -2,15 +2,21 @@
 //!
 //! Bare `/model` lists the curated [`SELECTABLE`] set with the active
 //! row marked. `/model <arg>` resolves through three tiers: alias map,
-//! exact id match, then unique-substring match against [`SELECTABLE`].
-//! On a unique match, the dispatcher hands [`UserAction::SwitchModel`]
-//! to the agent loop, which calls
+//! exact id match, then unique-substring match. Exact and substring
+//! match against the broader [`crate::model::MODELS`] table (every
+//! `id_substr` plus its `[1m]` variant where `context_1m` is true), so
+//! a user can manually type `claude-opus-4-6` even though the curated
+//! list only surfaces 4.7. On a unique match, the dispatcher hands
+//! [`UserAction::SwitchModel`] to the agent loop, which calls
 //! [`Client::set_model`](crate::client::anthropic::Client::set_model)
 //! and emits [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched).
 //!
-//! `[1m]` is a first-class selectable variant — `/model opus-4-7`
-//! means non-1M Opus 4.7; `/model opus-4-7[1m]` means the 1M variant.
-//! See `model.md` § Design Decisions.
+//! `[1m]` is a first-class variant — `/model opus-4-7` means non-1M
+//! Opus 4.7; `/model opus-4-7[1m]` means the 1M variant. Typing `[1m]`
+//! on a model whose capability table row has `context_1m: false`
+//! (e.g. Haiku 4.5) is rejected upfront so the user gets a clear
+//! signal instead of a silent fallback to 200K context. See `model.md`
+//! § Design Decisions.
 
 use std::fmt::Write as _;
 
@@ -18,13 +24,15 @@ use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
+use crate::model::{MODELS, lookup};
 use crate::prompt::environment::marketing_or_id;
 
-/// Selectable model ids, presented in the list view in this order.
-/// Curated from [`crate::model::MODELS`] — older / family-base rows
-/// are visible to the capability layer (so a user with `model =
-/// "claude-opus-4-1"` in config still gets the right beta headers)
-/// but `/model` only swaps within this set.
+/// `[1m]` opt-in tag — appended to a canonical id to request the 1M
+/// context window on models whose capability row has `context_1m`.
+const TAG_1M: &str = "[1m]";
+
+/// Curated UI surface for the list view. Manual swap accepts any id
+/// from [`MODELS`] plus its `[1m]` variant where `context_1m` is true.
 const SELECTABLE: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
@@ -33,16 +41,12 @@ const SELECTABLE: &[&str] = &[
     "claude-haiku-4-5",
 ];
 
-/// Short aliases the user can type instead of the canonical id.
-/// `opus`/`sonnet`/`haiku` map to the latest non-1M row of each
-/// family; `opus[1m]` and `sonnet[1m]` opt into 1M context. Haiku 4.5
-/// has no 1M variant, so `haiku[1m]` falls through to the
-/// "unknown model" error.
+/// Short aliases for the bare (non-`[1m]`) form. The resolver strips
+/// `[1m]` before alias lookup, so `opus[1m]` works without a separate
+/// entry — `haiku[1m]` then errors uniformly via the capability check.
 const ALIASES: &[(&str, &str)] = &[
     ("opus", "claude-opus-4-7"),
-    ("opus[1m]", "claude-opus-4-7[1m]"),
     ("sonnet", "claude-sonnet-4-6"),
-    ("sonnet[1m]", "claude-sonnet-4-6[1m]"),
     ("haiku", "claude-haiku-4-5"),
 ];
 
@@ -74,35 +78,57 @@ impl SlashCommand for ModelCmd {
             return Ok(SlashOutcome::Local);
         }
         let id = resolve_model_arg(arg)?;
-        Ok(SlashOutcome::Action(UserAction::SwitchModel(id.to_owned())))
+        Ok(SlashOutcome::Action(UserAction::SwitchModel(id)))
     }
 }
 
-/// Three-tier resolution: alias substitution → exact id match →
-/// unique-substring match against [`SELECTABLE`]. Exact match wins
-/// over substring so `/model opus-4-7` reaches the bare row instead
-/// of being ambiguous with `claude-opus-4-7[1m]`.
-fn resolve_model_arg(arg: &str) -> Result<&'static str, String> {
+/// Strip `[1m]`, resolve the base id, then re-attach `[1m]` if the
+/// model supports 1M context (errors otherwise). Splitting the tag
+/// from identity means `opus[1m]` works through the bare alias and
+/// `haiku[1m]` errors uniformly — no per-variant table entries.
+fn resolve_model_arg(arg: &str) -> Result<String, String> {
+    let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
+        Some(rest) => (rest, true),
+        None => (arg, false),
+    };
+    let base_id = resolve_base(base_arg)?;
+    if !want_1m {
+        return Ok(base_id.to_owned());
+    }
+    let info = lookup(base_id).expect("base_id is canonical");
+    if !info.capabilities.context_1m {
+        return Err(format!(
+            "{}: 1M context not supported. Drop the `{TAG_1M}` tag.",
+            info.marketing,
+        ));
+    }
+    Ok(format!("{base_id}{TAG_1M}"))
+}
+
+/// Three-tier resolution of the bare (no-[1m]) form: alias → exact id
+/// → unique substring against [`MODELS`].
+fn resolve_base(arg: &str) -> Result<&'static str, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target);
     }
-    if let Some(&exact) = SELECTABLE.iter().find(|id| **id == arg) {
-        return Ok(exact);
+    if let Some(info) = MODELS.iter().find(|m| m.id_substr == arg) {
+        return Ok(info.id_substr);
     }
-    let matches: Vec<&'static str> = SELECTABLE
+    let matches: Vec<&'static str> = MODELS
         .iter()
-        .copied()
+        .map(|m| m.id_substr)
         .filter(|id| id.contains(arg))
         .collect();
     match matches.as_slice() {
-        [] => Err(format!(
-            "Unknown model: `{arg}`. Run `/model` for the list of selectable models.",
-        )),
         [id] => Ok(*id),
-        _ => Err(format!(
+        [_, ..] => Err(format!(
             "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
             n = matches.len(),
             list = matches.join(", "),
+        )),
+        [] => Err(format!(
+            "Unknown model: `{arg}`. Run `/model` for selectable shortcuts; \
+             any id from the model table works (e.g. `claude-opus-4-6`).",
         )),
     }
 }
@@ -130,6 +156,7 @@ fn render_model_list(info: &SessionInfo) -> String {
     out.push_str(
         "Short aliases: /model opus, /model sonnet, /model haiku. Append [1m] for 1M context (Opus 4.7, Sonnet 4.6).\n",
     );
+    out.push_str("Older ids work too — type the canonical id (e.g. /model claude-opus-4-6).\n");
     out.push_str("Effort re-clamps to the new model's ceiling and is not restored on swap-back.");
 
     if !SELECTABLE.contains(&active) {
@@ -293,56 +320,92 @@ mod tests {
     }
 
     #[test]
-    fn execute_haiku_1m_alias_is_unknown_because_haiku_has_no_1m_variant() {
-        // `haiku[1m]` is not in `ALIASES` and not a substring of any
-        // SELECTABLE entry; falls through to Unknown.
-        let (_, outcome) = run_execute("haiku[1m]");
-        let msg = outcome.expect_err("haiku[1m] must error");
-        assert!(msg.starts_with("Unknown model: `haiku[1m]`"), "{msg}");
+    fn execute_1m_on_incompatible_model_is_rejected_with_marketing_name() {
+        // Haiku 4.5 has `context_1m: false`; silent acceptance would
+        // degrade to 200K. `haiku[1m]` (alias) and the spelled-out
+        // `claude-haiku-4-5[1m]` both route through the same check.
+        for arg in ["haiku[1m]", "claude-haiku-4-5[1m]"] {
+            let (_, outcome) = run_execute(arg);
+            let msg = outcome.expect_err("must error");
+            assert_eq!(
+                msg, "Claude Haiku 4.5: 1M context not supported. Drop the `[1m]` tag.",
+                "arg `{arg}`",
+            );
+        }
     }
 
     #[test]
-    fn execute_with_exact_id_wins_over_substring_match() {
-        // Exact match for `claude-opus-4-7` resolves to the bare row,
-        // even though it's a substring of `claude-opus-4-7[1m]` (which
-        // would otherwise make it ambiguous).
-        let (_, outcome) = run_execute("claude-opus-4-7");
+    fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
+        // Exact match works on every typeable row, including
+        // non-SELECTABLE older ids and their 1M variants.
+        for id in [
+            "claude-opus-4-7",
+            "claude-opus-4-7[1m]",
+            "claude-opus-4-6",
+            "claude-opus-4-6[1m]",
+            "claude-sonnet-4-6[1m]",
+            "claude-haiku-4-5",
+        ] {
+            let (_, outcome) = run_execute(id);
+            assert_eq!(
+                outcome,
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(id.to_owned()))),
+                "exact `{id}` must round-trip",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_unique_substring_resolves_against_typeable_set() {
+        // Substring tier reaches non-SELECTABLE rows. `opus-4-1` is
+        // only in MODELS, not SELECTABLE, but a unique substring still
+        // resolves it.
+        for (arg, expected) in [
+            ("haiku-4-5", "claude-haiku-4-5"),
+            ("opus-4-1", "claude-opus-4-1"),
+            ("sonnet-4-5", "claude-sonnet-4-5"),
+        ] {
+            let (_, outcome) = run_execute(arg);
+            assert_eq!(
+                outcome,
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(
+                    expected.to_owned()
+                ))),
+                "`{arg}` should resolve to `{expected}`",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_bare_substring_prefers_bare_row_over_1m_variant() {
+        // `sonnet-4-6` (no [1m]) clearly means the non-1M variant —
+        // the substring filter excludes [1m] candidates so the user
+        // doesn't get a spurious ambiguity error.
+        let (_, outcome) = run_execute("sonnet-4-6");
         assert_eq!(
             outcome,
             Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-opus-4-7".to_owned(),
+                "claude-sonnet-4-6".to_owned(),
             ))),
         );
     }
 
     #[test]
-    fn execute_with_unique_substring_resolves_to_canonical_id() {
-        // `haiku-4-5` is unique against SELECTABLE (Haiku has no 1M
-        // variant in the curated set).
-        let (_, outcome) = run_execute("haiku-4-5");
+    fn execute_1m_substring_resolves_to_1m_variant_only() {
+        // Mirror image of the bare case — `[1m]` arg only considers
+        // [1m] candidates, so `opus-4-6[1m]` lands on the 1M row
+        // without ambiguity against the bare row.
+        let (_, outcome) = run_execute("opus-4-6[1m]");
         assert_eq!(
             outcome,
             Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-haiku-4-5".to_owned(),
+                "claude-opus-4-6[1m]".to_owned(),
             ))),
         );
     }
 
     #[test]
-    fn execute_with_canonical_1m_id_resolves_to_1m_variant() {
-        // `[1m]` is first-class — exact-match path returns the
-        // 1M-tagged id verbatim so the [1m] opt-in survives.
-        let (_, outcome) = run_execute("claude-opus-4-7[1m]");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-opus-4-7[1m]".to_owned(),
-            ))),
-        );
-    }
-
-    #[test]
-    fn execute_with_unknown_arg_returns_capitalized_error_with_recovery_hint() {
+    fn execute_unknown_arg_returns_error_with_recovery_hint() {
         let (chat, outcome) = run_execute("gpt-4");
         let msg = outcome.expect_err("unknown arg must error");
         assert!(
@@ -350,21 +413,31 @@ mod tests {
             "leading capital + backticked input: {msg}",
         );
         assert!(msg.contains("Run `/model`"), "recovery hint: {msg}");
+        assert!(
+            msg.contains("claude-opus-4-6"),
+            "manual-entry example surfaces: {msg}",
+        );
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 
     #[test]
-    fn execute_with_ambiguous_substring_lists_count_and_each_candidate() {
-        // `opus-4-7` matches both bare and [1m] rows. The error must
-        // surface the count AND every candidate so the user can pick.
-        let (_, outcome) = run_execute("opus-4-7");
+    fn execute_ambiguous_substring_lists_count_and_each_candidate() {
+        // `opus-4` matches every Opus 4.x bare row — there's no way
+        // to disambiguate from the input alone, so the error lists
+        // every candidate.
+        let (_, outcome) = run_execute("opus-4");
         let msg = outcome.expect_err("ambiguous arg must error");
         assert!(
-            msg.starts_with("`opus-4-7` matches 2 models:"),
+            msg.starts_with("`opus-4` matches"),
             "leading backtick + count substring: {msg}",
         );
-        for needle in ["claude-opus-4-7", "claude-opus-4-7[1m]"] {
-            assert!(msg.contains(needle), "candidate listed: {msg}");
+        for needle in [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+        ] {
+            assert!(msg.contains(needle), "candidate `{needle}` listed: {msg}");
         }
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
     }
@@ -388,14 +461,33 @@ mod tests {
         // `opus` matches every Opus row as a substring (would be
         // ambiguous), but the alias map intercepts and routes it to
         // the canonical opus-4-7 row. Pin the precedence directly.
-        assert_eq!(resolve_model_arg("opus"), Ok("claude-opus-4-7"));
+        assert_eq!(resolve_model_arg("opus").as_deref(), Ok("claude-opus-4-7"));
     }
 
     #[test]
-    fn resolve_model_arg_each_selectable_id_matches_itself_exactly() {
-        for id in SELECTABLE {
-            assert_eq!(resolve_model_arg(id), Ok(*id), "{id}");
+    fn resolve_model_arg_round_trips_every_models_row() {
+        // Drift in MODELS would silently shrink the manual-entry
+        // surface — every row must be exactly typeable.
+        for info in MODELS {
+            assert_eq!(
+                resolve_model_arg(info.id_substr).as_deref(),
+                Ok(info.id_substr),
+                "{}",
+                info.id_substr,
+            );
         }
+    }
+
+    #[test]
+    fn execute_list_view_advertises_manual_entry_for_older_ids() {
+        // Pin the discoverability hook — without this, users can't
+        // tell that 4-6 is reachable.
+        let (chat, _) = run_execute("");
+        let body = chat.last_system_text().unwrap();
+        assert!(
+            body.contains("Older ids work too") && body.contains("claude-opus-4-6"),
+            "manual-entry footer missing: {body}",
+        );
     }
 
     // ── render_model_list ──
@@ -410,15 +502,15 @@ mod tests {
     fn render_model_list_marker_column_aligns_within_table() {
         // Pin the column alignment — `write_kv_table` pads to the
         // longest id, and the marker prepended by the active-row
-        // logic must not break that gutter. Compare the description
-        // column position across rows.
+        // logic must not break that gutter. Filter to table rows
+        // (have BOTH the canonical id AND the marketing name).
         let body = render("claude-opus-4-7");
         let value_cols: Vec<usize> = body
             .lines()
-            .filter(|l| l.contains("claude-"))
+            .filter(|l| l.contains("claude-") && l.contains("Claude"))
             .map(|l| l.find("Claude").expect("description present"))
             .collect();
-        assert!(value_cols.len() >= 2, "expected multiple rows: {body}");
+        assert_eq!(value_cols.len(), SELECTABLE.len(), "row count: {body}");
         assert!(
             value_cols.windows(2).all(|w| w[0] == w[1]),
             "columns not aligned: {value_cols:?} — body: {body}",
