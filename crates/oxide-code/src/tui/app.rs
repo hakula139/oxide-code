@@ -354,6 +354,9 @@ impl App {
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
+                self.chat.clear_history();
+                self.chat
+                    .push_system_message("Conversation cleared. Next message starts fresh.");
             }
             AgentEvent::ModelSwitched { model_id, effort } => {
                 let prev_effort = self.session_info.config.effort;
@@ -1572,13 +1575,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_session_rolled_rebinds_session_id_and_drops_stale_title() {
-        // `/clear` swaps the session UUID; the App must rebind the
-        // `/status`-visible id so it reflects the live session, and
-        // wipe the now-stale AI title so the bar isn't lying about
-        // which conversation is on screen.
+    fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
+        app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
+
         app.handle_agent_event(AgentEvent::SessionRolled {
             id: "rolled-session".to_owned(),
         });
@@ -1591,6 +1592,15 @@ mod tests {
         assert!(
             app.status_bar.title().is_none(),
             "stale AI title must be cleared on roll",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "only the confirmation message remains after clear",
+        );
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some("Conversation cleared. Next message starts fresh."),
         );
         assert!(app.dirty);
     }
