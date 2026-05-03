@@ -279,6 +279,38 @@ impl Capabilities {
     }
 }
 
+// ── ResolvedModelId ──
+
+/// A model id that has passed through the `/model` resolver. The private
+/// inner field ensures arbitrary strings cannot flow into
+/// [`UserAction::SwitchModel`] without validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelId(String);
+
+impl ResolvedModelId {
+    /// Wraps a resolver-validated id. Call sites outside the resolver
+    /// (tests, deserialization) should audit that the value is valid.
+    pub(crate) fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ResolvedModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ── Lookup ──
+
 /// First-match substring lookup against [`MODELS`]. Returns `None` for
 /// model strings that don't contain any known family stem (e.g. a future
 /// `claude-opus-5` before the table is bumped); callers decide whether

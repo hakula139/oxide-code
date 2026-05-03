@@ -9,7 +9,7 @@ use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, lookup, marketing_or_id};
+use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
 
 /// `[1m]` opt-in tag — appended to a canonical id to request the 1M
 /// context window on models whose capability row has `context_1m`.
@@ -65,7 +65,7 @@ impl SlashCommand for ModelCmd {
 }
 
 /// Strips `[1m]`, resolves base, re-attaches if supported. Case-insensitive.
-fn resolve_model_arg(arg: &str) -> Result<String, String> {
+fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     let arg = arg.to_ascii_lowercase();
     let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
         Some(rest) => (rest, true),
@@ -78,7 +78,7 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
     }
     let base_id = resolve_base(base_arg)?;
     if !want_1m {
-        return Ok(base_id);
+        return Ok(ResolvedModelId::new(base_id));
     }
     let info = lookup(&base_id).expect("base_id resolves via lookup");
     if !info.capabilities.context_1m {
@@ -87,7 +87,7 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
             info.marketing,
         ));
     }
-    Ok(format!("{base_id}{TAG_1M}"))
+    Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
 /// Four-tier resolution against [`MODELS`]: alias → exact / dated-id
@@ -191,6 +191,10 @@ mod tests {
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
+
+    fn resolved(id: &str) -> ResolvedModelId {
+        ResolvedModelId::new(id.to_owned())
+    }
 
     // ── ModelCmd metadata ──
 
@@ -306,9 +310,9 @@ mod tests {
             let (_, outcome) = run_execute(alias);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                    expected.to_owned(),
-                ))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                    expected
+                )))),
                 "alias `{alias}` should route to `{expected}`",
             );
         }
@@ -344,7 +348,7 @@ mod tests {
             let (_, outcome) = run_execute(id);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(id.to_owned()))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(id)))),
                 "canonical `{id}` must round-trip",
             );
         }
@@ -365,9 +369,9 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                    expected.to_owned()
-                ))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                    expected
+                )))),
                 "`{arg}` should resolve to `{expected}`",
             );
         }
@@ -397,9 +401,9 @@ mod tests {
         let (_, outcome) = run_execute("opus-4");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-opus-4".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-opus-4"
+            )))),
         );
     }
 
@@ -425,9 +429,9 @@ mod tests {
         let (_, outcome) = run_execute("haiku-4-");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-haiku-4-5".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-haiku-4-5"
+            )))),
         );
     }
 
@@ -437,9 +441,9 @@ mod tests {
         let (_, outcome) = run_execute("  haiku-4-5  ");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-haiku-4-5".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-haiku-4-5"
+            )))),
         );
     }
 
@@ -450,7 +454,12 @@ mod tests {
         // `opus` matches every Opus row as a substring (would be
         // ambiguous), but the alias map intercepts and routes it to
         // the canonical opus-4-7 row. Pin the precedence directly.
-        assert_eq!(resolve_model_arg("opus").as_deref(), Ok("claude-opus-4-7"));
+        assert_eq!(
+            resolve_model_arg("opus")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
+            Ok("claude-opus-4-7")
+        );
     }
 
     #[test]
@@ -459,7 +468,9 @@ mod tests {
         // surface — every row must be exactly typeable.
         for info in MODELS {
             assert_eq!(
-                resolve_model_arg(info.id_substr).as_deref(),
+                resolve_model_arg(info.id_substr)
+                    .as_ref()
+                    .map(ResolvedModelId::as_str),
                 Ok(info.id_substr),
                 "{}",
                 info.id_substr,
@@ -478,7 +489,9 @@ mod tests {
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(
-                resolve_model_arg(dated).as_deref(),
+                resolve_model_arg(dated)
+                    .as_ref()
+                    .map(ResolvedModelId::as_str),
                 Ok(dated),
                 "{dated} must pass through",
             );
@@ -505,13 +518,22 @@ mod tests {
     fn resolve_model_arg_lowercases_arg_before_matching() {
         // Mirrors `/effort`'s case-insensitivity so `/model OPUS`
         // doesn't silently fail with "Unknown model".
-        assert_eq!(resolve_model_arg("OPUS").as_deref(), Ok("claude-opus-4-7"));
         assert_eq!(
-            resolve_model_arg("Claude-Opus-4-7").as_deref(),
+            resolve_model_arg("OPUS")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
+            Ok("claude-opus-4-7")
+        );
+        assert_eq!(
+            resolve_model_arg("Claude-Opus-4-7")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
             Ok("claude-opus-4-7"),
         );
         assert_eq!(
-            resolve_model_arg("OPUS[1M]").as_deref(),
+            resolve_model_arg("OPUS[1M]")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
             Ok("claude-opus-4-7[1m]"),
         );
     }

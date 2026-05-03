@@ -6,6 +6,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::config::Effort;
+use crate::model::ResolvedModelId;
 use crate::tool::ToolRegistry;
 
 // ── Visible Markers ──
@@ -57,7 +58,7 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
-    SwitchModel(String),
+    SwitchModel(ResolvedModelId),
     SwitchEffort(Effort),
     Cancel,
     /// TUI-only; agent loop ignores this.
