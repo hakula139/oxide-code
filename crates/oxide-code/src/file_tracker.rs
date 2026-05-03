@@ -858,6 +858,27 @@ mod tests {
         assert_eq!(tracker.lock().len(), 8 * 100);
     }
 
+    #[test]
+    fn lock_recovers_from_poisoned_mutex() {
+        let tracker = Arc::new(FileTracker::default());
+        let t = Arc::clone(&tracker);
+        let _ = std::thread::spawn(move || {
+            let _guard = t.by_path.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // Mutex is now poisoned. record_read must recover via lock().
+        let result = tracker.record_read(
+            Path::new("/tmp/poison_test"),
+            b"hello",
+            UNIX_EPOCH,
+            5,
+            LastView::Full,
+        );
+        assert_eq!(result, RecordRead::Inserted);
+        assert_eq!(tracker.lock().len(), 1);
+    }
+
     // ── FileSnapshot ──
 
     #[test]

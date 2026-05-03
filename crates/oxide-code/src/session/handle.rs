@@ -1186,4 +1186,51 @@ mod tests {
             "post-resume message chains to pre-resume tail",
         );
     }
+
+    // ── SharedState poison recovery ──
+
+    #[test]
+    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        let s = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = s.last_flush_failure.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // Mutex is now poisoned. record_flush_failure must recover.
+        shared.record_flush_failure("disk full");
+        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        // Poison by writing then panicking.
+        let s = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let mut guard = s.last_flush_failure.lock().unwrap();
+            *guard = Some("pre-poison".to_owned());
+            panic!("deliberate poison");
+        })
+        .join();
+        // Recovery path must still return the value written pre-panic.
+        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+    }
+
+    #[tokio::test]
+    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        // Poison the actor_join mutex.
+        let join_ref = Arc::clone(&handle.actor_join);
+        let _ = std::thread::spawn(move || {
+            let _guard = join_ref.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // shutdown must recover (take the JoinHandle) and not panic.
+        handle.shutdown().await;
+    }
 }
