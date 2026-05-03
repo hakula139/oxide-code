@@ -60,8 +60,12 @@ pub(super) struct SharedState {
 
 impl SharedState {
     pub(super) fn record_flush_failure(&self, msg: &str) {
-        if let Ok(mut slot) = self.last_flush_failure.lock() {
-            *slot = Some(msg.to_owned());
+        match self.last_flush_failure.lock() {
+            Ok(mut slot) => *slot = Some(msg.to_owned()),
+            Err(e) => {
+                tracing::warn!("last_flush_failure mutex poisoned, recovering");
+                *e.into_inner() = Some(msg.to_owned());
+            }
         }
     }
 
@@ -80,7 +84,13 @@ impl SharedState {
 
     /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
-        self.last_flush_failure.lock().ok().and_then(|s| s.clone())
+        match self.last_flush_failure.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::warn!("last_flush_failure mutex poisoned, recovering");
+                e.into_inner().clone()
+            }
+        }
     }
 }
 
@@ -192,7 +202,13 @@ impl SessionHandle {
             _ = rx.await;
         }
         drop(cmd_tx);
-        let join = actor_join.lock().ok().and_then(|mut g| g.take());
+        let join = match actor_join.lock() {
+            Ok(mut g) => g.take(),
+            Err(e) => {
+                tracing::warn!("actor_join mutex poisoned, recovering");
+                e.into_inner().take()
+            }
+        };
         if let Some(j) = join {
             _ = j.await;
         }
