@@ -15,6 +15,8 @@ use super::{CLAUDE_CLI_VERSION, Client, billing, build_metadata, build_system_bl
 use crate::config::Auth;
 use crate::message::{ContentBlock, Message};
 
+// ── Client::complete ──
+
 impl Client {
     /// Non-streaming completion, used for one-shot utility calls (AI
     /// title generation, future classifiers). Returns the concatenated
@@ -80,6 +82,8 @@ impl Client {
     }
 }
 
+// ── Body Builder ──
+
 /// Serializes the JSON request body for [`Client::complete`].
 ///
 /// System block order matches [`Client::stream_message`]:
@@ -135,6 +139,8 @@ fn build_completion_body(
     }
     Ok(body)
 }
+
+// ── Response Handling ──
 
 /// Flattens a `messages.create` response's content array into the
 /// assistant's user-visible text (drops tool-use / thinking blocks).

@@ -23,6 +23,8 @@ use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::OutputFormat;
 use crate::session::handle::SessionHandle;
 
+// ── Constants ──
+
 /// Haiku model used for title generation. Small and fast, OAuth-compatible,
 /// and cheap enough to fire on every fresh session without thought.
 const HAIKU_MODEL: &str = "claude-haiku-4-5";
@@ -58,6 +60,8 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
     Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 "#};
 
+// ── Public API ──
+
 /// Spawns a detached task that asks Haiku for a title, records it on
 /// `session`, and notifies `sink`.
 ///
@@ -77,6 +81,8 @@ where
         }
     });
 }
+
+// ── Generation ──
 
 /// Single-shot title generator: call Haiku, parse, append, notify.
 async fn generate_and_record(
@@ -129,6 +135,8 @@ fn title_output_format() -> OutputFormat {
         "additionalProperties": false,
     }))
 }
+
+// ── Parsing ──
 
 /// Parses Haiku's response as the `{"title": "..."}` JSON envelope, or
 /// bail with enough context for the caller's warn-log.

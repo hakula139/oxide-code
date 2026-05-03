@@ -29,6 +29,8 @@ use tracing::warn;
 
 use super::{Slot, Theme, builtin, color::parse_color};
 
+// ── Resolution ──
+
 /// Resolve a theme from an optional base + per-slot overrides.
 ///
 /// Errors:
@@ -107,6 +109,8 @@ macro_rules! define_slot_for_name {
 }
 
 super::for_each_slot!(define_slot_for_name);
+
+// ── SlotPatch ──
 
 /// Per-slot override from `[tui.theme.overrides]` in user config.
 ///
@@ -212,6 +216,8 @@ impl InlinePatch {
         Ok(Slot { fg, bg, modifiers })
     }
 }
+
+// ── Parsing ──
 
 /// Parse a theme TOML document into a [`Theme`].
 pub(super) fn parse_theme(content: &str) -> Result<Theme> {

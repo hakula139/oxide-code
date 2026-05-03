@@ -14,6 +14,8 @@ use std::collections::HashSet;
 
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
+// ── Constants ──
+
 /// Stub appended after a trailing tool-result-only user turn so the
 /// next API call has a valid assistant follow-up.
 pub(super) const RESUME_CONTINUATION_SENTINEL: &str =
@@ -23,6 +25,8 @@ pub(super) const RESUME_CONTINUATION_SENTINEL: &str =
 /// message. The API rejects transcripts that start with assistant.
 pub(super) const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
 
+// ── Entry Point ──
+
 pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     strip_trailing_thinking(messages);
     drop_unresolved_tool_uses(messages);
@@ -31,6 +35,8 @@ pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     insert_resume_sentinels(messages);
     strip_trailing_thinking(messages);
 }
+
+// ── Passes ──
 
 /// Drops assistant `tool_use` blocks whose id has no matching
 /// `tool_result` anywhere in the transcript. Cloned ids: a borrowed

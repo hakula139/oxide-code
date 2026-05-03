@@ -14,6 +14,8 @@ use anyhow::{Context, Result, bail};
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
 
+// ── DiffCmd ──
+
 /// Cap so a runaway binary diff can't freeze rendering. 64 KB sits
 /// comfortably above a typical PR-sized review.
 const MAX_BYTES: usize = 64 * 1024;
@@ -36,6 +38,8 @@ impl SlashCommand for DiffCmd {
         execute_in(&cwd, ctx)
     }
 }
+
+// ── Execution ──
 
 /// Body of [`DiffCmd::execute`] with cwd injected as data so tests can
 /// drive it against a tempdir without touching process state.
@@ -69,6 +73,8 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
     Ok(truncate(format_diff(&tracked, &untracked)))
 }
 
+// ── Formatting ──
+
 fn format_diff(tracked: &str, untracked: &str) -> String {
     let mut out = String::new();
     // Strip only git's trailing newline — keep any in-line trailing
@@ -89,6 +95,8 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
     }
     out
 }
+
+// ── Git Helpers ──
 
 /// Distinguish "git binary missing" (Err) from "git ran but we're
 /// outside a work tree" (Ok(false)) so the user sees the actionable
@@ -131,6 +139,8 @@ fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
         msg.to_owned()
     }
 }
+
+// ── Truncation ──
 
 /// Cuts on a UTF-8 boundary so the prefix is always ≤ [`MAX_BYTES`],
 /// then appends a one-line footer naming the dropped size.

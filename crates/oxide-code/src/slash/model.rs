@@ -11,6 +11,8 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
 
+// ── Constants ──
+
 /// `[1m]` opt-in tag — appended to a canonical id to request the 1M
 /// context window on models whose capability row has `context_1m`.
 const TAG_1M: &str = "[1m]";
@@ -32,6 +34,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("sonnet", "claude-sonnet-4-6"),
     ("haiku", "claude-haiku-4-5"),
 ];
+
+// ── ModelCmd ──
 
 pub(super) struct ModelCmd;
 
@@ -64,6 +68,8 @@ impl SlashCommand for ModelCmd {
         Ok(SlashOutcome::Action(UserAction::SwitchModel(id)))
     }
 }
+
+// ── Resolver ──
 
 /// Strips `[1m]`, resolves base, re-attaches if supported. Case-insensitive.
 fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
@@ -143,6 +149,8 @@ fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
         .filter(|id| pred(id))
         .collect()
 }
+
+// ── List View ──
 
 /// Renders the selectable model table with active marker.
 fn render_model_list(info: &SessionInfo) -> String {

@@ -8,6 +8,8 @@ use std::borrow::Cow;
 
 use crate::config::Effort;
 
+// ── ModelInfo ──
+
 /// Metadata and capability flags for a single Claude model.
 pub(crate) struct ModelInfo {
     /// Substring that identifies this model. The first substring match in
@@ -19,6 +21,8 @@ pub(crate) struct ModelInfo {
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
 }
+
+// ── Capabilities ──
 
 /// Per-model feature flags consulted by the API client to gate beta
 /// headers and body fields. `interleaved_thinking`, `context_management`,
@@ -60,6 +64,8 @@ pub(crate) struct Capabilities {
     /// the beta header rather than 400ing on the gateway.
     pub(crate) structured_outputs: bool,
 }
+
+// ── MODELS ──
 
 /// Ordered table: most-specific substring first. No inheritance between rows.
 pub(crate) const MODELS: &[ModelInfo] = &[

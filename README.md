@@ -41,7 +41,7 @@ See the [user guide](docs/guide/) for installation, configuration, slash command
 
 ## Building from Source
 
-Requires [Rust](https://www.rust-lang.org/tools/install) 1.91+ (edition 2024).
+Requires [Rust](https://www.rust-lang.org/tools/install) 1.91+ (uses edition 2024).
 
 ```bash
 cargo build --release

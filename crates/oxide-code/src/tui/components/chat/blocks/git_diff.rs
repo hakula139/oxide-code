@@ -9,6 +9,8 @@ use ratatui::text::Line;
 use super::tool::{bordered_row, numbered_row};
 use super::{BlockKind, ChatBlock, RenderCtx};
 
+// ── GitDiffBlock ──
+
 pub(crate) struct GitDiffBlock {
     text: String,
 }
@@ -109,6 +111,8 @@ impl ChatBlock for GitDiffBlock {
     }
 }
 
+// ── Diff Parsing ──
+
 /// "a" path of a `diff --git a/X b/Y` line, or `None` when not a
 /// file header.
 fn parse_diff_git_path(line: &str) -> Option<&str> {
@@ -140,6 +144,8 @@ fn strip_marker(line: &str, marker: char) -> Option<&str> {
     line.strip_prefix(marker)
         .filter(|rest| !rest.starts_with(marker))
 }
+
+// ── Gutter Sizing ──
 
 /// Decimal-digit width of the highest line number across all hunks.
 /// Computed globally so the gutter stays one width through the diff.

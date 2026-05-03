@@ -217,6 +217,8 @@ impl FileTracker {
     }
 }
 
+// ── FileSnapshot ──
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -228,6 +230,8 @@ pub(crate) struct FileSnapshot {
     #[serde(with = "time::serde::rfc3339")]
     pub(crate) recorded_at: OffsetDateTime,
 }
+
+// ── Outcomes ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
@@ -255,6 +259,8 @@ pub(crate) enum GateError {
 /// unchanged file. Signals that the prior Read is still authoritative.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
+
+// ── Testing ──
 
 /// Shared test fixtures. Centralized so the five callers don't each
 /// grow near-duplicates that subtly disagree on what a "seeded
