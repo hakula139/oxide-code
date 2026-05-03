@@ -181,13 +181,10 @@ impl Client {
     }
 
     /// Swaps the active model and re-clamps `config.effort` against
-    /// the new caps. Returns the resolved effort so the agent loop's
-    /// `/model` arm can ship it without a second `model::lookup`.
-    ///
-    /// Effort is lossy across swaps: an `xhigh`-clamped-to-`high`
-    /// model doesn't restore `xhigh` on swap-back. (Per-request paths
-    /// re-read `&self.config.model` so betas / `output_config` /
-    /// `context_management` pick up the swap on the next stream.)
+    /// the new caps. Returns the resolved effort so the agent loop
+    /// ships it without a second `model::lookup`. Effort is lossy
+    /// across swaps — an `xhigh`-clamped-to-`high` model doesn't
+    /// restore `xhigh` on swap-back.
     pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
         let effort = caps.resolve_effort(self.config.effort);
@@ -625,73 +622,52 @@ mod tests {
     }
 
     #[test]
-    fn set_model_clamps_effort_down_when_new_model_caps_below_user_pick() {
-        // Opus 4.7 (xhigh) → Sonnet 4.6 (caps at high). Pin both the
-        // returned effort and the post-swap `client` state so a no-op
-        // mutation (returning the new effort but not storing it)
-        // surfaces here.
-        let mut client = client_with("claude-opus-4-7", Some(Effort::Xhigh));
-        let new_effort = client.set_model("claude-sonnet-4-6".to_owned());
-        assert_eq!(new_effort, Some(Effort::High));
-        assert_eq!(client.model(), "claude-sonnet-4-6");
-        assert_eq!(client.config.effort, Some(Effort::High));
-
-        // `Max → High` exercises the same arm via a different
-        // starting tier; folded in to keep one canonical clamp test.
-        let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
-        assert_eq!(
-            client.set_model("claude-sonnet-4-6".to_owned()),
-            Some(Effort::High),
-        );
-    }
-
-    #[test]
-    fn set_model_passes_effort_through_when_new_model_already_accepts_it() {
-        // `Low → Low` between two effort-capable models — guards
-        // against a regression that always re-derives the model
-        // default instead of preserving an in-bounds pick.
-        let mut client = client_with("claude-sonnet-4-6", Some(Effort::Low));
-        assert_eq!(
-            client.set_model("claude-opus-4-7".to_owned()),
-            Some(Effort::Low),
-        );
-        assert_eq!(client.config.effort, Some(Effort::Low));
-    }
-
-    #[test]
-    fn set_model_clears_effort_when_new_model_has_no_effort_tier() {
-        // Haiku 4.5 doesn't accept `output_config.effort` — must
-        // clamp to None so the request body omits the field.
-        let mut client = client_with("claude-opus-4-7", Some(Effort::Xhigh));
-        assert_eq!(client.set_model("claude-haiku-4-5".to_owned()), None);
-        assert_eq!(client.config.effort, None);
-    }
-
-    #[test]
-    fn set_model_picks_model_default_effort_when_previous_was_none() {
-        // Haiku (None) → Opus 4.7 must take the new model's default
-        // (Xhigh), not leave effort=None and ship a request without
-        // the field.
-        let mut client = client_with("claude-haiku-4-5", None);
-        assert_eq!(
-            client.set_model("claude-opus-4-7".to_owned()),
-            Some(Effort::Xhigh),
-        );
-        assert_eq!(client.config.effort, Some(Effort::Xhigh));
-    }
-
-    #[test]
-    fn set_model_unknown_id_stores_raw_id_with_no_effort() {
-        // Unknown id → conservative all-false caps → effort drops to
-        // None. The raw id round-trips into `config.model` so the
-        // next request sends what the user asked for.
-        let mut client = client_with("claude-opus-4-7", Some(Effort::High));
-        assert_eq!(client.set_model("claude-opus-5-0".to_owned()), None);
-        assert_eq!(client.model(), "claude-opus-5-0");
-        assert_eq!(
-            client.config.effort, None,
-            "stored effort must clear so the next request omits the field",
-        );
+    fn set_model_resolves_effort_and_persists_full_state() {
+        // Each row pins one resolution arm: clamp-down, pass-through,
+        // no-tier clear, model-default fallback, and unknown-id (all
+        // caps false). Asserting both returned + stored effort catches
+        // the "returned but not persisted" mutation.
+        for (from_model, from_effort, swap_to, expect) in [
+            (
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+                "claude-sonnet-4-6",
+                Some(Effort::High),
+            ),
+            (
+                "claude-sonnet-4-6",
+                Some(Effort::Low),
+                "claude-opus-4-7",
+                Some(Effort::Low),
+            ),
+            (
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+                "claude-haiku-4-5",
+                None,
+            ),
+            (
+                "claude-haiku-4-5",
+                None,
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+            ),
+            (
+                "claude-opus-4-7",
+                Some(Effort::High),
+                "claude-opus-5-0",
+                None,
+            ),
+        ] {
+            let mut client = client_with(from_model, from_effort);
+            let returned = client.set_model(swap_to.to_owned());
+            assert_eq!(returned, expect, "{from_model} → {swap_to}: returned");
+            assert_eq!(
+                client.config.effort, expect,
+                "{from_model} → {swap_to}: stored effort",
+            );
+            assert_eq!(client.model(), swap_to, "{swap_to}: stored id");
+        }
     }
 
     #[test]
@@ -707,35 +683,40 @@ mod tests {
     // ── Client::set_effort ──
 
     #[test]
-    fn set_effort_passes_through_when_active_model_accepts_pick() {
-        let mut client = client_with("claude-opus-4-7", Some(Effort::High));
-        assert_eq!(client.set_effort(Some(Effort::Xhigh)), Some(Effort::Xhigh));
-    }
-
-    #[test]
-    fn set_effort_clamps_down_to_active_model_ceiling() {
-        // Sonnet 4.6 caps at `high`; `xhigh` clamps down rather than
-        // 400ing the gateway.
-        let mut client = client_with("claude-sonnet-4-6", Some(Effort::High));
-        assert_eq!(client.set_effort(Some(Effort::Xhigh)), Some(Effort::High));
-    }
-
-    #[test]
-    fn set_effort_none_falls_back_to_model_default() {
-        // `pick = None` (= `/effort auto`) defers to `default_effort` —
-        // Opus 4.7 defaults to `xhigh`.
-        let mut client = client_with("claude-opus-4-7", Some(Effort::Low));
-        assert_eq!(client.set_effort(None), Some(Effort::Xhigh));
-    }
-
-    #[test]
-    fn set_effort_clears_to_none_on_no_tier_model() {
-        // Haiku 4.5 has no effort tier — even an explicit pick resolves
-        // to None. The slash command preflight catches this so the
-        // client only sees this path via `/effort auto`.
-        let mut client = client_with("claude-haiku-4-5", None);
-        assert_eq!(client.set_effort(Some(Effort::High)), None);
-        assert_eq!(client.set_effort(None), None);
+    fn set_effort_resolves_pick_against_active_model_caps() {
+        // Each row is one resolution arm: pass-through, clamp-down,
+        // auto → model default, and explicit-on-no-tier collapses
+        // to None. Tested through `&mut self` to cover both the
+        // returned value and the stored field in one pass.
+        for (model, initial, pick, expect) in [
+            (
+                "claude-opus-4-7",
+                Some(Effort::High),
+                Some(Effort::Xhigh),
+                Some(Effort::Xhigh),
+            ),
+            (
+                "claude-sonnet-4-6",
+                Some(Effort::High),
+                Some(Effort::Xhigh),
+                Some(Effort::High),
+            ),
+            (
+                "claude-opus-4-7",
+                Some(Effort::Low),
+                None,
+                Some(Effort::Xhigh),
+            ),
+            ("claude-haiku-4-5", None, Some(Effort::High), None),
+            ("claude-haiku-4-5", None, None, None),
+        ] {
+            let mut client = client_with(model, initial);
+            assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
+            assert_eq!(
+                client.config.effort, expect,
+                "{model} pick={pick:?}: stored effort",
+            );
+        }
     }
 
     // ── Client::stream_message ──

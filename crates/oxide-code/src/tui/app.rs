@@ -638,13 +638,9 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
-/// Single-line confirmation for an `AgentEvent::ModelSwitched`.
-/// Surfaces three things the user otherwise wouldn't see:
-///
-/// - **Cleared** — new model has no effort tier.
-/// - **Clamped** — new effort < previous effort (lossy swap).
-/// - **Model default** — previous effort was `None` and the new model
-///   ships a default tier.
+/// `AgentEvent::ModelSwitched` confirmation. Surfaces silent effort
+/// changes (cleared / clamped / model-default) the user wouldn't
+/// otherwise see.
 fn format_swap_confirmation(
     marketing: &str,
     model_id: &str,
@@ -663,11 +659,9 @@ fn format_swap_confirmation(
     }
 }
 
-/// Single-line confirmation for an `AgentEvent::EffortSwitched`.
-/// `pick` is what the user typed (`None` = `auto`); `effort` is what
-/// the model's caps resolved it to. The two diverge on clamp / no-tier
-/// cases, both surfaced explicitly so the user never gets a silent
-/// no-op.
+/// `AgentEvent::EffortSwitched` confirmation. `pick` is the user's
+/// input (`None` = `auto`); `effort` is the resolved value — the two
+/// diverge on clamp / no-tier so neither is a silent no-op.
 fn format_effort_confirmation(
     pick: Option<crate::config::Effort>,
     effort: Option<crate::config::Effort>,
@@ -1457,72 +1451,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_model_swap_during_busy_refuses_with_system_message_no_forward() {
-        // Arg-bearing /model mutates the live Client and must wait for
-        // idle; the typed line still lands but the SwitchModel action
-        // is suppressed.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-        rx.recv().await.expect("active submit forwarded");
+    async fn dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward() {
+        // `/model <id>` and `/effort <level>` both mutate the live
+        // Client and must wait for idle. Pinning both so a regression
+        // that special-cases only one leaks the other.
+        for (cmd, gate_phrase) in [
+            ("/model opus", "/model runs only when idle"),
+            ("/effort xhigh", "/effort runs only when idle"),
+        ] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/model opus".to_owned()));
+            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
 
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "SwitchModel must not reach user_tx mid-turn",
-        );
-        let body = app.chat.last_system_text().expect("refusal system message");
-        assert!(
-            body.contains("/model runs only when idle"),
-            "refusal must name the gate: {body}",
-        );
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{cmd}: action must not reach user_tx mid-turn",
+            );
+            let body = app.chat.last_system_text().expect("refusal system message");
+            assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
+        }
     }
 
     #[tokio::test]
-    async fn dispatch_bare_model_during_busy_runs_list_view() {
-        // The list form is read-only and must dispatch immediately
-        // even mid-turn — `is_read_only(args)` returns true for
-        // empty args. Pinning this so a regression that drops the
-        // args-aware classification surfaces here.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+    async fn dispatch_bare_slash_during_busy_runs_list_view() {
+        // The bare form is read-only via `is_read_only(args)` returning
+        // true for empty args, so it dispatches immediately even
+        // mid-turn. Regressing the args-aware classification fails here.
+        for (cmd, header_prefix) in [
+            ("/model", "Available models"),
+            ("/effort", "Effort levels for"),
+        ] {
+            let (mut app, _rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/model".to_owned()));
+            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
 
-        let body = app.chat.last_system_text().expect("system block from list");
-        assert!(body.starts_with("Available models"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn dispatch_effort_swap_during_busy_refuses_with_system_message_no_forward() {
-        // /effort mirrors /model's args-aware mid-turn rule. Without
-        // this pin a regression that special-cases only /model leaks.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-        rx.recv().await.expect("active submit forwarded");
-
-        app.dispatch_user_action(UserAction::SubmitPrompt("/effort xhigh".to_owned()));
-
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "SwitchEffort must not reach user_tx mid-turn",
-        );
-        let body = app.chat.last_system_text().expect("refusal system message");
-        assert!(
-            body.contains("/effort runs only when idle"),
-            "refusal must name the gate: {body}",
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_bare_effort_during_busy_runs_list_view() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
-
-        app.dispatch_user_action(UserAction::SubmitPrompt("/effort".to_owned()));
-
-        let body = app.chat.last_system_text().expect("system block from list");
-        assert!(body.starts_with("Effort levels for"), "{body}");
+            let body = app.chat.last_system_text().expect("system block from list");
+            assert!(body.starts_with(header_prefix), "{cmd}: {body}");
+        }
     }
 
     #[tokio::test]

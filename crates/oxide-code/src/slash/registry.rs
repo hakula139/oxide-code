@@ -45,12 +45,10 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether the command is safe to run mid-turn for the given args.
-    /// Commands that touch `messages` / session state, or kick off a
-    /// new turn via [`SlashOutcome::Action`], override to `false` so
-    /// they refuse instead of racing the live turn. `args` lets a
-    /// command (`/model`) classify per-form: a bare invocation prints
-    /// info, but an arg-bearing one mutates.
+    /// Whether this invocation is safe to run mid-turn. Mutating
+    /// commands return `false` to refuse instead of racing the live
+    /// turn. `args` enables per-form classification — `/model` lists
+    /// when bare and mutates when given an id.
     fn is_read_only(&self, _args: &str) -> bool {
         true
     }

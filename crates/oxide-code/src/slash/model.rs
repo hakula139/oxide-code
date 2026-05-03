@@ -82,12 +82,10 @@ impl SlashCommand for ModelCmd {
     }
 }
 
-/// Strip `[1m]`, resolve the base id, then re-attach `[1m]` if the
-/// model supports 1M context (errors otherwise). Splitting the tag
-/// from identity means `opus[1m]` works through the bare alias and
-/// `haiku[1m]` errors uniformly — no per-variant table entries.
-/// Lowercased at entry so `/model OPUS` and `/effort XHIGH` match
-/// the same convention.
+/// Strip `[1m]`, resolve the base id, re-attach `[1m]` only when the
+/// model supports it. Splitting the tag from identity lets `opus[1m]`
+/// reuse the bare alias and `haiku[1m]` fail uniformly with one check.
+/// Args are lowercased so `/model OPUS` matches `/effort XHIGH`.
 fn resolve_model_arg(arg: &str) -> Result<String, String> {
     let arg = arg.to_ascii_lowercase();
     let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
@@ -368,13 +366,15 @@ mod tests {
 
     #[test]
     fn execute_short_id_resolves_via_suffix_tier() {
-        // Suffix tier turns short forms into canonical ids without
-        // an explicit alias entry. Covers non-SELECTABLE rows like
-        // `opus-4-1` that are reachable only by manual entry.
+        // Suffix tier turns short forms into canonical ids without an
+        // explicit alias. The `[1m]` cases pin the strip-resolve-
+        // reattach pipeline; bare forms must NOT acquire `[1m]`.
         for (arg, expected) in [
             ("haiku-4-5", "claude-haiku-4-5"),
             ("opus-4-1", "claude-opus-4-1"),
             ("sonnet-4-5", "claude-sonnet-4-5"),
+            ("sonnet-4-6", "claude-sonnet-4-6"),
+            ("opus-4-6[1m]", "claude-opus-4-6[1m]"),
         ] {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
@@ -385,34 +385,6 @@ mod tests {
                 "`{arg}` should resolve to `{expected}`",
             );
         }
-    }
-
-    #[test]
-    fn execute_bare_arg_resolves_to_bare_row_not_1m_variant() {
-        // `sonnet-4-6` (no [1m]) is the non-1M variant. The strip-
-        // resolve-reattach pipeline never re-attaches [1m] when the
-        // arg lacks it, so the bare row wins without ambiguity.
-        let (_, outcome) = run_execute("sonnet-4-6");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-sonnet-4-6".to_owned(),
-            ))),
-        );
-    }
-
-    #[test]
-    fn execute_1m_arg_re_attaches_tag_after_resolving_base() {
-        // Strip `[1m]`, resolve `opus-4-6` via suffix, re-attach `[1m]`
-        // because Opus 4.6 caps allow it. Pin the round-trip so a
-        // regression in the strip-reattach pipeline shows up here.
-        let (_, outcome) = run_execute("opus-4-6[1m]");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-opus-4-6[1m]".to_owned(),
-            ))),
-        );
     }
 
     #[test]
