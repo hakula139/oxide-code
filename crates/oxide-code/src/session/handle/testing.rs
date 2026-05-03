@@ -63,6 +63,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                     _ = ack.send(Outcome { failure: None });
                 }
                 SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
+                SessionCmd::Panic => panic!("deliberate actor panic for testing"),
             }
         }
     });

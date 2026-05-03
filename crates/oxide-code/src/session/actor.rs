@@ -57,6 +57,10 @@ pub(super) enum SessionCmd {
     /// hold a sender — a bare clone-drop wait would block on whichever
     /// HTTP timeout the orphan is racing.
     Shutdown { ack: oneshot::Sender<()> },
+    /// Test-only: panics inside the actor task so callers can exercise
+    /// the `JoinError::is_panic()` path in `shutdown`.
+    #[cfg(test)]
+    Panic,
 }
 
 /// One absorbed cmd whose ack fires once the batch flush returns. Held
@@ -155,6 +159,8 @@ fn absorb(
             acks.push(PendingAck::Shutdown(ack));
             *should_exit = true;
         }
+        #[cfg(test)]
+        SessionCmd::Panic => panic!("deliberate actor panic for testing"),
     }
 }
 

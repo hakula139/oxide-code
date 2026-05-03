@@ -209,8 +209,14 @@ impl SessionHandle {
                 e.into_inner().take()
             }
         };
-        if let Some(j) = join {
-            _ = j.await;
+        if let Some(j) = join
+            && let Err(e) = j.await
+        {
+            if e.is_panic() {
+                tracing::error!("session actor panicked: {e}");
+            } else {
+                tracing::warn!("session actor task cancelled: {e}");
+            }
         }
     }
 
@@ -779,6 +785,22 @@ mod tests {
     async fn shutdown_is_safe_to_call_after_dead_handle() {
         // Smoke check: empty join slot must not panic.
         let handle = testing::dead("dead");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_logs_actor_panic_instead_of_silently_discarding() {
+        // An actor that panics mid-batch must surface via tracing::error,
+        // not disappear into `_ = j.await`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        handle
+            .cmd_tx
+            .send(super::super::actor::SessionCmd::Panic)
+            .await
+            .unwrap();
+        // shutdown must not panic itself — it handles the JoinError.
         handle.shutdown().await;
     }
 
