@@ -1,15 +1,13 @@
 //! `/effort` — list / swap the active effort tier mid-session.
 //!
-//! Bare lists the levels for the active model with the current marked
-//! and unsupported levels annotated. `/effort <level>` swaps to that
-//! tier. The agent loop calls
+//! Bare lists the levels supported by the active model with the current
+//! marked. `/effort <level>` swaps to that tier. The agent loop calls
 //! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
 //! which clamps against the active model's caps.
 
 use std::fmt::Write as _;
 
 use super::context::{SessionInfo, SlashContext};
-use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
@@ -62,8 +60,8 @@ fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
         .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))
 }
 
-/// `* level  note` table with the active marker, plus a header naming
-/// the active model so the user knows which caps the levels reflect.
+/// `* level` list with the active marker, plus a header naming the
+/// active model so the user knows which caps the levels reflect.
 fn render_effort_list(info: &SessionInfo) -> String {
     let marketing = marketing_or_id(&info.config.model_id);
     let caps = capabilities_for(&info.config.model_id);
@@ -77,38 +75,18 @@ fn render_effort_list(info: &SessionInfo) -> String {
         return out;
     }
 
-    let labels: Vec<String> = Effort::ALL
+    for level in Effort::ALL
         .iter()
-        .map(|level| {
-            let marker = if Some(*level) == active { '*' } else { ' ' };
-            format!("{marker} {level}")
-        })
-        .collect();
-    let notes: Vec<String> = Effort::ALL
-        .iter()
-        .map(|level| level_note(*level, caps))
-        .collect();
-    let rows = labels
-        .iter()
-        .zip(&notes)
-        .map(|(l, n)| (l.as_str(), n.as_str()));
-    write_kv_table(&mut out, rows);
+        .copied()
+        .filter(|level| caps.accepts_effort(*level))
+    {
+        let marker = if Some(level) == active { '*' } else { ' ' };
+        _ = writeln!(out, "  {marker} {level}");
+    }
 
     out.push_str("\nSwitch with: /effort <level>\n");
-    out.push_str("Unsupported levels clamp down to the model's ceiling.");
+    out.push_str("Only levels supported by the active model are shown.");
     out
-}
-
-/// Empty for supported levels; `(clamps to high)` for unsupported.
-/// Kept terse so the table column stays narrow.
-fn level_note(level: Effort, caps: crate::model::Capabilities) -> String {
-    if caps.accepts_effort(level) {
-        return String::new();
-    }
-    let ceiling = caps
-        .clamp_effort(level)
-        .map_or_else(|| "unsupported".to_owned(), |c| format!("clamps to {c}"));
-    format!("({ceiling})")
 }
 
 #[cfg(test)]
@@ -166,10 +144,10 @@ mod tests {
         );
         assert!(body.contains("Switch with: /effort <level>"), "{body}");
         assert!(
-            body.contains("Unsupported levels clamp down"),
-            "clamp hint: {body}",
+            body.contains("Only levels supported"),
+            "supported-level hint: {body}",
         );
-        for level in Effort::ALL {
+        for level in [Effort::Low, Effort::Medium, Effort::High] {
             assert!(
                 body.contains(&level.to_string()),
                 "level `{level}` listed: {body}",
@@ -193,20 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_annotates_unsupported_levels_with_clamp_target() {
-        // Sonnet 4.6 supports low/medium/high but not xhigh/max — both
-        // should be marked `(clamps to high)` so the user knows what
-        // will happen if they pick.
+    fn execute_no_args_hides_unsupported_levels() {
         let (chat, _) = run_execute_with_model("claude-sonnet-4-6", "");
         let body = chat.last_system_text().unwrap();
         for unsupported in ["xhigh", "max"] {
-            let row = body
-                .lines()
-                .find(|l| l.contains(unsupported))
-                .unwrap_or_else(|| panic!("row for {unsupported} missing: {body}"));
             assert!(
-                row.contains("clamps to high"),
-                "clamp annotation on {unsupported}: {row}",
+                !body.contains(unsupported),
+                "unsupported level `{unsupported}` should not be listed: {body}",
             );
         }
     }

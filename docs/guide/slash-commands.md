@@ -49,7 +49,7 @@ When you swap, your current effort tier is capped to the new model's max — for
 
 ## Switching the Effort
 
-`/effort` (no argument) lists every level for the active model with the current marked by `*`. Unsupported levels (e.g. `xhigh` on Sonnet 4.6) are annotated `(clamps to high)` so you know what'll happen if you pick.
+`/effort` (no argument) lists levels supported by the active model with the current marked by `*`.
 
 `/effort <level>` swaps to that tier. Valid: `low`, `medium`, `high`, `xhigh`, `max`. The active model's caps clamp the pick — `/effort xhigh` on Sonnet 4.6 lands on `high` and the confirmation says `effort high (clamped from xhigh)`.
 
