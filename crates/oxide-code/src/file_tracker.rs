@@ -98,9 +98,6 @@ impl FileTracker {
         let content_hash = xxh64(bytes, HASH_SEED);
         let mut by_path = self.lock();
 
-        // Cache-hit refreshes mtime / size so a later phantom touch
-        // doesn't trip the drift path, but preserves `recorded_at` so
-        // the resume tiebreak still reflects the last state change.
         if matches!(view, LastView::Full)
             && let Some(state) = by_path.get_mut(path)
             && state.last_view == LastView::Full
@@ -254,9 +251,6 @@ impl FileTracker {
             if meta.len() != snap.size || current_mtime != stored_mtime {
                 continue;
             }
-            // Latest `recorded_at` wins on duplicate path — a live
-            // entry written before resume could be newer than the
-            // snapshot.
             let keep = by_path
                 .get(&snap.path)
                 .is_none_or(|cur| snap.recorded_at >= cur.recorded_at);
@@ -470,10 +464,6 @@ mod tests {
 
     #[test]
     fn record_read_cache_hit_preserves_recorded_at_refreshes_mtime() {
-        // Cache-hit is an observation, not a state change: pin
-        // `recorded_at` so the resume tiebreak keeps the real
-        // last-modify, but refresh `mtime` so a later phantom touch
-        // doesn't slip into the drift arm.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let t0 = UNIX_EPOCH + std::time::Duration::from_secs(1);
@@ -489,8 +479,6 @@ mod tests {
 
     #[test]
     fn record_read_changed_content_inserts_not_cache_hit() {
-        // Same path / view, different content — pins that the
-        // cache-hit decision compares hashes, not mtime / size.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
@@ -500,8 +488,6 @@ mod tests {
 
     #[test]
     fn record_read_partial_view_does_not_cache_hit() {
-        // Partial Read never short-circuits — the model is asking
-        // for a specific slice and may not have seen the rest.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let view = LastView::Partial {
@@ -515,8 +501,6 @@ mod tests {
 
     #[test]
     fn record_read_full_after_partial_does_not_cache_hit() {
-        // Partial → Full is the model's first full view, never a
-        // redundant re-Read even when the bytes match.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
@@ -531,8 +515,6 @@ mod tests {
         );
         let outcome = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         assert_eq!(outcome, RecordRead::Inserted);
-        // Now Full, so the next re-Read with matching bytes
-        // cache-hits.
         let next = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
         assert_eq!(next, RecordRead::CacheHit);
     }
@@ -642,8 +624,6 @@ mod tests {
 
     #[test]
     fn verify_drift_bytes_phantom_drift_passes() {
-        // Stat moved but rehash matches — content-preserving touch
-        // (cloud-sync timestamp shuffle).
         let stored = xxh64(b"hello", HASH_SEED);
         let result = FileTracker::verify_drift_bytes(
             Path::new("/tmp/a.rs"),
@@ -721,8 +701,6 @@ mod tests {
 
     #[test]
     fn record_modify_updates_existing_entry_with_new_hash() {
-        // After an edit the pre-edit hash must not survive — gate
-        // checks compare against the new bytes.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
@@ -741,8 +719,6 @@ mod tests {
 
     #[test]
     fn record_modify_promotes_partial_view_to_full() {
-        // Edit / Write rewrites the whole file regardless of the
-        // original view, so the new state is always Full.
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
@@ -763,9 +739,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_modify_after_write_records_disk_state() {
-        // Post-write helper re-stats and records the new hash /
-        // mtime / size, so the next gate check `Pass`es without a
-        // rehash.
         let tracker = FileTracker::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
@@ -784,9 +757,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_modify_after_write_swallows_stat_failure_silently() {
-        // Best-effort: a stat failure must not panic and must not
-        // insert anything, so a successful write isn't reported as
-        // failed.
         let tracker = FileTracker::default();
         let path = Path::new("/nonexistent/never-here.rs");
         tracker.record_modify_after_write(path, b"bytes").await;
@@ -883,8 +853,6 @@ mod tests {
 
     #[test]
     fn restore_verified_size_drift_drops_snapshot() {
-        // Size mismatch drops silently; the next Edit hits the
-        // standard "must read first" gate via a cold tracker.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"now this is longer").unwrap();
@@ -905,8 +873,6 @@ mod tests {
 
     #[test]
     fn restore_verified_mtime_drift_drops_snapshot() {
-        // Size matches but mtime moved (between-session edit). Drop
-        // so the next Edit re-Reads instead of trusting a stale hash.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"alpha").unwrap();
@@ -947,9 +913,6 @@ mod tests {
 
     #[test]
     fn restore_verified_keeps_newer_recorded_at_on_duplicate_path() {
-        // Same path appearing twice (file written across separate
-        // sessions): later `recorded_at` wins when both still match
-        // disk.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"x").unwrap();
@@ -973,8 +936,6 @@ mod tests {
             recorded_at: OffsetDateTime::UNIX_EPOCH + Duration::from_mins(1),
         };
 
-        // Older first exercises "incoming wins"; newer first
-        // covers the symmetric guard.
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![older.clone(), newer.clone()]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
@@ -990,8 +951,6 @@ mod tests {
 
     #[test]
     fn concurrent_record_read_does_not_corrupt_map() {
-        // Eight threads, 100 unique paths each — catches any future
-        // migration to a non-thread-safe representation.
         let tracker = Arc::new(FileTracker::default());
         thread::scope(|s| {
             for t in 0..8u32 {
@@ -1017,9 +976,6 @@ mod tests {
 
     #[test]
     fn file_snapshot_round_trips_through_json() {
-        // Wire-stable shape — pin the field layout (path-as-string,
-        // RFC3339 timestamps, `kind` tag) so a change here surfaces
-        // here, not at resume time on existing JSONL.
         let snap = FileSnapshot {
             path: PathBuf::from("/tmp/a.rs"),
             content_hash: 0xDEAD_BEEF,
@@ -1049,8 +1005,6 @@ mod tests {
 
     #[test]
     fn last_view_full_serializes_kind_only() {
-        // Pin `{"kind":"full"}` so a future inline-table change
-        // doesn't silently break readers expecting just the tag.
         let json = serde_json::to_value(LastView::Full).unwrap();
         assert_eq!(json, serde_json::json!({"kind": "full"}));
     }

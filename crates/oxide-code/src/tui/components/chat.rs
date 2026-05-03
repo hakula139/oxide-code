@@ -119,10 +119,6 @@ impl ChatView {
                     content,
                     is_error,
                 } => {
-                    // [`walk_transcript`] emits `ToolResult` only
-                    // inline right after its paired `ToolCall` —
-                    // unpaired ids surface through `OrphanToolResult`
-                    // instead — so the lookup is total.
                     let p = pending
                         .remove(tool_use_id)
                         .expect("walk_transcript pairs every ToolResult with its ToolCall");
@@ -438,10 +434,6 @@ impl ChatView {
             return Text::from(lines);
         }
 
-        // Committed blocks. A blank-before goes in when the prior block
-        // had width AND the current block wants breathing room — either
-        // it's standalone, or it's the start of a new tool group
-        // (prev was a Result).
         let mut prev_kind: Option<BlockKind> = None;
         for block in &self.blocks {
             if !block.visible(&ctx) {
@@ -461,9 +453,6 @@ impl ChatView {
             prev_kind = Some(kind);
         }
 
-        // Live thinking (transient — not stored in blocks). Visibility
-        // lives in `AssistantThinking::visible`, same contract as the
-        // committed-blocks loop above.
         if !self.thinking_buffer.is_empty() {
             let thinking = AssistantThinking::new(self.thinking_buffer.clone());
             if thinking.visible(&ctx) {
@@ -474,7 +463,6 @@ impl ChatView {
             }
         }
 
-        // Streaming assistant tail (not yet committed).
         if let Some(streaming) = &self.streaming {
             let continues = self.streaming_continues_turn();
             streaming.render_into(&mut lines, &ctx, continues);
@@ -633,10 +621,6 @@ mod tests {
 
     #[test]
     fn load_history_multi_tool_turn_pairs_inline_with_orphan_fallback() {
-        // Live rendering pairs Call → Result inline. The resumed walk
-        // must preserve that order regardless of JSONL batching; an
-        // orphan result ("ghost", no matching call) surfaces at its
-        // original position with the "(result)" fallback label.
         let mut chat = test_chat();
         chat.load_history(
             &[
@@ -681,7 +665,6 @@ mod tests {
         );
         assert_eq!(chat.blocks.len(), 5);
         let text = all_text(&chat);
-        // Order: call(a.rs), result(a.rs)=file a, call(TODO), result(TODO)=3 matches, orphan=stale
         let a_call = text.find("a.rs").unwrap();
         let file_a = text.find("file a").unwrap();
         let todo_call = text.find("TODO").unwrap();
@@ -738,8 +721,6 @@ mod tests {
 
     #[test]
     fn load_history_tool_result_without_matching_tool_use_uses_fallback_label() {
-        // Orphan tool_result — possible after crash sanitization. Render
-        // with a generic fallback rather than dropping.
         let mut chat = test_chat();
         chat.load_history(
             &[Message {
@@ -782,8 +763,6 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("first"));
         assert!(text.contains("second"));
-        // Assistant text renders bar-less after the redesign; load_history
-        // is a natural place to pin this without a standalone test.
         assert!(
             !text.contains(BAR),
             "assistant text should render without the left bar: {text}"
@@ -931,16 +910,6 @@ mod tests {
 
     #[test]
     fn load_history_uses_persisted_metadata_title_and_replacements() {
-        // The architect flagged a live/replay header asymmetry: live
-        // shows the tool-set title (`Edited f.rs`), replay used to
-        // fall back to the call label (`Edit(/tmp/f.rs)`). Now that
-        // `Entry::ToolResultMetadata` persists the title alongside
-        // the tool result, replay must reattach it via
-        // `load_history`'s metadata map. Also pins that
-        // `metadata.replacements` wins over the content-derived
-        // default — if the Diff's match count came back as 1, the
-        // metadata lookup silently failed and the test would catch
-        // it.
         let tools = test_tools();
         let mut chat = test_chat();
         let history = vec![
@@ -977,10 +946,6 @@ mod tests {
         );
         chat.load_history(&history, &metadata_map, &tools);
         let text = all_text(&chat);
-        // Both labels appear: `Edit(/tmp/f.rs)` on the call row
-        // (from `ToolCallBlock`), `Edited f.rs` on the result row
-        // (from `ToolResultBlock`). Pre-commit the result row used
-        // the call label — so `Edited` was absent entirely.
         assert!(
             text.contains("✓ Edited f.rs"),
             "persisted title should drive the result row: {text}",
@@ -1025,8 +990,6 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains('❯'));
         assert!(text.contains("hello world"));
-        // Bar redesign: user messages render bar-less. A regressed snapshot
-        // that re-adds `▎` would land silently without this invariant.
         assert!(
             !text.contains(BAR),
             "user message should render without the left bar: {text}"
@@ -1163,7 +1126,6 @@ mod tests {
     fn append_stream_token_after_committed_assistant_omits_duplicate_icon() {
         let mut chat = test_chat();
         chat.blocks.push(Box::new(AssistantText::new("committed")));
-        // Push streaming directly — simulates a continued turn.
         let mut s = StreamingAssistant::new();
         s.append("streaming");
         chat.streaming = Some(s);
@@ -1175,10 +1137,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_inserts_blank_separator_after_tool_output() {
-        // When streaming tokens arrive after a non-standalone block (tool
-        // call / tool result / error — no trailing blank of its own), the
-        // streaming block must insert its own leading blank so the icon
-        // doesn't sit flush against the preceding line.
         let mut chat = test_chat();
         chat.push_tool_call("$", "ls");
         chat.append_stream_token("response");
@@ -1195,16 +1153,9 @@ mod tests {
 
     #[test]
     fn append_stream_token_renders_committed_and_trailing_before_cache_advance() {
-        // With viewport_width = 0, advance_cache no-ops, so the streaming
-        // buffer accumulates newlines that rfind('\n') inside render_into
-        // then splits on first paint. Covers the Some(nl) match arm plus
-        // the `!committed.is_empty()` branch that an advance-cache-first
-        // flow skips.
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("cached line\ntail text");
-        // Pre-check the invariant that makes this test meaningful: cache
-        // deferred because viewport wasn't measured.
         assert_eq!(
             chat.streaming.as_ref().unwrap().rendered_boundary(),
             0,
@@ -1218,10 +1169,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_renders_buffer_ending_in_newline_before_cache_advance() {
-        // Trailing newline with viewport_width = 0: `advance_cache` defers,
-        // so `render_into` sees a tail that ends in `\n`. The rfind split
-        // gives committed = "line1\nline2" and trailing = "" — this is the
-        // fall-through where `if !trailing.is_empty()` is false.
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         chat.append_stream_token("line1\nline2\n");
@@ -1250,17 +1197,8 @@ mod tests {
 
     #[test]
     fn append_stream_token_preserves_blank_between_committed_paragraphs() {
-        // The user-visible paragraph-spacing bug: committing chunk-
-        // by-chunk on `\n` boundaries fed pulldown-cmark fragments
-        // that each rendered as a standalone paragraph, losing the
-        // inter-paragraph blank. Mid-stream view ended up collapsed
-        // vs. the post-commit view. Pin the expected shape here —
-        // two committed paragraphs with a blank line between them.
         let mut chat = test_chat();
         chat.viewport_width = 80;
-        // First chunk ends a paragraph; second chunk starts a new
-        // one. Both must sit in the cache when the next token lands
-        // because each `advance_cache` call committed past a `\n\n`.
         chat.append_stream_token("para1\n\n");
         chat.append_stream_token("para2\n\ntail");
 
@@ -1276,9 +1214,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_no_spurious_blank_between_consecutive_list_items() {
-        // Guard against over-inserting: when the committed tail ends
-        // with a list item and the trailing starts another one, they
-        // share a block type and must render adjacent (tight list).
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("- item 1\n- item 2");
@@ -1295,11 +1230,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_preserves_blank_before_partial_list_item_trailing() {
-        // Mid-stream, a list item that arrives before the paragraph's
-        // `\n\n` terminator gets rendered as a raw trailing fragment
-        // (not through pulldown-cmark). Without an explicit block gap
-        // the bullet visually glues to the preceding paragraph until
-        // the next `\n` lands — pin the expected separator here.
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("Here are items:\n- item 1");
@@ -1319,10 +1249,6 @@ mod tests {
 
     #[test]
     fn append_stream_token_preserves_blank_between_cache_and_live_tail() {
-        // Same invariant at the cache / live-tail seam: a committed
-        // paragraph followed by a partially-typed next paragraph
-        // must show the blank gap even while the new paragraph is
-        // still streaming (pre-`\n\n`).
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("committed paragraph\n\n");
@@ -1381,10 +1307,6 @@ mod tests {
 
     #[test]
     fn append_thinking_token_after_tool_call_has_separator() {
-        // Live thinking pushes a leading blank when the tail block has no
-        // trailing blank of its own. Tool call is the natural example —
-        // standalone = false, no trail blank, so the thinking header needs
-        // its own separator.
         let mut chat = test_chat();
         chat.push_tool_call("$", "ls");
         chat.append_thinking_token("deep thought");
@@ -1435,7 +1357,6 @@ mod tests {
 
     #[test]
     fn commit_streaming_persists_thinking_only_turn() {
-        // Thinking → tool-call turn (no text) still persists the reasoning.
         let mut chat = test_chat();
         chat.append_thinking_token("plan before tool");
         assert!(chat.blocks.is_empty());
@@ -1456,8 +1377,6 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains('$'));
         assert!(text.contains("ls -la"));
-        // Bar is preserved specifically on tool call / tool result — it
-        // visually groups the call with its output and color-codes status.
         assert!(
             text.contains(BAR),
             "tool call should retain the left bar: {text}"
@@ -1481,8 +1400,6 @@ mod tests {
 
     #[test]
     fn tool_result_followed_by_new_tool_call_has_borderless_spacer() {
-        // Without the `Result → non-Result` spacer the `▎` bar runs
-        // unbroken across consecutive tool groups.
         let mut chat = test_chat();
         chat.push_tool_call("$", "ls");
         chat.push_tool_result("ran ls", "output one", false);
@@ -1565,11 +1482,6 @@ mod tests {
         assert!(text.contains(TOOL_ERROR));
         assert!(text.contains("failed"));
         assert!(text.contains("error details"));
-        // The bar color is the status channel: neutral on success, error
-        // on failure. Walk the rendered spans and pin that the `▎` span
-        // carries the theme's error style here — a bug swapping the
-        // tool_border / error branches in `border_style_for` would flip
-        // success and error results identically otherwise.
         let rendered = chat.build_text(60);
         let bar_style = rendered
             .lines
@@ -1617,10 +1529,6 @@ mod tests {
         assert!(text.contains("line 4"));
         assert!(!text.contains("line 5"));
         assert!(text.contains("... +5 lines"));
-        // Body-indent invariant: output lines sit at col 4
-        // ([`TOOL_BORDER_CONT`]), past the `✓`/`✗` header at col 2.
-        // Anchored to the exact prefix so a regression collapsing back
-        // to col 2 fails here, not just in snapshots.
         assert!(
             text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
             "tool result body should indent past the status indicator: {text}"
@@ -1642,11 +1550,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_dedup_drops_first_body_line_matching_label() {
-        // Grep and glob both set `title = "Found N files"` as the
-        // status-line label and emit the same string as the first
-        // line of `content` for the model's context. Rendering both
-        // duplicates it on screen; skip the first body line when it
-        // matches the label verbatim.
         let mut chat = test_chat();
         chat.push_tool_result(
             "Found 2 files",
@@ -1658,8 +1561,6 @@ mod tests {
             false,
         );
         let text = all_text(&chat);
-        // Only the status line carries "Found 2 files" — the body
-        // starts at the file list.
         assert_eq!(
             text.matches("Found 2 files").count(),
             1,
@@ -1671,10 +1572,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
-        // Body's first line only gets dropped when it exactly matches
-        // the label. A superficially similar prefix ("Found 2 files"
-        // vs "Found 2 files in cache") must render both — the label
-        // is a distinct header.
         let mut chat = test_chat();
         chat.push_tool_result(
             "Found 2 files",
@@ -1693,10 +1590,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
-        // `git diff --stat` and similar tools indent every body line with
-        // a meaningful leading space. Trimming whole-content whitespace
-        // used to strip it off the first line only, misaligning the
-        // first row against the rest.
         let mut chat = test_chat();
         chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
         let text = all_text(&chat);
@@ -1709,16 +1602,9 @@ mod tests {
 
     #[test]
     fn push_tool_result_drops_surrounding_blank_lines() {
-        // Some tools pad output with leading / trailing blank lines;
-        // those must not produce empty body rows, but per-line indent
-        // on real data lines in between must survive.
         let mut chat = test_chat();
         chat.push_tool_result("out", "\n\n real line\n\n\n", false);
         let text = all_text(&chat);
-
-        // Exactly one body row with the [`TOOL_BORDER_CONT`] prefix
-        // (4-col status-line continuation). A regression that kept
-        // surrounding blanks would render 2+ body rows.
         let body_row_count = text
             .lines()
             .filter(|l| l.starts_with(TOOL_BORDER_CONT))
@@ -1735,8 +1621,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
-        // When content is just the duplicated label (no trailing body
-        // lines), rendering collapses to a bare status line.
         let mut chat = test_chat();
         chat.push_tool_result("No matches found", "No matches found", false);
         let text = all_text(&chat);
@@ -1847,9 +1731,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_edit_renders_diff_markers() {
-        // An Edit tool result wired through the structured view should
-        // render the replaced text with `- ` for the old side and `+ `
-        // for the new side, not the default 5-line truncation body.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk("fn foo()", "fn bar()")],
@@ -1860,15 +1741,10 @@ mod tests {
         let text = all_text(&chat);
         assert!(text.contains("- fn foo()"), "old side missing: {text}");
         assert!(text.contains("+ fn bar()"), "new side missing: {text}");
-        // Diff rendering replaces the default body — the "Successfully
-        // edited" message must not leak through.
         assert!(
             !text.contains("Successfully edited"),
             "diff should replace the raw content body: {text}",
         );
-        // Single-replacement edits must not emit the
-        // "N occurrences replaced" footer — closes an `&&` → `||`
-        // mutation on the guard in `render_diff_body`.
         assert!(
             !text.contains("occurrences replaced"),
             "replace_all=false should suppress the match-count footer: {text}",
@@ -1877,9 +1753,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_edit_replace_all_shows_match_count() {
-        // Resume-fallback shape: a single chunk + replacements > 1
-        // preserves the legacy "{N} occurrences replaced" footer for
-        // sessions whose JSONL predates structured chunks.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
@@ -1896,10 +1769,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_edit_replace_all_multi_chunk_shows_locations_footer() {
-        // Live-path shape for `replace_all`: producer emits one chunk
-        // per matched site. The renderer dedupes identical content
-        // and prints "applied at lines 12, 47, 200" so the user sees
-        // the diff once plus every location.
         let mut chat = test_chat();
         let chunks = [12, 47, 200]
             .into_iter()
@@ -1925,8 +1794,6 @@ mod tests {
             text.contains("applied at lines 12, 47, 200"),
             "locations footer missing: {text}",
         );
-        // The legacy "{N} occurrences replaced" is subsumed by the
-        // locations footer here — must not appear alongside it.
         assert!(
             !text.contains("3 occurrences replaced"),
             "legacy count footer must not duplicate the locations footer: {text}",
@@ -1935,10 +1802,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_edit_single_replacement_hides_count_footer() {
-        // The location / count footer only makes sense when the edit
-        // actually multiplied. A single replacement (either
-        // replace_all=false or replace_all=true with one match) should
-        // render a clean diff with no footer.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::Diff {
             chunks: vec![crate::tool::edit::synthesize_chunk("a", "b")],
@@ -1990,7 +1853,6 @@ mod tests {
         };
         chat.push_tool_result_view("Grep(fn)", view, false);
         let text = all_text(&chat);
-        // Width forced to 2 by 10/11; the lib.rs row pads to " 5 │ ...".
         assert!(text.contains("src/main.rs"), "missing main.rs: {text}");
         assert!(text.contains("src/lib.rs"), "missing lib.rs: {text}");
         assert!(text.contains("10 │ fn main() {"), "missing match: {text}");
@@ -2006,8 +1868,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_grep_truncates_body_with_hidden_line_count() {
-        // 1 path + 5 matches = 6 rows; the 5-row budget hides the last
-        // match behind a `+N lines` footer.
         let mut chat = test_chat();
         let lines = (1..=5)
             .map(|number| crate::tool::GrepMatchLine {
@@ -2032,8 +1892,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_grep_truncated_flag_emits_limit_reached_marker() {
-        // Body fits the budget but grep hit `head_limit` server-side;
-        // footer advertises the truncation without a hidden-row count.
         let mut chat = test_chat();
         let view = crate::tool::ToolResultView::GrepMatches {
             groups: vec![crate::tool::GrepFileGroup {
@@ -2054,7 +1912,6 @@ mod tests {
 
     #[test]
     fn push_tool_result_view_glob_renders_path_list_with_total_in_footer() {
-        // 7 returned out of 1234 total: TUI shows the first 5.
         let mut chat = test_chat();
         let files: Vec<String> = (0..7).map(|i| format!("src/f{i}.rs")).collect();
         let view = crate::tool::ToolResultView::GlobFiles {
@@ -2118,7 +1975,6 @@ mod tests {
         assert_eq!(chat.scroll_offset, 0);
         assert_eq!(chat.content_height.get(), 0);
         assert!(chat.auto_scroll);
-        // Viewport mirrors terminal state, not conversation state.
         assert_eq!(chat.viewport_height, 24);
         assert_eq!(chat.viewport_width, 80);
     }
@@ -2134,10 +1990,6 @@ mod tests {
 
     #[test]
     fn last_is_error_false_for_non_error_blocks() {
-        // Exercises the `ChatBlock::is_error_marker` default impl on every
-        // non-error variant. A failed tool result also renders a ✗ but
-        // `is_error_marker` stays `false` — the predicate is about block
-        // identity, not rendered glyphs.
         let mut chat = test_chat();
         chat.push_user_message("hello".into());
         assert!(!chat.last_is_error());
@@ -2162,9 +2014,6 @@ mod tests {
 
     #[test]
     fn last_system_text_returns_body_for_system_message() {
-        // Pins the `Some` branch so a regression in
-        // `SystemMessageBlock::system_text` would surface here as well
-        // as in the slash-command tests that consume the accessor.
         let mut chat = test_chat();
         chat.push_system_message("hello there");
         assert_eq!(chat.last_system_text(), Some("hello there"));
@@ -2172,10 +2021,6 @@ mod tests {
 
     #[test]
     fn last_system_text_default_is_none_for_non_system_blocks() {
-        // Exercises the trait-default `system_text` impl on every
-        // non-system variant — the accessor must not surface user /
-        // tool / error block text as if it were a slash-command
-        // confirmation.
         let mut chat = test_chat();
         chat.push_user_message("a user prompt".into());
         assert_eq!(chat.last_system_text(), None);
@@ -2210,13 +2055,11 @@ mod tests {
 
         let moved = chat.update_layout(Rect::new(0, 0, 80, 20));
         assert_eq!(chat.scroll_offset, 80);
-        // The `must_use` signal drives App-level repaint.
         assert!(moved);
     }
 
     #[test]
     fn update_layout_returns_false_when_offset_unchanged() {
-        // Steady-state paints must short-circuit the repaint.
         let mut chat = test_chat();
         chat.content_height.set(100);
         chat.auto_scroll = true;
@@ -2227,7 +2070,6 @@ mod tests {
 
     #[test]
     fn update_layout_paused_skips_scroll_and_keeps_offset() {
-        // Scrolled-up state: appends must not yank the viewport down.
         let mut chat = test_chat();
         chat.content_height.set(100);
         chat.scroll_offset = 25;
@@ -2242,8 +2084,6 @@ mod tests {
     fn update_layout_invalidates_streaming_cache_on_width_change() {
         let mut chat = test_chat();
         _ = chat.update_layout(Rect::new(0, 0, 80, 24));
-        // Full paragraph (ends in `\n\n`) so the cache actually
-        // commits — a single `\n` no longer triggers advance_cache.
         chat.append_stream_token("a complete paragraph\n\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_ne!(s.rendered_len(), 0);
@@ -2370,7 +2210,6 @@ mod tests {
     fn render_updates_content_height() {
         let mut chat = test_chat();
         render_chat(&mut chat, 80, 24);
-        // Welcome screen: 2 blank lines + title + subtitle = 4 lines.
         assert_eq!(chat.content_height.get(), 4);
     }
 
@@ -2399,10 +2238,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_result() {
-        // Per-tool rendering: the Edit tool's result renders as a
-        // `-` / `+` diff body, not the default truncated text block.
-        // Pins the first structured-view override so a regression
-        // routing Edit through `Text` again shows up here.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
@@ -2419,14 +2254,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_over_budget_truncates_both_sides() {
-        // Pins the symmetric truncation policy: when the combined line
-        // count exceeds `MAX_DIFF_BODY_LINES`, each side renders with
-        // a head + ellipsis + tail shape. Regressions that revert to
-        // the old asymmetric policy — or that emit a bogus
-        // `... +0 lines` footer on pure deletion — show up here.
-        // 14 lines per side (combined = 28 > MAX_DIFF_BODY_LINES = 20)
-        // is small enough to read but big enough to stay over budget
-        // if the constant inches up.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/big.rs)");
         let old = (0..14)
@@ -2448,12 +2275,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_error_uses_error_border_color() {
-        // Error-path Edit (e.g., `old_string` didn't match) still
-        // renders through the Diff view but with the error-colored
-        // border on the result row. Pins the `is_error = true`
-        // branch in `render_diff_body` — all other diff snapshots
-        // exercise the success border, so any theme regression on
-        // the error path would otherwise slip through.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
@@ -2470,13 +2291,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
-        // Defensive guard in `render_diff_body`: when
-        // `trim_common_boundaries` collapses both sides to empty
-        // (old == new entirely — reachable on transcript replay
-        // since `edit_file` rejects no-op edits live), emit a single
-        // dim "(no change)" row so the user sees an explicit marker
-        // instead of a bare success header that reads as "edit
-        // applied, diff scrolled off".
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
@@ -2493,12 +2307,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_trims_identical_boundary_lines() {
-        // Pure tail insertion: the anchor line (`fn foo()`) is
-        // identical on both sides and must NOT render as
-        // `- fn foo()` / `+ fn foo()`. Pinned as a snapshot so a trim
-        // regression in the producer surfaces at the rendered-layout
-        // level, not only in `synthesize_chunk` / `trim_chunk` unit
-        // tests.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
@@ -2515,9 +2323,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_with_edit_diff_wraps_long_lines_under_bar() {
-        // Pins bar continuation under narrow widths — the `+` sigil
-        // stays on the first visual row only; wrapped continuations
-        // flush under the bar without repeating the sigil.
         let mut chat = test_chat();
         chat.push_tool_call("✎", "Edit(/tmp/f.rs)");
         let view = crate::tool::ToolResultView::Diff {
@@ -2667,7 +2472,6 @@ mod tests {
         assert!(text.contains("The answer is 4."));
         assert!(text.contains("python -c 'print(2+2)'"));
         assert!(text.contains("You're welcome"));
-        // Two user messages → two user-icon prefixes.
         assert_eq!(text.matches('❯').count(), 2);
     }
 
@@ -2685,11 +2489,6 @@ mod tests {
 
     #[test]
     fn advance_streaming_cache_line_boundary_does_not_commit() {
-        // Line boundaries mid-paragraph are not commit points — the
-        // cache advances only when a full paragraph has arrived
-        // (`\n\n`), so pulldown-cmark sees each committed chunk as a
-        // complete block. A single `\n` inside a paragraph keeps the
-        // buffer uncommitted and streaming-live.
         let mut chat = test_chat();
         chat.viewport_width = 80;
         chat.append_stream_token("first line\nsecond line");
@@ -2704,9 +2503,6 @@ mod tests {
         chat.viewport_width = 80;
         chat.append_stream_token("para1\n\npartial");
         let s = chat.streaming.as_ref().unwrap();
-        // The `\n\n` between para1 and "partial" is the commit point;
-        // boundary lands past both newlines so subsequent advances
-        // scan only the uncommitted tail.
         assert_eq!(s.rendered_boundary(), "para1\n\n".len());
         assert_eq!(s.rendered_len(), 1);
     }
@@ -2717,10 +2513,6 @@ mod tests {
         chat.viewport_width = 80;
         chat.append_stream_token("p1\n\np2\n\np3\n\npartial");
         let s = chat.streaming.as_ref().unwrap();
-        // Commit up to the last `\n\n` before the trailing live
-        // fragment; p1, p2, p3 land in the cache in one render pass
-        // so pulldown sees them as three consecutive blocks and emits
-        // inter-paragraph blanks naturally.
         assert_eq!(s.rendered_boundary(), "p1\n\np2\n\np3\n\n".len());
     }
 
@@ -2729,8 +2521,6 @@ mod tests {
         let mut chat = test_chat();
         chat.viewport_width = 80;
 
-        // First paragraph — cache empty, the render includes the `◉`
-        // icon via render_assistant_markdown's `starts_new_turn`.
         chat.append_stream_token("para1\n\n");
         let (first_boundary, first_len) = {
             let s = chat.streaming.as_ref().unwrap();
@@ -2739,10 +2529,6 @@ mod tests {
         assert_eq!(first_boundary, "para1\n\n".len());
         assert!(first_len >= 1);
 
-        // Second paragraph — cache is non-empty, so advance_cache
-        // prepends a blank separator before the new paragraph's
-        // rendered lines. Total cache length grows by at least 2
-        // (separator + paragraph line).
         chat.append_stream_token("para2\n\n");
         let s = chat.streaming.as_ref().unwrap();
         assert_eq!(s.rendered_boundary(), "para1\n\npara2\n\n".len());
@@ -2759,18 +2545,12 @@ mod tests {
         chat.viewport_width = 80;
         chat.append_stream_token("\n\n");
         let s = chat.streaming.as_ref().unwrap();
-        // Empty (whitespace-only) commit — boundary still advances
-        // past the `\n\n` so subsequent text isn't re-scanned, but
-        // nothing lands in the cache.
         assert_eq!(s.rendered_boundary(), 2);
         assert_eq!(s.rendered_len(), 0);
     }
 
     #[test]
     fn advance_streaming_cache_defers_until_viewport_measured() {
-        // Streaming before update_layout runs must not bake unwrapped
-        // markdown into the cache. The cache stays empty until the
-        // viewport width is supplied.
         let mut chat = test_chat();
         chat.append_stream_token("first paragraph\n\n");
         {

@@ -258,25 +258,17 @@ pnpm lint                                          # Lint Markdown
 pnpm spellcheck                                    # Spell check
 ```
 
-The `pnpm` checks gate the `node-check` CI job. `cspell` covers Rust
-sources too, so a new word in a doc comment fails the same way as one
-in `README.md`.
+The `pnpm` checks gate the `node-check` CI job. `cspell` covers Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
 
 ### Mutation testing
 
-Coverage reports whether a line ran; mutation testing reports whether
-a mutation of that line would be caught. Run out-of-band before
-large-scope changes ship — it is not part of CI because a full run is
-slow:
+Coverage reports whether a line ran; mutation testing reports whether a mutation of that line would be caught. Run out-of-band before large-scope changes ship — not in CI because a full run is slow:
 
 ```bash
 cargo mutants --package oxide-code
 ```
 
-Surviving mutants usually mean a test asserts something too loose
-(e.g., `starts_with` on uniform input, or a wildcard pattern that
-matches every output). Tighten the assertion; if the mutant is
-genuinely equivalent, exclude it with an explanatory comment.
+Surviving mutants usually mean a test asserts something too loose. Tighten the assertion; if the mutant is genuinely equivalent, exclude it with an explanatory comment.
 
 ## Code Review
 
