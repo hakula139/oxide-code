@@ -16,7 +16,7 @@ impl SlashCommand for StatusCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Show session info: model, version, working directory, auth source, and session ID"
+        "Show session info: model, effort, version, working directory, auth source, and session ID"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {

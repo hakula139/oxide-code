@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use crate::config::ConfigSnapshot;
-use crate::prompt::environment::marketing_or_id;
+use crate::model::marketing_or_id;
 use crate::tui::components::chat::ChatView;
 
 /// Session-level descriptors surfaced by read-only slash commands.

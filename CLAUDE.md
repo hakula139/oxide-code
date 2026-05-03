@@ -45,10 +45,10 @@ ox                                          # Start an interactive session
 ├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                              # Conversation message types
-├── model.rs                                # Ground-truth table of known Claude models (marketing name, cutoff, capability flags)
+├── model.rs                                # Ground-truth table: marketing name, cutoff, capabilities; `marketing_or_id` unknown-id fallback
 ├── prompt.rs                               # System prompt builder (section assembly)
 ├── prompt/
-│   ├── environment.rs                      # Runtime environment detection (platform, git, date, marketing name)
+│   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
 │   ├── instructions.rs                     # Instruction file discovery and loading (CLAUDE.md, AGENTS.md)
 │   └── sections.rs                         # Static prompt section constants (intro, guidance, style)
 ├── session.rs                              # Session module root
@@ -79,7 +79,7 @@ ox                                          # Start an interactive session
 │   ├── help.rs                             # /help — registry-driven command listing
 │   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
-│   ├── model.rs                            # /model — list / swap; three-tier resolver (alias → exact → unique substring); `[1m]` first-class
+│   ├── model.rs                            # /model — list / swap; resolver alias → lookup → unique suffix → unique substring; `[1m]` first-class
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + BUILT_INS slice + alias-aware lookup
 │   └── status.rs                           # /status — model, effort, cwd, version, auth, session id

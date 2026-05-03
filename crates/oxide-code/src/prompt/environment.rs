@@ -1,9 +1,9 @@
-use std::borrow::Cow;
 use std::path::Path;
 
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
+use crate::model::marketing_name;
 use crate::util::env;
 
 /// Fallback used in the `# Environment` prompt section when a value
@@ -96,24 +96,9 @@ impl Environment {
 
 // ── Model Metadata ──
 
-use crate::model;
-
-/// Maps a model ID to its marketing name.
-pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
-    model::lookup(model).map(|info| info.marketing)
-}
-
-/// Marketing name when known; raw id otherwise. Single seam so the
-/// "unknown id falls back to the literal model string" rule lives in
-/// one place — [`Config::load`], `/status`, `/config`, and the
-/// `/model` swap handler all decay the same way.
-pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
-    marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
-}
-
 /// Maps a model ID to its knowledge cutoff date.
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
-    model::lookup(model).and_then(|info| info.cutoff)
+    crate::model::lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
@@ -284,59 +269,6 @@ mod tests {
         let rendered = env.render();
         assert!(rendered.contains("- You are powered by the model custom-model-v1."));
         assert!(!rendered.contains("knowledge cutoff"));
-    }
-
-    // ── marketing_name ──
-
-    #[test]
-    fn marketing_name_known_models() {
-        assert_eq!(marketing_name("claude-opus-4-7"), Some("Claude Opus 4.7"));
-        assert_eq!(marketing_name("claude-opus-4-6"), Some("Claude Opus 4.6"));
-        assert_eq!(
-            marketing_name("claude-sonnet-4-6"),
-            Some("Claude Sonnet 4.6")
-        );
-        assert_eq!(marketing_name("claude-opus-4-5"), Some("Claude Opus 4.5"));
-        assert_eq!(
-            marketing_name("claude-sonnet-4-5"),
-            Some("Claude Sonnet 4.5")
-        );
-        assert_eq!(marketing_name("claude-haiku-4-5"), Some("Claude Haiku 4.5"));
-        assert_eq!(marketing_name("claude-opus-4-1"), Some("Claude Opus 4.1"));
-        assert_eq!(marketing_name("claude-opus-4"), Some("Claude Opus 4"));
-        assert_eq!(marketing_name("claude-sonnet-4"), Some("Claude Sonnet 4"));
-        assert_eq!(marketing_name("claude-haiku-4"), Some("Claude Haiku 4"));
-    }
-
-    #[test]
-    fn marketing_name_unknown_model() {
-        assert_eq!(marketing_name("gpt-4o"), None);
-        assert_eq!(marketing_name("custom-model"), None);
-    }
-
-    #[test]
-    fn marketing_name_with_suffix() {
-        // Model IDs can include suffixes (e.g., date tags).
-        assert_eq!(
-            marketing_name("claude-opus-4-6-20260401"),
-            Some("Claude Opus 4.6")
-        );
-    }
-
-    // ── marketing_or_id ──
-
-    #[test]
-    fn marketing_or_id_returns_marketing_for_known_id() {
-        assert_eq!(marketing_or_id("claude-opus-4-7"), "Claude Opus 4.7");
-    }
-
-    #[test]
-    fn marketing_or_id_falls_back_to_raw_id_for_unknown() {
-        // Single seam for the unknown-id fallback — every UI surface
-        // (status bar, /status, /config, swap confirmation) goes
-        // through this. A regression that returned a placeholder or
-        // panicked here would show up everywhere at once.
-        assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
     }
 
     // ── knowledge_cutoff ──

@@ -443,7 +443,7 @@ impl App {
             // from `model_id` so it can't drift.
             AgentEvent::ModelSwitched { model_id, effort } => {
                 let prev_effort = self.session_info.config.effort;
-                let marketing = crate::prompt::environment::marketing_or_id(&model_id);
+                let marketing = crate::model::marketing_or_id(&model_id);
                 let confirmation =
                     format_swap_confirmation(&marketing, &model_id, prev_effort, effort);
                 self.status_bar.set_model(marketing.into_owned());
@@ -1601,6 +1601,8 @@ mod tests {
         assert!(app.dirty);
     }
 
+    // ── format_swap_confirmation ──
+
     #[test]
     fn format_swap_confirmation_both_none_omits_effort_clause() {
         // Pin: no `effort` substring at all, never a stray "none"
@@ -1692,6 +1694,8 @@ mod tests {
         assert_eq!(body, "Effort set to xhigh.");
         assert!(app.dirty);
     }
+
+    // ── format_effort_confirmation ──
 
     #[test]
     fn format_effort_confirmation_explicit_pick_matches_resolution() {

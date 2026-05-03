@@ -25,8 +25,7 @@ use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, lookup};
-use crate::prompt::environment::marketing_or_id;
+use crate::model::{MODELS, lookup, marketing_or_id};
 
 /// `[1m]` opt-in tag — appended to a canonical id to request the 1M
 /// context window on models whose capability row has `context_1m`.

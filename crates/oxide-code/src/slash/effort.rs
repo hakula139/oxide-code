@@ -14,8 +14,7 @@ use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::capabilities_for;
-use crate::prompt::environment::marketing_or_id;
+use crate::model::{capabilities_for, marketing_or_id};
 
 /// Levels presented in the list view, weakest first.
 const LEVELS: &[(Effort, &str)] = &[

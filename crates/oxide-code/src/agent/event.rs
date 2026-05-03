@@ -78,7 +78,7 @@ pub(crate) enum AgentEvent {
     /// `/model` swapped the active model. The TUI handler refreshes
     /// `session_info.config` and the status bar; marketing name is
     /// derived locally via
-    /// [`marketing_or_id`](crate::prompt::environment::marketing_or_id).
+    /// [`marketing_or_id`](crate::model::marketing_or_id).
     ModelSwitched {
         model_id: String,
         effort: Option<Effort>,
@@ -407,6 +407,10 @@ mod tests {
             AgentEvent::ModelSwitched {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
+            },
+            AgentEvent::EffortSwitched {
+                pick: Some(Effort::High),
+                effort: Some(Effort::High),
             },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);

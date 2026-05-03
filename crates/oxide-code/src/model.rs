@@ -36,6 +36,8 @@
 //! `structured_outputs`) are exercised by per-flag enumeration tests
 //! because they don't reduce to a substring rule.
 
+use std::borrow::Cow;
+
 use crate::config::Effort;
 
 /// Metadata and capability flags for a single Claude model.
@@ -343,6 +345,18 @@ pub(crate) fn capabilities_for(model: &str) -> Capabilities {
         .unwrap_or_default()
 }
 
+/// Marketing display name when `model` matches a known row.
+pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
+    lookup(model).map(|info| info.marketing)
+}
+
+/// Marketing name when known, raw id otherwise. Single seam for the
+/// "unknown id → fall back to literal" rule so `Config::load`,
+/// `/status`, `/config`, and the `/model` swap all decay the same way.
+pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
+    marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +550,97 @@ mod tests {
                 "{unsupported} fallback row must not claim structured outputs",
             );
         }
+    }
+
+    // ── Capabilities::resolve_effort ──
+
+    #[test]
+    fn resolve_effort_passes_pick_through_when_model_accepts_it() {
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        assert_eq!(
+            opus_4_7.resolve_effort(Some(Effort::Xhigh)),
+            Some(Effort::Xhigh)
+        );
+    }
+
+    #[test]
+    fn resolve_effort_clamps_pick_against_model_ceiling() {
+        // Sonnet 4.6 caps at `high`; an `xhigh` pick must clamp down.
+        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
+        assert_eq!(
+            sonnet_4_6.resolve_effort(Some(Effort::Xhigh)),
+            Some(Effort::High)
+        );
+    }
+
+    #[test]
+    fn resolve_effort_falls_back_to_model_default_when_pick_is_none() {
+        // None ≡ "use the model default" — Opus 4.7 → xhigh, others → high.
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        assert_eq!(opus_4_7.resolve_effort(None), Some(Effort::Xhigh));
+        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
+        assert_eq!(sonnet_4_6.resolve_effort(None), Some(Effort::High));
+    }
+
+    #[test]
+    fn resolve_effort_returns_none_on_no_tier_model() {
+        // Haiku 4.5 doesn't accept the effort field — both pick=None
+        // and pick=Some collapse to None so the request omits the
+        // field rather than 400-ing the gateway.
+        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
+        assert_eq!(haiku_4_5.resolve_effort(None), None);
+        assert_eq!(haiku_4_5.resolve_effort(Some(Effort::High)), None);
+    }
+
+    // ── marketing_name ──
+
+    #[test]
+    fn marketing_name_known_models() {
+        assert_eq!(marketing_name("claude-opus-4-7"), Some("Claude Opus 4.7"));
+        assert_eq!(marketing_name("claude-opus-4-6"), Some("Claude Opus 4.6"));
+        assert_eq!(
+            marketing_name("claude-sonnet-4-6"),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(marketing_name("claude-opus-4-5"), Some("Claude Opus 4.5"));
+        assert_eq!(
+            marketing_name("claude-sonnet-4-5"),
+            Some("Claude Sonnet 4.5")
+        );
+        assert_eq!(marketing_name("claude-haiku-4-5"), Some("Claude Haiku 4.5"));
+        assert_eq!(marketing_name("claude-opus-4-1"), Some("Claude Opus 4.1"));
+        assert_eq!(marketing_name("claude-opus-4"), Some("Claude Opus 4"));
+        assert_eq!(marketing_name("claude-sonnet-4"), Some("Claude Sonnet 4"));
+        assert_eq!(marketing_name("claude-haiku-4"), Some("Claude Haiku 4"));
+    }
+
+    #[test]
+    fn marketing_name_unknown_model_is_absent() {
+        assert_eq!(marketing_name("gpt-4o"), None);
+        assert_eq!(marketing_name("custom-model"), None);
+    }
+
+    #[test]
+    fn marketing_name_with_dated_suffix_falls_through_to_family_row() {
+        assert_eq!(
+            marketing_name("claude-opus-4-6-20260401"),
+            Some("Claude Opus 4.6")
+        );
+    }
+
+    // ── marketing_or_id ──
+
+    #[test]
+    fn marketing_or_id_returns_marketing_for_known_id() {
+        assert_eq!(marketing_or_id("claude-opus-4-7"), "Claude Opus 4.7");
+    }
+
+    #[test]
+    fn marketing_or_id_falls_back_to_raw_id_for_unknown() {
+        // Single seam for the unknown-id fallback — every UI surface
+        // (status bar, /status, /config, swap confirmation) goes
+        // through this. A regression that returned a placeholder or
+        // panicked here would show up everywhere at once.
+        assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
     }
 }
