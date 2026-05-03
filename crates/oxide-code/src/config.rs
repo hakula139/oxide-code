@@ -40,10 +40,11 @@ impl Auth {
     }
 }
 
-/// Read-only view of resolved config — every field [`Config`] holds
-/// except the actual secret. Built once at startup from
-/// [`Config::snapshot`] and handed into the slash dispatcher; survives
-/// the move when [`Config`] itself is consumed by the API client.
+/// Resolved-config view — every field [`Config`] holds except the
+/// secret. Built at startup from [`Config::snapshot`] and handed into
+/// the slash dispatcher; survives the move when [`Config`] itself is
+/// consumed by the API client. `model_id` and `effort` are rebound by
+/// the `/model` swap path so the snapshot reflects the live values.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) auth_label: &'static str,
@@ -233,10 +234,7 @@ impl Config {
             Some(raw) => Some(raw.parse::<Effort>().context("ANTHROPIC_EFFORT")?),
             None => client.effort,
         };
-        let effort = match effort_pick {
-            Some(pick) => caps.clamp_effort(pick),
-            None => caps.default_effort(),
-        };
+        let effort = caps.resolve_effort(effort_pick);
 
         let max_tokens = env::string("ANTHROPIC_MAX_TOKENS")
             .and_then(|v| v.parse().ok())

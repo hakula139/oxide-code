@@ -49,8 +49,9 @@ fn render_config(
     let max_tokens = cfg.max_tokens.to_string();
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
     let thinking = if cfg.show_thinking { "yes" } else { "no" };
+    let model = info.marketing_name();
     let resolved: [(&str, &str); 8] = [
-        ("Model", &info.model),
+        ("Model", &model),
         ("Model ID", &cfg.model_id),
         ("Base URL", &cfg.base_url),
         ("Auth", cfg.auth_label),
@@ -132,13 +133,14 @@ mod tests {
         // combination the dedicated branch tests below skip.
         let info = test_session_info();
         let cfg = &info.config;
+        let model = info.marketing_name();
         let body = render_config(&info, None, None);
         let effort = cfg
             .effort
             .map(|e| e.to_string())
             .expect("fixture sets effort = Some");
         for needle in [
-            info.model.as_str(),
+            model.as_ref(),
             cfg.model_id.as_str(),
             cfg.base_url.as_str(),
             cfg.auth_label,

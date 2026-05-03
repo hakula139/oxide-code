@@ -29,8 +29,9 @@ impl SlashCommand for StatusCmd {
 /// names) so the rendered labels stay stable when the struct grows.
 /// `Model ID` sits next to `Model` so a routing-debug glance shows both.
 fn render_status(info: &SessionInfo) -> String {
+    let model = info.marketing_name();
     let rows: [(&str, &str); 6] = [
-        ("Model", &info.model),
+        ("Model", &model),
         ("Model ID", &info.config.model_id),
         ("Working Directory", &info.cwd),
         ("Version", info.version),
@@ -85,9 +86,10 @@ mod tests {
         // Pin every field reaches the user, plus the row count — a
         // dropped row mustn't slip past the per-value checks.
         let info = test_session_info();
+        let model = info.marketing_name();
         let body = render_status(&info);
         for needle in [
-            info.model.as_str(),
+            model.as_ref(),
             info.config.model_id.as_str(),
             info.cwd.as_str(),
             info.version,
@@ -105,8 +107,9 @@ mod tests {
         // Pin the absolute column, not just "all rows agree" — a
         // uniformly broken renderer would pass the latter.
         let info = test_session_info();
+        let model = info.marketing_name();
         let values = [
-            info.model.as_str(),
+            model.as_ref(),
             info.config.model_id.as_str(),
             info.cwd.as_str(),
             info.version,

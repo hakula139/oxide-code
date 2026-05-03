@@ -33,7 +33,6 @@ use client::anthropic::Client;
 use config::Config;
 use file_tracker::FileTracker;
 use message::Message;
-use prompt::environment::marketing_name;
 use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
@@ -171,7 +170,6 @@ async fn async_main() -> Result<()> {
 
     run_tui(
         &client,
-        &model,
         show_thinking,
         snapshot,
         &theme,
@@ -272,7 +270,6 @@ async fn shutdown_signal() {
 )]
 async fn run_tui(
     client: &Client,
-    model: &str,
     show_thinking: bool,
     config: config::ConfigSnapshot,
     theme: &tui::theme::Theme,
@@ -302,13 +299,7 @@ async fn run_tui(
         .map(tildify)
         .unwrap_or_default();
 
-    let display_model = match marketing_name(model) {
-        Some(name) => name.to_owned(),
-        None => model.to_owned(),
-    };
-
     let session_info = SessionInfo {
-        model: display_model,
         cwd,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),
@@ -469,11 +460,10 @@ async fn agent_loop_task(
                 }
             }
             UserAction::SwitchModel(id) => {
-                let swap = client.set_model(id);
+                let effort = client.set_model(id.clone());
                 if let Err(e) = sink.send(AgentEvent::ModelSwitched {
-                    model_id: swap.model_id,
-                    marketing: swap.marketing,
-                    effort: swap.effort,
+                    model_id: id,
+                    effort,
                 }) {
                     warn!("model-switched event dropped: {e}");
                 }

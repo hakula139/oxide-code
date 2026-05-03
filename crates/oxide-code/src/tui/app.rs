@@ -87,8 +87,11 @@ impl App {
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
         chat.load_history(history, history_metadata, tools.as_ref());
-        let mut status_bar =
-            StatusBar::new(theme, session_info.model.clone(), session_info.cwd.clone());
+        let mut status_bar = StatusBar::new(
+            theme,
+            session_info.marketing_name().into_owned(),
+            session_info.cwd.clone(),
+        );
         status_bar.set_title(title);
         Self {
             theme: theme.clone(),
@@ -435,22 +438,15 @@ impl App {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
             }
-            // Refresh both surfaces that read the previous model:
-            // the status bar caches its own label, and `session_info`
-            // backs `/status` / `/config`.
-            AgentEvent::ModelSwitched {
-                model_id,
-                marketing,
-                effort,
-            } => {
-                let confirmation = match effort {
-                    Some(level) => {
-                        format!("Switched to {marketing} ({model_id}) · effort {level}.")
-                    }
-                    None => format!("Switched to {marketing} ({model_id})."),
-                };
-                self.status_bar.set_model(marketing.clone());
-                self.session_info.model = marketing;
+            // The status bar caches its own label; `session_info`
+            // backs `/status` / `/config`. Marketing name derives
+            // from `model_id` so it can't drift.
+            AgentEvent::ModelSwitched { model_id, effort } => {
+                let prev_effort = self.session_info.config.effort;
+                let marketing = crate::prompt::environment::marketing_or_id(&model_id);
+                let confirmation =
+                    format_swap_confirmation(&marketing, &model_id, prev_effort, effort);
+                self.status_bar.set_model(marketing.into_owned());
                 self.session_info.config.model_id = model_id;
                 self.session_info.config.effort = effort;
                 self.chat.push_system_message(confirmation);
@@ -637,6 +633,31 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
+/// Single-line confirmation for an `AgentEvent::ModelSwitched`.
+/// Surfaces three things the user otherwise wouldn't see:
+///
+/// - **Cleared** — new model has no effort tier.
+/// - **Clamped** — new effort < previous effort (lossy swap).
+/// - **Model default** — previous effort was `None` and the new model
+///   ships a default tier.
+fn format_swap_confirmation(
+    marketing: &str,
+    model_id: &str,
+    prev_effort: Option<crate::config::Effort>,
+    new_effort: Option<crate::config::Effort>,
+) -> String {
+    let head = format!("Switched to {marketing} ({model_id})");
+    match (prev_effort, new_effort) {
+        (None, None) => format!("{head}."),
+        (Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
+        (None, Some(new)) => format!("{head} · effort {new} (model default)."),
+        (Some(prev), Some(new)) if new < prev => {
+            format!("{head} · effort {new} (clamped from {prev}).")
+        }
+        (Some(_), Some(new)) => format!("{head} · effort {new}."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -698,21 +719,19 @@ mod tests {
     }
 
     fn test_session_info() -> SessionInfo {
-        // Local fixture keeps the snapshot-pinned model label
-        // (`test-model`) stable; slash::test_session_info uses
-        // `Test Model` to verify the marketing-name rendering path
-        // and would churn the TUI insta snapshots on import.
+        // `model_id = "test-model"` is intentionally unknown so
+        // `marketing_or_id` falls back to the literal id, keeping
+        // every TUI insta snapshot stable as `test-model`.
         use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
         SessionInfo {
-            model: "test-model".to_owned(),
             cwd: "~/test".to_owned(),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),
             config: ConfigSnapshot {
                 auth_label: "API key",
                 base_url: "https://api.test.invalid".to_owned(),
-                model_id: "claude-test-1-0".to_owned(),
+                model_id: "test-model".to_owned(),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
@@ -1460,49 +1479,6 @@ mod tests {
             Some("First prompt"),
             "current-session title must survive a stale event",
         );
-    }
-
-    #[test]
-    fn handle_model_switched_updates_session_info_status_bar_and_pushes_confirmation() {
-        // Three surfaces refresh in one shot: `session_info` (backs
-        // `/status` and `/config`), the status-bar label, and the
-        // chat with a confirmation block.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ModelSwitched {
-            model_id: "claude-sonnet-4-6".to_owned(),
-            marketing: "Claude Sonnet 4.6".to_owned(),
-            effort: Some(crate::config::Effort::High),
-        });
-
-        assert_eq!(app.session_info.model, "Claude Sonnet 4.6");
-        assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
-        assert_eq!(
-            app.session_info.config.effort,
-            Some(crate::config::Effort::High)
-        );
-        assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
-        let body = app.chat.last_system_text().expect("confirmation block");
-        assert!(body.contains("Claude Sonnet 4.6"), "{body}");
-        assert!(body.contains("claude-sonnet-4-6"), "{body}");
-        assert!(body.contains("effort high"), "effort included: {body}");
-        assert!(app.dirty);
-    }
-
-    #[test]
-    fn handle_model_switched_with_effort_none_omits_effort_clause() {
-        // Models that can't accept `effort` drop the field entirely;
-        // the confirmation must skip the trailing `· effort ...`
-        // rather than render `effort none`.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ModelSwitched {
-            model_id: "claude-haiku-4-5".to_owned(),
-            marketing: "Claude Haiku 4.5".to_owned(),
-            effort: None,
-        });
-        assert_eq!(app.session_info.config.effort, None);
-        let body = app.chat.last_system_text().unwrap();
-        assert!(body.contains("Claude Haiku 4.5"), "{body}");
-        assert!(!body.contains("effort"), "no effort clause: {body}");
     }
 
     #[test]

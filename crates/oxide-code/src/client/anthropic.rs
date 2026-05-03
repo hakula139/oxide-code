@@ -33,7 +33,6 @@ use uuid::Uuid;
 use crate::config::{Auth, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
-use crate::prompt::environment::marketing_name;
 use crate::tool::ToolDefinition;
 
 use betas::{compute_betas, static_prefix_cache_control};
@@ -59,16 +58,6 @@ const STAINLESS_TIMEOUT_SECS: &str = "600";
 /// models with OAuth tokens unless the system prompt starts with this exact
 /// string in its own text block.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-
-/// Resolved values produced by [`Client::set_model`] — feeds
-/// [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched)
-/// without a second [`crate::model`] lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModelSwap {
-    pub(crate) model_id: String,
-    pub(crate) marketing: String,
-    pub(crate) effort: Option<Effort>,
-}
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -192,30 +181,19 @@ impl Client {
     }
 
     /// Swaps the active model and re-clamps `config.effort` against
-    /// the new caps. Returns the resolved [`ModelSwap`] so the agent
-    /// loop's `/model` arm builds
-    /// [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched)
-    /// without re-deriving. Per-request paths re-read `&self.config.model`
-    /// every call, so betas / `output_config` / `context_management`
-    /// pick up the swap on the next stream.
+    /// the new caps. Returns the resolved effort so the agent loop's
+    /// `/model` arm can ship it without a second `model::lookup`.
     ///
     /// Effort is lossy across swaps: an `xhigh`-clamped-to-`high`
-    /// model doesn't restore `xhigh` on swap-back. Tracking the raw
-    /// pick separately is deferred (see `model.md`).
-    pub(crate) fn set_model(&mut self, model: String) -> ModelSwap {
+    /// model doesn't restore `xhigh` on swap-back. (Per-request paths
+    /// re-read `&self.config.model` so betas / `output_config` /
+    /// `context_management` pick up the swap on the next stream.)
+    pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
-        let effort = match self.config.effort {
-            Some(pick) => caps.clamp_effort(pick),
-            None => caps.default_effort(),
-        };
+        let effort = caps.resolve_effort(self.config.effort);
         self.config.effort = effort;
-        let marketing = marketing_name(&model).map_or_else(|| model.clone(), ToOwned::to_owned);
-        self.config.model.clone_from(&model);
-        ModelSwap {
-            model_id: model,
-            marketing,
-            effort,
-        }
+        self.config.model = model;
+        effort
     }
 
     /// Stream a message response from the Anthropic API.
@@ -637,59 +615,79 @@ mod tests {
     }
 
     #[test]
-    fn set_model_swaps_model_and_returns_marketing_and_effort() {
-        // Pin the round-trip: ModelSwap mirrors the resolved values
-        // and `config` reflects the swap for the next request.
+    fn set_model_clamps_effort_down_when_new_model_caps_below_user_pick() {
+        // Opus 4.7 (xhigh) → Sonnet 4.6 (caps at high). Pin both the
+        // returned effort and the post-swap `client` state so a no-op
+        // mutation (returning the new effort but not storing it)
+        // surfaces here.
         let mut client = client_with("claude-opus-4-7", Some(Effort::Xhigh));
-        let swap = client.set_model("claude-sonnet-4-6".to_owned());
-
-        assert_eq!(swap.model_id, "claude-sonnet-4-6");
-        assert_eq!(swap.marketing, "Claude Sonnet 4.6");
-        // Sonnet 4.6 caps at high; xhigh clamps down silently.
-        assert_eq!(swap.effort, Some(Effort::High));
+        let new_effort = client.set_model("claude-sonnet-4-6".to_owned());
+        assert_eq!(new_effort, Some(Effort::High));
         assert_eq!(client.model(), "claude-sonnet-4-6");
         assert_eq!(client.config.effort, Some(Effort::High));
-    }
 
-    #[test]
-    fn set_model_re_clamps_effort_when_new_model_does_not_accept_current_level() {
-        // Sonnet 4.6 caps below `max`; clamp down rather than letting
-        // the next request 400.
+        // `Max → High` exercises the same arm via a different
+        // starting tier; folded in to keep one canonical clamp test.
         let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
-        let swap = client.set_model("claude-sonnet-4-6".to_owned());
-        assert_eq!(swap.effort, Some(Effort::High));
-        assert_eq!(client.config.effort, Some(Effort::High));
+        assert_eq!(
+            client.set_model("claude-sonnet-4-6".to_owned()),
+            Some(Effort::High),
+        );
     }
 
     #[test]
-    fn set_model_drops_effort_when_new_model_does_not_accept_it() {
-        // Haiku 4.5 doesn't accept `output_config.effort` — clamp to
-        // None so the body omits the field entirely.
+    fn set_model_passes_effort_through_when_new_model_already_accepts_it() {
+        // `Low → Low` between two effort-capable models — guards
+        // against a regression that always re-derives the model
+        // default instead of preserving an in-bounds pick.
+        let mut client = client_with("claude-sonnet-4-6", Some(Effort::Low));
+        assert_eq!(
+            client.set_model("claude-opus-4-7".to_owned()),
+            Some(Effort::Low),
+        );
+        assert_eq!(client.config.effort, Some(Effort::Low));
+    }
+
+    #[test]
+    fn set_model_clears_effort_when_new_model_has_no_effort_tier() {
+        // Haiku 4.5 doesn't accept `output_config.effort` — must
+        // clamp to None so the request body omits the field.
         let mut client = client_with("claude-opus-4-7", Some(Effort::Xhigh));
-        let swap = client.set_model("claude-haiku-4-5".to_owned());
-        assert_eq!(swap.effort, None);
+        assert_eq!(client.set_model("claude-haiku-4-5".to_owned()), None);
         assert_eq!(client.config.effort, None);
     }
 
     #[test]
-    fn set_model_picks_default_effort_when_previous_model_did_not_accept_effort() {
-        // Haiku → Opus 4.7 must pick the new model's default rather
-        // than leave effort=None and ship without the body field.
+    fn set_model_picks_model_default_effort_when_previous_was_none() {
+        // Haiku (None) → Opus 4.7 must take the new model's default
+        // (Xhigh), not leave effort=None and ship a request without
+        // the field.
         let mut client = client_with("claude-haiku-4-5", None);
-        let swap = client.set_model("claude-opus-4-7".to_owned());
-        assert_eq!(swap.effort, Some(Effort::Xhigh));
+        assert_eq!(
+            client.set_model("claude-opus-4-7".to_owned()),
+            Some(Effort::Xhigh),
+        );
         assert_eq!(client.config.effort, Some(Effort::Xhigh));
     }
 
     #[test]
-    fn set_model_unknown_id_falls_back_to_raw_id_for_marketing() {
-        // Unknown model → marketing mirrors the raw id; caps default
-        // to all-false so effort drops to None.
+    fn set_model_unknown_id_stores_raw_id_with_no_effort() {
+        // Unknown id → conservative all-false caps → effort drops to
+        // None. The raw id round-trips into `config.model` so the
+        // next request sends what the user asked for.
         let mut client = client_with("claude-opus-4-7", Some(Effort::High));
-        let swap = client.set_model("claude-opus-5-0".to_owned());
-        assert_eq!(swap.model_id, "claude-opus-5-0");
-        assert_eq!(swap.marketing, "claude-opus-5-0");
-        assert_eq!(swap.effort, None);
+        assert_eq!(client.set_model("claude-opus-5-0".to_owned()), None);
+        assert_eq!(client.model(), "claude-opus-5-0");
+    }
+
+    #[test]
+    fn set_model_preserves_1m_tag_round_trip() {
+        // `[1m]` is a client-side opt-in; the swap must store it
+        // verbatim so per-request `compute_betas` keeps sending the
+        // 1M context beta. Regressing this drops 1M context silently.
+        let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
+        client.set_model("claude-opus-4-7[1m]".to_owned());
+        assert_eq!(client.model(), "claude-opus-4-7[1m]");
     }
 
     // ── Client::stream_message ──

@@ -75,14 +75,12 @@ pub(crate) enum AgentEvent {
     /// updates `session_info.session_id` and clears the (now-stale) AI
     /// title; other sinks ignore it.
     SessionRolled { id: String },
-    /// `/model` swapped the active model. The agent loop carries the
-    /// already-resolved values back so the TUI updates
-    /// `session_info.model` / `session_info.config.model_id` /
-    /// `session_info.config.effort` and the status bar without
-    /// re-deriving caps.
+    /// `/model` swapped the active model. The TUI handler refreshes
+    /// `session_info.config` and the status bar; marketing name is
+    /// derived locally via
+    /// [`marketing_or_id`](crate::prompt::environment::marketing_or_id).
     ModelSwitched {
         model_id: String,
-        marketing: String,
         effort: Option<Effort>,
     },
     /// A fatal error from the API or agent loop.
