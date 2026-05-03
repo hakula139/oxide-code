@@ -73,6 +73,16 @@ The direction is simple:
 
 ## Current Focus
 
+### Permission & Approval
+
+- Per-tool approval prompts before destructive actions (bash, write, edit).
+- Project-level allowlists to auto-approve trusted commands.
+- Plan mode: read-only review of the agent's proposed changes before any tool runs.
+
+### Context Compression
+
+- Summarize older messages when approaching the context limit so long sessions keep responding.
+
 ### Slash Commands (continuation)
 
 Remaining surface beyond Working Today:
@@ -84,16 +94,6 @@ Remaining surface beyond Working Today:
 - Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow, argument-aware popup completion.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
-
-### Permission & Approval
-
-- Per-tool approval prompts before destructive actions (bash, write, edit).
-- Project-level allowlists to auto-approve trusted commands.
-- Plan mode: read-only review of the agent's proposed changes before any tool runs.
-
-### Context Compression
-
-- Summarize older messages when approaching the context limit so long sessions keep responding.
 
 ### Viewport Virtualization
 
