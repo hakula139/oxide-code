@@ -154,8 +154,8 @@ ox                                          # Start an interactive session
 ### Error Handling
 
 - Application code: `anyhow::Result` with `.context()` for actionable messages.
-- Reach for `thiserror::Error` only when callers need to match on error variants (no current uses; add the dep when the first one lands).
-- Avoid `unwrap()` / `expect()` in production code. Reserve them for cases with a clear invariant comment.
+- `thiserror::Error` only when callers need to match on error variants.
+- Avoid `unwrap()` / `expect()` in production code. Reserve for cases with a clear invariant comment.
 
 ### Discarding Results
 
@@ -165,7 +165,7 @@ ox                                          # Start an interactive session
 
 - Use `#[expect(lint)]` instead of `#[allow(lint)]`. `#[expect]` warns when the suppressed lint is no longer triggered, preventing stale suppressions from accumulating.
 - `#[expect]` reason strings must describe the current state, not future plans.
-- For complexity / size lints (`clippy::too_many_lines`, `clippy::too_many_arguments`, `clippy::cognitive_complexity`, etc.), the default response is to **extract a helper**, not to silence the warning. The lint is a signal that a natural seam exists. Reach for `#[expect]` only when the function is irreducibly cohesive and any extraction would be an artificial split that hurts readability — and say so in the reason string. Trimming a docstring or inlining a small helper to dodge a one-line overage is not a fix; it's noise.
+- For complexity / size lints (`clippy::too_many_lines`, `clippy::cognitive_complexity`, etc.), the default response is to **extract a helper**. Reach for `#[expect]` only when the function is irreducibly cohesive — and say so in the reason string.
 
 ### Section Dividers
 
@@ -174,11 +174,11 @@ ox                                          # Start an interactive session
 
 ### Comments
 
-- Comment the **why**, not the **what**. Clear naming, types, and structure already say what the code does; comments earn their place by explaining intent, trade-offs, invariants, magic numbers, or constraints the code can't convey on its own. Skip comments that restate the code, narrate the change ("now uses X" — belongs in the commit message), or carry commented-out code (version control exists).
-- Keep `//` comments tight — one line per thought, several lines only when the rationale genuinely needs them. Long structured prose belongs in `///` doc-comments, where rustdoc renders it; in-function `//` blocks should not grow into mini-essays.
-- Doc comments (`///`) should state the **contract** (what the caller needs to know), not explain **mechanics** (how it works internally). Implementation details belong in inline `//` comments near the relevant code, if anywhere. A one-line doc is the default; multi-line only when the contract genuinely warrants it.
-- Wrap comments at **100 columns** (matching `rustfmt` max_width). This applies to both `//` and `///` lines.
-- Write `//` comments as prose, not structured markdown. If list structure is genuinely useful, promote the comment to `///` so rustdoc renders it. Either way, follow our `**/*.md` markdownlint conventions: blank line before the list, single space after the marker, incremental numbering for ordered lists, no leading-space indent.
+- Comment the **why**, not the **what**. Comments earn their place by explaining intent, trade-offs, invariants, or constraints the code can't convey on its own. Skip comments that restate the code or narrate the change.
+- Keep `//` comments to one line per thought. Multi-line only when the rationale genuinely needs it.
+- Doc comments (`///`) state the **contract**, not **mechanics**. One-line doc is the default; multi-line only when the contract genuinely warrants it.
+- Wrap comments at **100 columns** (matching `rustfmt` max_width).
+- Write `//` comments as prose. Promote to `///` if list structure is genuinely useful.
 
 ### Blank Lines
 
@@ -190,12 +190,11 @@ ox                                          # Start an interactive session
 ### Module Organization
 
 - New-style module paths: `foo.rs` alongside `foo/` directory, not `foo/mod.rs`.
-- Keep files focused: one primary type or concern per file. When a file or function grows large, split it into smaller units proactively rather than letting it accumulate.
-- Place functions and types in the module that reflects their conceptual domain — import paths should not mislead about what the item does. Create new modules when needed for clean organization.
-- Avoid `pub use` re-exports that obscure where items are defined. Prefer consistent import paths — if some items are re-exported, re-export all related items so callers never mix paths.
-- Order helper functions after their caller (top-down reading order) _within each section_. Whole trait impls or unrelated feature sections don't need to be reshuffled to satisfy this — the rule is about local readability, not cross-section call graphs.
-- When adding new fields to structs or variants to enums, place them at the most semantically appropriate position among existing members, not simply appended at the bottom.
-- A type used by N callers across M modules belongs in the module that names the **contract**, not the module of the first **implementation**. If `tui::event::AgentSink` is implemented by both a TUI channel and a stdio writer, the trait belongs in `agent::` (the contract), not `tui::` (one implementation).
+- Keep files focused: one primary type or concern per file. Split proactively when files grow large.
+- Place types in the module that reflects their conceptual domain. A cross-module trait belongs where the **contract** lives, not the first implementation.
+- Avoid `pub use` re-exports that obscure where items are defined.
+- Order helper functions after their caller (top-down reading) _within each section_.
+- New struct fields / enum variants go at the most semantically appropriate position, not just appended at the bottom.
 
 ### Visibility
 
@@ -222,38 +221,21 @@ ox                                          # Start an interactive session
 
 ### Git Conventions
 
-#### Commits
+Follows global CLAUDE.md commit / branch / PR conventions, plus:
 
-- Messages: `type(scope): description`
-  - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`, `style`, `perf`
-  - Scope: the most specific area changed — module (e.g., `client`, `config`, `oauth`), doc target (e.g., `CLAUDE`, `research`), or crate name only for cross-module changes.
-- Keep commits atomic — one logical change per commit.
-
-#### Branches
-
-- Format: `<type>/<short-name>`, using the same type set as commits (`feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`, `perf`, `ci`). Pick the type that matches the dominant change on the branch; if commits span multiple types, use the one that matches the PR's `type(scope):` title.
-
-#### Pull Requests
-
-- Assign to `hakula139`. Label `enhancement` for `feat`, `bug` for `fix`.
-- Do not request review from the PR author (GitHub rejects it).
-- Descriptions follow `.github/pull_request_template.md`:
-  - Prose intro summarizing what and why.
-  - Optional Design decisions section for non-trivial PRs — bullet list of tradeoffs (alternatives rejected, invariants preserved, intentional omissions). Skip for mechanical changes.
-  - Per-file Changes table (for non-trivial PRs). Drop the `crates/<crate>/src/` prefix on crate sources (e.g. `tool/glob.rs`, not `crates/oxide-code/src/tool/glob.rs`); keep the full path for repo-root files (`CLAUDE.md`, `Cargo.toml`, `docs/...`, `.cspell/...`).
-  - Test plan checklist.
-- PR descriptions are review-facing and must not reference gitignored working docs (e.g., `.claude/plans/*`, `.claude/agent-memory-local/*`). Those are internal collaboration notes, not reader context. When deferring follow-ups, describe them inline in the PR body — a reader should not need a file they can't see to understand the PR.
+- **Scope**: the most specific area changed — module (e.g., `client`, `config`, `oauth`), doc target (e.g., `CLAUDE`, `research`), or crate name only for cross-module changes.
+- **PRs**: assign to `hakula139`. Label `enhancement` for `feat`, `bug` for `fix`. Descriptions follow `.github/pull_request_template.md`. Drop `crates/<crate>/src/` prefix on crate sources in the Changes table. Must not reference gitignored working docs.
 
 ### Testing
 
 - Unit tests in the same file as the code they test (`#[cfg(test)]` module).
 - Integration tests in `tests/` directory for cross-module behavior.
 - Group tests by function under `// ── function_name ──` section headers. Section order must mirror the production function order in the same file. Within each section, order: happy path → variants → edge / error cases.
-- Name tests after the scenario they cover, not the return type. Prefix with the function name being tested (e.g., `parse_sse_frame_missing_data`, `load_oauth_expired_token`). When the scenario and the return value are synonyms (unset env var → `None`), phrase the scenario side (`string_unset_is_absent`), not the mechanism (`string_unset_returns_none`). For parameterless single-behavior functions where the value IS the test, use property form (`icon_is_dollar_sign`), not mechanism form (`icon_returns_dollar_sign`).
+- Name tests after the scenario they cover, prefixed by the function name (e.g., `parse_sse_frame_missing_data`). Phrase the scenario side (`string_unset_is_absent`), not the mechanism (`string_unset_returns_none`).
 - Use `indoc!` for multi-line string literals in tests.
-- Reach for the established test infrastructure before hand-rolling: `wiremock` for HTTP round-trips, `temp-env` for environment-variable isolation, `ratatui::backend::TestBackend` + `insta` for TUI render snapshots (review with `cargo insta review`), and an extracted trait with an in-process fake (see `agent::AgentClient`) when a dependency is hard to mock at the network boundary.
-- Write assertions that verify actual behavior, not just surface properties. Avoid uniform test data that makes `starts_with` / `ends_with` unfalsifiable, wildcard struct matches (`..`) that discard field values, and loose bounds that accept nearly any output. Each assertion should fail if the code under test has a plausible bug.
-- Prefer a concise test suite with full coverage over many minimal tests. Drop tests that are subsumed by more thorough ones. Merge tests that cover the same code path when the combined test remains readable.
+- Use established test infra: `wiremock` for HTTP, `temp-env` for env isolation, `TestBackend` + `insta` for TUI snapshots, extracted trait fakes for hard-to-mock dependencies.
+- Assertions must verify actual behavior. Each should fail if the code under test has a plausible bug.
+- Prefer a concise suite with full coverage over many minimal tests. Merge tests that cover the same path.
 
 ### Documentation Maintenance
 
@@ -304,7 +286,9 @@ After verification passes, review for:
 - Adherence to project conventions (this file)
 - Conciseness — prefer the simplest idiomatic solution
 - DRY — flag duplicate logic across modules; look for extraction opportunities
-- Cross-file consistency — parallel types and similar patterns should use the same structure, naming, ordering, and derive traits
-- Idiomatic Rust — proper use of iterators, pattern matching, type system, ownership, and standard library
+- Cross-file consistency — parallel types should use the same structure, naming, ordering, and derive traits
+- Comment hygiene — verbose multi-line docs that should be one-liners, missing WHY comments where non-obvious
+- Visibility — `pub(crate)` where `pub(super)` or private suffices
+- Idiomatic Rust — iterators, pattern matching, type system, ownership, standard library
 - Existing crates — flag hand-written logic that an established crate already handles
 - Test coverage gaps
