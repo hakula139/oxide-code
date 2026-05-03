@@ -196,6 +196,16 @@ impl Client {
         effort
     }
 
+    /// Swaps the active effort, clamped against the current model's
+    /// caps. `pick = None` means `auto` — fall back to the model
+    /// default. Returns the resolved effort.
+    pub(crate) fn set_effort(&mut self, pick: Option<Effort>) -> Option<Effort> {
+        let caps = crate::model::capabilities_for(&self.config.model);
+        let effort = caps.resolve_effort(pick);
+        self.config.effort = effort;
+        effort
+    }
+
     /// Stream a message response from the Anthropic API.
     ///
     /// `system_sections` ship as individual `system` text blocks so

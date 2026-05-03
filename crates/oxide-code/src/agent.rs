@@ -357,10 +357,15 @@ where
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
                 // None reach mid-turn: `ConfirmExit` is short-circuited
-                // by `apply_action_locally`; `Clear` / `SwitchModel`
-                // are mutating commands the dispatcher refuses while
-                // a turn is live.
-                Some(UserAction::ConfirmExit | UserAction::Clear | UserAction::SwitchModel(_)) => {}
+                // by `apply_action_locally`; mutating slash commands
+                // (`Clear` / `SwitchModel` / `SwitchEffort`) are refused
+                // by the dispatcher while a turn is live.
+                Some(
+                    UserAction::ConfirmExit
+                    | UserAction::Clear
+                    | UserAction::SwitchModel(_)
+                    | UserAction::SwitchEffort(_),
+                ) => {}
             },
             output = &mut fut => return Ok(output),
         }

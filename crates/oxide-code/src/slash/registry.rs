@@ -9,6 +9,7 @@ use super::clear::ClearCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
 use super::diff::DiffCmd;
+use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::model::ModelCmd;
@@ -74,7 +75,7 @@ pub(crate) trait SlashCommand: Sync {
 /// alphabetically within each tier when filtering, so this keeps
 /// every popup state consistent.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &ClearCmd, &ConfigCmd, &DiffCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
+    &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
 ];
 
 /// Resolves `name` by canonical name first, then aliases. Generic

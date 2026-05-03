@@ -18,6 +18,7 @@ mod clear;
 mod config;
 mod context;
 mod diff;
+mod effort;
 mod format;
 mod help;
 mod init;

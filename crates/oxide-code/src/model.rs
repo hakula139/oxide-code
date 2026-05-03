@@ -272,7 +272,7 @@ impl Capabilities {
     /// Centralises the `low`/`medium`/`high` → [`Self::effort`],
     /// `xhigh` → [`Self::effort_xhigh`], `max` → [`Self::effort_max`]
     /// mapping so callers don't re-derive it.
-    fn accepts_effort(self, level: Effort) -> bool {
+    pub(crate) fn accepts_effort(self, level: Effort) -> bool {
         match level {
             Effort::Low | Effort::Medium | Effort::High => self.effort,
             Effort::Xhigh => self.effort_xhigh,

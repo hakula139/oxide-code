@@ -468,6 +468,12 @@ async fn agent_loop_task(
                     warn!("model-switched event dropped: {e}");
                 }
             }
+            UserAction::SwitchEffort(pick) => {
+                let effort = client.set_effort(pick);
+                if let Err(e) = sink.send(AgentEvent::EffortSwitched { pick, effort }) {
+                    warn!("effort-switched event dropped: {e}");
+                }
+            }
             UserAction::Quit => break,
         }
     }

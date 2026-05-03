@@ -356,7 +356,7 @@ impl App {
             // forwards `Action(_)` straight via `forward_to_agent`.
             // `false` is defensive in case a future caller routes
             // `Clear` / `SwitchModel` through here.
-            UserAction::Clear | UserAction::SwitchModel(_) => false,
+            UserAction::Clear | UserAction::SwitchModel(_) | UserAction::SwitchEffort(_) => false,
         }
     }
 
@@ -450,6 +450,11 @@ impl App {
                 self.session_info.config.model_id = model_id;
                 self.session_info.config.effort = effort;
                 self.chat.push_system_message(confirmation);
+            }
+            AgentEvent::EffortSwitched { pick, effort } => {
+                self.session_info.config.effort = effort;
+                self.chat
+                    .push_system_message(format_effort_confirmation(pick, effort));
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -655,6 +660,26 @@ fn format_swap_confirmation(
             format!("{head} · effort {new} (clamped from {prev}).")
         }
         (Some(_), Some(new)) => format!("{head} · effort {new}."),
+    }
+}
+
+/// Single-line confirmation for an `AgentEvent::EffortSwitched`.
+/// `pick` is what the user typed (`None` = `auto`); `effort` is what
+/// the model's caps resolved it to. The two diverge on clamp / no-tier
+/// cases, both surfaced explicitly so the user never gets a silent
+/// no-op.
+fn format_effort_confirmation(
+    pick: Option<crate::config::Effort>,
+    effort: Option<crate::config::Effort>,
+) -> String {
+    match (pick, effort) {
+        (None, None) => "Effort: (none) — model has no effort tier.".to_owned(),
+        (None, Some(level)) => format!("Effort set to {level} (model default)."),
+        (Some(p), Some(level)) if p == level => format!("Effort set to {level}."),
+        (Some(p), Some(level)) => format!("Effort set to {level} (clamped from {p})."),
+        (Some(p), None) => {
+            format!("Effort cleared — model has no effort tier (asked for {p}).")
+        }
     }
 }
 

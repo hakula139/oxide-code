@@ -83,6 +83,13 @@ pub(crate) enum AgentEvent {
         model_id: String,
         effort: Option<Effort>,
     },
+    /// `/effort` swapped the active effort. `pick` is what the user
+    /// asked for (`None` = `auto`/clear), `effort` is what the model's
+    /// caps resolved it to — the two diverge on clamp / clear cases.
+    EffortSwitched {
+        pick: Option<Effort>,
+        effort: Option<Effort>,
+    },
     /// A fatal error from the API or agent loop.
     Error(String),
 }
@@ -102,6 +109,11 @@ pub(crate) enum UserAction {
     /// and emits [`AgentEvent::ModelSwitched`]. `id` is a canonical
     /// `SELECTABLE` entry resolved by the slash command.
     SwitchModel(String),
+    /// `/effort <level>` — agent loop calls
+    /// [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
+    /// and emits [`AgentEvent::EffortSwitched`]. `None` = `auto` (clear
+    /// the user pick so the model default kicks in).
+    SwitchEffort(Option<Effort>),
     /// Cancel the in-flight turn. No-op when the agent is idle.
     Cancel,
     /// Idle Ctrl+C — arm a 1-second exit confirmation in the TUI; a
@@ -212,7 +224,8 @@ impl StdioSink {
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
-            | AgentEvent::ModelSwitched { .. } => {}
+            | AgentEvent::ModelSwitched { .. }
+            | AgentEvent::EffortSwitched { .. } => {}
             AgentEvent::TurnComplete => {
                 // Newline after streamed text.
                 writeln!(stdout)?;
