@@ -700,6 +700,40 @@ mod tests {
         assert_eq!(client.model(), "claude-opus-4-7[1m]");
     }
 
+    // ── Client::set_effort ──
+
+    #[test]
+    fn set_effort_passes_through_when_active_model_accepts_pick() {
+        let mut client = client_with("claude-opus-4-7", Some(Effort::High));
+        assert_eq!(client.set_effort(Some(Effort::Xhigh)), Some(Effort::Xhigh));
+    }
+
+    #[test]
+    fn set_effort_clamps_down_to_active_model_ceiling() {
+        // Sonnet 4.6 caps at `high`; `xhigh` clamps down rather than
+        // 400ing the gateway.
+        let mut client = client_with("claude-sonnet-4-6", Some(Effort::High));
+        assert_eq!(client.set_effort(Some(Effort::Xhigh)), Some(Effort::High));
+    }
+
+    #[test]
+    fn set_effort_none_falls_back_to_model_default() {
+        // `pick = None` (= `/effort auto`) defers to `default_effort` —
+        // Opus 4.7 defaults to `xhigh`.
+        let mut client = client_with("claude-opus-4-7", Some(Effort::Low));
+        assert_eq!(client.set_effort(None), Some(Effort::Xhigh));
+    }
+
+    #[test]
+    fn set_effort_clears_to_none_on_no_tier_model() {
+        // Haiku 4.5 has no effort tier — even an explicit pick resolves
+        // to None. The slash command preflight catches this so the
+        // client only sees this path via `/effort auto`.
+        let mut client = client_with("claude-haiku-4-5", None);
+        assert_eq!(client.set_effort(Some(Effort::High)), None);
+        assert_eq!(client.set_effort(None), None);
+    }
+
     // ── Client::stream_message ──
 
     #[tokio::test]

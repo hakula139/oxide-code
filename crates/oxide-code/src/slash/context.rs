@@ -12,9 +12,11 @@ use crate::tui::components::chat::ChatView;
 /// Session-level descriptors surfaced by read-only slash commands.
 /// Built at TUI startup, then rebound mid-session by
 /// [`AgentEvent::SessionRolled`](crate::agent::event::AgentEvent::SessionRolled)
-/// (`/clear`) and
+/// (`/clear`),
 /// [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched)
-/// (`/model`). Embeds [`ConfigSnapshot`] so `/config` reads from a
+/// (`/model`), and
+/// [`AgentEvent::EffortSwitched`](crate::agent::event::AgentEvent::EffortSwitched)
+/// (`/effort`). Embeds [`ConfigSnapshot`] so `/config` reads from a
 /// single source.
 pub(crate) struct SessionInfo {
     /// Tildified working directory (`$HOME` rewritten as `~`).

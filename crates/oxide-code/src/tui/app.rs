@@ -1643,6 +1643,66 @@ mod tests {
     }
 
     #[test]
+    fn handle_effort_switched_refreshes_session_info_and_pushes_confirmation() {
+        // /effort updates the snapshot effort and pushes a confirmation
+        // block. Status bar caches model, not effort, so it doesn't
+        // change here.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::EffortSwitched {
+            pick: Some(crate::config::Effort::Xhigh),
+            effort: Some(crate::config::Effort::Xhigh),
+        });
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::Xhigh),
+        );
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert_eq!(body, "Effort set to xhigh.");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn format_effort_confirmation_explicit_pick_matches_resolution() {
+        let s = format_effort_confirmation(
+            Some(crate::config::Effort::Xhigh),
+            Some(crate::config::Effort::Xhigh),
+        );
+        assert_eq!(s, "Effort set to xhigh.");
+    }
+
+    #[test]
+    fn format_effort_confirmation_clamp_surfaces_what_user_asked_for() {
+        let s = format_effort_confirmation(
+            Some(crate::config::Effort::Xhigh),
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(s, "Effort set to high (clamped from xhigh).");
+    }
+
+    #[test]
+    fn format_effort_confirmation_auto_marks_model_default() {
+        let s = format_effort_confirmation(None, Some(crate::config::Effort::Xhigh));
+        assert_eq!(s, "Effort set to xhigh (model default).");
+    }
+
+    #[test]
+    fn format_effort_confirmation_pick_on_no_tier_model_surfaces_loss() {
+        // The slash command preflight stops this from happening through
+        // /effort, but client-driven flows could still emit it.
+        let s = format_effort_confirmation(Some(crate::config::Effort::High), None);
+        assert_eq!(
+            s,
+            "Effort cleared — model has no effort tier (asked for high)."
+        );
+    }
+
+    #[test]
+    fn format_effort_confirmation_auto_on_no_tier_model_acknowledges_no_op() {
+        let s = format_effort_confirmation(None, None);
+        assert_eq!(s, "Effort: (none) — model has no effort tier.");
+    }
+
+    #[test]
     fn handle_session_rolled_rebinds_session_id_and_drops_stale_title() {
         // `/clear` swaps the session UUID; the App must rebind the
         // `/status`-visible id so it reflects the live session, and
