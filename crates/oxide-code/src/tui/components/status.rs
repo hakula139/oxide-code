@@ -13,26 +13,13 @@ use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
-/// Number of 16 ms ticks between spinner frame advances (~80 ms).
 const TICKS_PER_FRAME: usize = 5;
-
-/// Upper bound on the session-title width before ellipsis-truncation. Chosen
-/// so the title cannot crowd out the status slot on typical 80-column
-/// terminals: core left (`  ox │ model │ streaming...`) is ~30 columns, 40
-/// leaves breathing room for cwd on the right.
 const MAX_TITLE_WIDTH: usize = 40;
 
 /// Status bar at the top of the TUI.
-///
-/// Displays the product name, model, optional session title, current status
-/// with a braille spinner, and the working directory (right-aligned). The
-/// title and cwd slots drop gracefully when the terminal is too narrow.
 pub(crate) struct StatusBar {
     theme: Theme,
     model: String,
-    /// Session title. `None` until a title is set — either the first-prompt
-    /// title from session resume, or an AI-generated title appended during
-    /// the turn. Truncated to [`MAX_TITLE_WIDTH`] on render.
     title: Option<String>,
     cwd: String,
     status: Status,
@@ -44,22 +31,9 @@ pub(crate) struct StatusBar {
 pub(crate) enum Status {
     Idle,
     Streaming,
-    /// A tool is running. `name` is the tool's display name (`bash`,
-    /// `read`, `edit`, etc.) so the busy hint can read
-    /// `"<name> · Esc to interrupt"` rather than a generic label.
-    ToolRunning {
-        name: String,
-    },
-    /// User-issued `Cancel` is being honored — the partial turn is
-    /// being torn down, but [`crate::agent::event::AgentEvent::Cancelled`]
-    /// hasn't arrived yet.
+    ToolRunning { name: String },
     Cancelling,
-    /// First Ctrl+C from idle armed an exit confirmation. A second
-    /// Ctrl+C before `until` exits; otherwise the timer expires and
-    /// the status returns to [`Self::Idle`] silently.
-    ExitArmed {
-        until: Instant,
-    },
+    ExitArmed { until: Instant },
 }
 
 impl StatusBar {
@@ -75,17 +49,10 @@ impl StatusBar {
         }
     }
 
-    /// Sets or clears the session title displayed between model and status.
-    /// Pass `None` or an empty string to remove the title entirely (the slot
-    /// and its separator disappear from the bar).
     pub(crate) fn set_title(&mut self, title: Option<String>) {
         self.title = title.filter(|t| !t.trim().is_empty());
     }
 
-    /// Replaces the cached model label so render doesn't re-read
-    /// `session_info` per frame. Empty input would render a doubled
-    /// separator with no label between — assert rather than silently
-    /// paint a malformed bar.
     pub(crate) fn set_model(&mut self, model: String) {
         debug_assert!(
             !model.trim().is_empty(),
@@ -102,29 +69,21 @@ impl StatusBar {
         self.status = status;
     }
 
-    /// Current status. Used by [`App`](super::super::app::App) to
-    /// arm-or-exit on Ctrl+C and to clear an expired
-    /// [`Status::ExitArmed`] from the tick arm.
     pub(crate) fn status(&self) -> &Status {
         &self.status
     }
 
-    /// Current title slot, or `None` when no title is set. Same
-    /// rationale as [`status`][Self::status].
     #[cfg(test)]
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
 
-    /// Current model label. Used by `ModelSwitched` tests.
     #[cfg(test)]
     pub(crate) fn model(&self) -> &str {
         &self.model
     }
 
-    /// Advances the spinner animation. Returns `true` if the frame
-    /// changed (caller should mark dirty). The non-spinner states
-    /// ([`Status::Idle`], [`Status::ExitArmed`]) short-circuit.
+    /// Returns `true` if the spinner frame advanced (caller should repaint).
     pub(crate) fn tick(&mut self) -> bool {
         if !is_animated(&self.status) {
             return false;
@@ -148,7 +107,6 @@ impl Component for StatusBar {
         let sep = self.theme.separator_span();
         let area_width = usize::from(area.width);
 
-        // Core: `  ox │ model │ status` — always rendered.
         let core = vec![
             Span::raw("  "),
             Span::styled("ox", self.theme.accent()),
@@ -159,17 +117,12 @@ impl Component for StatusBar {
         ];
         let core_width: usize = core.iter().map(Span::width).sum();
 
-        // Title: `│ title` inserted between model and status when there is
-        // room. Truncated to MAX_TITLE_WIDTH with a trailing ellipsis.
         let title_slot = self
             .title
             .as_deref()
             .map(|t| title_slot_spans(t, &sep, self.theme.muted()));
         let title_slot_width = title_slot.as_deref().map_or(0, slot_width);
 
-        // CWD: `<gap> cwd  ` on the right edge. Dropped when the remaining
-        // budget is too small to fit `gap + cwd + 2-space margin`. The +1
-        // accounts for the minimum gap column between status and cwd.
         let cwd_slot_content_width = self.cwd.width() + 2;
         let cwd_display_width = if self.cwd.is_empty() {
             0
@@ -177,15 +130,10 @@ impl Component for StatusBar {
             cwd_slot_content_width + 1
         };
 
-        // Greedy fit: try [core + title + cwd] → [core + title] →
-        // [core + cwd] → [core]. Title is sacrificed before cwd because cwd
-        // provides location context that's hard to recover elsewhere.
         let mut spans = core;
         let (include_title, include_cwd) =
             fit_layout(area_width, core_width, title_slot_width, cwd_display_width);
         if include_title && let Some(slot) = title_slot {
-            // Insert title spans between model and status. Status is the
-            // last span of `core`, so replace-with-insert-before-status.
             let status = spans.pop().expect("core always has the status span");
             spans.extend(slot);
             spans.push(status);
@@ -229,8 +177,6 @@ impl StatusBar {
     }
 }
 
-/// Whether the status drives the braille spinner. Idle is at rest;
-/// [`Status::ExitArmed`] uses a static hint instead of an animation.
 fn is_animated(status: &Status) -> bool {
     matches!(
         status,
@@ -238,10 +184,6 @@ fn is_animated(status: &Status) -> bool {
     )
 }
 
-/// Builds the `title │` insert. The leading `│` is provided by the separator
-/// core already places after `model`, so the slot itself is
-/// `[title, trailing_sep]` — inserting it before `status` yields the
-/// `model │ title │ status` sequence without a doubled bar.
 fn title_slot_spans<'a>(
     title: &'a str,
     sep: &Span<'a>,
@@ -253,21 +195,12 @@ fn title_slot_spans<'a>(
     ]
 }
 
-/// Total visual width of a slot's spans, fed into [`fit_layout`] so the
-/// greedy fit decides title-vs-cwd inclusion against the same column
-/// count the renderer would later emit.
 fn slot_width(slot: &[Span<'_>]) -> usize {
     slot.iter().map(Span::width).sum()
 }
 
-/// Greedy fit: which optional slots can we afford? Returns
-/// `(include_title, include_cwd)`. Rules:
-///
-/// - `core` is always included.
-/// - cwd is preserved before title when both can't fit — cwd carries
-///   location context (which directory you're in) that the title does not.
-/// - a slot is "affordable" only when one column of breathing room remains
-///   after it (strict `<`, not `≤`, to avoid the bar hitting the right edge).
+/// Returns `(include_title, include_cwd)`. Cwd wins over title when both
+/// can't fit — it carries location context the title does not.
 fn fit_layout(area_width: usize, core: usize, title: usize, cwd: usize) -> (bool, bool) {
     let fits = |extra: usize| core + extra < area_width;
     match (
@@ -325,9 +258,6 @@ mod tests {
 
     #[test]
     fn set_model_replaces_displayed_model_label() {
-        // Assert both field and rendered frame so a render-time
-        // lookup of the session model couldn't sneak past the
-        // field assertion alone.
         let mut bar = test_bar();
         bar.set_model("Claude Opus 4.7".to_owned());
         assert_eq!(bar.model(), "Claude Opus 4.7");
@@ -442,8 +372,6 @@ mod tests {
 
     #[test]
     fn handle_event_is_inert() {
-        // The status bar observes state via setters (`set_status`,
-        // `set_title`, `tick`); crossterm events pass through untouched.
         let mut bar = test_bar();
         let key = Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -464,10 +392,6 @@ mod tests {
         terminal.backend().clone()
     }
 
-    /// Returns row 0 as a plain string for substring assertions about
-    /// relative ordering, presence of ellipsis, or conditional slot
-    /// drops — cases where a full snapshot would be more brittle than
-    /// informative.
     fn render_top_row(bar: &mut StatusBar, width: u16) -> String {
         let backend = render_status(bar, width);
         let buf = backend.buffer();
@@ -482,9 +406,6 @@ mod tests {
     }
 
     fn bar_idle(title: Option<&str>, cwd: &str) -> StatusBar {
-        // Real callers pass the pre-converted marketing name (see
-        // `main::marketing_name`), so the snapshots mirror what users
-        // see on screen rather than the raw API id.
         let mut bar = StatusBar::new(&Theme::default(), "Claude Opus 4.7".into(), cwd.into());
         bar.set_title(title.map(ToOwned::to_owned));
         bar
@@ -536,9 +457,6 @@ mod tests {
 
     #[test]
     fn render_narrow_width_drops_cwd_and_title_slots() {
-        // At 40 cols both slots drop entirely (title first, then cwd);
-        // ellipsis truncation is covered by
-        // `render_truncates_long_title_with_ellipsis` at generous widths.
         let mut bar = bar_idle(Some("A rather long session title"), "~/projects/demo/long");
         insta::assert_snapshot!(render_status(&mut bar, 40));
     }
@@ -577,11 +495,6 @@ mod tests {
 
     #[test]
     fn render_drops_title_first_when_tight() {
-        // Core `  ox │ test-model │ ready` is 25 cols, cwd slot is 9 cols
-        // (6-char "~/test" + 2-char margin + 1-col gap), title slot is 15
-        // cols ("Some long title" + trailing " │ "). Width 40 leaves room
-        // for core + cwd (25 + 9 = 34 < 40) but not core + cwd + title
-        // (25 + 9 + 15 = 49 > 40). Title must drop, cwd survives.
         let mut bar = test_bar();
         bar.set_title(Some("Some long title".to_owned()));
         let output = render_top_row(&mut bar, 40);
@@ -596,7 +509,6 @@ mod tests {
     fn render_no_title_still_shows_cwd_wide() {
         let mut bar = test_bar();
         let output = render_top_row(&mut bar, 120);
-        // Sanity check that the no-title path still renders cwd.
         assert!(output.contains("~/test"));
         assert!(
             !output.contains("..."),
@@ -606,9 +518,6 @@ mod tests {
 
     #[test]
     fn render_empty_cwd_drops_cwd_slot_entirely() {
-        // Empty cwd (current_dir failed) must short-circuit — no trailing
-        // gap, no stray right margin. Generous width exercises the
-        // `cwd.is_empty()` guard without racing the title-dropped path.
         let mut bar = StatusBar::new(&Theme::default(), "test-model".to_owned(), String::new());
         let output = render_top_row(&mut bar, 120);
         assert!(output.contains("ox"));
@@ -624,30 +533,21 @@ mod tests {
 
     #[test]
     fn fit_layout_keeps_both_slots_when_everything_fits() {
-        // Wide bar: core + title + cwd all fit with room to spare.
         assert_eq!(fit_layout(80, 25, 10, 10), (true, true));
     }
 
     #[test]
     fn fit_layout_drops_title_before_cwd_when_combined_too_wide() {
-        // core (25) + title (10) + cwd (10) = 45, too wide for 40. cwd alone
-        // fits (35 < 40). Title is sacrificed — cwd carries location context
-        // that's harder to recover elsewhere.
         assert_eq!(fit_layout(40, 25, 10, 10), (false, true));
     }
 
     #[test]
     fn fit_layout_keeps_title_when_cwd_is_too_wide_to_fit_alone() {
-        // core (25) + cwd (20) = 45, too wide for 40 — cwd drops.
-        // core (25) + title (5) = 30 < 40 — title survives.
-        // Fallback arm: when cwd can't fit anywhere, show the title instead
-        // of an empty right side.
         assert_eq!(fit_layout(40, 25, 5, 20), (true, false));
     }
 
     #[test]
     fn fit_layout_drops_both_when_nothing_extra_fits() {
-        // core already fills the bar; neither optional slot earns its column.
         assert_eq!(fit_layout(26, 25, 5, 5), (false, false));
     }
 }

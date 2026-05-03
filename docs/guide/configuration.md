@@ -65,7 +65,7 @@ When unset, oxide-code derives `max_tokens` from the resolved `effort`: 64 000 f
 
 #### `prompt_cache_ttl` — cache duration
 
-Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/api/anthropic-api.md#agentic-request-body-fields) for the wire shape and cost analysis.
+Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/anthropic-api.md#agentic-request-body-fields) for the wire shape and cost analysis.
 
 #### 1M context window — `[1m]` tag
 

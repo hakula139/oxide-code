@@ -18,7 +18,7 @@ use super::registry::{SlashCommand, SlashOutcome};
 /// comfortably above a typical PR-sized review.
 const MAX_BYTES: usize = 64 * 1024;
 
-pub(crate) struct DiffCmd;
+pub(super) struct DiffCmd;
 
 impl SlashCommand for DiffCmd {
     fn name(&self) -> &'static str {

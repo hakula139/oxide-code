@@ -1,12 +1,4 @@
-//! Claude Code OAuth credentials.
-//!
-//! Loads the OAuth access token from the macOS Keychain (service
-//! `"Claude Code-credentials"`) and `~/.claude/.credentials.json`,
-//! preferring whichever has the later expiry. Refreshes via the
-//! Anthropic token endpoint when the access token is expired or about
-//! to expire, writing the new pair back to both sources. A directory-
-//! based advisory lock keeps two `ox` instances from refreshing
-//! concurrently and clobbering each other's tokens.
+//! Claude Code OAuth credential loading and refresh.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,9 +24,6 @@ const OAUTH_SCOPES: &[&str] = &[
 const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Directory mtime threshold above which an existing lock is treated
-/// as stale and removed before re-attempting acquisition. Guards
-/// against a peer that crashed without cleaning up its lock dir.
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
@@ -65,20 +54,12 @@ impl OAuthCredential {
 
 // ── Token Loading ──
 
-/// Loads an OAuth access token from Claude Code credentials, refreshing
-/// proactively if the token is within 5 minutes of expiry.
 pub(super) async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
     load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL, load_credentials).await
 }
 
-/// Inner implementation; tests override paths, URL, and loader.
-///
-/// `loader` is injected so tests can pass [`read_credentials`] (file
-/// only) and bypass the macOS Keychain — otherwise a leftover entry
-/// for the running `$USER` would shadow the synthetic temp-file
-/// fixture.
 async fn load_token_from(
     file_path: &Path,
     lock_path: &Path,
@@ -88,12 +69,10 @@ async fn load_token_from(
     let oauth = loader(file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
 
-    // Token is valid and not near-expiry.
     if !is_near_expiry(expires_at_ms) {
         return Ok(oauth.access_token);
     }
 
-    // No refresh token — use as-is if not yet expired.
     if oauth.refresh_token.is_none() {
         if is_expired(expires_at_ms) {
             bail!("Claude Code OAuth token has expired — run `claude` to refresh");
@@ -102,7 +81,6 @@ async fn load_token_from(
         return Ok(oauth.access_token);
     }
 
-    // Acquire lock and re-read (another process may have refreshed).
     let _lock = acquire_lock(lock_path).await?;
 
     let oauth = loader(file_path)?.claude_ai_oauth;
@@ -131,12 +109,6 @@ async fn load_token_from(
     }
 }
 
-/// Loads credentials, preferring the macOS Keychain over the file.
-///
-/// File contents are user-writable, so an attacker with write access to
-/// `~/.claude/.credentials.json` could otherwise spoof a far-future expiry
-/// to override a valid Keychain entry. Near-expired Keychain entries still
-/// trigger a refresh that re-syncs both sources.
 #[cfg(target_os = "macos")]
 fn load_credentials(file_path: &Path) -> Result<CredentialsFile> {
     if let Some(kc) = read_keychain() {
@@ -190,16 +162,10 @@ fn keychain_account() -> Option<String> {
 fn read_credentials(path: &Path) -> Result<CredentialsFile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    // Reassert before parsing so a file we later reject still gets tightened.
     enforce_private_mode(path);
     serde_json::from_str(&content).context("failed to parse Claude Code credentials")
 }
 
-/// Reassert owner-only (`0o600`) permissions on the credentials file.
-///
-/// Bounds the exposure window for files left with laxer perms by an older
-/// `claude` or by `cp`. Failures are logged at debug level only — we have
-/// no fallback but shouldn't block authentication.
 #[cfg(unix)]
 fn enforce_private_mode(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -213,9 +179,6 @@ fn enforce_private_mode(path: &Path) {
 fn enforce_private_mode(_path: &Path) {}
 
 fn is_near_expiry(expires_at_ms: u64) -> bool {
-    // A broken host clock can't disprove expiry: if we can't tell, treat as
-    // expiring so the caller refreshes. A stale access token fails server-side;
-    // a needless refresh is cheap.
     now_millis().is_none_or(|now| now.saturating_add(TOKEN_EXPIRY_BUFFER_MS) >= expires_at_ms)
 }
 
@@ -273,12 +236,6 @@ struct RefreshResponse {
     scope: Option<String>,
 }
 
-/// Writes refreshed tokens back to the credentials file (and macOS Keychain),
-/// preserving unknown fields.
-///
-/// Replaces the file atomically (temp + rename) so a crash mid-write cannot
-/// invalidate login for both `ox` and `claude`. Must be called while holding
-/// the [`LockGuard`] from [`acquire_lock`].
 fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
     let mut json: serde_json::Value =
@@ -290,15 +247,11 @@ fn write_refreshed_credentials(path: &Path, response: &RefreshResponse) -> Resul
 
     oauth["accessToken"] = serde_json::Value::String(response.access_token.clone());
     oauth["refreshToken"] = serde_json::Value::String(response.refresh_token.clone());
-    // Computed from local clock — derived from relative `expires_in`, the
-    // refresh endpoint does not return an absolute timestamp.
     let now = now_millis().context("system clock before UNIX epoch; cannot record token expiry")?;
     oauth["expiresAt"] =
         serde_json::json!(now.saturating_add(response.expires_in.saturating_mul(1000)));
 
     if let Some(scope) = &response.scope {
-        // `split_whitespace` tolerates extra or leading/trailing spaces in the
-        // server's `scope` field; `split(' ')` would emit empty strings.
         let scopes: Vec<&str> = scope.split_whitespace().collect();
         oauth["scopes"] = serde_json::json!(scopes);
     }
@@ -323,10 +276,6 @@ fn write_keychain(json: &str) -> Result<()> {
         .context("failed to write to Keychain")
 }
 
-/// Current wall clock in milliseconds since UNIX epoch. Returns `None` if the
-/// host clock is set before 1970 — in that case OAuth expiry math is
-/// meaningless, so callers should treat the credential as expired and let the
-/// refresh path (or server-side rejection) take over.
 fn now_millis() -> Option<u64> {
     u64::try_from(
         std::time::SystemTime::now()
@@ -343,7 +292,6 @@ fn credentials_path() -> Option<PathBuf> {
 
 // ── File Locking ──
 
-/// RAII guard that removes the lock directory on drop.
 struct LockGuard {
     path: PathBuf,
 }
@@ -356,10 +304,6 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire a directory-based lock, compatible with `proper-lockfile`
-/// (used by Claude Code). Retries contended locks via the shared
-/// [`lock::retry_acquire`] helper and breaks stale lock directories
-/// on each attempt.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
     lock::retry_acquire(
         || match std::fs::create_dir(path) {
@@ -391,8 +335,6 @@ async fn acquire_lock(path: &Path) -> Result<LockGuard> {
 }
 
 fn is_stale_lock(path: &Path) -> bool {
-    // Treat unreadable metadata as *not* stale — safer to back off and retry
-    // than to clobber a lock we can't inspect (EACCES, EIO, ...).
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .is_ok_and(|t| t.elapsed().unwrap_or_default() > LOCK_STALE_THRESHOLD)
@@ -435,9 +377,6 @@ mod tests {
 
     // ── load_token ──
 
-    /// Skipped on macOS: `load_credentials` reads the user's Keychain,
-    /// which is user-scoped rather than `$HOME`-scoped and would leak a
-    /// real Claude Code token into the test run.
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn load_token_resolves_credentials_relative_to_home() {
@@ -538,7 +477,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
-        // Under the 5-min refresh buffer so load_token_from must refresh.
         write_creds(
             &creds,
             "old",
@@ -575,7 +513,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let creds = dir.path().join("creds.json");
         let lock = dir.path().join("lock");
-        // Near-expiry but not expired — refresh failure warns + keeps token.
         write_creds(
             &creds,
             "stale",
@@ -717,9 +654,6 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_oauth_token_sends_grant_and_client_id_and_returns_parsed_response() {
-        // Captures the request body to pin the wire shape — Anthropic's
-        // token endpoint rejects a request missing `grant_type` or
-        // `client_id`, so regressions there are gateway-level.
         let server = MockServer::start().await;
         let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let captured_clone = Arc::clone(&captured);
@@ -829,7 +763,6 @@ mod tests {
         assert_eq!(oauth["refreshToken"], "new-refresh");
         let expires_at = oauth["expiresAt"].as_u64().unwrap();
         let now = now_millis().unwrap();
-        // expires_in is 3600s → 3_600_000ms from now, with tolerance for test execution time
         assert!(
             expires_at >= now + 3_500_000,
             "expiresAt too early: {expires_at}"

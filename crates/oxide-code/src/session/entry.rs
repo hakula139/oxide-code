@@ -1,9 +1,4 @@
 //! JSONL entry schema for session files.
-//!
-//! Each session file is a sequence of [`Entry`] values, one per line.
-//! The format is forward-compatible: [`Entry::Unknown`] absorbs entry
-//! types this reader doesn't recognize, so newer writers can emit
-//! additional variants without breaking older readers.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -13,99 +8,50 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
-/// Current session file format version. Bump on incompatible changes.
 pub(crate) const CURRENT_VERSION: u32 = 1;
 
-/// A single line in a session JSONL file.
-///
-/// Each session file is a sequence of entries:
-///
-/// 1. A [`Header`][Entry::Header] on the first line (session metadata).
-/// 2. Zero or more other entries — [`Message`][Entry::Message] carries the
-///    conversation; [`Title`][Entry::Title] may appear multiple times (latest
-///    wins); [`Summary`][Entry::Summary] marks a clean exit (latest wins).
-/// 3. The [`Unknown`][Entry::Unknown] variant absorbs entry types this
-///    reader does not recognize, so newer writers can emit additional
-///    types without breaking older readers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {
-    /// First line of every session file.
     Header {
         session_id: String,
         cwd: String,
         model: String,
         #[serde(with = "time::serde::rfc3339")]
         created_at: OffsetDateTime,
-        /// Format version. Readers reject files with a newer version.
         #[serde(default = "default_version")]
         version: u32,
     },
-    /// A conversation message with stable identity, chained via
-    /// [`parent_uuid`][Self::Message::parent_uuid].
-    ///
-    /// The chain enables future forking / partial replay without schema
-    /// migration — a message can be identified by its UUID and branched
-    /// from without rewriting the parent file.
     Message {
-        /// Stable identity for this message.
         uuid: Uuid,
-        /// Immediate predecessor in the chain. `None` only for the first
-        /// message in the file.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_uuid: Option<Uuid>,
         message: Message,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// Session title. Re-appendable — the latest occurrence in the tail
-    /// wins. Written early (on first user prompt) so interrupted sessions
-    /// still have a title; may be superseded later by an AI-generated or
-    /// user-provided title.
     Title {
         title: String,
         source: TitleSource,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// Session exit marker. Written on clean exit. Latest wins.
     Summary {
         message_count: u32,
         #[serde(with = "time::serde::rfc3339")]
         updated_at: OffsetDateTime,
     },
-    /// TUI-only metadata for a completed tool call, persisted
-    /// alongside the [`Entry::Message`] that carries the matching
-    /// [`ContentBlock::ToolResult`](crate::message::ContentBlock).
-    ///
-    /// The API-facing `ContentBlock::ToolResult` wire format only
-    /// carries `tool_use_id` + `content` + `is_error`; display fields
-    /// like the result's header title or the edit tool's replacement
-    /// count would pollute that contract. This sidecar entry lets
-    /// the replay path reconstruct a rich view without polluting the
-    /// wire format — resumed sessions match what the user saw live.
-    ///
-    /// On replay, [`SessionData`] (via `load_session_data`) indexes
-    /// these by `tool_use_id`; a missing entry means pre-upgrade
-    /// sessions (fallback to content-derived defaults) or a tool
-    /// that attached no metadata.
+    /// Display-only sidecar for tool results, indexed by `tool_use_id` on replay.
     ToolResultMetadata {
         tool_use_id: String,
         metadata: ToolMetadata,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    /// One persisted tracker entry per tracked file, written at
-    /// session finish so resume can skip cold-tracker re-Reads on
-    /// previously-observed files. Wire-stable; see
-    /// [`FileSnapshot`][crate::file_tracker::FileSnapshot].
     FileSnapshot {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
-    /// Catch-all for unrecognized entry types. Preserves parse
-    /// compatibility when a newer writer emits a type this reader
-    /// doesn't know.
     #[serde(other)]
     Unknown,
 }
@@ -114,52 +60,30 @@ fn default_version() -> u32 {
     CURRENT_VERSION
 }
 
-/// How a session title was derived.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TitleSource {
-    /// Derived from the first user prompt.
     #[default]
     FirstPrompt,
-    /// AI-generated via a background summarization call. Emitted by
-    /// the planned AI-title feature; accepted on read today.
     AiGenerated,
-    /// Explicitly set by the user. Emitted by the planned `/title`
-    /// command; accepted on read today.
     UserProvided,
 }
 
-/// Title fields extracted from the latest [`Entry::Title`] in a session.
-///
-/// `source` from [`Entry::Title`] is preserved on disk but not projected
-/// here — consumers only need the text today. The AI-title feature will
-/// reintroduce it together with a display annotation.
 #[derive(Debug, Clone)]
 pub(crate) struct TitleInfo {
     pub(crate) title: String,
-    /// Used by the merge between head and tail scan to pick the latest
-    /// title when a session has more than one [`Entry::Title`].
     pub(crate) updated_at: OffsetDateTime,
 }
 
-/// Exit fields extracted from the latest [`Entry::Summary`] in a session.
 #[derive(Debug, Clone)]
 pub(crate) struct ExitInfo {
     pub(crate) message_count: u32,
-    /// Drives the latest-wins tiebreak in `store::read_session_info`
-    /// when a resumed session has appended more than one summary.
     pub(crate) updated_at: OffsetDateTime,
 }
 
-/// Lightweight session metadata for listing, extracted from the header
-/// (first line) and a tail scan (latest [`Title`][Entry::Title] and
-/// [`Summary`][Entry::Summary]) without parsing every message.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
-    /// Working directory the session was started from. Surfaced as the
-    /// `Project` column under `--list --all` so cross-project listings
-    /// remain disambiguable.
     pub(crate) cwd: String,
     #[expect(
         dead_code,
@@ -171,15 +95,8 @@ pub(crate) struct SessionInfo {
         reason = "kept for diagnostics but superseded by last_active_at for display and sort"
     )]
     pub(crate) created_at: OffsetDateTime,
-    /// File mtime. Drives the `--list` sort order and display column so
-    /// resumed sessions bubble to the top. Falls back to `created_at` if
-    /// mtime cannot be read.
     pub(crate) last_active_at: OffsetDateTime,
-    /// Present when the session file contains a [`Title`][Entry::Title].
     pub(crate) title: Option<TitleInfo>,
-    /// Present when the session exited cleanly (i.e., a
-    /// [`Summary`][Entry::Summary] entry was written). Absent for
-    /// interrupted sessions.
     pub(crate) exit: Option<ExitInfo>,
 }
 
@@ -374,33 +291,20 @@ mod tests {
         assert_eq!(json["metadata"]["title"], "Edited f.rs");
         assert_eq!(json["metadata"]["replacements"], 3);
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
-        // Unset fields must be absent, not serialized as null — the
-        // file bytes grow quickly across many tool turns.
         assert!(json["metadata"].get("exit_code").is_none());
 
-        // Bytes → Entry → bytes must be identical so every field
-        // (not just the ones spot-checked above) round-trips.
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
 
     #[test]
     fn tool_result_metadata_parses_with_unknown_metadata_fields() {
-        // Forward-compat: a newer writer may emit metadata fields
-        // this version doesn't know about. The entry must still
-        // parse and surface the known fields — per `#[serde(other)]`
-        // on `Entry`, unknown entry *types* fall through to
-        // `Entry::Unknown`, but unknown metadata *fields* should
-        // just be ignored by serde default behavior.
         let json = r#"{"type":"tool_result_metadata","tool_use_id":"e","metadata":{"title":"t","future_field":123},"timestamp":"2026-04-16T12:00:00Z"}"#;
         let parsed: Entry = serde_json::from_str(json).unwrap();
-        // Re-serialize to observe the surviving known fields without
-        // destructuring (which would require an unreachable else-arm).
         let reserialized = serde_json::to_value(&parsed).unwrap();
         assert_eq!(reserialized["type"], "tool_result_metadata");
         assert_eq!(reserialized["tool_use_id"], "e");
         assert_eq!(reserialized["metadata"]["title"], "t");
-        // Unknown field is silently dropped on re-serialization.
         assert!(reserialized["metadata"].get("future_field").is_none());
     }
 
@@ -408,9 +312,6 @@ mod tests {
 
     #[test]
     fn file_snapshot_round_trips_with_inlined_payload_fields() {
-        // `#[serde(flatten)]` inlines the payload directly under
-        // `type`, not under a `snapshot` key. Pin the layout so a
-        // refactor can't silently change the wire format.
         let snapshot = FileSnapshot {
             path: std::path::PathBuf::from("/tmp/a.rs"),
             content_hash: 0xDEAD_BEEF,
@@ -441,9 +342,6 @@ mod tests {
 
     #[test]
     fn file_snapshot_unknown_field_is_ignored_for_forward_compat() {
-        // Older readers must ignore unknown fields a newer writer
-        // may grow (no `#[serde(deny_unknown_fields)]`). Pin here
-        // so a future tightening fails this test, not resume.
         let json = serde_json::json!({
             "type": "file_snapshot",
             "path": "/tmp/a.rs",

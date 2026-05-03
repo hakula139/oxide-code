@@ -1,14 +1,4 @@
 //! Session file I/O.
-//!
-//! [`SessionStore`] locates sessions (`$XDG_DATA_HOME/ox/sessions/
-//! {project}/`), creates new ones, resolves prefix lookups, and lists
-//! them for `ox --list`. [`SessionWriter`] is the append-only handle
-//! the manager writes through.
-//!
-//! Listing reads the header (line 1) and streams the rest of the file
-//! so the latest re-appended title and summary win regardless of
-//! where they sit — titles buried behind multi-KB tool-result lines
-//! are a real shape on long sessions.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -34,27 +24,14 @@ const SESSIONS_DIR: &str = "sessions";
 
 // ── SessionStore ──
 
-/// Low-level session file operations.
-///
-/// Sessions are stored under `$XDG_DATA_HOME/ox/sessions/{project}/`,
-/// where `{project}` is a filesystem-safe subdirectory name derived
-/// from the working directory at session creation time (see
-/// [`super::path::sanitize_cwd`]). The store exposes one "home"
-/// project (the current CWD) that listing, creation, and default
-/// resume operate on, and provides explicit cross-project variants
-/// for `--all` callers.
+/// Low-level session file operations scoped to a project subdirectory.
 #[derive(Clone)]
 pub(crate) struct SessionStore {
-    /// Root directory holding every project subdirectory.
     sessions_dir: PathBuf,
-    /// Subdirectory for the current working directory.
     project_dir: PathBuf,
 }
 
 impl SessionStore {
-    /// Creates a store rooted at the XDG data directory, scoped to the
-    /// current working directory. Creates both the root and the
-    /// project subdirectory if needed.
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
             std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
@@ -86,21 +63,7 @@ impl SessionStore {
         })
     }
 
-    /// Creates a new session file and writes the header entry.
-    ///
-    /// On Unix, the file is created with mode `0o600` so session contents
-    /// (verbatim tool output, assistant responses) are not world-readable.
-    /// Creation is atomic via `O_CREAT | O_EXCL`, so the rare case of two
-    /// processes minting the same session ID fails cleanly.
-    ///
-    /// Filenames are `{created_at_epoch}-{session_id}.jsonl`. The epoch
-    /// prefix makes `ls` on a project subdirectory return sessions in
-    /// chronological order, which is convenient when inspecting the
-    /// store outside of `ox --list`.
-    ///
-    /// Session files carry no file-level lock: concurrent resumes are
-    /// explicitly allowed and form forks in the recorded UUID chain.
-    /// See [`Self::load_session_data`] for the fork-aware loader.
+    /// Creates a new session file (0o600, `O_EXCL`) and writes the header.
     pub(crate) fn create(&self, header: &Entry) -> Result<SessionWriter> {
         let Entry::Header {
             session_id,
@@ -123,67 +86,26 @@ impl SessionStore {
         Ok(writer)
     }
 
-    /// Opens an existing session file in append mode.
-    ///
-    /// Searches every project subdirectory, not just the current one,
-    /// so `ox -c <id>` resumes a session regardless of which project
-    /// it originally belonged to.
-    ///
-    /// No file-level lock is acquired: two processes resuming the same
-    /// session both append to the same file, forming a fork in the
-    /// UUID chain. [`Self::load_session_data`] reconstructs the newest
-    /// non-sidechain branch on the next resume. Individual writes rely
-    /// on POSIX `O_APPEND` for line positioning; writes larger than
-    /// `PIPE_BUF` (typically 4 KiB) may interleave, but the loader
-    /// warn-skips any malformed UTF-8 / JSON fragments that result.
+    /// Opens an existing session file in append mode, searching all projects.
     pub(crate) fn open_append(&self, session_id: &str) -> Result<SessionWriter> {
         let path = self.find_session_path(session_id)?;
         open_append_at(&path)
     }
 
-    /// Loads a session's message chain and returns the UUID of its tip
-    /// (for parent-chain continuity on resume). Like
-    /// [`Self::open_append`], searches every project subdirectory.
-    ///
-    /// Walks the recorded UUID DAG rather than the raw file order.
-    /// Two processes resuming the same session concurrently both
-    /// append with `parent_uuid` pointing at what each saw as the
-    /// tip, forming a fork. The loader:
-    ///
-    /// 1. Builds a map of every valid `Entry::Message` by UUID.
-    /// 2. Computes the set of leaves — UUIDs not referenced as
-    ///    `parent_uuid` by any other message.
-    /// 3. Picks the leaf with the newest timestamp as the tip (ties
-    ///    break by UUID byte order for determinism).
-    /// 4. Walks back via `parent_uuid` to the root, reverses → linear
-    ///    chain from root to tip.
-    ///
-    /// The "newest-leaf wins" policy means the losing branch on a
-    /// concurrent-resume fork stays in the file but is invisible to
-    /// later resumes. The trade-off is documented in
-    /// [`Self::open_append`].
-    ///
-    /// Non-`Message` entries (headers, titles, summaries, unknown)
-    /// are skipped. Malformed lines — including interleaved-write
-    /// fragments from concurrent large writes, truncated UTF-8 from
-    /// a crash during `writeln!`, or unknown future entry types —
-    /// are warn-skipped and do not fail the load.
+    /// Loads a session's message chain via DAG resolution (newest-leaf-wins).
     pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
         let path = self.find_session_path(session_id)?;
         load_session_data_from_path(&path)
     }
 
-    /// List sessions for the current project, sorted by file mtime
-    /// (most recently active first) so resumed sessions bubble to the
-    /// top.
+    /// List sessions for the current project, most recently active first.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
         let mut sessions = read_sessions_in_dir(&self.project_dir)?;
         sort_sessions_recent_first(&mut sessions);
         Ok(sessions)
     }
 
-    /// List sessions across every project subdirectory. Used by the
-    /// `--all` flag for cross-project views.
+    /// List sessions across every project subdirectory.
     pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
         let mut sessions = Vec::new();
         for entry in fs::read_dir(&self.sessions_dir)
@@ -207,13 +129,7 @@ impl SessionStore {
         Ok(sessions)
     }
 
-    /// Locate an existing session file by session ID. Filenames are
-    /// prefixed with the creation epoch, so we match by the
-    /// `-{session_id}.jsonl` suffix rather than a direct path build.
-    ///
-    /// Checks the current project first (the fast path), then falls
-    /// back to walking sibling project subdirectories so cross-project
-    /// resume by session ID also works.
+    /// Finds a session file by suffix match, checking the home project first.
     fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
         validate_session_id(session_id)?;
         if let Some(path) = find_session_in(&self.project_dir, session_id)? {
@@ -235,9 +151,6 @@ impl SessionStore {
         bail!("session not found: {session_id}")
     }
 
-    /// Creates a store at an explicit directory. Used by tests to bypass
-    /// XDG resolution. `project_name` selects the subdirectory inside
-    /// `sessions_dir` that acts as the current project.
     #[cfg(test)]
     pub(super) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
@@ -252,10 +165,7 @@ impl SessionStore {
 
 // ── Path-keyed primitives ──
 
-/// Opens an existing session file in append mode by path. Underlies
-/// [`SessionStore::open_append`] (which resolves the path first) and
-/// [`super::handle::resume_from_path`] (which bypasses the store
-/// entirely for sessions living outside the XDG project subdirectories).
+/// Opens an existing session file in append mode by explicit path.
 pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     let file = OpenOptions::new()
         .append(true)
@@ -264,11 +174,7 @@ pub(crate) fn open_append_at(path: &Path) -> Result<SessionWriter> {
     Ok(SessionWriter::new(file))
 }
 
-/// Loads session data from an explicit path. See
-/// [`SessionStore::load_session_data`] for the description of DAG-based
-/// chain resolution and fault-tolerant parsing — this is the underlying
-/// primitive, used both by the store lookup and by the external-path
-/// resume flow.
+/// Loads session data from an explicit path with DAG-based chain resolution.
 pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
@@ -280,13 +186,8 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let mut buf = Vec::new();
     let mut line_no: u32 = 0;
 
-    // Read byte-by-line instead of `BufReader::lines()`. A crash during
-    // `writeln!` can leave the last record truncated — mid-byte of a
-    // multibyte UTF-8 codepoint in the worst case — and `lines()`
-    // propagates `InvalidData` there, failing the entire resume. Doing the
-    // decode ourselves lets us warn-skip bad lines with the same
-    // resilience we already apply to malformed JSON, and tolerate a
-    // missing trailing newline.
+    // Manual byte-by-line read so truncated UTF-8 at EOF is warn-skipped
+    // instead of propagating `InvalidData` from `BufReader::lines()`.
     loop {
         buf.clear();
         let read = reader
@@ -328,10 +229,6 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
             } => {
                 chain.insert(uuid, parent_uuid, message, timestamp);
             }
-            // Track the newest title so the TUI's status bar and any
-            // future surface can display it on resume without a second
-            // pass over the file. AI-generated titles appended later beat
-            // the first-prompt title by `updated_at`.
             Entry::Title {
                 title, updated_at, ..
             } if latest_title
@@ -340,10 +237,6 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
             {
                 latest_title = Some(TitleInfo { title, updated_at });
             }
-            // Sidecar metadata for completed tool results. Later
-            // entries win on duplicate `tool_use_id` — a rerun /
-            // partial-write recovery replays the same id, and the
-            // most recent write reflects the final view.
             Entry::ToolResultMetadata {
                 tool_use_id,
                 metadata,
@@ -368,11 +261,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     })
 }
 
-/// Reads just the `session_id` from a session file's header (line 1).
-/// Used by external-path resume so the resumed [`SessionHandle`] can
-/// key on the file's declared identity rather than its path.
-///
-/// [`SessionHandle`]: super::handle::SessionHandle
+/// Reads just the `session_id` from a session file's header line.
 pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
@@ -386,9 +275,6 @@ pub(crate) fn read_session_id_from_path(path: &Path) -> Result<String> {
     Ok(session_id)
 }
 
-/// Restrict session IDs to ASCII alphanumerics + `-_`, max 64 chars.
-/// Covers our 36-char UUID v4 while rejecting path separators, NUL,
-/// control chars, and Windows-reserved chars.
 fn validate_session_id(session_id: &str) -> Result<()> {
     let ok = !session_id.is_empty()
         && session_id.len() <= 64
@@ -401,16 +287,10 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Formats a new session filename as `{epoch}-{session_id}.jsonl`. The
-/// epoch prefix gives chronological directory-order listings and stays
-/// fixed-width (10 ASCII digits) through the year 2286.
 fn session_filename(session_id: &str, created_at: OffsetDateTime) -> String {
     format!("{}-{session_id}.jsonl", created_at.unix_timestamp())
 }
 
-/// Returns the path of the first `.jsonl` file in `dir` whose name ends
-/// with `-{session_id}.jsonl`. `None` means "no match in this dir", not
-/// a hard error — the caller can continue searching other locations.
 fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     let suffix = format!("-{session_id}.jsonl");
     let entries = match fs::read_dir(dir) {
@@ -435,8 +315,6 @@ fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// Reads every `.jsonl` file in `dir` and returns the successfully
-/// parsed [`SessionInfo`] entries, warning and skipping on errors.
 fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     Ok(entries
@@ -459,11 +337,6 @@ fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
 }
 
 fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
-    // Matches the `sort_by_key(|e| Reverse(...))` idiom used by the
-    // mtime sort in `tool/{glob,grep}.rs`. `session_id` breaks ties
-    // in reverse-alphabetical order so the resulting order is
-    // stable across `list` calls even when two sessions share a
-    // single-second mtime.
     sessions.sort_by_key(|s| {
         (
             std::cmp::Reverse(s.last_active_at),
@@ -474,9 +347,7 @@ fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
 
 // ── SessionWriter ──
 
-/// Append-only handle for an open session file. Wraps the file in a
-/// [`BufWriter`] so the actor's batching loop can coalesce a turn's
-/// entries into one `write()` syscall.
+/// Append-only buffered handle for an open session file.
 #[derive(Debug)]
 pub(crate) struct SessionWriter {
     file: BufWriter<File>,
@@ -489,24 +360,17 @@ impl SessionWriter {
         }
     }
 
-    /// Buffer one entry. Concurrent readers don't see it until
-    /// [`Self::flush`].
     pub(super) fn append_no_flush(&mut self, entry: &Entry) -> Result<()> {
         let json = serde_json::to_string(entry).context("failed to serialize entry")?;
         writeln!(self.file, "{json}").context("failed to write entry")?;
         Ok(())
     }
 
-    /// Drain the buffer in one `write()`. No `fsync` — entries reach
-    /// the OS cache, which is the durability tier the resume loader
-    /// already tolerates (warn-skip on truncated tail entries).
     pub(super) fn flush(&mut self) -> Result<()> {
         self.file.flush().context("failed to flush entry")?;
         Ok(())
     }
 
-    /// Append + flush. Used by header writes on file creation and by
-    /// store tests that read back immediately.
     fn append(&mut self, entry: &Entry) -> Result<()> {
         self.append_no_flush(entry)?;
         self.flush()
@@ -518,37 +382,15 @@ impl SessionWriter {
 /// Data loaded from a session file on resume.
 #[derive(Debug)]
 pub(crate) struct SessionData {
-    /// Conversation messages in file order.
     pub(crate) messages: Vec<Message>,
-    /// UUID of the last [`Entry::Message`] in the file, used as
-    /// `parent_uuid` for the first newly-recorded message. `None` if the
-    /// file contains no messages.
     pub(crate) last_uuid: Option<Uuid>,
-    /// Latest [`Entry::Title`] in the file (max `updated_at`). `None` when
-    /// no title was ever recorded (e.g., the session exited before the
-    /// first user prompt).
     pub(crate) title: Option<TitleInfo>,
-    /// Per-tool-use-id sidecar metadata collected from every
-    /// [`Entry::ToolResultMetadata`](crate::session::entry::Entry)
-    /// in the file. Keyed by the tool-use id on the matching
-    /// [`ContentBlock::ToolResult`](crate::message::ContentBlock)
-    /// so the replay path can reattach display fields (title,
-    /// replacement count) that the wire format doesn't carry.
-    /// Empty for pre-upgrade sessions — the TUI falls back to its
-    /// existing content-derived defaults.
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Tracker snapshots harvested from every
-    /// [`Entry::FileSnapshot`](crate::session::entry::Entry) in the
-    /// file. Handed to [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
-    /// before the agent loop runs. Empty for pre-upgrade sessions
-    /// and for any session that exited without a summary.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── File Opening ──
 
-/// Creates a new file exclusively (fails if it exists). On Unix, applies
-/// `0o600` permissions so session contents aren't world-readable.
 fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -562,28 +404,10 @@ fn open_create_exclusive(path: &Path) -> std::io::Result<File> {
 
 // ── Session Info Extraction ──
 
-/// Discriminator prefix for lines [`read_session_info`] cares about
-/// past the header. `Entry` serializes with `#[serde(tag = "type")]`,
-/// which places `type` first in the emitted JSON, so a `starts_with`
-/// on the literal prefix is a reliable and cheap pre-filter — most
-/// session files are dominated by `{"type":"message",...}` lines that
-/// can be skipped without a full serde parse.
+// Cheap pre-filter: `serde(tag = "type")` always emits `type` first.
 const TITLE_LINE_PREFIX: &str = r#"{"type":"title""#;
 const SUMMARY_LINE_PREFIX: &str = r#"{"type":"summary""#;
 
-/// Reads session info from a JSONL file.
-///
-/// Walks the whole file once, tracking the latest [`Entry::Title`] (by
-/// `updated_at`) and [`Entry::Summary`] (ditto) as it goes. A header
-/// +-tail scan is faster but breaks when an AI-generated title lands
-/// early in the file and the first user turn produces a large
-/// `tool_result` that pushes it out of the tail window — the title
-/// disappears even though it sits intact on disk.
-///
-/// Most lines are `Entry::Message` entries that this function doesn't
-/// care about; the [`TITLE_LINE_PREFIX`] / [`SUMMARY_LINE_PREFIX`]
-/// cheap pre-filter keeps the full serde parse off the hot path so
-/// listing stays O(bytes read) without meaningful CPU overhead.
 fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let metadata = file
@@ -620,10 +444,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         if without_newline.is_empty() {
             continue;
         }
-        // Skip non-UTF-8 garbage rather than failing the whole row:
-        // `load_session_data_from_path` already warn-skips here, and
-        // the listing path should match that resilience so a single
-        // corrupt byte doesn't hide an entire session from `--list`.
         let Ok(line) = std::str::from_utf8(without_newline) else {
             continue;
         };
@@ -665,8 +485,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     })
 }
 
-/// Parses a JSONL line into a [`TitleInfo`], returning `None` for any
-/// line that is not a well-formed [`Entry::Title`].
 fn parse_title(line: &str) -> Option<TitleInfo> {
     match serde_json::from_str(line).ok()? {
         Entry::Title {
@@ -679,20 +497,11 @@ fn parse_title(line: &str) -> Option<TitleInfo> {
 #[cfg(test)]
 pub(crate) const TEST_PROJECT: &str = "test-project";
 
-/// Opens a [`SessionStore`] rooted at `dir` under [`TEST_PROJECT`].
-/// Shared between the `session::store`, `session::handle`,
-/// `session::actor`, and `agent::tests` modules so they all exercise
-/// the same project-scoping path.
 #[cfg(test)]
 pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
-/// Resolves a session file inside [`TEST_PROJECT`] by its session ID.
-/// Filenames are prefixed with the creation epoch (see
-/// [`session_filename`]), so tests cannot build the path directly
-/// from a session ID alone; this helper scans the project dir for
-/// the matching suffix. Panics on miss.
 #[cfg(test)]
 pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
     let project_dir = test_project_dir(dir);
@@ -701,10 +510,6 @@ pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no session file for id {session_id} in {project_dir:?}"))
 }
 
-/// Project subdirectory used by [`test_store`]. Exposed so tests
-/// can assert on the directory's contents (e.g., that lazy file
-/// creation has not materialized anything yet) without panicking
-/// on a missing session like [`test_session_file`].
 #[cfg(test)]
 pub(super) fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
@@ -719,9 +524,6 @@ mod tests {
     use super::*;
     use crate::message::ContentBlock;
 
-    /// Direct path inside [`TEST_PROJECT`] for a given filename. Used
-    /// by tests that hand-roll a file before opening the store, or
-    /// that seed invalid content the production loader should skip.
     fn test_project_path(dir: &Path, filename: &str) -> PathBuf {
         dir.join(TEST_PROJECT).join(filename)
     }
@@ -740,9 +542,6 @@ mod tests {
         sample_message_at(uuid, None, datetime!(2026-04-16 12:00:01 UTC), text)
     }
 
-    /// Variant of [`sample_message_entry`] that accepts a `parent_uuid`
-    /// and explicit timestamp so tests can build multi-message chains
-    /// (and forks) exercised by the DAG-walking loader.
     fn sample_message_at(
         uuid: Uuid,
         parent_uuid: Option<Uuid>,
@@ -774,9 +573,6 @@ mod tests {
 
     // ── SessionStore::open ──
 
-    /// Isolates [`SessionStore::open`] from the caller's real filesystem.
-    /// Pins `XDG_DATA_HOME` to `xdg` and `HOME` to a parked tempdir so
-    /// the fallback path never lands on the real home.
     async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
         let home = tempfile::tempdir().unwrap();
         temp_env::async_with_vars(
@@ -937,10 +733,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_append_allows_concurrent_resumes_without_blocking() {
-        // Two processes resuming the same session is a first-class
-        // case: both acquire append handles immediately, and the
-        // resulting UUID fork is resolved at load time (see
-        // `load_session_data_picks_newest_leaf_on_fork`).
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer_a = store.create(&sample_header("concurrent")).unwrap();
@@ -1043,19 +835,14 @@ mod tests {
         assert!(store.load_session_data("../etc/passwd").is_err());
         assert!(store.load_session_data(r"..\..\etc\passwd").is_err());
         assert!(store.load_session_data("session\0evil").is_err());
-        // Windows-reserved and control chars are also rejected.
         assert!(store.load_session_data("foo:bar").is_err());
         assert!(store.load_session_data("foo|bar").is_err());
         assert!(store.load_session_data("foo*").is_err());
-        // Bounded length: a very long ID is rejected.
         assert!(store.load_session_data(&"a".repeat(65)).is_err());
     }
 
     #[tokio::test]
     async fn load_session_data_picks_newest_leaf_on_fork() {
-        // Two processes resumed and each appended — forming a fork
-        // in the UUID DAG. `load_session_data` must pick the newest
-        // leaf as the tip and walk back to the shared ancestor.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("fork")).unwrap();
@@ -1070,7 +857,6 @@ mod tests {
             ))
             .unwrap();
 
-        // Branch A: recorded first, at t+2s.
         let branch_a = Uuid::new_v4();
         writer
             .append(&sample_message_at(
@@ -1081,7 +867,6 @@ mod tests {
             ))
             .unwrap();
 
-        // Branch B: recorded later, at t+3s. Should win as the tip.
         let branch_b = Uuid::new_v4();
         writer
             .append(&sample_message_at(
@@ -1112,11 +897,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_session_data_terminates_at_orphan_parent_reference() {
-        // parent_uuid points at a UUID not present in the file — e.g.,
-        // because the parent line was lost to an interleaved write or
-        // a truncation. The walker should stop at the orphan instead
-        // of looping or erroring; everything collected so far is
-        // returned.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("orphan")).unwrap();
@@ -1142,8 +922,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_session_data_breaks_chain_walk_on_cycle() {
-        // Corrupted file where two messages point at each other.
-        // Defensive: the walker must terminate rather than looping.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("cycle")).unwrap();
@@ -1168,9 +946,6 @@ mod tests {
             .unwrap();
         drop(writer);
 
-        // Every message is referenced by another, so there's no leaf.
-        // `resolve_chain` returns an empty chain; we only assert the
-        // load doesn't hang and succeeds.
         let data = store.load_session_data("cycle").unwrap();
         assert!(
             data.messages.is_empty(),
@@ -1181,10 +956,6 @@ mod tests {
 
     #[tokio::test]
     async fn load_session_data_prefers_later_duplicate_uuid() {
-        // A replayed append (e.g., after a partial-write retry) can
-        // produce two records with the same UUID. Keep the later one
-        // — newest-wins matches the API-replay semantics the UUID is
-        // supposed to dedupe on.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("dup")).unwrap();
@@ -1219,10 +990,6 @@ mod tests {
 
     #[test]
     fn load_session_data_recovers_from_truncated_utf8_at_eof() {
-        // Simulate a SIGKILL mid-`writeln!` that left the final record
-        // broken in the middle of a multibyte UTF-8 sequence. The
-        // pre-fix code used `BufReader::lines()`, which propagates an
-        // `InvalidData` error there and fails the whole resume.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let created_at = datetime!(2026-01-01 00:00:00 UTC);
@@ -1237,10 +1004,8 @@ mod tests {
             br#"{"type":"message","uuid":"a1b2c3d4-e5f6-7890-abcd-1234567890ef","message":{"role":"user","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-01-01T00:00:01Z"}
 "#,
         );
-        // Start writing the next message, then crash inside the emoji.
         bytes.extend_from_slice(br#"{"type":"message","uuid":"b2c3d4e5-f6a7-8901-bcde-234567890abc","message":{"role":"assistant","content":[{"type":"text","text":"crab "#);
-        // First two bytes of 🦀 (U+1F980, UTF-8: F0 9F A6 80) so we
-        // are mid-character at EOF.
+        // Truncated mid-codepoint (first two bytes of U+1F980).
         bytes.extend_from_slice(&[0xF0, 0x9F]);
         fs::write(&path, &bytes).unwrap();
 
@@ -1254,9 +1019,6 @@ mod tests {
 
     #[test]
     fn load_session_data_recovers_from_missing_trailing_newline() {
-        // A crash between the JSON body and the final '\n' leaves a
-        // complete record without a newline. The loader should still
-        // parse it rather than dropping the last turn.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let created_at = datetime!(2026-01-01 00:00:00 UTC);
@@ -1314,10 +1076,6 @@ mod tests {
 
     #[test]
     fn read_session_id_from_path_rejects_non_header_first_line() {
-        // A file whose first line parses as a valid `Entry` but of the
-        // wrong variant (e.g., a bare message without a header above
-        // it) hits the explicit `bail!` inside the let-else, which the
-        // "not JSON at all" path never reaches.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("headless.jsonl");
         fs::write(
@@ -1389,8 +1147,6 @@ mod tests {
 
     #[tokio::test]
     async fn list_mtime_overrides_header_created_at_order() {
-        // Sort is by file mtime, not header created_at: a resumed session
-        // (fresh mtime, older header) should bubble above a brand-new one.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
@@ -1418,7 +1174,6 @@ mod tests {
         w_new.append(&sample_title_entry("New")).unwrap();
         drop(w_new);
 
-        // Backdate zzz's mtime so its file is older than aaa's.
         let new_path = test_session_file(dir.path(), "zzz-new-header");
         let far_past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let times = std::fs::FileTimes::new().set_modified(far_past);
@@ -1469,10 +1224,6 @@ mod tests {
 
     #[tokio::test]
     async fn list_finds_first_prompt_title_in_long_session() {
-        // Regression guard: a busy session pushes the first-prompt
-        // title (line 2, never re-appended) far from the tail. The
-        // full-file scan must still surface it when no newer title
-        // has been appended.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("long")).unwrap();
@@ -1497,11 +1248,6 @@ mod tests {
 
     #[tokio::test]
     async fn list_finds_ai_title_buried_between_head_and_tail() {
-        // Real-world shape: first_prompt title at line 2, one user
-        // message at line 3, ai_generated title at line 4, then a
-        // tool_result so large that line 4 sits outside any plausible
-        // tail window. The old head(2 lines)+tail(4 KB) scan missed
-        // the AI title here; the full-file scan must surface it.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("buried")).unwrap();
@@ -1522,7 +1268,6 @@ mod tests {
                 updated_at: datetime!(2026-04-16 12:00:05 UTC),
             })
             .unwrap();
-        // 16 KB body — comfortably past any tail-scan window.
         let bulky_body = "x".repeat(16_000);
         writer
             .append(&sample_message_entry(Uuid::new_v4(), &bulky_body))
@@ -1564,13 +1309,10 @@ mod tests {
 
     #[tokio::test]
     async fn list_is_scoped_to_current_project() {
-        // Only sessions in the current project dir are visible; siblings
-        // in other project subdirectories stay hidden.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _own = store.create(&sample_header("own")).unwrap();
 
-        // Drop a session into a sibling project subdir.
         let sibling_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
         let _foreign = sibling_store.create(&sample_header("foreign")).unwrap();
@@ -1607,7 +1349,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
-        // Session lives in a different project subdirectory.
         let foreign_store =
             SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
         let _w = foreign_store.create(&sample_header("foreign")).unwrap();

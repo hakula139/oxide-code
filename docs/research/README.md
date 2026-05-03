@@ -1,25 +1,22 @@
 # Research Notes
 
-Architecture research and API reference notes for oxide-code development. Split by direction:
+External research and API reference for oxide-code development. Covers Claude Code, OpenAI Codex, opencode, and the Anthropic API.
 
-- [`api/`](api/) — outward-facing: how the Anthropic API works and what oxide-code has to send to it.
-- [`design/`](design/) — inward-facing: surveys of reference projects + design choices for oxide-code.
+## API References
 
-## API references
+| Document                                  | Description                                        |
+| ----------------------------------------- | -------------------------------------------------- |
+| [Anthropic API](anthropic-api.md)         | OAuth flow, required headers, system prompt prefix |
+| [Extended Thinking](extended-thinking.md) | Content block types, signatures, round-tripping    |
+| [System Prompt](system-prompt.md)         | Section assembly, CLAUDE.md, caching, block layout |
 
-| Document                                      | Description                                                            |
-| --------------------------------------------- | ---------------------------------------------------------------------- |
-| [Anthropic API](api/anthropic-api.md)         | Anthropic API auth: OAuth flow, required headers, system prompt prefix |
-| [Extended Thinking](api/extended-thinking.md) | Extended thinking: content block types, signatures, round-tripping     |
-| [System Prompt](api/system-prompt.md)         | System prompt architecture: section assembly, CLAUDE.md, caching       |
+## Design Surveys
 
-## Design surveys
-
-| Document                                                                 | Description                                                           |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------- |
-| [Session Persistence](design/session-persistence.md)                     | Session persistence: JSONL format, storage layout, listing strategy   |
-| [Terminal UI](design/tui.md)                                             | TUI research: reference projects, flickering prevention, crate stack  |
-| [Tool Output Truncation](design/tool-truncation.md)                      | Tool dispatcher truncation: per-tool vs central, caps and spillover   |
-| [File Change Tracking](design/file-tracking.md)                          | Read-before-Edit gate, staleness detection, persistence across resume |
-| [Cancellation and Queued Input](design/cancellation-and-queued-input.md) | Esc / Ctrl+C cancel, double-press exit, queued prompts, run-state UX  |
-| [Slash Commands](design/slash-commands/)                                 | Slash-command surface: registry shape, popup UX, mid-session state    |
+| Document                                                          | Description                                              |
+| ----------------------------------------------------------------- | -------------------------------------------------------- |
+| [Session Persistence](session-persistence.md)                     | JSONL format, storage layout, write strategy             |
+| [Terminal UI](tui.md)                                             | Reference TUI patterns, flickering prevention, ecosystem |
+| [Tool Output Truncation](tool-truncation.md)                      | Per-tool vs central caps, spillover strategies           |
+| [File Change Tracking](file-tracking.md)                          | Read-before-Edit gates, staleness detection              |
+| [Cancellation and Queued Input](cancellation-and-queued-input.md) | Cancel, exit, and input queueing patterns                |
+| [Slash Commands](slash-commands.md)                               | Registry shape, popup UX, execution models               |

@@ -36,30 +36,7 @@ const PLACEHOLDER_IDLE: &str = "Ask anything...";
 const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
 const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds another";
 
-/// Multi-line input area at the bottom of the TUI.
-///
-/// Wraps [`ratatui_textarea::TextArea`] for multi-line editing with
-/// dynamic height. Grows from 1 to [`MAX_VISIBLE_LINES`] as content
-/// expands. The placeholder text (visible only when the buffer is
-/// empty) is the inline hint surface; mid-turn / interrupt hints
-/// live on the status bar so they survive past the first keystroke.
-///
-/// Key bindings (idle):
-///
-/// - Enter: submit prompt
-/// - Shift+Enter: insert newline
-/// - Ctrl+C: arm exit (second press within 1 s exits)
-/// - Ctrl+D: quit when the input is empty (POSIX EOF idiom);
-///   no-op when the input has content
-///
-/// Key bindings (busy, i.e. disabled):
-///
-/// - Ctrl+C: cancel the in-flight turn
-/// - Ctrl+D: no-op (avoid tearing down an in-flight turn from a
-///   stray habitual EOF)
-///
-/// Esc routes through [`App::handle_crossterm_event`](super::super::app::App::handle_crossterm_event)
-/// because its meaning depends on App-level state (queue, run state).
+/// Multi-line input area with dynamic height and slash-command popup.
 pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
@@ -177,12 +154,7 @@ impl InputArea {
 
 impl Component for InputArea {
     fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
-        // Ctrl+D follows the POSIX EOF idiom: quit only when the input
-        // buffer is empty so a stray press while composing never
-        // discards work. Disabled while busy — a turn in flight is
-        // closer to "command running" than "shell at the prompt", so
-        // a habitual Ctrl+D shouldn't tear it down; cancel via Esc /
-        // Ctrl+C first, then quit.
+        // Ctrl+D: quit only when idle + empty (POSIX EOF idiom).
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,

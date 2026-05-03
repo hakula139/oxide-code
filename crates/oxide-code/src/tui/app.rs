@@ -55,14 +55,9 @@ pub(crate) struct App {
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
-    /// Bridges [`AgentEvent::ToolCallStart`] to its matching
-    /// [`AgentEvent::ToolCallEnd`]. The End arm looks up `name` +
-    /// `input` to build a structured [`ToolResultView`] and falls
-    /// back to `label` when the tool emits `title: None`.
+    /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
     pending_calls: PendingCalls,
-    /// Prompts the user submitted while a turn was in flight. Drained
-    /// in FIFO order at each turn boundary; Esc on idle pops the most
-    /// recent entry back into the input for editing.
+    /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     should_quit: bool,
     /// Whether state has changed since the last render.
@@ -126,28 +121,21 @@ impl App {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Initial render.
         self.render(terminal)?;
 
         loop {
             tokio::select! {
-                // Crossterm events (keyboard, mouse, resize).
-                event = crossterm_events.next() => {
+                    event = crossterm_events.next() => {
                     if let Some(Ok(event)) = event {
                         self.handle_crossterm_event(&event);
                     }
                 }
-                // Agent events (stream tokens, tool calls, etc.).
                 event = self.agent_rx.recv() => {
                     match event {
                         Some(event) => self.handle_agent_event(event),
-                        None => {
-                            // Agent channel closed — agent loop exited.
-                            self.should_quit = true;
-                        }
+                        None => self.should_quit = true,
                     }
                 }
-                // Tick — coalesce renders and advance spinner.
                 _ = tick.tick() => {
                     if self.status_bar.tick() {
                         self.dirty = true;
@@ -174,11 +162,6 @@ impl App {
 
     fn handle_crossterm_event(&mut self, event: &Event) {
         match event {
-            // Esc routes through `App` because its meaning depends on
-            // queue / run-state — InputArea has no view of either.
-            // Exception: when the slash popup is visible it owns Esc
-            // (dismissal); the popup-route never produces an action,
-            // so we drop the return value.
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
             }) => {
@@ -189,11 +172,9 @@ impl App {
                 }
             }
             Event::Key(..) => {
-                // Input area handles typing, submit, and quit.
                 if let Some(action) = self.input.handle_event(event) {
                     self.dispatch_user_action(action);
                 }
-                // When input is disabled (streaming), scroll keys go to chat.
                 if !self.input.is_enabled() {
                     self.chat.handle_event(event);
                 }
@@ -207,14 +188,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Esc routing:
-    ///
-    /// - busy → cancel the in-flight turn
-    /// - idle with a non-empty queue AND empty input → pop the most
-    ///   recent queued prompt back into the input for editing
-    /// - idle with content already in the input → no-op (refuse to
-    ///   clobber the user's draft; they must clear it first)
-    /// - idle with an empty queue → no-op (textarea has no use for Esc)
+    /// Routes Esc: cancel if busy, pop queue if idle+empty, else no-op.
     fn handle_esc(&mut self) {
         if !self.input.is_enabled() {
             self.dispatch_user_action(UserAction::Cancel);
@@ -226,12 +200,7 @@ impl App {
         }
     }
 
-    /// Translate a user action into UI state changes, then forward it to the
-    /// agent loop over the bounded channel. A `Closed` error means the agent
-    /// task has died; surface that so the user isn't left staring at a
-    /// wedged "Streaming" status. `Full` is implausible (input is disabled
-    /// while streaming, so at most one in-flight action at a time), but
-    /// worth treating symmetrically if it ever trips.
+    /// Applies UI side-effects then forwards to the agent channel.
     fn dispatch_user_action(&mut self, action: UserAction) {
         if !self.apply_action_locally(&action) {
             return;
@@ -259,21 +228,11 @@ impl App {
         }
     }
 
-    /// Apply the UI-state side of an action and report whether it
-    /// should also be forwarded to the agent loop. Mid-turn submits
-    /// during a `Cancelling` acknowledgement window stay local —
-    /// forwarding them would race the cancel signal and let a
-    /// fresh prompt jump ahead of `pending_prompts`'s existing head
-    /// when the agent's outer `recv` picks it up before
-    /// `AgentEvent::Cancelled` reaches `finalize_idle`.
+    /// Applies UI-state changes; returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
             UserAction::SubmitPrompt(text) => {
                 if self.input.is_enabled() {
-                    // Slash commands stay client-side: parse, run
-                    // locally, never forward the typed `/cmd` line.
-                    // State-mutating commands return `Action(_)`; the
-                    // dispatcher hands the action back for forwarding.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         let synthesized = {
@@ -281,11 +240,6 @@ impl App {
                             slash::dispatch(&parsed, &mut ctx)
                         };
                         if let Some(action) = synthesized {
-                            // SubmitPrompt starts a new turn; flip UI
-                            // state before forwarding so a typed prompt
-                            // can't squeeze in between dispatch and
-                            // forward. Other actions (e.g. Clear) just
-                            // forward.
                             if matches!(action, UserAction::SubmitPrompt(_)) {
                                 self.input.set_enabled(false);
                                 self.status_bar.set_status(Status::Streaming);
@@ -299,14 +253,11 @@ impl App {
                     self.status_bar.set_status(Status::Streaming);
                     true
                 } else {
-                    // Mid-turn: read-only commands dispatch
-                    // immediately; mutators refuse.
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
                             SlashKind::ReadOnly | SlashKind::Unknown => {
                                 let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                                // Read-only ⇒ contract guarantees `Local`.
                                 _ = slash::dispatch(&parsed, &mut ctx);
                             }
                             SlashKind::Mutating => {
@@ -318,25 +269,15 @@ impl App {
                         }
                         return false;
                     }
-                    // Busy: buffer for the preview pane. On a clean
-                    // round boundary the agent emits `PromptDrained`
-                    // and the TUI pops `pending_prompts` FIFO,
-                    // promoting the entry to a chat-history block.
-                    // Tool-less turns drain via `finalize_idle`.
                     self.pending_prompts.push_back(text.clone());
                     self.sync_input_queue_hint();
                     !matches!(self.status_bar.status(), Status::Cancelling)
                 }
             }
-            // The matching `AgentEvent::Cancelled` returns the input to
-            // idle; the bar flips to `Cancelling` for the duration so
-            // the user sees the request was honored.
             UserAction::Cancel => {
                 self.status_bar.set_status(Status::Cancelling);
                 true
             }
-            // First press arms an exit hint; a second press inside the
-            // window confirms. TUI-only — no agent-side consumer.
             UserAction::ConfirmExit => {
                 if let Status::ExitArmed { until } = self.status_bar.status()
                     && Instant::now() < *until
@@ -352,10 +293,6 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            // Unreachable on the live wiring — the slash branch above
-            // forwards `Action(_)` straight via `forward_to_agent`.
-            // `false` is defensive in case a future caller routes
-            // `Clear` / `SwitchModel` through here.
             UserAction::Clear | UserAction::SwitchModel(_) | UserAction::SwitchEffort(_) => false,
         }
     }
@@ -374,9 +311,6 @@ impl App {
             AgentEvent::ToolCallStart { id, name, input } => {
                 let icon = self.tools.icon(&name);
                 let label = self.tools.label(&name, &input);
-                // `push_tool_call` implicitly flushes any in-flight
-                // streaming assistant text — no explicit
-                // `commit_streaming` side channel needed.
                 self.chat.push_tool_call(icon, &label);
                 self.set_active_status(Status::ToolRunning { name: name.clone() });
                 self.pending_calls
@@ -388,10 +322,6 @@ impl App {
                 is_error,
                 metadata,
             } => {
-                // The End arm always pushes a result, even when the
-                // tool didn't set a title — the tool-call label is
-                // the natural fallback. The cached input drives
-                // per-tool structured views (Edit diff, etc.).
                 let pending = self.pending_calls.remove(&id);
                 let view = pending.as_ref().map_or_else(
                     || ToolResultView::Text {
@@ -405,9 +335,6 @@ impl App {
                 let header = result_header(&metadata, pending.as_ref().map(|p| p.label.as_str()));
                 self.chat.push_tool_result_view(&header, view, is_error);
             }
-            // Round boundary drained one queued prompt: pop the FIFO
-            // head and promote it to a chat-history user message so
-            // the preview entry "graduates" into the conversation.
             AgentEvent::PromptDrained(text) => {
                 self.pending_prompts.pop_front();
                 self.chat.push_user_message(text);
@@ -416,31 +343,19 @@ impl App {
             AgentEvent::TurnComplete => {
                 self.finish_turn();
             }
-            // Same teardown as `TurnComplete`, plus a trailing
-            // `(interrupted)` marker so the transcript shows where
-            // the user dropped the turn.
             AgentEvent::Cancelled => {
-                // `push_interrupted_marker` flushes any in-flight
-                // streaming text first, mirroring `push_tool_call`.
                 self.chat.push_interrupted_marker();
                 self.finalize_idle();
             }
-            // Drop titles for sessions other than the one we're showing
-            // — a slow Haiku call straddling `/clear` would otherwise
-            // paint the old session's title onto the fresh one.
             AgentEvent::SessionTitleUpdated { session_id, title } => {
                 if session_id == self.session_info.session_id {
                     self.status_bar.set_title(Some(title));
                 }
             }
-            // Rebind `/status`-visible id; drop the now-stale AI title.
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
             }
-            // The status bar caches its own label; `session_info`
-            // backs `/status` / `/config`. Marketing name derives
-            // from `model_id` so it can't drift.
             AgentEvent::ModelSwitched { model_id, effort } => {
                 let prev_effort = self.session_info.config.effort;
                 let marketing = crate::model::marketing_or_id(&model_id);
@@ -469,27 +384,15 @@ impl App {
         self.finalize_idle();
     }
 
-    /// Shared tail for every turn-end path (normal, error, cancelled):
-    /// drop orphan tool calls, drop the spinner, re-enable input,
-    /// then dispatch any queued follow-up so the next turn fires
-    /// without waiting on the user.
+    /// Resets to idle: clears orphan calls, re-enables input, drains queued prompts.
     fn finalize_idle(&mut self) {
-        // A tool call whose matching `ToolCallEnd` didn't arrive by
-        // turn end is orphaned — either the agent loop dropped the
-        // pairing (bug) or the tool crashed before emitting a result.
-        // Either way, the entry will never be consumed; clearing at
-        // the turn boundary bounds `pending_calls` to at most one
-        // turn's worth of in-flight calls.
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
         self.input.set_enabled(true);
         self.drain_pending_prompt();
     }
 
-    /// Pops the front of [`Self::pending_prompts`] (FIFO) and dispatches
-    /// it as a fresh submit. Cancellation does not auto-clear the
-    /// queue: a user who interrupted typically still wants their
-    /// planned follow-up.
+    /// Pops the front of the queue and dispatches as a fresh submit.
     fn drain_pending_prompt(&mut self) {
         if let Some(prompt) = self.pending_prompts.pop_front() {
             self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
@@ -497,17 +400,11 @@ impl App {
         self.sync_input_queue_hint();
     }
 
-    /// Mirrors [`Self::pending_prompts`] non-emptiness onto the input
-    /// area so its footer hint can swap to the queue-aware row.
     fn sync_input_queue_hint(&mut self) {
         self.input.set_has_queued(!self.pending_prompts.is_empty());
     }
 
-    /// Sets a busy status only when the bar isn't already showing a
-    /// terminal user-acknowledgement (`Cancelling`, `ExitArmed`) —
-    /// otherwise a late stream / tool event buffered in the agent
-    /// channel would overwrite the hint before the user has had time
-    /// to react.
+    /// Sets busy status unless a user-acknowledgement status is showing.
     fn set_active_status(&mut self, status: Status) {
         if !matches!(
             self.status_bar.status(),
@@ -539,9 +436,6 @@ impl App {
         draw_sync(terminal, |frame| {
             chat_area = self.draw_frame(frame);
         })?;
-        // Auto-scroll re-clamps `scroll_offset` against the
-        // freshly-measured content height, so the paint above used a
-        // stale offset; repaint once so new blocks land in-viewport.
         if self.chat.update_layout(chat_area) {
             draw_sync(terminal, |frame| {
                 self.draw_frame(frame);
@@ -558,11 +452,11 @@ impl App {
         let preview_height = self.preview_height();
         let popup_height = self.input.popup_height();
         let chunks = Layout::vertical([
-            Constraint::Length(2),              // status bar (content + border)
-            Constraint::Min(1),                 // chat view
-            Constraint::Length(preview_height), // queued-prompt preview (0 when empty)
-            Constraint::Length(popup_height),   // slash-command popup (0 when hidden)
-            Constraint::Length(input_height),   // input area
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(preview_height),
+            Constraint::Length(popup_height),
+            Constraint::Length(input_height),
         ])
         .split(frame.area());
 
@@ -584,14 +478,10 @@ impl App {
         }
         let visible = self.pending_prompts.len().min(PREVIEW_VISIBLE);
         let overflow = usize::from(self.pending_prompts.len() > PREVIEW_VISIBLE);
-        // Saturate well before u16 overflow: PREVIEW_VISIBLE + 1 fits.
         u16::try_from(visible + overflow).unwrap_or(u16::MAX)
     }
 
     fn render_preview(&self, frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) {
-        // Body width = area minus the chevron gutter on the left and a
-        // one-column right margin so the ellipsis tail never butts
-        // against the screen edge.
         let body_width = usize::from(area.width)
             .saturating_sub(usize::from(USER_PROMPT_PREFIX_WIDTH))
             .saturating_sub(1);
@@ -622,15 +512,8 @@ impl App {
 fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static> {
     use ratatui::style::Modifier;
 
-    // Replace newlines with a glyph so multi-line prompts collapse to
-    // one row without losing the "this is more than it looks" hint.
     let flat = prompt.replace('\n', NEWLINE_GLYPH);
     let display = truncate_to_width(&flat, body_width);
-    // The DIM modifier renders the queued accent at reduced intensity
-    // so the rows read as "yours, in-waiting" rather than competing
-    // with the active input. The +N overflow row reuses theme.dim()
-    // (a different gray) — stylistically intentional: the rows speak
-    // for themselves in queued color, the count is a footnote.
     let style = theme.queued().add_modifier(Modifier::DIM);
     Line::from(vec![
         Span::styled(USER_PROMPT_PREFIX, style),

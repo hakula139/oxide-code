@@ -9,13 +9,7 @@ mod loader;
 
 pub(crate) use loader::{SlotPatch, resolve_theme};
 
-/// A single theme slot — composes optional foreground, optional
-/// background, and modifiers into a ratatui [`Style`].
-///
-/// Most slots are `fg`-only; a few (`surface`, `diff_add`, `diff_del`)
-/// are `bg`-only and leave `fg` unset. Modifiers default to empty
-/// unless the role's purpose is to add style (e.g., `accent` is bold,
-/// `thinking` is italic, `link` is underlined).
+/// A single theme slot — composes optional fg, bg, and modifiers into a [`Style`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,
@@ -24,8 +18,6 @@ pub(crate) struct Slot {
 }
 
 impl Slot {
-    /// Compose this slot's fields into a ratatui [`Style`]. Unset
-    /// `fg` / `bg` leave the terminal's default in place.
     pub(crate) fn style(&self) -> Style {
         let mut style = Style::default().add_modifier(self.modifiers);
         if let Some(fg) = self.fg {
@@ -40,9 +32,7 @@ impl Slot {
 
 // ── Theme ──
 
-/// Canonical slot list. `Theme`, `ThemeFile`, `into_theme`, and
-/// `slot_for_name` are all generated from this — adding or renaming
-/// a slot is a one-place edit.
+/// Canonical slot list. Adding or renaming a slot is a one-place edit.
 macro_rules! for_each_slot {
     ($callback:ident) => {
         $callback! {
@@ -103,9 +93,7 @@ macro_rules! for_each_slot {
 
 pub(super) use for_each_slot;
 
-/// Theme palette. Each slot is one role — `error` is "errors", not
-/// "red". `Default::default()` parses the vendored `themes/mocha.toml`
-/// once on first access.
+/// Theme palette. Each slot is a semantic role, not a raw color.
 macro_rules! define_theme_struct {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Debug, Clone)]
@@ -116,9 +104,6 @@ macro_rules! define_theme_struct {
             )*
         }
 
-        /// Every slot name in declaration order. Drives the test that
-        /// exercises every `slot_for_name` arm without duplicating the
-        /// list.
         #[cfg(test)]
         pub(crate) const SLOT_NAMES: &[&str] = &[ $(stringify!($name),)* ];
     };
@@ -127,8 +112,6 @@ macro_rules! define_theme_struct {
 for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
-    /// Catppuccin Mocha. Parsed once from the embedded TOML; each call
-    /// clones the cached [`Theme`].
     fn default() -> Self {
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
@@ -140,201 +123,137 @@ impl Default for Theme {
 // ── Style Helpers ──
 
 impl Theme {
-    // Text styles
-
-    /// Primary text style (no background override)
     pub(crate) fn text(&self) -> Style {
         self.text.style()
     }
 
-    /// Muted / assistant text
     pub(crate) fn muted(&self) -> Style {
         self.muted.style()
     }
 
-    /// Dimmed metadata
     pub(crate) fn dim(&self) -> Style {
         self.dim.style()
     }
 
-    /// Chat / input / status panel background. Bg-only; default
-    /// `Color::Reset` keeps the terminal background showing through,
-    /// so users on transparent terminals see no change. Override
-    /// `surface = { bg = "..." }` to give the panels an opaque tint.
+    /// Bg-only; `Color::Reset` keeps the terminal background transparent.
     pub(crate) fn surface(&self) -> Style {
         self.surface.style()
     }
 
-    // Semantic accents
-
-    /// Bold accent (highlights, active borders)
     pub(crate) fn accent(&self) -> Style {
         self.accent.style()
     }
 
-    /// User message bar and icon
     pub(crate) fn user(&self) -> Style {
         self.user.style()
     }
 
-    /// Queued user prompts in the preview panel between chat and input
     pub(crate) fn queued(&self) -> Style {
         self.queued.style()
     }
 
-    /// Assistant message bar and icon
     pub(crate) fn assistant(&self) -> Style {
         self.assistant.style()
     }
 
-    // Status indicators
-
-    /// Info indicator (in-progress / neutral signals)
     pub(crate) fn info(&self) -> Style {
         self.info.style()
     }
 
-    /// Success indicator
     pub(crate) fn success(&self) -> Style {
         self.success.style()
     }
 
-    /// Warning indicator — caution / non-fatal issues (e.g.
-    /// [`Status::ExitArmed`](super::components::status::Status::ExitArmed)).
     pub(crate) fn warning(&self) -> Style {
         self.warning.style()
     }
 
-    /// Error indicator
     pub(crate) fn error(&self) -> Style {
         self.error.style()
     }
 
-    // Diff row backgrounds
-
-    /// Bg-only style for added diff rows. Patched onto each span of a
-    /// `+` row so the green tint extends across the row, including the
-    /// trailing pad-to-width filler.
+    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_add_row(&self) -> Style {
         Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
     }
 
-    /// Bg-only style for deleted diff rows. Mirror of [`diff_add_row`].
-    ///
-    /// [`diff_add_row`]: Self::diff_add_row
+    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_del_row(&self) -> Style {
         Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
     }
 
-    // Composite helpers
-
-    /// Left border for tool call blocks
     pub(crate) fn tool_border(&self) -> Style {
         self.tool_border.style()
     }
 
-    /// Tool icon accent (non-bold)
     pub(crate) fn tool_icon(&self) -> Style {
         self.tool_icon.style()
     }
 
-    /// Thinking text (dimmed italic)
     pub(crate) fn thinking(&self) -> Style {
         self.thinking.style()
     }
 
-    /// Styled pipe separator span (`" │ "`)
     pub(crate) fn separator_span(&self) -> Span<'static> {
         Span::styled(" │ ", self.separator())
     }
 
-    /// Status bar separator style (dimmed pipe)
     pub(crate) fn separator(&self) -> Style {
         self.separator.style()
     }
 
-    /// Border style for focused components
     pub(crate) fn border_focused(&self) -> Style {
         self.border_focused.style()
     }
 
-    /// Border style for unfocused components — default-aligned with
-    /// [`dim`] but independently overridable.
-    ///
-    /// [`dim`]: Self::dim
     pub(crate) fn border_unfocused(&self) -> Style {
         self.border_unfocused.style()
     }
 
-    // Markdown rendering
-
-    /// H1 — bold + underlined (most prominent heading)
     pub(crate) fn heading_h1(&self) -> Style {
         self.heading_h1.style()
     }
 
-    /// H2 — bold
     pub(crate) fn heading_h2(&self) -> Style {
         self.heading_h2.style()
     }
 
-    /// H3 — bold italic
     pub(crate) fn heading_h3(&self) -> Style {
         self.heading_h3.style()
     }
 
-    /// H4–H6 — italic (demoted minor headings)
     pub(crate) fn heading_minor(&self) -> Style {
         self.heading_minor.style()
     }
 
-    /// Inline code (`` `code` ``) — peach fg, no fill. A surface bg
-    /// reads as a heavy block on transparent terminals.
     pub(crate) fn inline_code(&self) -> Style {
         self.inline_code.style()
     }
 
-    /// Fenced code blocks with no recognized language.
     pub(crate) fn code(&self) -> Style {
         self.code.style()
     }
 
-    /// Markdown link URL — accent color with underline
     pub(crate) fn link(&self) -> Style {
         self.link.style()
     }
 
-    /// Blockquote marker (`> `) — uses the palette's success green as a
-    /// distinctive accent; not a semantic "success" signal.
     pub(crate) fn blockquote(&self) -> Style {
         self.blockquote.style()
     }
 
-    /// List item bullet / number marker — accent color
     pub(crate) fn list_marker(&self) -> Style {
         self.list_marker.style()
     }
 
-    /// Markdown horizontal rule — default-aligned with [`dim`] but
-    /// independently overridable.
-    ///
-    /// [`dim`]: Self::dim
     pub(crate) fn horizontal_rule(&self) -> Style {
         self.horizontal_rule.style()
     }
 
-    /// Table header cell — default-aligned with [`heading_h2`] but
-    /// independently overridable.
-    ///
-    /// [`heading_h2`]: Self::heading_h2
     pub(crate) fn table_header(&self) -> Style {
         self.table_header.style()
     }
 
-    /// Table border glyphs — default-aligned with [`dim`] but
-    /// independently overridable.
-    ///
-    /// [`dim`]: Self::dim
     pub(crate) fn table_border(&self) -> Style {
         self.table_border.style()
     }
@@ -421,9 +340,6 @@ mod tests {
 
     #[test]
     fn diff_row_helpers_set_only_background() {
-        // Bg-only is load-bearing: helpers are patched onto each span
-        // of a diff row, so setting fg here would override the
-        // success / error / muted fg the row composes from.
         let t = Theme::default();
 
         let add = t.diff_add_row();
@@ -548,10 +464,6 @@ mod tests {
 
     // ── Default theme cohesion ──
 
-    /// `border_unfocused`, `horizontal_rule`, `table_border` are
-    /// independent slots but ship aligned with `dim` in the default
-    /// theme. If a future palette change diverges any from `dim` by
-    /// accident, this test surfaces it.
     #[test]
     fn default_dim_cluster_matches_dim() {
         let t = Theme::default();
@@ -561,8 +473,6 @@ mod tests {
         assert_eq!(t.table_border(), dim);
     }
 
-    /// Table headers and H2 ship visually identical in the default
-    /// theme. Independent slots, aligned defaults.
     #[test]
     fn default_table_header_matches_heading_h2() {
         let t = Theme::default();

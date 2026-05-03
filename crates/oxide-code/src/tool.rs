@@ -1,10 +1,4 @@
 //! Tool dispatch.
-//!
-//! The [`Tool`] trait defines what the agent can invoke; the concrete
-//! tools live in submodules (`bash`, `edit`, `glob`, `grep`, `read`,
-//! `write`). [`ToolRegistry`] holds the set exposed to the model
-//! along with its JSON schema; [`ToolOutput`] carries the wire result
-//! back to the model plus structured [`ToolMetadata`] for UI display.
 
 pub(crate) mod bash;
 pub(crate) mod edit;
@@ -27,7 +21,7 @@ use crate::util::text::ELLIPSIS;
 
 // ── Tool Definition ──
 
-/// Schema sent to the Anthropic API to describe an available tool.
+/// Tool schema exposed to the Anthropic API.
 #[derive(Clone, Serialize)]
 pub(crate) struct ToolDefinition {
     pub(crate) name: &'static str,
@@ -38,15 +32,6 @@ pub(crate) struct ToolDefinition {
 // ── Tool Output ──
 
 /// Result returned from a tool execution to the agent loop.
-///
-/// `content` is the text sent back to the model as the `tool_result`.
-/// `metadata` carries structured data for UI display and logging — it is
-/// never sent to the model.
-///
-/// `is_error` signals an infrastructure failure (timeout, spawn error, invalid
-/// input) — not a semantic failure in the command itself. Nonzero exit codes,
-/// missing files, and regex mismatches are reported in `content` with
-/// `is_error: false` so the model can interpret severity from context.
 pub(crate) struct ToolOutput {
     pub(crate) content: String,
     pub(crate) is_error: bool,
@@ -54,58 +39,26 @@ pub(crate) struct ToolOutput {
 }
 
 /// Structured data for UI display and logging, not sent to the model.
-///
-/// Every tool should set `title` to a concise, human-readable summary
-/// (e.g., "Read Cargo.toml", "Created src/main.rs", "3 matches in 2 files").
-/// The TUI renders this as the one-line label for each tool invocation.
-///
-/// Serializable because the session writer persists this alongside
-/// each tool result (via [`Entry::ToolResultMetadata`](crate::session::entry::Entry))
-/// so resumed sessions see the same rendered shape as live — without
-/// polluting the API-facing [`ContentBlock::ToolResult`](crate::message::ContentBlock)
-/// wire format with TUI-only fields.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ToolMetadata {
-    /// Short label for TUI display (5–15 words).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
-    /// Process exit code, present only for the bash tool. Read by
-    /// the `PartialEq` derive (used to gate persistence of empty
-    /// metadata) but not yet surfaced in the rendered view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) exit_code: Option<i32>,
-    /// Number of replacements actually made, present only for the
-    /// edit tool when `replace_all` matched multiple occurrences.
-    /// Consumed by [`ToolResultView::Diff`] so the "N occurrences
-    /// replaced" footer can be driven structurally instead of
-    /// parsed from prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replacements: Option<usize>,
-    /// Per-match diff hunks with real file line numbers, present only
-    /// for the edit tool. Consumed by [`ToolResultView::Diff`] so the
-    /// renderer can show line-numbered, location-aware diffs instead
-    /// of a placeholder pair of strings. Resumed sessions whose JSONL
-    /// predates this field fall back to a synthesized single chunk
-    /// inside [`crate::tool::edit::EditTool::result_view`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
-    /// Unbounded match count when a tool capped returned rows; lets
-    /// the renderer show "X of N" without re-parsing prose footers.
-    /// Set by per-tool view-shape caps (glob's `MAX_RESULTS`, etc.).
+    /// Unbounded match count when a tool capped returned rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_total: Option<usize>,
-    /// Pre-cap byte count when [`ToolRegistry::run`] applied the
-    /// [`MAX_OUTPUT_BYTES`] safety net. Distinct from `truncated_total`
-    /// — the units don't share a renderer, so encoding them in
-    /// separate fields keeps glob's "X of N matches" from accidentally
-    /// rendering a byte count.
+    /// Pre-cap byte count when the registry byte safety net fired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) truncated_bytes: Option<usize>,
 }
 
 impl ToolOutput {
-    /// Converts a `Result<String, String>` into a `ToolOutput` with default
-    /// metadata. `Err` maps to `is_error: true`.
+    /// Converts `Ok` / `Err` into a `ToolOutput` with default metadata.
     pub(crate) fn from_result(result: Result<String, String>) -> Self {
         match result {
             Ok(content) => Self {
@@ -121,32 +74,25 @@ impl ToolOutput {
         }
     }
 
-    /// Fluent helper to attach a display title; chains after
-    /// [`from_result`](Self::from_result) at the construction site.
+    /// Attaches a display title.
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
         self
     }
 
-    /// Fluent helper to record a replacement count; only meaningful
-    /// for the edit tool with `replace_all` hitting multiple matches.
+    /// Records a replacement count (edit tool).
     pub(crate) fn with_replacements(mut self, count: usize) -> Self {
         self.metadata.replacements = Some(count);
         self
     }
 
-    /// Fluent helper to attach the per-match diff hunks; only
-    /// meaningful for the edit tool's success path. The chunks carry
-    /// the real file line numbers so the diff renderer can show where
-    /// each match landed without re-reading the (possibly already
-    /// modified) file at render time.
+    /// Attaches per-match diff hunks (edit tool).
     pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
         self
     }
 
-    /// Fluent helper to record the unbounded match count for a
-    /// truncated tool result.
+    /// Records the unbounded match count for a truncated result.
     pub(crate) fn with_truncated_total(mut self, total: usize) -> Self {
         self.metadata.truncated_total = Some(total);
         self
@@ -155,49 +101,26 @@ impl ToolOutput {
 
 // ── Tool Result View ──
 
-/// Per-tool shape of a completed tool call's body, produced by
-/// [`Tool::result_view`] and rendered by the TUI's tool-result block.
-///
-/// This enum lives here — not in the TUI layer — so per-tool parsing
-/// (Edit's diff extraction, Read's line-numbered excerpts, Grep's
-/// per-file matches) stays in the module that owns each tool's
-/// input/output contract. The TUI still owns rendering; this is pure data.
+/// Per-tool structured shape of a completed tool call's body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolResultView {
-    /// Default shape — the raw tool output, shown as a truncated
-    /// monospace block with a `+N lines` footer when it overflows.
-    Text { content: String },
-    /// Read tool — renders as a line-numbered excerpt with path/range
-    /// context while leaving the model-facing output unchanged.
+    Text {
+        content: String,
+    },
     ReadExcerpt {
         path: String,
         lines: Vec<ReadExcerptLine>,
         total_lines: usize,
     },
-    /// Edit tool — `-` old / `+` new unified diff with real file
-    /// line numbers. Live invariant: chunks share trimmed content
-    /// (one chunk for a single edit, one per match for `replace_all`).
-    /// `replacements` matches `chunks.len()` on the live path; resumed
-    /// sessions predating structured chunks may carry a count larger
-    /// than 1 against a single synthesized chunk.
     Diff {
         chunks: Vec<DiffChunk>,
         replace_all: bool,
         replacements: usize,
     },
-    /// Grep content-mode result. `truncated` mirrors grep's "Results
-    /// limited to N lines" footer. Other modes and outputs with skipped-
-    /// file warnings fall through to [`Text`].
     GrepMatches {
         groups: Vec<GrepFileGroup>,
         truncated: bool,
     },
-    /// Glob result — flat list of cwd-relative paths. `pattern` is the
-    /// input glob echoed back so the body can stay self-describing
-    /// after the status header scrolls away. `total` preserves the
-    /// unbounded match count from glob's `MAX_RESULTS` cap so the
-    /// renderer can show "X more matched" when the tool itself
-    /// truncated; equals `files.len()` otherwise.
     GlobFiles {
         pattern: String,
         files: Vec<String>,
@@ -205,45 +128,35 @@ pub(crate) enum ToolResultView {
     },
 }
 
-/// One line in a structured `read` result view.
+/// One line in a `ReadExcerpt` view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadExcerptLine {
     pub(crate) number: usize,
     pub(crate) text: String,
 }
 
-/// One numbered line on either side of a structured `edit` diff.
-/// Persisted in [`ToolMetadata::diff_chunks`] so resumed sessions
-/// keep real file line numbers — not a render-only view type.
+/// One numbered line on either side of a diff hunk.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DiffLine {
     pub(crate) number: usize,
     pub(crate) text: String,
 }
 
-/// A single matched edit hunk — `-` and `+` line spans for one file
-/// location. Producer emits one chunk per match site (always one for
-/// non-`replace_all`).
-///
-/// Chunks are emitted boundary-trimmed by
-/// `crate::tool::edit::trim_chunk`: surviving entries are the
-/// user-visible delta. Consumers must not re-trim.
+/// A single boundary-trimmed edit hunk. Consumers must not re-trim.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DiffChunk {
     pub(crate) old: Vec<DiffLine>,
     pub(crate) new: Vec<DiffLine>,
 }
 
-/// One file's match block in a grep result view. Lines mix matches
-/// (`:` in grep output) and surrounding context (`-`).
+/// One file's match block in a grep result view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepFileGroup {
     pub(crate) path: String,
     pub(crate) lines: Vec<GrepMatchLine>,
 }
 
-/// One row in a [`GrepFileGroup`]. `is_match: false` flags context
-/// lines so renderers can dim them.
+/// One row in a [`GrepFileGroup`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepMatchLine {
     pub(crate) number: usize,
@@ -254,32 +167,20 @@ pub(crate) struct GrepMatchLine {
 // ── Tool Trait ──
 
 /// A tool that the agent can invoke.
-///
-/// Uses `Pin<Box<dyn Future>>` for the async `run` method instead of `async fn`
-/// so the trait remains object-safe (`Box<dyn Tool>`).
 pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
 
-    /// Single-character display icon for TUI / stdio rendering.
     fn icon(&self) -> &'static str {
         "⟡"
     }
 
-    /// Returns the most relevant input field as a one-line label
-    /// (e.g., the command for bash, the `file_path` for read / write / edit).
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         _ = input;
         None
     }
 
-    /// Returns the human-readable tool-call label shown in the TUI,
-    /// e.g. `Grep(fn foo)`, `Read(Cargo.toml)`. The default capitalizes
-    /// [`Tool::name`] and wraps [`summarize_input`](Self::summarize_input)
-    /// in parentheses; tools whose icon + argument already read as a
-    /// complete line (bash's `$ <command>`) override to return the bare
-    /// argument instead.
     fn summarize_call(&self, input: &serde_json::Value) -> String {
         let label = title_case(self.name());
         match self.summarize_input(input) {
@@ -288,23 +189,7 @@ pub(crate) trait Tool: Send + Sync {
         }
     }
 
-    /// Optional structured view of a completed tool call's output,
-    /// used by the TUI in place of the default truncated text block.
-    /// `input` is the original tool-call arguments (already used by
-    /// `run`); `content` is the success-path `ToolOutput::content`;
-    /// `metadata` is the same `ToolMetadata` the tool attached in
-    /// `run` (title, exit code, replacements, ...) so tools can drive
-    /// the view structurally instead of re-parsing `content`.
-    ///
-    /// Returning `None` — the default — falls back to [`ToolResultView::Text`].
-    /// Tools should also return `None` when the input shape doesn't
-    /// match their expectations, so malformed calls degrade gracefully
-    /// rather than panic.
-    ///
-    /// Not called for error outputs: [`ToolRegistry::result_view`]
-    /// short-circuits `is_error` to `Text` centrally since every
-    /// tool's error message is free-form prose, not a structured
-    /// shape.
+    /// Returns `None` to fall back to [`ToolResultView::Text`].
     fn result_view(
         &self,
         _input: &serde_json::Value,
@@ -314,10 +199,6 @@ pub(crate) trait Tool: Send + Sync {
         None
     }
 
-    /// Runs the tool. Output flows through [`ToolRegistry::run`],
-    /// which applies the byte safety net — implementations should not
-    /// pre-truncate by bytes here, only by view-shape (row caps,
-    /// per-line caps).
     fn run(
         &self,
         input: serde_json::Value,
@@ -332,20 +213,15 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
-/// Default icon used when a tool name is unknown to the registry.
+/// Fallback icon for unknown tool names.
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 
-/// Extracts a string field from a tool input object. Helper for per-tool
-/// [`Tool::summarize_input`] implementations that simply pluck one key.
+/// Extracts a string field from a tool input object.
 pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// Capitalizes the first character of an ASCII tool name for display
-/// (`"grep"` → `"Grep"`). Returns an empty string for empty input.
-/// Used by the default [`Tool::summarize_call`] implementation and by
-/// overrides that still want the default fallback shape when input
-/// fields are missing (see [`BashTool::summarize_call`]).
+/// Capitalizes the first character of a tool name for display.
 pub(crate) fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -376,28 +252,15 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.definition()).collect()
     }
 
-    /// Looks up the display icon for `name`, falling back to
-    /// [`DEFAULT_TOOL_ICON`] when the tool is not registered.
     pub(crate) fn icon(&self, name: &str) -> &'static str {
         self.get(name).map_or(DEFAULT_TOOL_ICON, Tool::icon)
     }
 
-    /// Returns the display label for a tool call. Resolves `name` to
-    /// a registered [`Tool`] and delegates to [`Tool::summarize_call`];
-    /// falls back to the raw `name` for tools not in the registry so
-    /// callers always get a non-empty label to render.
     pub(crate) fn label(&self, name: &str, input: &serde_json::Value) -> String {
         self.get(name)
             .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 
-    /// Dispatches a tool call by name and applies the byte safety net.
-    /// Unknown names return an `is_error: true` payload; otherwise the
-    /// tool's output flows through [`cap_output`], stamping
-    /// [`ToolMetadata::truncated_bytes`] when the cap fires. Errors are
-    /// capped too — a 200 KB stack trace is truncated identically.
-    /// Single agent-side dispatch entry point — bypassing it via
-    /// [`Self::get`] + [`Tool::run`] would skip the cap.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
             return ToolOutput {
@@ -415,16 +278,6 @@ impl ToolRegistry {
         output
     }
 
-    /// Builds the structured [`ToolResultView`] for a completed tool
-    /// call. Falls back to [`ToolResultView::Text`] in every case a
-    /// per-tool renderer cannot cleanly represent:
-    ///
-    /// - `is_error`: error outputs carry the failure message as free
-    ///   text; pretending they're a diff swaps signal for a lie.
-    /// - Unregistered tool name: no renderer to consult.
-    /// - [`Tool::result_view`] returns `None`: the tool has no
-    ///   structured view yet, or the input shape wasn't what the
-    ///   renderer expected.
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -447,40 +300,17 @@ impl ToolRegistry {
 }
 
 // ── Output Cap ──
-//
-// Two layers, deliberately separate:
-//
-// 1. Per-tool view-shape budgets — row caps (read's `DEFAULT_LINE_LIMIT`,
-//    grep's match cap, glob's `MAX_RESULTS`) and per-line caps
-//    (`MAX_LINE_LENGTH`). These live in each tool module and capture
-//    "how much of this is useful to show".
-// 2. The byte ceiling below, applied centrally by [`ToolRegistry::run`].
-//    Acts as a safety net for any output that slips past the per-tool
-//    caps; tools should not re-implement byte truncation.
 
-/// Cap on tool output size. Prevents flooding the LLM context window.
-/// Roughly 32K tokens at ~4 chars / token.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
-/// Upper bound on the bytes [`cap_output`] inserts between the head
-/// and tail halves; bounds the slack [`MAX_OUTPUT_BYTES`] can be
-/// exceeded by once the separator and byte count are formatted in.
 const TRUNCATION_OVERHEAD: usize = 80;
 
-/// Caps `content` at [`MAX_OUTPUT_BYTES`], keeping the first and last
-/// halves so the model sees both setup context and final outcome.
-/// Returns the original byte count when truncation fired so callers
-/// can record the pre-cap size. No-op when the omitted region is
-/// smaller than the inserted separator — truncating would otherwise
-/// grow the output.
+/// Caps `content` at [`MAX_OUTPUT_BYTES`], keeping head and tail halves.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
     }
 
-    // `MAX_OUTPUT_BYTES` is even and `content.len() > MAX_OUTPUT_BYTES`,
-    // so `head_end ≤ half ≤ content.len() - half ≤ tail_start`; the
-    // subtraction below cannot underflow.
     let half = MAX_OUTPUT_BYTES / 2;
     let head_end = content.floor_char_boundary(half);
     let tail_start = content.floor_char_boundary(content.len() - half);
@@ -504,8 +334,7 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes raw JSON into a tool's input struct, returning a
-/// [`ToolOutput`] error that can be sent directly back to the model.
+/// Deserializes raw JSON into a tool's input struct.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
@@ -520,17 +349,13 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Utilities ──
 
-/// Returns `search_path` as a [`PathBuf`] if provided, otherwise the current
-/// working directory.
+/// Resolves `search_path` or falls back to the current working directory.
 pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
     Ok(search_path.map_or(cwd, PathBuf::from))
 }
 
-/// Returns a relative path string when `path` is inside the current working
-/// directory, otherwise the absolute path. Falls back to `path` when the cwd
-/// cannot be read.
 pub(crate) fn display_cwd_path(path: &str) -> String {
     let cwd = std::env::current_dir().ok();
     display_cwd_path_from(path, cwd.as_deref())
@@ -543,7 +368,7 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
     }
 }
 
-/// Returns a tool-call label using a cwd-relative path argument when possible.
+/// Returns a tool-call label with a cwd-relative path argument.
 pub(crate) fn summarize_path_call(
     tool_name: &str,
     input: &serde_json::Value,
@@ -556,14 +381,10 @@ pub(crate) fn summarize_path_call(
     }
 }
 
-/// Returns a relative path string when `path` is inside `base`, otherwise the
-/// absolute path. When stripping the prefix yields an empty path (i.e.,
-/// `path == base`), falls back to the filename. Saves tokens in tool output
-/// and matches how developers think about file locations.
+/// Returns a cwd-relative path, or absolute if outside `base`.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
-            // path == base (single-file search): show the filename
             return path.file_name().map_or_else(
                 || path.to_string_lossy().into_owned(),
                 |n| n.to_string_lossy().into_owned(),
@@ -574,9 +395,7 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Extracts the filename component from a path string, falling back to the
-/// full path when no filename is present. Used by file tools to generate
-/// concise TUI titles.
+/// Extracts the filename component, falling back to the full path.
 pub(crate) fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
@@ -589,24 +408,15 @@ pub(crate) fn file_name(path: &str) -> &str {
 const BINARY_CHECK_SIZE: usize = 8192;
 
 /// Detects binary files by scanning for null bytes in the first 8 KB.
-/// False negatives are possible for binary formats that avoid nulls (e.g.,
-/// base64-encoded data), but this catches ELF, Mach-O, images, and most
-/// compiled output cheaply.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
 
 // ── File Walking ──
 
-/// Depth cap for file-tree walks — guards against pathological trees
-/// (generated code, deep artefact dumps) that `ignore` doesn't filter.
 const MAX_WALK_DEPTH: usize = 64;
 
 /// Returns a gitignore-aware iterator over regular files under `base`.
-///
-/// Respects `.gitignore`, `.ignore`, `.git/info/exclude`, and global ignore
-/// rules. Stays within the same filesystem, caps depth at [`MAX_WALK_DEPTH`],
-/// silently skips permission errors and symlink loops.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)
@@ -616,8 +426,7 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
-/// Extracts the modification time from a walker entry, falling back to
-/// `UNIX_EPOCH` when metadata is unavailable.
+/// Extracts the modification time, falling back to `UNIX_EPOCH`.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -628,9 +437,7 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
-/// Converts a byte count to megabytes for display. Centralizes the
-/// `clippy::cast_precision_loss` suppression — every file-size cap in
-/// this crate is well below 2^53 bytes, so the f64 cast is exact.
+/// Converts a byte count to megabytes for display.
 pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     #[expect(
         clippy::cast_precision_loss,
@@ -640,16 +447,10 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     mb
 }
 
-/// Per-line character cap for read and grep output. Long lines (minified
-/// bundles, base64 blobs) rarely help the model and crowd out useful
-/// context; 500 chars captures ~80 code columns with margin for structured
-/// output like `rg --vimgrep` locations.
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
-/// Truncates a line beyond [`MAX_LINE_LENGTH`] characters, appending a
-/// `[N chars]` suffix. Returns a borrowed slice when no truncation is needed.
+/// Truncates a line beyond [`MAX_LINE_LENGTH`] characters.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
-    // Fast path: fewer bytes than the char cap means we can't exceed the cap.
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
     }
@@ -657,7 +458,6 @@ pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if total_chars <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
     }
-    // `nth(MAX_LINE_LENGTH)` is Some: we just proved `total_chars > MAX_LINE_LENGTH`.
     let boundary = line
         .char_indices()
         .nth(MAX_LINE_LENGTH)
@@ -683,7 +483,6 @@ mod tests {
     use super::*;
     use crate::file_tracker::testing::tracker;
 
-    /// Every registered tool, to parameterize trait-contract tests.
     fn all_tools() -> Vec<Box<dyn Tool>> {
         let tracker = tracker();
         vec![
@@ -732,8 +531,6 @@ mod tests {
 
     #[test]
     fn tool_catalog_names_and_icons_are_unique() {
-        // Duplicate names collide in registry lookup; duplicate icons
-        // make the TUI tool-call rows indistinguishable.
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.name()).collect();
         assert_eq!(names.len(), tools.len(), "duplicate name");
@@ -743,7 +540,6 @@ mod tests {
 
     #[test]
     fn tool_catalog_icons_match_the_published_prefix_set() {
-        // Pins the published icons — see docs / roadmap TUI section.
         let expected = [
             ("bash", "$"),
             ("edit", "✎"),
@@ -764,8 +560,6 @@ mod tests {
 
     #[test]
     fn tool_summarize_input_plucks_the_primary_field() {
-        // Table of (tool, input JSON, expected summary). Each entry pins
-        // which field the TUI's tool-call label sources from.
         let cases = [
             ("bash", serde_json::json!({"command": "ls"}), Some("ls")),
             (
@@ -815,10 +609,6 @@ mod tests {
 
     #[test]
     fn tool_summarize_call_wraps_arg_in_title_cased_name() {
-        // Default format: `Grep(fn foo)`, `Read(/a/b.rs)` — clearly
-        // identifies which tool is running even without the icon.
-        // Bash overrides to the bare command (the `$` icon carries the
-        // "shell prompt" semantics; wrapping in `Bash(...)` is redundant).
         let cases = [
             ("bash", serde_json::json!({"command": "ls"}), "ls"),
             (
@@ -852,10 +642,6 @@ mod tests {
 
     #[test]
     fn tool_summarize_call_falls_back_to_bare_name_when_arg_missing() {
-        // Missing primary field → every tool (bash included) falls
-        // back to the title-cased tool name. Without this, bash would
-        // render as a bare `$ ` in the TUI; `$ Bash` keeps the status
-        // line readable even on malformed input.
         let tools = all_tools();
         for t in &tools {
             let got = t.summarize_call(&serde_json::json!({}));
@@ -906,8 +692,6 @@ mod tests {
     fn title_case_capitalizes_first_char_only() {
         assert_eq!(title_case("grep"), "Grep");
         assert_eq!(title_case("bash"), "Bash");
-        // Already-capitalized / empty / single-char inputs pass through
-        // without panicking or mangling subsequent characters.
         assert_eq!(title_case("Foo"), "Foo");
         assert_eq!(title_case(""), "");
         assert_eq!(title_case("a"), "A");
@@ -972,9 +756,6 @@ mod tests {
 
     #[test]
     fn label_unknown_tool_falls_back_to_raw_name() {
-        // Unknown tool → the raw API name keeps the UI showing
-        // *something*. Pinned so a future "defer to first registered
-        // tool" bug would flip this to a mismatched label.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let input = serde_json::json!({"command": "echo hi"});
         assert_eq!(registry.label("nonexistent", &input), "nonexistent");
@@ -982,9 +763,6 @@ mod tests {
 
     // ── ToolRegistry::run ──
 
-    /// Helper: writes a temp file whose `read` output trips the byte
-    /// cap. 500 lines × 600 chars × `truncate_line` (caps each at 500)
-    /// ≈ 250 KB, comfortably above [`MAX_OUTPUT_BYTES`].
     fn write_oversize_file() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
@@ -1033,11 +811,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_byte_cap_on_read_falls_through_to_text_view() {
-        // When the byte cap fires on a read, the trailing
-        // `(Showing lines ...)` footer is replaced by the truncation
-        // separator — `read_excerpt_view` can't parse it, so
-        // `result_view` must drop to `Text` instead of panicking or
-        // mis-rendering.
         let (_dir, path) = write_oversize_file();
         let registry = ToolRegistry::new(vec![Box::new(ReadTool::new(tracker()))]);
         let input = serde_json::json!({"file_path": path.to_str().unwrap()});
@@ -1066,10 +839,6 @@ mod tests {
 
     #[test]
     fn result_view_delegates_to_tool_for_structured_output() {
-        // Edit was the first registered override; routing through
-        // the registry must produce the same `Diff` the tool owns —
-        // including the field values, so a mutation returning an
-        // empty diff wouldn't pass.
         let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
@@ -1164,9 +933,6 @@ mod tests {
 
     #[test]
     fn result_view_short_circuits_errors_to_text() {
-        // Error outputs are prose ("old_string not found ..."); rendering
-        // them as a diff would hide the failure. The short-circuit lives
-        // in the registry so individual tools don't each re-implement it.
         let registry = ToolRegistry::new(vec![Box::new(EditTool::new(tracker()))]);
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
@@ -1204,10 +970,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_to_text_when_tool_has_no_structured_view() {
-        // Bash has no `result_view` override yet — free-form shell
-        // output renders as the default truncated text block. Pin
-        // the full content so a mutation returning an empty Text
-        // wouldn't pass.
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let metadata = ToolMetadata::default();
         let view = registry.result_view(
@@ -1236,9 +998,6 @@ mod tests {
 
     #[test]
     fn cap_output_keeps_head_and_tail() {
-        // Sentinels at each end prove head + tail are kept; the
-        // separator lands strictly between them; original_len echoes
-        // the pre-cap byte count.
         let head = "HEAD_SENTINEL\n";
         let tail = "TAIL_SENTINEL\n";
         let filler_len = MAX_OUTPUT_BYTES * 2 - head.len() - tail.len();
@@ -1263,9 +1022,6 @@ mod tests {
 
     #[test]
     fn cap_output_multibyte_at_split_boundary() {
-        // 4-byte emoji straddles the head split. floor_char_boundary
-        // must drop it from both halves so it never appears in the
-        // result.
         let half = MAX_OUTPUT_BYTES / 2;
         let emoji = "🦀"; // 4 bytes
         let prefix_len = half - 2;
@@ -1286,7 +1042,6 @@ mod tests {
 
     #[test]
     fn cap_output_barely_over_limit_unchanged() {
-        // Head + tail halves overlap; truncating would grow the output.
         let original = "a".repeat(MAX_OUTPUT_BYTES + 1);
         let (out, original_len) = cap_output(original.clone());
         assert_eq!(out, original);
@@ -1354,8 +1109,6 @@ mod tests {
         let long_line = "x".repeat(MAX_LINE_LENGTH + 100);
         let result = truncate_line(&long_line);
         let suffix = format!("... [{} chars]", MAX_LINE_LENGTH + 100);
-        // Pin the exact shape: MAX_LINE_LENGTH x's, then the suffix — no
-        // off-by-one slack that would hide a truncation-boundary regression.
         assert_eq!(result.len(), MAX_LINE_LENGTH + suffix.len());
         assert_eq!(&result[..MAX_LINE_LENGTH], "x".repeat(MAX_LINE_LENGTH));
         assert_eq!(&result[MAX_LINE_LENGTH..], suffix);
@@ -1363,16 +1116,11 @@ mod tests {
 
     #[test]
     fn truncate_line_multibyte_safe() {
-        // The 🦀 sits at char `MAX_LINE_LENGTH - 2`, straddling the byte
-        // boundary a naive cut at `MAX_LINE_LENGTH` bytes would land in.
         let mut line = "a".repeat(MAX_LINE_LENGTH - 2);
         line.push('🦀');
         line.push_str(&"b".repeat(100));
         let result = truncate_line(&line);
 
-        // Prefix is exactly the first MAX_LINE_LENGTH chars of the body:
-        // (MAX_LINE_LENGTH - 2) a's, then 🦀, then a single b — no partial
-        // emoji bytes, no over-read. Suffix reports the original char count.
         let (prefix, suffix) = result.split_once("... [").unwrap();
         let expected_prefix = "a".repeat(MAX_LINE_LENGTH - 2) + "🦀" + "b";
         assert_eq!(prefix, expected_prefix);
@@ -1382,11 +1130,6 @@ mod tests {
 
     #[test]
     fn truncate_line_multibyte_under_char_cap_unchanged() {
-        // Regression: MAX_LINE_LENGTH é's take 2*MAX_LINE_LENGTH bytes,
-        // tripping a byte-length gate but staying within the char cap.
-        // A bad implementation returns `"... [N chars]"` with an empty
-        // prefix (silent data loss); the correct behavior is a no-op
-        // borrow.
         let line = "é".repeat(MAX_LINE_LENGTH);
         let result = truncate_line(&line);
         assert!(matches!(result, Cow::Borrowed(_)));
