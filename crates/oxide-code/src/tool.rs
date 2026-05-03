@@ -436,13 +436,12 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 // ── Formatting ──
 
 /// Converts a byte count to megabytes for display.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
+)]
 pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
-    )]
-    let mb = bytes as f64 / (1024.0 * 1024.0);
-    mb
+    bytes as f64 / (1024.0 * 1024.0)
 }
 
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
@@ -594,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_summarize_input_returns_none_when_primary_field_missing() {
+    fn tool_summarize_input_is_none_when_primary_field_missing() {
         let tools = all_tools();
         for t in &tools {
             assert!(
@@ -698,7 +697,7 @@ mod tests {
     // ── ToolRegistry::get ──
 
     #[test]
-    fn get_returns_registered_tool() {
+    fn get_finds_registered_tool() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         assert_eq!(registry.get("bash").unwrap().name(), "bash");
     }
@@ -712,7 +711,7 @@ mod tests {
     // ── ToolRegistry::definitions ──
 
     #[test]
-    fn definitions_returns_tool_with_valid_schema() {
+    fn definitions_produces_tool_with_valid_schema() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let defs = registry.definitions();
         assert_eq!(defs.len(), 1);
@@ -825,7 +824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_unknown_tool_returns_error_payload() {
+    async fn run_unknown_tool_errors() {
         let registry = ToolRegistry::new(vec![Box::new(BashTool)]);
         let output = registry.run("nonexistent", serde_json::json!({})).await;
         assert!(output.is_error);
@@ -1049,13 +1048,13 @@ mod tests {
     // ── resolve_base_dir ──
 
     #[test]
-    fn resolve_base_dir_some_returns_given_path() {
+    fn resolve_base_dir_some_uses_given_path() {
         let result = resolve_base_dir(Some("/tmp/foo")).unwrap();
         assert_eq!(result, PathBuf::from("/tmp/foo"));
     }
 
     #[test]
-    fn resolve_base_dir_none_returns_cwd() {
+    fn resolve_base_dir_none_uses_cwd() {
         let result = resolve_base_dir(None).unwrap();
         assert_eq!(result, std::env::current_dir().unwrap());
     }
@@ -1077,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn display_path_same_path_returns_filename() {
+    fn display_path_same_path_is_filename() {
         let base = Path::new("/home/user/project/src/main.rs");
         let path = Path::new("/home/user/project/src/main.rs");
         assert_eq!(display_path(path, base), "main.rs");
