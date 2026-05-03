@@ -1,11 +1,11 @@
 //! `/model` — list selectable models or swap the active one mid-session.
 //!
 //! Bare `/model` lists the curated [`SELECTABLE`] set with the active
-//! row marked. `/model <arg>` resolves through three tiers: alias map,
-//! exact id match, then unique-substring match. Exact and substring
-//! match against the broader [`crate::model::MODELS`] table (every
-//! `id_substr` plus its `[1m]` variant where `context_1m` is true), so
-//! a user can manually type `claude-opus-4-6` even though the curated
+//! row marked. `/model <arg>` resolves through three tiers against the
+//! broader [`crate::model::MODELS`] table: alias map, unique suffix
+//! match (so `opus-4` lands on `claude-opus-4` even though it is also
+//! a substring of `opus-4-{7,6,5,1}`), then unique substring match.
+//! Manual entry of `claude-opus-4-6` works even though the curated
 //! list only surfaces 4.7. On a unique match, the dispatcher hands
 //! [`UserAction::SwitchModel`] to the agent loop, which calls
 //! [`Client::set_model`](crate::client::anthropic::Client::set_model)
@@ -105,20 +105,18 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
     Ok(format!("{base_id}{TAG_1M}"))
 }
 
-/// Three-tier resolution of the bare (no-[1m]) form: alias → exact id
-/// → unique substring against [`MODELS`].
+/// Three-tier resolution against [`MODELS`]: alias → unique suffix →
+/// unique substring. The suffix tier subsumes exact match and turns
+/// `opus-4` into `claude-opus-4` (the only id ending with that string)
+/// instead of a 5-way ambiguity against the `opus-4-{7,6,5,1}` rows.
 fn resolve_base(arg: &str) -> Result<&'static str, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target);
     }
-    if let Some(info) = MODELS.iter().find(|m| m.id_substr == arg) {
-        return Ok(info.id_substr);
+    if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
+        return Ok(*id);
     }
-    let matches: Vec<&'static str> = MODELS
-        .iter()
-        .map(|m| m.id_substr)
-        .filter(|id| id.contains(arg))
-        .collect();
+    let matches = candidates(|id| id.contains(arg));
     match matches.as_slice() {
         [id] => Ok(*id),
         [_, ..] => Err(format!(
@@ -131,6 +129,14 @@ fn resolve_base(arg: &str) -> Result<&'static str, String> {
              any id from the model table works (e.g. `claude-opus-4-6`).",
         )),
     }
+}
+
+fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    MODELS
+        .iter()
+        .map(|m| m.id_substr)
+        .filter(|id| pred(id))
+        .collect()
 }
 
 /// `* id  marketing` table with a legend header. Active row marker is
@@ -152,12 +158,7 @@ fn render_model_list(info: &SessionInfo) -> String {
     let mut out = String::from("Available models  (* = active)\n\n");
     write_kv_table(&mut out, rows);
 
-    out.push_str("\nSwitch with: /model <id>\n");
-    out.push_str(
-        "Short aliases: /model opus, /model sonnet, /model haiku. Append [1m] for 1M context (Opus 4.7, Sonnet 4.6).\n",
-    );
-    out.push_str("Older ids work too — type the canonical id (e.g. /model claude-opus-4-6).\n");
-    out.push_str("Effort re-clamps to the new model's ceiling and is not restored on swap-back.");
+    out.push_str("\nSwitch: /model <id>  (aliases: opus, sonnet, haiku)");
 
     if !SELECTABLE.contains(&active) {
         _ = write!(
@@ -225,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_pushes_list_with_legend_aliases_and_clamp_note() {
+    fn execute_no_args_pushes_list_with_legend_and_switch_hint() {
         let (chat, outcome) = run_execute("");
         assert_eq!(outcome, Ok(SlashOutcome::Local));
         assert_eq!(chat.entry_count(), 1);
@@ -235,10 +236,8 @@ mod tests {
             body.starts_with("Available models  (* = active)"),
             "header + legend must lead the output: {body}",
         );
-        assert!(body.contains("Switch with: /model <id>"), "{body}");
-        assert!(body.contains("Short aliases"), "alias hint: {body}");
-        assert!(body.contains("[1m]"), "1M opt-in hint: {body}");
-        assert!(body.contains("Effort re-clamps"), "clamp note: {body}");
+        assert!(body.contains("Switch: /model <id>"), "switch hint: {body}");
+        assert!(body.contains("aliases: opus, sonnet, haiku"), "{body}");
     }
 
     #[test]
@@ -421,22 +420,31 @@ mod tests {
     }
 
     #[test]
-    fn execute_ambiguous_substring_lists_count_and_each_candidate() {
-        // `opus-4` matches every Opus 4.x bare row — there's no way
-        // to disambiguate from the input alone, so the error lists
-        // every candidate.
+    fn execute_unique_suffix_resolves_above_substring_ambiguity() {
+        // `opus-4` is a substring of 5 ids but a suffix of only one —
+        // the suffix tier must short-circuit before the substring
+        // ambiguity check runs.
         let (_, outcome) = run_execute("opus-4");
+        assert_eq!(
+            outcome,
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(
+                "claude-opus-4".to_owned(),
+            ))),
+        );
+    }
+
+    #[test]
+    fn execute_ambiguous_substring_lists_count_and_each_candidate() {
+        // `4-6` is neither a unique suffix nor a unique substring —
+        // both `claude-opus-4-6` and `claude-sonnet-4-6` end with it.
+        // The error must list both candidates and the alias hint.
+        let (_, outcome) = run_execute("4-6");
         let msg = outcome.expect_err("ambiguous arg must error");
         assert!(
-            msg.starts_with("`opus-4` matches"),
+            msg.starts_with("`4-6` matches"),
             "leading backtick + count substring: {msg}",
         );
-        for needle in [
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-opus-4-5",
-            "claude-opus-4-1",
-        ] {
+        for needle in ["claude-opus-4-6", "claude-sonnet-4-6"] {
             assert!(msg.contains(needle), "candidate `{needle}` listed: {msg}");
         }
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
@@ -476,18 +484,6 @@ mod tests {
                 info.id_substr,
             );
         }
-    }
-
-    #[test]
-    fn execute_list_view_advertises_manual_entry_for_older_ids() {
-        // Pin the discoverability hook — without this, users can't
-        // tell that 4-6 is reachable.
-        let (chat, _) = run_execute("");
-        let body = chat.last_system_text().unwrap();
-        assert!(
-            body.contains("Older ids work too") && body.contains("claude-opus-4-6"),
-            "manual-entry footer missing: {body}",
-        );
     }
 
     // ── render_model_list ──
