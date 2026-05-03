@@ -27,24 +27,14 @@ const MAX_TOOL_ROUNDS: usize = 25;
 
 // ── Turn Abort ──
 
-/// Reasons a turn ends before the model produces a final response.
-/// `Ok(())` from [`agent_turn`] is the implicit "completed" path.
-///
-/// `Cancelled` and `Quit` are user-initiated; the caller drops the
-/// agent future, which closes the in-flight HTTP stream (reqwest
-/// closes on drop) and reaps any tool subprocess
-/// (`tokio::process::Child::kill_on_drop(true)`).
+/// Reasons a turn ends before normal completion.
 #[derive(Debug)]
 pub(crate) enum TurnAbort {
-    /// User pressed Esc / Ctrl+C — drop the future and tell the TUI
-    /// to render an `(interrupted)` marker.
+    /// User pressed Esc / Ctrl+C.
     Cancelled,
-    /// User requested quit (Ctrl+D, confirmed exit, or the TUI
-    /// dropped the action channel). The agent loop returns to its
-    /// outer driver, which exits.
+    /// User quit or TUI dropped the channel.
     Quit,
-    /// Stream / tool / API error. `anyhow::Error` preserves the
-    /// cause chain so `{e:#}` renders the full context.
+    /// Stream / tool / API error.
     Failed(anyhow::Error),
 }
 
@@ -59,25 +49,17 @@ impl std::fmt::Display for TurnAbort {
         match self {
             Self::Cancelled => f.write_str("turn cancelled"),
             Self::Quit => f.write_str("turn quit"),
-            // Delegate alternate / non-alternate formatting so callers
-            // that already do `{e:#}` keep the anyhow cause chain.
             Self::Failed(e) if f.alternate() => write!(f, "{e:#}"),
             Self::Failed(e) => write!(f, "{e}"),
         }
     }
 }
 
-/// Shorthand for `Result<T, TurnAbort>`. Used by the helpers that
-/// race a future against `user_rx` so `?` short-circuits both
-/// abort signals and inner anyhow errors uniformly.
 type AbortResult<T> = std::result::Result<T, TurnAbort>;
 
 // ── Agent Client ──
 
-/// Streaming surface the agent loop needs from a model client. Narrower
-/// than [`Client`][crate::client::anthropic::Client] (which also owns
-/// non-streaming `complete`, headers, auth) so in-process fakes can
-/// drive [`agent_turn`] with scripted [`StreamEvent`]s in tests.
+/// Narrow streaming trait so in-process fakes can drive [`agent_turn`].
 pub(crate) trait AgentClient: Send + Sync {
     fn stream_message(
         &self,
@@ -102,21 +84,8 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
-/// Drives one user → assistant turn until the model produces a
-/// text-only response or [`MAX_TOOL_ROUNDS`] trips. Records each
-/// assistant / tool-result message to `session` as it completes.
-/// Returns `Ok(())` on a clean completion; the [`TurnAbort`] error
-/// carries every other early-exit reason (cancel, quit, failure).
-///
-/// Long-running awaits race against `user_rx` for three signals:
-///
-/// 1. Esc / Ctrl+C → [`TurnAbort::Cancelled`]; drop unwinds the SSE
-///    stream and any tool subprocesses.
-/// 2. TUI sender drop → [`TurnAbort::Quit`].
-/// 3. Mid-turn [`UserAction::SubmitPrompt`] → buffered into
-///    `pending_prompts`, drained at the next round boundary as a
-///    trailing user message so the queued text lands in the very next
-///    API request without aborting in-flight work.
+/// Drives one user→assistant turn until text-only response or safety cap.
+/// Long-running awaits race `user_rx` for cancel / quit / mid-turn submit.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -127,15 +96,10 @@ pub(crate) async fn agent_turn(
     user_rx: &mut mpsc::Receiver<UserAction>,
 ) -> AbortResult<()> {
     let tool_defs = tools.definitions();
-    // SubmitPrompts observed during stream / tool races; drained at
-    // the round boundary into trailing user messages.
     let mut pending_prompts: Vec<String> = Vec::new();
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
-        // First `?` propagates a `TurnAbort` early-exit; second `?`
-        // converts an inner `anyhow::Error` into `TurnAbort::Failed`
-        // via `From<anyhow::Error>`.
         let StreamOutcome {
             blocks,
             parse_errors,
@@ -153,10 +117,7 @@ pub(crate) async fn agent_turn(
         };
 
         if tool_uses.is_empty() {
-            // Text-only turn: no round boundary to drain queued text
-            // into, so any `pending_prompts` instead falls through
-            // to the TUI's turn-end drain in `App::finalize_idle`,
-            // which dispatches it as a fresh `SubmitPrompt`.
+            // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
             return Ok(());
@@ -188,8 +149,6 @@ pub(crate) async fn agent_turn(
     )))
 }
 
-/// Extract the `(id, name, input)` triples from each `ToolUse` block in
-/// the assistant response, preserving order.
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
     blocks
         .iter()
@@ -202,10 +161,7 @@ fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json
         .collect()
 }
 
-/// Dispatch every tool call in the round, returning the matching
-/// `tool_result` blocks and per-call metadata sidecars. Each call
-/// races against `user_rx` so cancel / quit / mid-turn submit signals
-/// land without polling seams.
+/// Dispatches tool calls, racing each against `user_rx` for abort signals.
 async fn run_tool_round(
     tools: &ToolRegistry,
     tool_uses: Vec<(String, String, serde_json::Value)>,
@@ -244,13 +200,7 @@ async fn run_tool_round(
     Ok((results, sidecars))
 }
 
-/// Persist the assistant message, tool-result message, and metadata
-/// sidecars concurrently. Sending all three before any `await` queues
-/// them in the session actor's mpsc before its `try_recv` runs, so
-/// receive-and-drain coalesces them into one absorb pass and one
-/// buffered flush. Iteration-atomic: a crash mid-write leaves the
-/// session at the previous round's tail, and resume sees no
-/// half-written round.
+/// Persists the round's messages + metadata in one coalesced flush.
 async fn commit_round_writes(
     session: &SessionHandle,
     sink: &dyn AgentSink,
@@ -268,12 +218,7 @@ async fn commit_round_writes(
     sink.session_write_error(metadata_outcome.failure.as_deref());
 }
 
-/// Synthesize the `tool_result` content for one tool call. When the
-/// model emitted malformed input JSON the agent doesn't run the tool —
-/// instead it short-circuits to a synthetic error result so the model
-/// learns its JSON was bad on the next round. Otherwise the tool runs,
-/// racing against `user_rx` so an Esc / Ctrl+C / mid-turn submit lands
-/// without a polling seam in the tool itself.
+/// Dispatches one tool call; short-circuits to error result on malformed input.
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     name: &str,
@@ -292,19 +237,7 @@ async fn dispatch_tool_call(
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
-/// Splice each queued mid-turn submit into the conversation as a
-/// trailing User message, persist it, and emit a `PromptDrained`
-/// event so the TUI can promote the matching preview-queue head to
-/// a chat-history user-message block.
-///
-/// Anthropic accepts consecutive same-role messages, so the request
-/// shape `[..., User(tool_results), User(text_1), ...]` is valid;
-/// persisting per-prompt (rather than collapsing) keeps resume-side
-/// rendering trivial — each drained prompt round-trips as the same
-/// `UserMessage` block the TUI already renders for fresh prompts.
-///
-/// Sequential, in dispatch order: the TUI's preview-queue is FIFO and
-/// matches `PromptDrained` events to its head by position.
+/// Splices queued prompts into the conversation and emits `PromptDrained` per item, in order.
 async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
@@ -319,19 +252,8 @@ async fn record_drained_prompts(
     }
 }
 
-/// Race `fut` against user actions on `user_rx`. Returns the future's
-/// output on completion, or a [`TurnAbort`] when the user cancels or
-/// quits so the caller can use `?` to short-circuit the round loop.
-///
-/// Mid-turn [`UserAction::SubmitPrompt`]s are appended to `pending` —
-/// the calling round drains the buffer into trailing user messages
-/// alongside the tool results, splicing the queued text into the same
-/// turn without aborting the in-flight work.
-///
-/// `fut` MUST be cancel-safe across loop iterations: a queued submit
-/// returns to the `select!` and re-polls `fut` from where it paused.
-/// Existing callers (`stream_response`'s mpsc pump, `tools.run`'s
-/// per-tool awaits) all are; new callers must verify the same.
+/// Races `fut` against user actions. Cancel / quit → `TurnAbort`; submits buffer into `pending`.
+/// `fut` must be cancel-safe.
 async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
@@ -343,23 +265,13 @@ where
     tokio::pin!(fut);
     loop {
         tokio::select! {
-            // Biased so a queued user action is observed before a
-            // future that is also ready in the same poll. Without
-            // this, an already-buffered `SubmitPrompt` competing
-            // with a synchronously-resolving stream / tool future
-            // can lose the random select pick and never make it
-            // into `pending`. Cancel responsiveness benefits too.
+            // Biased: user actions observed before same-poll-ready futures.
             biased;
             action = user_rx.recv() => match action {
                 Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
-                // `None` means every sender dropped — the TUI is gone, treat
-                // it as a quit so the agent loop exits cleanly.
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // None reach mid-turn under the current wiring —
-                // `ConfirmExit` is intercepted by `apply_action_locally`;
-                // mutating slashes are refused by the dispatcher.
-                // Log so a regression in either gate surfaces here.
+                // Unreachable under current wiring; log so regressions surface.
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
@@ -407,11 +319,7 @@ enum BlockAccumulator {
 }
 
 impl BlockAccumulator {
-    /// Lower the accumulated state into a [`ContentBlock`]. For tool-use
-    /// variants, also surface any JSON parse error against the tool's id
-    /// so the caller can inject a synthetic error result and tell the
-    /// model what actually went wrong (instead of running the tool with
-    /// an empty input and surfacing a misleading schema error).
+    /// Converts to a [`ContentBlock`], surfacing any tool-input parse error.
     fn into_content_block(self) -> (Option<ContentBlock>, Option<(String, String)>) {
         match self {
             Self::Text(text) => (Some(ContentBlock::Text { text }), None),
@@ -446,11 +354,7 @@ impl BlockAccumulator {
     }
 }
 
-/// Decode a tool's streamed `input_json_delta` buffer. On failure, fall
-/// back to an empty object so the [`ContentBlock::ToolUse`] round-trip
-/// to the model stays valid, but return the parse error too — callers
-/// short-circuit dispatch to a synthetic error tool result so the model
-/// learns its JSON was malformed instead of seeing a schema error.
+/// Parses tool JSON; returns empty object + error string on failure.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     match serde_json::from_str(json_buf) {
         Ok(value) => (value, None),
@@ -464,9 +368,6 @@ fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     }
 }
 
-/// Outcome of one model streaming pass: the assembled content blocks
-/// plus a map of `tool_use_id` to JSON parse error message for any
-/// tool-use blocks whose `input_json_delta` stream did not decode.
 #[derive(Debug, Default)]
 struct StreamOutcome {
     blocks: Vec<ContentBlock>,
@@ -502,12 +403,9 @@ async fn stream_response(
                     blocks.resize_with(index + 1, || None);
                 }
                 let acc = init_accumulator(content_block, index);
-                // Send initial text to display if non-empty (the API
-                // typically sends empty initial text, but be safe).
                 if let BlockAccumulator::Text(text) = &acc
                     && !text.is_empty()
                 {
-                    // Display-only; authoritative content stays in `acc`.
                     _ = sink.send(AgentEvent::StreamToken(text.clone()));
                 }
                 blocks[index] = Some(acc);
@@ -565,7 +463,6 @@ fn apply_delta(block: &mut BlockAccumulator, delta: Delta, sink: &dyn AgentSink)
     match (block, delta) {
         (BlockAccumulator::Text(buf), Delta::TextDelta { text }) => {
             buf.push_str(&text);
-            // Display-only; authoritative content stays in `buf`.
             _ = sink.send(AgentEvent::StreamToken(text));
         }
         (
