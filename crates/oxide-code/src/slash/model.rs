@@ -1,12 +1,13 @@
 //! `/model` — list selectable models or swap the active one mid-session.
 //!
 //! Bare `/model` lists the curated [`SELECTABLE`] set with the active
-//! row marked. `/model <arg>` resolves through three tiers against the
-//! broader [`crate::model::MODELS`] table: alias map, unique suffix
-//! match (so `opus-4` lands on `claude-opus-4` even though it is also
-//! a substring of `opus-4-{7,6,5,1}`), then unique substring match.
-//! Manual entry of `claude-opus-4-6` works even though the curated
-//! list only surfaces 4.7. On a unique match, the dispatcher hands
+//! row marked. `/model <arg>` resolves through four tiers against the
+//! broader [`crate::model::MODELS`] table: alias map, lookup
+//! pass-through (the arg already matches via [`crate::model::lookup`],
+//! e.g. dated `claude-opus-4-6-20250805`), unique suffix (so `opus-4`
+//! lands on `claude-opus-4` rather than 5-way ambiguous), then unique
+//! substring. Manual entry of older or dated ids works even though the
+//! curated list only surfaces 4.7. On a unique match, the dispatcher hands
 //! [`UserAction::SwitchModel`] to the agent loop, which calls
 //! [`Client::set_model`](crate::client::anthropic::Client::set_model)
 //! and emits [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched).
@@ -86,16 +87,24 @@ impl SlashCommand for ModelCmd {
 /// model supports 1M context (errors otherwise). Splitting the tag
 /// from identity means `opus[1m]` works through the bare alias and
 /// `haiku[1m]` errors uniformly — no per-variant table entries.
+/// Lowercased at entry so `/model OPUS` and `/effort XHIGH` match
+/// the same convention.
 fn resolve_model_arg(arg: &str) -> Result<String, String> {
+    let arg = arg.to_ascii_lowercase();
     let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
         Some(rest) => (rest, true),
-        None => (arg, false),
+        None => (arg.as_str(), false),
     };
+    if base_arg.is_empty() {
+        return Err(format!(
+            "`{TAG_1M}` is a tag, not a model. Try `/model opus{TAG_1M}` or `/model claude-opus-4-7{TAG_1M}`.",
+        ));
+    }
     let base_id = resolve_base(base_arg)?;
     if !want_1m {
-        return Ok(base_id.to_owned());
+        return Ok(base_id);
     }
-    let info = lookup(base_id).expect("base_id is canonical");
+    let info = lookup(&base_id).expect("base_id resolves via lookup");
     if !info.capabilities.context_1m {
         return Err(format!(
             "{}: 1M context not supported. Drop the `{TAG_1M}` tag.",
@@ -105,20 +114,23 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
     Ok(format!("{base_id}{TAG_1M}"))
 }
 
-/// Three-tier resolution against [`MODELS`]: alias → unique suffix →
-/// unique substring. The suffix tier subsumes exact match and turns
-/// `opus-4` into `claude-opus-4` (the only id ending with that string)
-/// instead of a 5-way ambiguity against the `opus-4-{7,6,5,1}` rows.
-fn resolve_base(arg: &str) -> Result<&'static str, String> {
+/// Four-tier resolution against [`MODELS`]: alias → pass-through (arg
+/// is already a recognized id, including dated forms like
+/// `claude-opus-4-6-20250805`) → unique suffix (so `opus-4` lands on
+/// `claude-opus-4`, not 5-way ambiguous) → unique substring.
+fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
-        return Ok(target);
+        return Ok(target.to_owned());
+    }
+    if lookup(arg).is_some() {
+        return Ok(arg.to_owned());
     }
     if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
-        return Ok(*id);
+        return Ok((*id).to_owned());
     }
     let matches = candidates(|id| id.contains(arg));
     match matches.as_slice() {
-        [id] => Ok(*id),
+        [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
             "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
             n = matches.len(),
@@ -484,6 +496,49 @@ mod tests {
                 info.id_substr,
             );
         }
+    }
+
+    #[test]
+    fn resolve_model_arg_passes_through_dated_id_via_lookup() {
+        // Anthropic's fully-qualified dated ids round-trip unchanged —
+        // `lookup` finds the family row for capability detection but
+        // the user's exact string is sent on the wire.
+        for dated in [
+            "claude-opus-4-7-20260101",
+            "claude-opus-4-6-20250805",
+            "claude-sonnet-4-5-20250929",
+        ] {
+            assert_eq!(
+                resolve_model_arg(dated).as_deref(),
+                Ok(dated),
+                "{dated} must pass through",
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_model_arg_lowercases_arg_before_matching() {
+        // Mirrors `/effort`'s case-insensitivity so `/model OPUS`
+        // doesn't silently fail with "Unknown model".
+        assert_eq!(resolve_model_arg("OPUS").as_deref(), Ok("claude-opus-4-7"));
+        assert_eq!(
+            resolve_model_arg("Claude-Opus-4-7").as_deref(),
+            Ok("claude-opus-4-7"),
+        );
+        assert_eq!(
+            resolve_model_arg("OPUS[1M]").as_deref(),
+            Ok("claude-opus-4-7[1m]"),
+        );
+    }
+
+    #[test]
+    fn resolve_model_arg_bare_1m_tag_errors_without_listing_models() {
+        // `/model [1m]` strips to an empty base — a substring filter
+        // would match every row. Reject up front so the user gets a
+        // clear "tag, not a model" message instead of a 10-row dump.
+        let msg = resolve_model_arg("[1m]").expect_err("must error");
+        assert!(msg.contains("tag, not a model"), "{msg}");
+        assert!(!msg.contains("matches"), "must not list candidates: {msg}");
     }
 
     // ── render_model_list ──
