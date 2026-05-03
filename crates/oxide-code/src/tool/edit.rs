@@ -12,8 +12,6 @@ use super::{
 };
 use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
 
-/// Per-file size cap for `edit` (10 MB). Generous because legitimate
-/// edits sometimes target large config or data files.
 const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 pub(crate) struct EditTool {
@@ -88,11 +86,6 @@ impl Tool for EditTool {
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // Live: `metadata.diff_chunks` carries real line numbers.
-        // Resume: synthesize a (line 1) chunk and recover the count
-        // from `metadata.replacements` or the success-message prose.
-        // Empty `Some(vec![])` counts as absent so a zero-chunks
-        // regression doesn't surface as `(no change)`.
         let live_chunks = metadata.diff_chunks.as_ref().filter(|c| !c.is_empty());
         let chunks = live_chunks
             .cloned()
@@ -151,9 +144,6 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
             .with_title(format!("Edited {name}"))
             .with_replacements(replacements)
             .with_diff_chunks(chunks),
-        // Error path: leave `title` unset so the TUI falls back to
-        // the neutral tool-call label — `✗ Edited {name}` would
-        // read as a successful edit, contradicting the ✗ indicator.
         Err(msg) => ToolOutput::from_result(Err(msg)),
     }
 }
@@ -187,8 +177,6 @@ async fn edit_file(
         ));
     }
 
-    // Strict gate: stat-match short-circuits, drift falls through to a
-    // rehash against the bytes we're about to read anyway.
     let pre_mtime = metadata
         .modified()
         .map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -227,10 +215,6 @@ async fn edit_file(
         ));
     }
 
-    // Diff chunks computed BEFORE the file write so we capture the
-    // pre-edit positions while the original content is still in scope.
-    // For non-`replace_all` we cap to the first match to mirror the
-    // single-replacement semantics of `replacen`.
     let chunks_take = if replace_all { usize::MAX } else { 1 };
     let chunks = build_diff_chunks(
         &content,
@@ -264,16 +248,7 @@ async fn edit_file(
 
 // ── Diff Production ──
 
-/// Builds the per-match diff chunks from a successful edit.
-/// `original`, `old_string`, and `new_string` are all post EOL
-/// normalization. `take` is `usize::MAX` for `replace_all`, 1
-/// otherwise. Each chunk carries real file line numbers (post-edit
-/// positions on the `+` side) with common anchors trimmed.
-///
-/// [`MAX_EDIT_FILE_SIZE`] caps both line counts and per-match shifts
-/// well inside `isize` on every supported target; the `checked_*`
-/// calls below panic on overflow rather than silently emitting a
-/// wrong-but-plausible line number.
+/// Builds per-match diff chunks with real file line numbers.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
@@ -281,9 +256,6 @@ fn build_diff_chunks(
     take: usize,
 ) -> Vec<DiffChunk> {
     let positions = match_positions(original, old_string, take);
-    // Newline-count delta — even pure "\n" → "" rewrites (no
-    // displayable lines on either side) still need to shift later
-    // matches.
     let shift_per_match = new_string.matches('\n').count().cast_signed()
         - old_string.matches('\n').count().cast_signed();
 
@@ -309,11 +281,6 @@ fn build_diff_chunks(
         .collect()
 }
 
-/// Returns up to `take` non-overlapping byte offsets where `pattern`
-/// occurs in `haystack`. Mirrors what `String::replacen(.., take)` /
-/// `String::replace` actually rewrite, so post-edit line numbers
-/// computed from these offsets stay consistent with the file's new
-/// state.
 fn match_positions(haystack: &str, pattern: &str, take: usize) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut start = 0;
@@ -323,25 +290,15 @@ fn match_positions(haystack: &str, pattern: &str, take: usize) -> Vec<usize> {
         };
         let abs = start + rel;
         positions.push(abs);
-        // `pattern.len().max(1)` guards against pathological zero-byte
-        // patterns that would loop forever; `edit_file` already rejects
-        // empty `old_string` upstream, so this is defense-in-depth.
         start = abs + pattern.len().max(1);
     }
     positions
 }
 
-/// 1-based line number of the byte at `offset` in `content`. Counts
-/// `\n` separators in the prefix; offsets at end-of-file map to the
-/// line after the final newline.
 fn line_at_byte(content: &str, offset: usize) -> usize {
     1 + content[..offset].matches('\n').count()
 }
 
-/// Splits `s` into numbered diff lines starting at `start_line`. A
-/// trailing newline is dropped so `"a\nb\n"` yields two entries — the
-/// Edit-tool convention is line-ended `old_string`/`new_string` args,
-/// and the renderer doesn't want a phantom blank tail row.
 fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<DiffLine> {
     s.lines()
         .enumerate()
@@ -352,11 +309,6 @@ fn split_into_diff_lines(s: &str, start_line: usize) -> Vec<DiffLine> {
         .collect()
 }
 
-/// Drops common leading and trailing lines from `chunk.old` /
-/// `chunk.new` in-place. Pure tail insertions like
-/// `"fn foo()"` → `"fn foo()\n  body"` collapse the anchor on the old
-/// side so only the real delta survives. Line numbers on surviving
-/// entries are preserved — slicing keeps each `DiffLine` intact.
 fn trim_chunk(chunk: &mut DiffChunk) {
     let (prefix, suffix) = {
         let old_text: Vec<&str> = chunk.old.iter().map(|l| l.text.as_str()).collect();
@@ -369,9 +321,6 @@ fn trim_chunk(chunk: &mut DiffChunk) {
     chunk.new.drain(..prefix);
 }
 
-/// Returns `(prefix, suffix)` — the count of leading and trailing
-/// elements that compare equal on both sides. Used by [`trim_chunk`]
-/// to strip identical anchors from a diff.
 fn common_boundaries<T: Eq>(old: &[T], new: &[T]) -> (usize, usize) {
     let max_prefix = old.len().min(new.len());
     let mut prefix = 0;
@@ -388,11 +337,8 @@ fn common_boundaries<T: Eq>(old: &[T], new: &[T]) -> (usize, usize) {
 
 // ── Line Endings ──
 
-/// Detects the dominant line ending style. Bare CR (`\r` without `\n`) is not
-/// detected — such files are treated as LF and multi-line matches may fail.
 fn dominant_eol(content: &str) -> &'static str {
     let crlf = content.matches("\r\n").count();
-    // Each `\r\n` also contains a `\n`, so subtract to get the LF-only count.
     let lf_only = content.matches('\n').count() - crlf;
     if crlf > lf_only { "\r\n" } else { "\n" }
 }
@@ -415,12 +361,6 @@ fn apply_eol(content: String, eol: &str) -> String {
 
 // ── Result View ──
 
-/// Parses `N` out of `"Replaced N occurrences in <path>."`. `None`
-/// for the single-match shape (`"Successfully edited ..."`), where
-/// the caller defaults to 1. Final fallback for resumed sessions
-/// whose JSONL predates structured metadata; the content-format
-/// contract is pinned by
-/// `edit_file_replace_all_pins_replaced_n_occurrences_format`.
 fn parse_replacement_count(content: &str) -> Option<usize> {
     content
         .strip_prefix("Replaced ")?
@@ -430,11 +370,7 @@ fn parse_replacement_count(content: &str) -> Option<usize> {
         .ok()
 }
 
-/// Single best-effort chunk from raw input strings, used by
-/// [`EditTool::result_view`] when the resumed JSONL has no
-/// `diff_chunks`. Line numbers start at 1 — best we have without
-/// re-reading the (possibly already mutated) file. `pub(crate)` so
-/// TUI snapshot tests can build the same shape as the resume path.
+/// Builds a fallback chunk from raw input strings (line 1).
 pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
     let mut chunk = DiffChunk {
         old: split_into_diff_lines(old, 1),
@@ -456,8 +392,6 @@ mod tests {
 
     #[test]
     fn result_view_returns_none_when_new_string_missing_with_old_string_present() {
-        // `_required_inputs_missing` short-circuits at `old_string`;
-        // this case is the only way to reach the `new_string` guard.
         let tool = EditTool::new(Arc::new(FileTracker::default()));
         let view = tool.result_view(
             &serde_json::json!({"old_string": "x"}),
@@ -469,9 +403,6 @@ mod tests {
 
     #[test]
     fn result_view_prefers_structured_chunks_from_metadata_on_live_path() {
-        // Live `metadata.diff_chunks` must win over input-derived
-        // synthesis; `replacements` derives from `chunks.len()` so a
-        // stale legacy `metadata.replacements` can't disagree.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -502,7 +433,6 @@ mod tests {
         ];
         let metadata = ToolMetadata {
             diff_chunks: Some(chunks.clone()),
-            // Stale value — must lose to chunks.len().
             replacements: Some(99),
             ..ToolMetadata::default()
         };
@@ -523,10 +453,6 @@ mod tests {
 
     #[test]
     fn result_view_synthesizes_chunk_when_metadata_lacks_diff_chunks() {
-        // Resume path: session JSONL written before structured chunks
-        // existed only carries `metadata.replacements` (or nothing).
-        // The renderer still needs a chunk to draw, so we synthesize
-        // one from the raw inputs starting at line 1.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "fn foo()",
@@ -558,10 +484,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_to_parsing_content_when_metadata_is_empty() {
-        // Very-old-session fallback: neither `diff_chunks` nor
-        // `replacements` were recorded. The success message is the
-        // last remaining source of the count, so `parse_replacement_count`
-        // still pulls it out — synthesized chunk pairs with parsed N.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -594,8 +516,6 @@ mod tests {
 
     #[test]
     fn result_view_defaults_to_one_replacement_when_count_missing() {
-        // Single-match edits return `"Successfully edited ..."` —
-        // `parse_replacement_count` returns None, caller defaults to 1.
         let input = serde_json::json!({
             "file_path": "/tmp/f.rs",
             "old_string": "a",
@@ -628,9 +548,6 @@ mod tests {
 
     #[test]
     fn result_view_returns_none_when_required_inputs_missing() {
-        // Malformed call (e.g., model emitted JSON missing `new_string`)
-        // degrades to None so the caller falls back to Text rather
-        // than panicking.
         let input = serde_json::json!({"file_path": "/tmp/x"});
         assert!(
             EditTool::new(tracker())
@@ -641,10 +558,6 @@ mod tests {
 
     #[test]
     fn result_view_returns_none_when_field_type_is_wrong() {
-        // Either string field being the wrong JSON type must degrade
-        // to None so the caller falls back to Text rather than
-        // panicking on `as_str()?`. Cover both sides explicitly since
-        // they're parallel `?` chains.
         let bad_old = serde_json::json!({
             "file_path": "/tmp/x",
             "old_string": 42,
@@ -710,7 +623,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_without_prior_read_is_rejected() {
-        // Strict gate fires before any rewrite.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -736,10 +648,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_edit_error_omits_edited_title() {
-        // Failing edits (old_string not found, missing file, etc.)
-        // must leave `title` unset so the TUI header falls back to
-        // the neutral call label rather than rendering
-        // `✗ Edited <name>`, which contradicts the error indicator.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -763,8 +671,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_tool_run_dispatches_through_trait_to_inner_run() {
-        // Pin the trait shim so the `Arc::clone` it does on the
-        // tracker doesn't silently regress.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -842,12 +748,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_replace_all_pins_replaced_n_occurrences_format() {
-        // [`parse_replacement_count`] reads the replacement count out
-        // of this exact string to drive the TUI's "applied to N
-        // matches" footer. Rewording the prefix or spacing silently
-        // breaks that parser — pin the full shape here so the
-        // coupling is visible in this test file rather than only
-        // manifesting as a missing footer in the rendered diff.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
         std::fs::write(&path, "a a a").unwrap();
@@ -918,7 +818,6 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "aaa\r\nbbb\r\n").unwrap();
 
-        // new_string contains \r\n — should be normalized before apply_eol.
         edit_file(
             path.to_str().unwrap(),
             "aaa",
@@ -930,7 +829,6 @@ mod tests {
         .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        // \r\n in new_string is normalized to \n, then restored to \r\n — not \r\r\n.
         assert_eq!(bytes, b"x\r\ny\r\nbbb\r\n");
     }
 
@@ -938,7 +836,6 @@ mod tests {
     async fn edit_file_mixed_eol_normalized_to_dominant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.txt");
-        // 2 CRLF, 1 LF → dominant is CRLF.
         std::fs::write(&path, "aaa\nbbb\r\nreplace_me\r\n").unwrap();
 
         edit_file(
@@ -952,7 +849,6 @@ mod tests {
         .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        // All line endings normalized to the dominant style (CRLF).
         assert_eq!(bytes, b"aaa\r\nbbb\r\nreplaced\r\n");
     }
 
@@ -960,7 +856,6 @@ mod tests {
     async fn edit_file_mixed_eol_multiline_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.txt");
-        // LF between first two lines, CRLF after — previously failed to match.
         std::fs::write(&path, "foo\nbar\r\nbaz\r\n").unwrap();
 
         edit_file(
@@ -974,7 +869,6 @@ mod tests {
         .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        // Dominant is CRLF (2 vs 1), so all newlines become CRLF.
         assert_eq!(bytes, b"a\r\nb\r\nbaz\r\n");
     }
 
@@ -984,8 +878,6 @@ mod tests {
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
 
-        // Empty `old_string` is rejected before the gate fires, so an
-        // empty tracker is fine.
         let err = edit_file(
             path.to_str().unwrap(),
             "",
@@ -1037,7 +929,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_without_prior_read_is_rejected() {
-        // Strict gate: existing file but no Read entry → must read first.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1060,8 +951,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_after_external_modification_is_rejected() {
-        // Read, then overwrite so check_stat returns NeedsBytes
-        // and the rehash catches the new bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1079,9 +968,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_phantom_drift_passes_via_hash_match() {
-        // Cloud-sync shape: stat moved but bytes match. A fake older
-        // mtime forces the drift path hermetically — without the
-        // rehash fallback the gate would over-reject.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         std::fs::write(&path, "old content").unwrap();
@@ -1106,8 +992,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_partial_read_is_rejected() {
-        // Ranged Read never satisfies the gate, even on matching
-        // bytes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello world").unwrap();
@@ -1150,9 +1034,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_rejects_non_utf8_content() {
-        // The gate is bytes-only, so a session that bypassed Read
-        // (which rejects binary) could still hit `edit_file` on a
-        // non-UTF8 file. Surface the decode error, don't panic.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blob.bin");
         let bytes = [0xff_u8, 0xfe, 0xfd];
@@ -1201,7 +1082,6 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
 
-        // Size cap fires before the gate, so an empty tracker is fine.
         let err = edit_file(
             path.to_str().unwrap(),
             "a",
@@ -1236,12 +1116,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_carry_real_file_line_numbers_for_replace_all() {
-        // Pins the structural payload of `replace_all`: file with
-        // 4 lines, "B" at lines 2 and 4, replaced with "X". The two
-        // emitted chunks must carry their actual file positions —
-        // not an off-by-one shift, not relative-to-snippet line 1.
-        // Anchors the live-path producer end-to-end so a regression
-        // in `match_positions` or `line_at_byte` surfaces here.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.txt");
         std::fs::write(
@@ -1299,11 +1173,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_shift_new_side_for_growing_replace_all() {
-        // Replace_all with a multi-line `new_string` shifts the file's
-        // line count after each match. The post-edit `+` numbering on
-        // the second chunk must reflect that shift — pin the exact
-        // numbers so a missing `idx * shift_per_match` term in
-        // `build_diff_chunks` regresses visibly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grow.txt");
         std::fs::write(
@@ -1317,7 +1186,6 @@ mod tests {
         )
         .unwrap();
 
-        // "B" → "X\nY" adds one line per replacement.
         let (_, _, chunks) = edit_file(
             path.to_str().unwrap(),
             "B",
@@ -1329,7 +1197,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(chunks.len(), 2);
-        // Match 0: original line 2 unaffected by prior shifts.
         assert_eq!(chunks[0].old[0].number, 2);
         assert_eq!(
             chunks[0].new,
@@ -1344,8 +1211,6 @@ mod tests {
                 },
             ],
         );
-        // Match 1: original line 4, but match 0 added one line, so
-        // the post-edit position is line 5.
         assert_eq!(chunks[1].old[0].number, 4);
         assert_eq!(
             chunks[1].new,
@@ -1364,10 +1229,6 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_chunks_shift_new_side_for_shrinking_replace_all() {
-        // Inverse of `..._growing_replace_all`: a multi-line `old`
-        // collapsing to single-line `new` produces a negative shift.
-        // The post-edit `+` numbering on later matches must reflect
-        // each prior match having shrunk the file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.txt");
         std::fs::write(
@@ -1386,7 +1247,6 @@ mod tests {
         )
         .unwrap();
 
-        // "X\nY" → "Z" drops one line per replacement.
         let (_, _, chunks) = edit_file(
             path.to_str().unwrap(),
             "X\nY",
@@ -1401,10 +1261,8 @@ mod tests {
         assert_eq!(chunks[0].old[0].number, 1);
         assert_eq!(chunks[0].new[0].number, 1);
         assert_eq!(chunks[1].old[0].number, 4);
-        // Match 1: original line 4, shifted by -1 from match 0 → 3.
         assert_eq!(chunks[1].new[0].number, 3);
         assert_eq!(chunks[2].old[0].number, 7);
-        // Match 2: original line 7, shifted by -2 → 5.
         assert_eq!(chunks[2].new[0].number, 5);
     }
 
@@ -1412,9 +1270,6 @@ mod tests {
 
     #[test]
     fn build_diff_chunks_single_match_carries_real_position() {
-        // Producer-level check separate from the integration test:
-        // exercises `build_diff_chunks` directly to pin the line-number
-        // contract independent of file-IO plumbing.
         let chunks = build_diff_chunks("A\nB\nC\n", "B", "X", 1);
         assert_eq!(chunks.len(), 1);
         assert_eq!(
@@ -1435,9 +1290,6 @@ mod tests {
 
     #[test]
     fn build_diff_chunks_take_one_caps_at_first_match() {
-        // Non-`replace_all` calls pass `take = 1`; the producer must
-        // not walk past the first match even when more exist. Mirrors
-        // `replacen(.., 1)` semantics.
         let chunks = build_diff_chunks("B\nB\nB\n", "B", "X", 1);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].old[0].number, 1);
@@ -1445,9 +1297,6 @@ mod tests {
 
     #[test]
     fn build_diff_chunks_applies_per_chunk_trim() {
-        // Pure tail insertion at file line 5: anchor on old side
-        // collapses, leaving only the inserted line on the new side.
-        // Line numbers on the surviving entry are preserved.
         let chunks = build_diff_chunks(
             indoc! {"
                 x
@@ -1461,8 +1310,7 @@ mod tests {
             1,
         );
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].old.is_empty(), "anchor trimmed on old side");
-        // New side starts at line 6 — line below the old anchor at 5.
+        assert!(chunks[0].old.is_empty());
         assert_eq!(
             chunks[0].new,
             vec![DiffLine {
@@ -1486,9 +1334,6 @@ mod tests {
 
     #[test]
     fn match_positions_advances_past_pattern_to_avoid_overlap() {
-        // "aaaa" with pattern "aa" must NOT yield positions 0,1,2 —
-        // that's overlapping. Real `replace` rewrites left-to-right
-        // non-overlapping, and the offsets must mirror that.
         assert_eq!(match_positions("aaaa", "aa", usize::MAX), vec![0, 2]);
     }
 
@@ -1499,9 +1344,6 @@ mod tests {
 
     #[test]
     fn match_positions_take_zero_returns_empty() {
-        // `take == 0` short-circuits before the first search — pin
-        // this so a regression to `<=` in the loop predicate would
-        // surface as a single-result mismatch.
         assert!(match_positions("aXbXcX", "X", 0).is_empty());
     }
 
@@ -1514,28 +1356,17 @@ mod tests {
 
     #[test]
     fn line_at_byte_after_newline_increments() {
-        // Byte 2 sits at "B" — the third line under 1-based numbering
-        // should still report line 2 (count of newlines before the
-        // byte plus 1). The "2 newlines but third line" interpretation
-        // would only kick in past the second newline.
         assert_eq!(line_at_byte("A\nB\nC\n", 2), 2);
         assert_eq!(line_at_byte("A\nB\nC\n", 4), 3);
     }
 
     #[test]
     fn line_at_byte_end_of_file_after_trailing_newline() {
-        // Offset just past the final newline maps to the implicit
-        // line after the last `\n` — used when an edit appends to
-        // EOF. Pin the off-by-one so a "+ 1" mutation surfaces.
         assert_eq!(line_at_byte("A\n", 2), 2);
     }
 
     #[test]
     fn line_at_byte_end_of_file_without_trailing_newline() {
-        // Files without a final newline: offset == content.len() must
-        // still report the last line's number, not one past it. Tests
-        // the slice's upper bound separately from the trailing-newline
-        // case above.
         assert_eq!(line_at_byte("AB", 2), 1);
         assert_eq!(line_at_byte("A\nB", 3), 2);
     }
@@ -1561,8 +1392,6 @@ mod tests {
 
     #[test]
     fn split_into_diff_lines_drops_trailing_newline() {
-        // "a\nb\n" is two displayable lines, not three. Matches the
-        // Edit-tool convention of line-ended `old_string`/`new_string`.
         assert_eq!(
             split_into_diff_lines("a\nb\n", 1),
             vec![
@@ -1665,9 +1494,6 @@ mod tests {
 
     #[test]
     fn trim_chunk_fully_identical_collapses_both_sides() {
-        // Not reachable via `edit_file` (no-op edits rejected), but the
-        // helper must terminate cleanly. The renderer's "(no change)"
-        // branch covers the resulting empty chunk.
         let mut chunk = DiffChunk {
             old: vec![DiffLine {
                 number: 1,
@@ -1705,10 +1531,6 @@ mod tests {
 
     #[test]
     fn common_boundaries_asymmetric_lengths_capped_by_shorter_side() {
-        // `max_suffix = min(old.len(), new.len()) - prefix` —
-        // dropping the `- prefix` term would let suffix overlap the
-        // already-counted prefix. Pin the cap with a non-zero prefix
-        // and asymmetric lengths.
         assert_eq!(common_boundaries(&["a", "b", "a"], &["a", "X"]), (1, 0));
         assert_eq!(common_boundaries(&["a", "X"], &["a", "b", "a"]), (1, 0));
     }
@@ -1752,9 +1574,6 @@ mod tests {
 
     #[test]
     fn normalize_eol_lf_input_borrows() {
-        // Pure-LF input must not allocate — the Cow lets the caller
-        // skip a copy on the common case. `Cow::Borrowed` also locks
-        // in that the returned reference ties back to the input.
         let out = normalize_eol("a\nb\n");
         assert_eq!(out, "a\nb\n");
         assert!(matches!(out, Cow::Borrowed(_)));
@@ -1790,18 +1609,11 @@ mod tests {
 
     #[test]
     fn parse_replacement_count_requires_space_after_replaced() {
-        // The leading `"Replaced "` prefix (with trailing space) is the
-        // structural separator — `"Replaced7 occurrences ..."` is not
-        // the format `edit_file` emits and must not parse, otherwise a
-        // mutation that drops the space from the prefix would go
-        // unnoticed.
         assert_eq!(parse_replacement_count("Replaced7 occurrences in x."), None);
     }
 
     #[test]
     fn parse_replacement_count_returns_none_when_only_prefix_present() {
-        // Pin the empty-token `?` so a future "default to 0 / 1"
-        // regression doesn't slip.
         assert_eq!(parse_replacement_count("Replaced "), None);
     }
 
@@ -1809,8 +1621,6 @@ mod tests {
 
     #[test]
     fn synthesize_chunk_starts_numbering_at_one() {
-        // Resume-fallback shape: line 1 is the best the renderer has
-        // when JSONL didn't carry real positions.
         let chunk = synthesize_chunk("a\nb", "x\ny");
         assert_eq!(chunk.old[0].number, 1);
         assert_eq!(chunk.new[0].number, 1);
@@ -1818,9 +1628,6 @@ mod tests {
 
     #[test]
     fn synthesize_chunk_applies_trim() {
-        // Mirrors live-path producer trim so the rendered output for
-        // a resumed transcript matches what the live renderer would
-        // produce — pure tail insertion still drops the anchor.
         let chunk = synthesize_chunk("fn foo()", "fn foo()\n    body");
         assert!(chunk.old.is_empty());
         assert_eq!(chunk.new.len(), 1);

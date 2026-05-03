@@ -1,19 +1,4 @@
-//! Per-session file-change tracker.
-//!
-//! Records what every Read / Write / Edit observed on disk so later
-//! Edit / Write calls can refuse to clobber a file changed externally
-//! between turns. Cloned via `Arc` into the file-mutating tools and
-//! drained at session finish into
-//! [`Entry::FileSnapshot`][crate::session::entry::Entry::FileSnapshot]
-//! lines; resume rehydrates via [`FileTracker::restore_verified`].
-//!
-//! See `docs/research/design/file-tracking.md` for the contract: strict
-//! Read-before-Edit gate, mtime + size fast path with xxh64 fallback,
-//! persist-on-finish + verify-on-resume.
-//!
-//! Concurrency: `std::sync::Mutex<HashMap<...>>` — no I/O held under
-//! the lock, same exception shape as
-//! [`crate::session::handle::SharedState`].
+//! Per-session file-change tracker: Read-before-Edit gate with mtime + xxh64 staleness detection.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -25,47 +10,24 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use xxhash_rust::xxh64::xxh64;
 
-/// Seed for `xxh64` over file bytes. Zero matches the rest of the
-/// crate (`sanitize_cwd`, billing fingerprints); private so callers
-/// can't synthesize hashes that compare unequal to ours.
 const HASH_SEED: u64 = 0;
 
 // ── FileTracker ──
 
-/// Shared map of file paths to their last-observed disk state.
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
 }
 
-/// Per-file disk state captured at the most recent Read / Write / Edit
-/// and compared against `stat()` on subsequent gate checks. `mtime` is
-/// `SystemTime` to skip a conversion on every check; the persistence
-/// boundary at [`FileSnapshot`] uses `OffsetDateTime` so the JSONL
-/// stays RFC3339.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileState {
-    /// xxh64 of the bytes the model last observed (Read) or produced
-    /// (Edit / Write).
     content_hash: u64,
-    /// `metadata.modified()` at capture; round-tripped through
-    /// [`FileSnapshot::mtime`] only at finish / resume.
     mtime: SystemTime,
-    /// `metadata.len()` at capture; drift in either field triggers
-    /// the rehash.
     size: u64,
-    /// Full reads gate Edit through; partial reads gate it shut.
     last_view: LastView,
-    /// Wall-clock insert time. Persisted into
-    /// [`FileSnapshot::recorded_at`] so resume can pick the newest
-    /// survivor on duplicate paths.
     recorded_at: OffsetDateTime,
 }
 
-/// Full Read vs ranged Read. Edit and Write gate through `Full`;
-/// `Partial` is recorded for cache-hit comparison but won't satisfy
-/// the modification gate. Same shape on disk and in memory so resume
-/// doesn't need a conversion layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
@@ -73,8 +35,6 @@ pub(crate) enum LastView {
     Partial { offset: usize, limit: usize },
 }
 
-/// Selects the gate verb (`editing` vs `writing to`). Staleness logic
-/// is shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
@@ -82,11 +42,7 @@ pub(crate) enum GatePurpose {
 }
 
 impl FileTracker {
-    /// Records a successful Read. Returns [`RecordRead::CacheHit`]
-    /// when the call is a redundant full-file re-Read of an unchanged
-    /// file so the caller can substitute [`CACHE_HIT_STUB`] and save
-    /// tokens. Partial Reads never short-circuit — the model may want
-    /// a different range.
+    /// Returns `CacheHit` when an unchanged full-file re-Read can be stubbed.
     pub(crate) fn record_read(
         &self,
         path: &Path,
@@ -121,12 +77,7 @@ impl FileTracker {
         RecordRead::Inserted
     }
 
-    /// Stat-only gate run before Edit / Write of an existing file.
-    /// `Pass` skips disk I/O on the common case; `NeedsBytes` hands
-    /// the stored hash back so the caller can forward the file bytes
-    /// to [`Self::verify_drift_bytes`] (one lock acquisition instead
-    /// of two); `Err` covers the structural rejects (never read,
-    /// partial read) and names the path.
+    /// Fast-path gate: `Pass` if stat matches, `NeedsBytes` if rehash required.
     pub(crate) fn check_stat(
         &self,
         path: &Path,
@@ -156,12 +107,7 @@ impl FileTracker {
         }
     }
 
-    /// Resolves a [`StatCheck::NeedsBytes`] outcome by rehashing
-    /// `bytes` against `stored_hash`. Matching hashes mean the
-    /// mtime / size touch was content-preserving (e.g. cloud-sync
-    /// timestamp shuffle) and the gate passes; mismatches surface
-    /// the staleness error tagged with `path`. Associated function
-    /// because the tracker has no state to consult here.
+    /// Rehashes `bytes` against `stored_hash`; passes if content unchanged despite stat drift.
     pub(crate) fn verify_drift_bytes(
         path: &Path,
         bytes: &[u8],
@@ -178,9 +124,6 @@ impl FileTracker {
         }
     }
 
-    /// Records the post-modify state of a file (Edit or Write success
-    /// path). Always promotes the entry to `LastView::Full` because
-    /// every Edit / Write writes a complete file body.
     pub(crate) fn record_modify(&self, path: &Path, bytes: &[u8], mtime: SystemTime, size: u64) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let now = OffsetDateTime::now_utc();
@@ -196,10 +139,7 @@ impl FileTracker {
         );
     }
 
-    /// Re-`stat()`s `path` after a successful Edit / Write and records
-    /// the resulting state. Best-effort: a stat / `modified()` failure
-    /// silently skips the record rather than reporting a successful
-    /// write as failed; the next gate check rehashes if needed.
+    /// Best-effort post-write stat + record; skips silently on stat failure.
     pub(crate) async fn record_modify_after_write(&self, path: &Path, bytes: &[u8]) {
         if let Ok(meta) = tokio::fs::metadata(path).await
             && let Ok(mtime) = meta.modified()
@@ -208,9 +148,6 @@ impl FileTracker {
         }
     }
 
-    /// Snapshot every tracked file for persistence. Drained at
-    /// session finish and batched into the same flush as the
-    /// `Summary`.
     pub(crate) fn snapshot_all(&self) -> Vec<FileSnapshot> {
         self.lock()
             .iter()
@@ -225,19 +162,11 @@ impl FileTracker {
             .collect()
     }
 
-    /// Drops every recorded path so the next Read / Edit / Write hits
-    /// the gate cold. `/clear` calls this after `finalize` has
-    /// persisted the snapshots into the old session's JSONL.
     pub(crate) fn clear(&self) {
         self.lock().clear();
     }
 
-    /// Restores tracker state from session JSONL. Re-`stat()`s each
-    /// snapshot: survivors (mtime + size match) reload; mismatches
-    /// and missing files drop silently so the model re-Reads on first
-    /// access. Stat-only rather than rehash because rehashing every
-    /// recently-edited file would dominate startup on large repos —
-    /// the worst case degrades to cold-start, which is correct.
+    /// Rehydrates from session JSONL; drops entries whose stat no longer matches.
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) {
         let mut by_path = self.lock();
         for snap in snapshots {
@@ -274,11 +203,6 @@ impl FileTracker {
     }
 }
 
-/// Persisted on-disk shape of one tracker entry. Wire-stable: carried
-/// as [`Entry::FileSnapshot`][crate::session::entry::Entry::FileSnapshot]
-/// in the session JSONL. `mtime` widens to `OffsetDateTime` for
-/// RFC3339 alongside `Header::created_at` and friends; the
-/// `OffsetDateTime ↔ SystemTime` round-trip is infallible.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -291,35 +215,22 @@ pub(crate) struct FileSnapshot {
     pub(crate) recorded_at: OffsetDateTime,
 }
 
-/// Outcome of [`FileTracker::record_read`]. Named enum (not `bool`)
-/// so call sites read `RecordRead::CacheHit` directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
     CacheHit,
 }
 
-/// Stat-only outcome of [`FileTracker::check_stat`]. `NeedsBytes`
-/// requires the caller to forward bytes to
-/// [`FileTracker::verify_drift_bytes`] before proceeding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatCheck {
     Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
-/// Structural rejection from the gate. Each variant carries the
-/// offending `path` so the rendered `Display` names the file (matching
-/// the codebase-wide `Error reading {path}: ...` convention) and the
-/// `GatePurpose` for verb selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GateError {
-    /// Gate hit before any Read in this session recorded the path.
     NeverRead { path: PathBuf, purpose: GatePurpose },
-    /// Prior Read was ranged — the model never saw the full file.
     PartialRead { path: PathBuf, purpose: GatePurpose },
-    /// Post-stat rehash confirmed the bytes diverged from the last
-    /// observation.
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 

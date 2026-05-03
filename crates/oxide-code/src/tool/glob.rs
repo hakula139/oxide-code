@@ -109,8 +109,6 @@ fn glob_title(output: Option<&str>) -> String {
     }
 }
 
-/// `glob_files` return: model-facing prose plus the unbounded match
-/// count when the result was capped at [`MAX_RESULTS`].
 #[derive(Debug)]
 struct GlobOutput {
     content: String,
@@ -174,12 +172,6 @@ fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, St
 
 // ── Result View ──
 
-/// Builds a [`ToolResultView::GlobFiles`] from `glob_files` output.
-/// Returns `None` for malformed shapes so they fall through to the
-/// raw text body instead of silently dropping rows. The unbounded
-/// match count prefers `metadata.truncated_total`; for sessions
-/// whose JSONL predates that field, the count is recovered from the
-/// `(Showing X of Y matches. ...)` prose still baked into `content`.
 fn build_files_view(
     input: &serde_json::Value,
     content: &str,
@@ -222,15 +214,10 @@ fn build_files_view(
     })
 }
 
-/// Matches the `(Showing X of Y matches. ...)` footer emitted by
-/// [`glob_files`] — gates trailing prose so unknown shapes fall
-/// through instead of getting absorbed as a path.
 fn is_truncation_footer(footer: &str) -> bool {
     footer.starts_with("(Showing ")
 }
 
-/// Extracts `Y` from `(Showing X of Y matches. ...)`. Caller must
-/// have already gated the shape via [`is_truncation_footer`].
 fn parse_total_from_footer(footer: &str) -> Option<usize> {
     footer
         .strip_prefix('(')?
@@ -433,9 +420,6 @@ mod tests {
 
     #[test]
     fn result_view_pulls_total_from_metadata_and_drops_prose_footer() {
-        // Trailing `(Showing ...)` prose is dropped from the file
-        // list; metadata wins over the prose count when both are
-        // present (the live path).
         let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
         let body = files.join("\n");
         let content = formatdoc! {"
@@ -467,9 +451,6 @@ mod tests {
 
     #[test]
     fn result_view_recovers_total_from_prose_footer_for_legacy_sessions() {
-        // Sessions recorded before `truncated_total` landed in metadata
-        // still carry the count in the prose footer. Recovering it
-        // keeps the rendered "X of Y" honest after resume.
         let files: Vec<String> = (0..MAX_RESULTS).map(|i| format!("f{i:03}.rs")).collect();
         let body = files.join("\n");
         let content = formatdoc! {"
@@ -517,8 +498,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_for_empty_content() {
-        // `body.lines()` yields nothing — falling through to text shows
-        // the user the raw output instead of a misleading empty list.
         let view = GlobTool.result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             "",
@@ -529,8 +508,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_when_input_has_no_pattern() {
-        // Defensive: missing pattern falls through to text rather
-        // than rendering an empty header.
         let view = GlobTool.result_view(
             &serde_json::json!({}),
             "src/main.rs",
@@ -541,8 +518,6 @@ mod tests {
 
     #[test]
     fn result_view_single_file_no_footer() {
-        // Off-by-one guard for the `files.is_empty()` boundary. Also
-        // pins `total` to derived `files.len()` when no footer present.
         let view = GlobTool
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
@@ -562,9 +537,6 @@ mod tests {
 
     #[test]
     fn result_view_normalises_trailing_newline() {
-        // glob_files never emits a trailing newline today, but `trim_end`
-        // means we tolerate one — pin the contract so a future producer
-        // change doesn't shift this silently.
         let view = GlobTool
             .result_view(
                 &serde_json::json!({"pattern": "*.rs"}),
@@ -584,9 +556,6 @@ mod tests {
 
     #[test]
     fn result_view_metadata_total_equal_to_file_count_succeeds() {
-        // Boundary of the `total < files.len()` guard. Pinning equality
-        // here keeps the comparator from drifting to `<=` or `==` —
-        // mutants that would otherwise pass every other test.
         let metadata = ToolMetadata {
             truncated_total: Some(2),
             ..ToolMetadata::default()
@@ -610,11 +579,6 @@ mod tests {
 
     #[test]
     fn result_view_path_with_embedded_blank_line_falls_back() {
-        // Unix paths can technically contain `\n`; back-to-back newlines
-        // would let the parser mistake the rest of the body for a
-        // truncation footer. The `is_truncation_footer` gate rejects
-        // anything that doesn't start with `(Showing ` so we fall
-        // through to text instead of dropping rows.
         let view = build_files_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
@@ -630,9 +594,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_when_metadata_total_under_visible_files() {
-        // Inconsistent metadata — claims fewer total matches than the
-        // visible body. Render-time math depends on `total >= files.len()`,
-        // so reject up front.
         let metadata = ToolMetadata {
             truncated_total: Some(1),
             ..ToolMetadata::default()
@@ -647,9 +608,6 @@ mod tests {
 
     #[test]
     fn result_view_falls_back_for_unrecognised_trailing_prose() {
-        // `\n\n` separator present but the trailing chunk doesn't match
-        // the truncation-footer shape — fall through to text rather
-        // than absorb the rest as paths.
         let view = GlobTool.result_view(
             &serde_json::json!({"pattern": "*.rs"}),
             indoc! {"
@@ -690,17 +648,14 @@ mod tests {
 
     #[test]
     fn parse_total_from_footer_returns_none_for_malformed_input() {
-        // Drop the leading `(` → missing strip.
         assert_eq!(
             parse_total_from_footer("Showing 100 of 1234 matches."),
             None,
         );
-        // Token at idx 3 is non-numeric.
         assert_eq!(
             parse_total_from_footer("(Showing 100 of many matches.)"),
             None
         );
-        // Fewer than four whitespace-separated tokens.
         assert_eq!(parse_total_from_footer("(Showing 100 of)"), None);
     }
 }
