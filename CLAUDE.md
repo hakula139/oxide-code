@@ -74,7 +74,7 @@ ox                                          # Start an interactive session
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
 │   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo) handed to each command's execute
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
-│   ├── effort.rs                           # /effort — list / swap effort tier; `auto` clears the user pick
+│   ├── effort.rs                           # /effort — list / swap explicit effort tier
 │   ├── format.rs                           # Shared kv-section / kv-table renderer
 │   ├── help.rs                             # /help — registry-driven command listing
 │   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
