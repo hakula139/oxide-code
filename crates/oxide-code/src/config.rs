@@ -92,6 +92,9 @@ pub(crate) enum Effort {
 }
 
 impl Effort {
+    pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+    pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -119,7 +122,10 @@ impl FromStr for Effort {
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::Xhigh),
             "max" => Ok(Self::Max),
-            _ => bail!("invalid effort {s:?}; expected one of: low, medium, high, xhigh, max"),
+            _ => bail!(
+                "invalid effort {s:?}; expected one of: {}",
+                Self::VALID_VALUES
+            ),
         }
     }
 }
@@ -358,13 +364,10 @@ mod tests {
 
     #[test]
     fn effort_round_trips_through_serde_and_fromstr() {
-        for (variant, token) in [
-            (Effort::Low, "low"),
-            (Effort::Medium, "medium"),
-            (Effort::High, "high"),
-            (Effort::Xhigh, "xhigh"),
-            (Effort::Max, "max"),
-        ] {
+        for (variant, token) in Effort::ALL
+            .into_iter()
+            .zip(["low", "medium", "high", "xhigh", "max"])
+        {
             assert_eq!(serde_json::to_value(variant).unwrap(), token);
             assert_eq!(variant.to_string(), token);
             assert_eq!(token.parse::<Effort>().unwrap(), variant);

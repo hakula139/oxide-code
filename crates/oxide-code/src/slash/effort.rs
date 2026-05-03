@@ -5,7 +5,7 @@
 //! tier; `/effort auto` (alias `unset`) clears the user pick so the
 //! model's default kicks in. The agent loop calls
 //! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
-//! which clamps against the active model's caps. See `effort.md`.
+//! which clamps against the active model's caps.
 
 use std::fmt::Write as _;
 
@@ -15,15 +15,6 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
-
-/// Levels presented in the list view, weakest first.
-const LEVELS: &[(Effort, &str)] = &[
-    (Effort::Low, "low"),
-    (Effort::Medium, "medium"),
-    (Effort::High, "high"),
-    (Effort::Xhigh, "xhigh"),
-    (Effort::Max, "max"),
-];
 
 /// Keywords that clear the user pick so the model default kicks in.
 const AUTO_KEYWORDS: &[&str] = &["auto", "unset"];
@@ -75,13 +66,12 @@ fn parse_effort_arg(arg: &str) -> Result<Option<Effort>, String> {
     if AUTO_KEYWORDS.contains(&lower.as_str()) {
         return Ok(None);
     }
-    LEVELS
-        .iter()
-        .find(|(_, name)| *name == lower)
-        .map(|(level, _)| Some(*level))
-        .ok_or_else(|| {
-            format!("Unknown effort: `{arg}`. Valid: low, medium, high, xhigh, max, auto.")
-        })
+    lower.parse().map(Some).map_err(|_| {
+        format!(
+            "Unknown effort: `{arg}`. Valid: {}, auto.",
+            Effort::VALID_VALUES
+        )
+    })
 }
 
 /// `* level  note` table with the active marker, plus a header naming
@@ -99,16 +89,16 @@ fn render_effort_list(info: &SessionInfo) -> String {
         return out;
     }
 
-    let labels: Vec<String> = LEVELS
+    let labels: Vec<String> = Effort::ALL
         .iter()
-        .map(|(level, name)| {
+        .map(|level| {
             let marker = if Some(*level) == active { '*' } else { ' ' };
-            format!("{marker} {name}")
+            format!("{marker} {level}")
         })
         .collect();
-    let notes: Vec<String> = LEVELS
+    let notes: Vec<String> = Effort::ALL
         .iter()
-        .map(|(level, _)| level_note(*level, caps))
+        .map(|level| level_note(*level, caps))
         .collect();
     let rows = labels
         .iter()
@@ -192,8 +182,11 @@ mod tests {
         );
         assert!(body.contains("Switch with: /effort <level>"), "{body}");
         assert!(body.contains("/effort auto"), "auto hint: {body}");
-        for (_, name) in LEVELS {
-            assert!(body.contains(name), "level `{name}` listed: {body}");
+        for level in Effort::ALL {
+            assert!(
+                body.contains(&level.to_string()),
+                "level `{level}` listed: {body}",
+            );
         }
     }
 
@@ -301,7 +294,7 @@ mod tests {
         let (chat, outcome) = run_execute("turbo");
         let msg = outcome.expect_err("unknown level must error");
         assert!(msg.starts_with("Unknown effort: `turbo`."), "{msg}");
-        for valid in ["low", "medium", "high", "xhigh", "max", "auto"] {
+        for valid in Effort::VALID_VALUES.split(", ").chain(["auto"]) {
             assert!(msg.contains(valid), "lists `{valid}`: {msg}");
         }
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
