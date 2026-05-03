@@ -165,14 +165,11 @@ fn parse_hunk_extents(line: &str) -> Option<usize> {
 
 /// `start[,count]` → `start + count - 1`. Bare `start` ⇒ one line.
 fn parse_range_extent(s: &str) -> Option<usize> {
-    let stop = s.find([',', ' ']).unwrap_or(s.len());
-    let start: usize = s[..stop].parse().ok()?;
-    if s.as_bytes().get(stop) != Some(&b',') {
+    let start = parse_first_number(s)?;
+    let Some(comma) = s.find(',') else {
         return Some(start);
-    }
-    let rest = &s[stop + 1..];
-    let stop2 = rest.find(' ').unwrap_or(rest.len());
-    let count: usize = rest[..stop2].parse().ok()?;
+    };
+    let count = parse_first_number(&s[comma + 1..])?;
     Some(start + count.saturating_sub(1))
 }
 
