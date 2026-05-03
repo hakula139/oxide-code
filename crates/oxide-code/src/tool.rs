@@ -39,7 +39,7 @@ pub(crate) struct ToolOutput {
 }
 
 /// Structured data for UI display and logging, not sent to the model.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
@@ -136,14 +136,14 @@ pub(crate) struct ReadExcerptLine {
 }
 
 /// One numbered line on either side of a diff hunk.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiffLine {
     pub(crate) number: usize,
     pub(crate) text: String,
 }
 
 /// A single boundary-trimmed edit hunk. Consumers must not re-trim.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiffChunk {
     pub(crate) old: Vec<DiffLine>,
     pub(crate) new: Vec<DiffLine>,

@@ -150,7 +150,7 @@ fn chunk_anchor_line(chunk: &DiffChunk) -> Option<usize> {
         .map(|l| l.number)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Del,
     Add,

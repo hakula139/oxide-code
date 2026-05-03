@@ -19,7 +19,7 @@ pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     content_hash: u64,
     mtime: SystemTime,
@@ -28,14 +28,14 @@ struct FileState {
     recorded_at: OffsetDateTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
     Full,
     Partial { offset: usize, limit: usize },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
     Write,
@@ -203,7 +203,7 @@ impl FileTracker {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
     pub(crate) content_hash: u64,
@@ -215,19 +215,19 @@ pub(crate) struct FileSnapshot {
     pub(crate) recorded_at: OffsetDateTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
     CacheHit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatCheck {
     Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GateError {
     NeverRead { path: PathBuf, purpose: GatePurpose },
     PartialRead { path: PathBuf, purpose: GatePurpose },

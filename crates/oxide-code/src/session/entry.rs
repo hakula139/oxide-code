@@ -60,7 +60,7 @@ fn default_version() -> u32 {
     CURRENT_VERSION
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TitleSource {
     #[default]

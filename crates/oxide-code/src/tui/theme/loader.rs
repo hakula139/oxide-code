@@ -261,7 +261,7 @@ enum SlotDef {
     clippy::struct_excessive_bools,
     reason = "modifiers are independent flags by design (matches ratatui::style::Modifier)"
 )]
-#[derive(Deserialize, Default)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InlineSlot {
     fg: Option<String>,
