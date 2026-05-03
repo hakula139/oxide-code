@@ -154,26 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn trait_default_is_read_only_returns_true() {
-        // The default impl ignores `args` and reports read-only.
-        // Synthetic command exercises the default body directly.
-        struct DefaultCmd;
-        impl SlashCommand for DefaultCmd {
-            fn name(&self) -> &'static str {
-                "default"
-            }
-            fn description(&self) -> &'static str {
-                "default"
-            }
-            fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(SlashOutcome::Local)
-            }
-        }
-        assert!(DefaultCmd.is_read_only(""));
-        assert!(DefaultCmd.is_read_only("anything"));
-    }
-
-    #[test]
     fn alias_collisions_finds_a_synthetic_overlap() {
         // BUILT_INS has no aliases today, so the collision branch needs
         // a synthetic registry to execute. `ColliderCmd`'s alias `help`
@@ -255,10 +235,14 @@ mod tests {
     #[test]
     fn aliased_cmd_fixture_satisfies_trait_contract() {
         // Pin so a fixture drift fails here rather than silently
-        // misleading the lookup_in tests.
+        // misleading the lookup_in tests. The `is_read_only` calls
+        // also exercise the trait's default body — `AliasedCmd`
+        // doesn't override it.
         assert_eq!(AliasedCmd.name(), "primary");
         assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
         assert_eq!(AliasedCmd.description(), "fake");
+        assert!(AliasedCmd.is_read_only(""));
+        assert!(AliasedCmd.is_read_only("anything"));
         assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Local));
     }
 
