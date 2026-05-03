@@ -449,6 +449,17 @@ mod tests {
     }
 
     #[test]
+    fn execute_unique_substring_resolves_after_suffix_tier_misses() {
+        let (_, outcome) = run_execute("haiku-4-");
+        assert_eq!(
+            outcome,
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(
+                "claude-haiku-4-5".to_owned(),
+            ))),
+        );
+    }
+
+    #[test]
     fn execute_trims_whitespace_around_arg() {
         // Padded input resolves the same as bare input.
         let (_, outcome) = run_execute("  haiku-4-5  ");
