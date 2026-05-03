@@ -56,7 +56,7 @@ ox                                          # Start an interactive session
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
-│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start/resume/resume_from_path/roll constructors + lifecycle
+│   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
 │   ├── handle/
 │   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
 │   ├── history.rs                          # Transcript → display interaction stream (pair ToolUse with ToolResult inline)
@@ -72,16 +72,17 @@ ox                                          # Start an interactive session
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo) — slash impls hand state-mutating work back via SlashOutcome::Action, never reach into user_tx
-│   ├── diff.rs                             # /diff — `git diff HEAD` + untracked names, capped at 64 KB on UTF-8 boundary
-│   ├── format.rs                           # Shared kv-section / kv-table renderer for /help, /status, /config
-│   ├── help.rs                             # /help — registry-driven command listing with display_label + // escape tip
-│   ├── init.rs                             # /init — synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt; returns SlashOutcome::Action(SubmitPrompt)
-│   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches (name-prefix > alias-prefix > name-substring > alias-substring)
-│   ├── model.rs                            # /model — list `SELECTABLE` models or swap mid-session; three-tier resolution (alias → exact → substring) with `[1m]` first-class
-│   ├── parser.rs                           # parse_slash + popup_query: detect `/cmd args`; allows `:` and `.` for plugin namespaces
-│   ├── registry.rs                         # SlashCommand trait + SlashOutcome { Local, Action(UserAction) } + BUILT_INS slice + alias-aware lookup_in
-│   └── status.rs                           # /status — model, model id, cwd, version, auth label, session id
+│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo) handed to each command's execute
+│   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
+│   ├── effort.rs                           # /effort — list / swap effort tier; `auto` clears the user pick
+│   ├── format.rs                           # Shared kv-section / kv-table renderer
+│   ├── help.rs                             # /help — registry-driven command listing
+│   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
+│   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
+│   ├── model.rs                            # /model — list / swap; three-tier resolver (alias → exact → unique substring); `[1m]` first-class
+│   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
+│   ├── registry.rs                         # SlashCommand trait + SlashOutcome + BUILT_INS slice + alias-aware lookup
+│   └── status.rs                           # /status — model, effort, cwd, version, auth, session id
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
@@ -113,17 +114,17 @@ ox                                          # Start an interactive session
 │   │   │       ├── system.rs               # SystemMessageBlock — left-bar accent + body text for slash-command output
 │   │   │       ├── tool.rs                 # ToolCallBlock + ToolResultBlock (left-bar border machinery + per-variant dispatch)
 │   │   │       ├── tool/
-│   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows (text, grep paths, glob list, footers)
-│   │   │       │   ├── diff.rs             # Edit-tool unified diff body (boundary trim + per-side budget + line-number gutter + Catppuccin row-bg tint)
-│   │   │       │   ├── glob.rs             # Glob-tool body — `pattern (visible of total)` header + flat path list + parenthetical TUI-hidden / tool-truncated footer
+│   │   │       │   ├── bordered_row.rs     # Shared `[bar] [text]` row renderer for unnumbered body / header / footer rows
+│   │   │       │   ├── diff.rs             # Edit-tool unified diff body — boundary trim + per-side budget + line-number gutter
+│   │   │       │   ├── glob.rs             # Glob-tool body — header + flat path list + truncation footer
 │   │   │       │   ├── grep.rs             # Grep-tool per-file groups of line-numbered matches (content mode)
-│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [separator] [text]` row renderer — pipe separator for read / grep, sign separator + row bg for diff sides
+│   │   │       │   ├── numbered_row.rs     # Shared `[bar] [number] [sep] [text]` row renderer — pipe sep for read / grep, sign sep for diff
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
 │   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring
 │   │   ├── input/
-│   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold-text selected, conditional alias parens, truncating description gutter
+│   │   │   ├── popup.rs                    # Slash-command autocomplete overlay — dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   └── status.rs                       # Status bar (model, spinner, status, working directory)
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)

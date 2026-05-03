@@ -61,10 +61,9 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/help`, `/init`, `/model`, `/status`. See the [user guide](guide/slash-commands.md).
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter and Tab completion.
-- `/model` swaps the active model mid-session via three-tier resolution (alias `opus` / `sonnet` / `haiku`, exact id, unique substring against a curated 5-row set). `[1m]` is first-class for the 1M-context variants of Opus 4.7 and Sonnet 4.6. Effort re-clamps to the new model's ceiling and the confirmation surfaces the change explicitly (`clamped from xhigh`, `effort cleared`). Session-only; restart returns to the user-declared model.
-- Read-only by design — no slash command writes user config files; runtime mutations stay session-local.
+- Mid-session swap: `/model` and `/effort`. Session-only — no slash command writes user config files.
 
 ### Authentication & Configuration
 
@@ -76,14 +75,15 @@ The direction is simple:
 
 ### Slash Commands (continuation)
 
-The first wave (`/clear`, `/config`, `/diff`, `/help`, `/init`, `/model`, `/status`) plus the autocomplete popup ship under Working Today. Remaining surface:
+Remaining surface beyond Working Today:
 
 - Session: `/resume`.
 - Mid-session swap: `/theme`.
-- `/model` interactive picker — Claude Code-style modal with arrow-key model navigation and `← →` effort adjustment. Follow-up PR; the textual list view ships under Working Today. Needs new key routing (modal-mode flag), a chat-anchored interactive `ChatBlock`, and effort-adjuster state plumbing.
-- Deferred: `/compact` (summarization), `/cost` (token persistence), `/login` / `/logout` (interactive OAuth), custom user commands (templates), `/init` multi-phase flow (`AgentEvent::PromptRequest`), lossless effort across `/model` swap-backs, argument-aware popup completion (`SlashCommand::complete(args_partial)` hook).
+- Combined `/model` + `/effort` interactive picker — Claude Code-style modal with arrow-key model navigation and `← →` effort adjustment.
+- Inline argument placeholder — dim ghost-text hint (e.g. `[id]`) after a slash command's trailing space.
+- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow, lossless effort across `/model` swap-backs, argument-aware popup completion.
 
-Persistence stance: `/model` and `/theme` mutate runtime state for the current session only; restart returns to the user-declared config. Persisting a slash-command choice across restarts is intentionally deferred until there is a clear case for it. When the case arrives, the design will be an **explicit subcommand** writing to an **explicit user-opted-in path** (e.g. `/model save claude-sonnet-4-6` writing into `~/.config/ox/config.toml.local` or similar) — never a silent merge into the user's main config file. This rejects Claude Code's `~/.claude.json` mega-file pattern (telemetry, recent files, login state, per-project state all in one silently-written blob); a single corrupt write should never erase the user's preferences, and a NixOS-style declarative config should remain valid.
+Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
 
 ### Permission & Approval
 
