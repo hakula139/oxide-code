@@ -318,9 +318,12 @@ mod tests {
     // ── detect_os_version ──
 
     #[test]
-    fn detect_os_version_is_nonempty() {
+    fn detect_os_version_contains_platform_and_version() {
         let version = detect_os_version();
-        assert!(!version.is_empty());
+        assert!(
+            version.contains(' '),
+            "expected 'Platform Version', got: {version:?}",
+        );
     }
 
     // ── current_date ──
