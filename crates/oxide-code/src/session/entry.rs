@@ -291,7 +291,6 @@ mod tests {
         assert_eq!(json["metadata"]["title"], "Edited f.rs");
         assert_eq!(json["metadata"]["replacements"], 3);
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
-        assert!(json["metadata"].get("exit_code").is_none());
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);

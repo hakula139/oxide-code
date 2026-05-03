@@ -187,10 +187,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     ToolOutput {
         content,
         is_error: false,
-        metadata: ToolMetadata {
-            exit_code,
-            ..ToolMetadata::default()
-        },
+        metadata: ToolMetadata::default(),
     }
 }
 

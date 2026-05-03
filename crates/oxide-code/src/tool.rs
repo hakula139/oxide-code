@@ -44,8 +44,6 @@ pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) replacements: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) diff_chunks: Option<Vec<DiffChunk>>,
