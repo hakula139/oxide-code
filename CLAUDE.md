@@ -176,6 +176,8 @@ ox                                          # Start an interactive session
 
 - Comment the **why**, not the **what**. Clear naming, types, and structure already say what the code does; comments earn their place by explaining intent, trade-offs, invariants, magic numbers, or constraints the code can't convey on its own. Skip comments that restate the code, narrate the change ("now uses X" — belongs in the commit message), or carry commented-out code (version control exists).
 - Keep `//` comments tight — one line per thought, several lines only when the rationale genuinely needs them. Long structured prose belongs in `///` doc-comments, where rustdoc renders it; in-function `//` blocks should not grow into mini-essays.
+- Doc comments (`///`) should state the **contract** (what the caller needs to know), not explain **mechanics** (how it works internally). Implementation details belong in inline `//` comments near the relevant code, if anywhere. A one-line doc is the default; multi-line only when the contract genuinely warrants it.
+- Wrap comments at **100 columns** (matching `rustfmt` max_width). This applies to both `//` and `///` lines.
 - Write `//` comments as prose, not structured markdown. If list structure is genuinely useful, promote the comment to `///` so rustdoc renders it. Either way, follow our `**/*.md` markdownlint conventions: blank line before the list, single space after the marker, incremental numbering for ordered lists, no leading-space indent.
 
 ### Blank Lines
