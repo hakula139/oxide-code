@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use indoc::formatdoc;
@@ -100,6 +101,14 @@ use crate::model;
 /// Maps a model ID to its marketing name.
 pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
     model::lookup(model).map(|info| info.marketing)
+}
+
+/// Marketing name when known; raw id otherwise. Single seam so the
+/// "unknown id falls back to the literal model string" rule lives in
+/// one place — [`Config::load`], `/status`, `/config`, and the
+/// `/model` swap handler all decay the same way.
+pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
+    marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
 }
 
 /// Maps a model ID to its knowledge cutoff date.

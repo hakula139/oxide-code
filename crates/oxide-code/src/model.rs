@@ -312,6 +312,17 @@ impl Capabilities {
             None
         }
     }
+
+    /// One-shot "user pick or model default" — clamps `pick` if
+    /// present, falls back to [`Self::default_effort`] otherwise.
+    /// Single seam for `Config::load` and runtime model swaps so the
+    /// two paths can't drift.
+    pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
+        match pick {
+            Some(p) => self.clamp_effort(p),
+            None => self.default_effort(),
+        }
+    }
 }
 
 /// First-match substring lookup against [`MODELS`]. Returns `None` for
