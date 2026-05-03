@@ -23,7 +23,7 @@ impl SlashCommand for InitCmd {
         false
     }
 
-    fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Action(UserAction::SubmitPrompt(
             PROMPT.to_owned(),
         )))

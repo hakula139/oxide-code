@@ -15,7 +15,7 @@ use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::{display_effort, file};
 use crate::util::path::tildify;
 
-pub(crate) struct ConfigCmd;
+pub(super) struct ConfigCmd;
 
 impl SlashCommand for ConfigCmd {
     fn name(&self) -> &'static str {

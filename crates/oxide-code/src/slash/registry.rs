@@ -21,7 +21,7 @@ use crate::agent::event::UserAction;
 /// commands that hand a [`UserAction`] back for the dispatcher to
 /// forward to the agent loop. The trait stays the only seam — slash
 /// impls never reach into `user_tx` themselves.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashOutcome {
     Local,
     Action(UserAction),

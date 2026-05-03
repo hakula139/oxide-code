@@ -24,7 +24,7 @@ impl SlashCommand for ClearCmd {
         false
     }
 
-    fn execute(&self, _: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
+    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.chat.clear_history();
         ctx.chat
             .push_system_message("Conversation cleared. Next message starts fresh.");

@@ -9,7 +9,7 @@ use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::display_effort;
 
-pub(crate) struct StatusCmd;
+pub(super) struct StatusCmd;
 
 impl SlashCommand for StatusCmd {
     fn name(&self) -> &'static str {

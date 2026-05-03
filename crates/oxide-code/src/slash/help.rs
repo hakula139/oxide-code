@@ -10,7 +10,7 @@ use super::context::SlashContext;
 use super::format::write_kv_section;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
 
-pub(crate) struct HelpCmd;
+pub(super) struct HelpCmd;
 
 impl SlashCommand for HelpCmd {
     fn name(&self) -> &'static str {
