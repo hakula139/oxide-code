@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_full_reread_returns_cache_hit_stub() {
+    async fn run_full_reread_is_cache_hit_stub() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\nworld\n").unwrap();

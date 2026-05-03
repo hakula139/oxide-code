@@ -1259,7 +1259,7 @@ mod tests {
     // ── parse_content_view ──
 
     #[test]
-    fn parse_content_view_no_matches_returns_empty_groups() {
+    fn parse_content_view_no_matches_is_empty() {
         assert_eq!(
             parse_content_view("No matches found"),
             Some(ToolResultView::GrepMatches {
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_match_line_returns_none_when_shape_does_not_match() {
+    fn parse_match_line_is_none_when_shape_does_not_match() {
         // No `:NUM:` / `:NUM-` pattern anywhere → fall through.
         assert!(parse_match_line("not a match line").is_none());
         // `path:` with non-digit content after → fall through.

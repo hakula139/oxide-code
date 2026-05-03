@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_cwd_returns_unknown_for_empty_result() {
+    fn sanitize_cwd_is_unknown_for_empty_result() {
         assert_eq!(sanitize_cwd(Path::new("/")), UNKNOWN_PROJECT_DIR);
         assert_eq!(sanitize_cwd(Path::new("")), UNKNOWN_PROJECT_DIR);
         assert_eq!(sanitize_cwd(Path::new("///")), UNKNOWN_PROJECT_DIR);

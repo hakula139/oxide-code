@@ -64,7 +64,7 @@ mod tests {
     // ── retry_acquire ──
 
     #[tokio::test]
-    async fn retry_acquire_returns_immediately_on_success() {
+    async fn retry_acquire_succeeds_immediately() {
         let result = retry_acquire(
             || Ok(Some(42u32)),
             3,
@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_acquire_returns_contention_err_after_exhausting_retries() {
+    async fn retry_acquire_errors_with_contention_after_exhausting_retries() {
         let calls = AtomicU32::new(0);
         let result: Result<()> = retry_acquire(
             || {

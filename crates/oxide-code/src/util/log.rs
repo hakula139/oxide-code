@@ -121,7 +121,7 @@ mod tests {
     // ── build_log_target ──
 
     #[test]
-    fn build_log_target_returns_none_when_tui_mode_false() {
+    fn build_log_target_is_none_when_tui_mode_false() {
         assert!(build_log_target(false).unwrap().is_none());
     }
 
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn log_dir_from_returns_none_without_xdg_or_home() {
+    fn log_dir_from_is_none_without_xdg_or_home() {
         assert!(log_dir_from(None, None).is_none());
     }
 

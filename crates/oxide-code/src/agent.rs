@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_stream_returns_cancelled_abort() {
+    async fn agent_turn_cancel_during_stream_is_cancelled_abort() {
         // Biased select picks the queued Cancel before the synchronous
         // stream future, so the turn never produces an assistant
         // message. The session must stay at its pre-turn tail and the
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_quit_during_stream_returns_quit_abort() {
+    async fn agent_turn_quit_during_stream_is_quit_abort() {
         // `Quit` is the explicit teardown signal; the agent loop relies
         // on it to break out of its outer driver. Pre-queueing it must
         // surface as Err(Quit) so callers don't conflate it with cancel.
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_tool_round_returns_cancelled_outcome() {
+    async fn agent_turn_cancel_during_tool_round_is_cancelled_outcome() {
         // Drives the tool-round path of `await_unless_aborted`: the
         // stream completes synchronously, then `dispatch_tool_call`
         // parks on `GateTool`'s pending future. Sending Cancel after
@@ -1641,7 +1641,7 @@ data: {"type":"message_stop"}
     }
 
     #[test]
-    fn parse_tool_json_malformed_returns_empty_object_and_error() {
+    fn parse_tool_json_malformed_produces_empty_object_and_error() {
         let (value, err) = parse_tool_json("{unclosed");
         assert_eq!(value, json!({}));
         let err = err.expect("parse error surfaced");

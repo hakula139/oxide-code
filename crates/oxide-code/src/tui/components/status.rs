@@ -316,7 +316,7 @@ mod tests {
     // ── tick ──
 
     #[test]
-    fn tick_idle_returns_false() {
+    fn tick_idle_is_false() {
         let mut bar = test_bar();
         assert!(!bar.tick());
         assert_eq!(bar.spinner_frame, 0);

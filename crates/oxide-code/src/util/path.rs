@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn xdg_dir_returns_none_without_home_or_xdg() {
+    fn xdg_dir_is_none_without_home_or_xdg() {
         assert!(
             xdg_dir(
                 None,

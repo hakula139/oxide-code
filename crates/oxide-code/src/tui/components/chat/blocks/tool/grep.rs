@@ -151,7 +151,7 @@ mod tests {
     // ── footer_text ──
 
     #[test]
-    fn footer_text_no_hidden_no_truncation_returns_none() {
+    fn footer_text_no_hidden_no_truncation_is_none() {
         assert_eq!(footer_text(0, false), None);
     }
 

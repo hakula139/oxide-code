@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_happy_path_returns_assistant_text() {
+    async fn complete_happy_path_produces_assistant_text() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn join_text_blocks_returns_empty_for_tool_only_response() {
+    fn join_text_blocks_is_empty_for_tool_only_response() {
         // Defensive: a tool_use-only reply must not surface as a title —
         // the caller treats empty as "parse failure, keep fallback".
         let blocks = vec![ContentBlock::ToolUse {

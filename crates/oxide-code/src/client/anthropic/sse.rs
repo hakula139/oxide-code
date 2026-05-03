@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_sse_returns_ok_when_receiver_drops_before_send() {
+    async fn stream_sse_succeeds_when_receiver_drops_before_send() {
         // Consumer cancellation closes the channel; the next tx.send
         // call surfaces an Err which stream_sse must treat as graceful
         // shutdown (Ok(())), not propagate as a stream failure.

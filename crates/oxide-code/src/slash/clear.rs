@@ -55,7 +55,7 @@ mod tests {
     // ── ClearCmd::execute ──
 
     #[test]
-    fn execute_returns_clear_action_without_local_side_effects() {
+    fn execute_produces_clear_action_without_local_side_effects() {
         let mut chat = ChatView::new(&Theme::default(), false);
         chat.push_user_message("prompt".to_owned());
         let info = test_session_info();

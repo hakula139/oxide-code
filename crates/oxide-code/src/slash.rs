@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_prompt_submit_command_returns_synthesized_body() {
+    fn dispatch_prompt_submit_command_produces_synthesized_body() {
         // Pin: public `dispatch` (not just `dispatch_with`) surfaces
         // the synthesized body so the App-side caller can forward it.
         let mut chat = fresh_chat();

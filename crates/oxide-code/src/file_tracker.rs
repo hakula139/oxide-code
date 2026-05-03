@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn record_read_redundant_full_read_returns_cache_hit() {
+    fn record_read_redundant_full_read_is_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_mtime_drift_returns_stored_hash() {
+    fn check_stat_mtime_drift_produces_stored_hash() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_size_drift_returns_stored_hash() {
+    fn check_stat_size_drift_produces_stored_hash() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_all_empty_tracker_returns_empty_vec() {
+    fn snapshot_all_empty_tracker_is_empty() {
         let snaps = FileTracker::default().snapshot_all();
         assert!(snaps.is_empty());
     }

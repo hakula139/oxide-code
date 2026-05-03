@@ -198,7 +198,7 @@ mod tests {
     // ── Environment::date ──
 
     #[test]
-    fn date_returns_formatted_string() {
+    fn date_produces_formatted_string() {
         let env = Environment {
             cwd: "/tmp".to_owned(),
             is_git: false,
@@ -309,7 +309,7 @@ mod tests {
     // ── detect_shell ──
 
     #[test]
-    fn detect_shell_returns_basename() {
+    fn detect_shell_produces_basename() {
         let shell = detect_shell();
         assert!(!shell.is_empty());
         assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");

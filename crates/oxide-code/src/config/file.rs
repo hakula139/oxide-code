@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn load_file_empty_toml_returns_defaults() {
+    fn load_file_empty_toml_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "").unwrap();

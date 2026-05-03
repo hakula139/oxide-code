@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_cancelled_commits_partial_stream_with_marker_and_returns_idle() {
+    fn handle_cancelled_commits_partial_stream_with_marker_and_becomes_idle() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
@@ -1825,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_turn_complete_returns_to_idle_and_reenables_input() {
+    fn handle_turn_complete_becomes_idle_and_reenables_input() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         // Drive into streaming first so TurnComplete has state to tear down.
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
@@ -1987,7 +1987,7 @@ mod tests {
     // ── expire_armed_exit ──
 
     #[test]
-    fn expire_armed_exit_returns_to_idle_after_window() {
+    fn expire_armed_exit_becomes_idle_after_window() {
         // After the 1 s window the armed state evaporates so the user
         // isn't left staring at an exit hint they didn't act on.
         let (mut app, _rx, _agent_tx) = test_app(None);

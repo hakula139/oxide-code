@@ -336,7 +336,7 @@ mod tests {
     // ── resolve_theme: base resolution ──
 
     #[test]
-    fn resolve_theme_no_args_returns_default_mocha() {
+    fn resolve_theme_no_args_uses_default_mocha() {
         let t = resolve_theme(None, &HashMap::new()).unwrap();
         assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)));
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));

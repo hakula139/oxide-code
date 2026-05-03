@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_ctrl_c_busy_returns_cancel() {
+    fn handle_event_ctrl_c_busy_triggers_cancel() {
         let mut input = test_input();
         input.set_enabled(false);
         let action = input.handle_event(&key(KeyCode::Char('c'), KeyModifiers::CONTROL));

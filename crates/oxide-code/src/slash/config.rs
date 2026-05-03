@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn display_path_existing_file_returns_tildified_value_only() {
+    fn display_path_existing_file_is_tildified_value_only() {
         // Workspace `Cargo.toml` is guaranteed to exist at test time.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(here.exists(), "test fixture missing");

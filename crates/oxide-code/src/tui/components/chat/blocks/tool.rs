@@ -252,7 +252,7 @@ mod tests {
     // ── truncate_to_bytes ──
 
     #[test]
-    fn truncate_to_bytes_under_limit_returns_input() {
+    fn truncate_to_bytes_under_limit_preserves_input() {
         assert_eq!(truncate_to_bytes("hello", 10), "hello");
     }
 

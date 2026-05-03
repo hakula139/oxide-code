@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_single_message_returns_self_as_tip() {
+    fn resolve_single_message_is_self_as_tip() {
         let mut b = ChainBuilder::new();
         let u = Uuid::new_v4();
         b.insert(
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_linear_chain_returns_root_to_tip_order() {
+    fn resolve_linear_chain_preserves_root_to_tip_order() {
         let mut b = ChainBuilder::new();
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();

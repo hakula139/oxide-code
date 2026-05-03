@@ -306,7 +306,7 @@ mod tests {
     // ── selected ──
 
     #[test]
-    fn selected_returns_match_at_index() {
+    fn selected_picks_match_at_index() {
         let mut popup = popup_with_query(Some(""));
         popup.select_next();
         let row = popup.selected().expect("popup visible");

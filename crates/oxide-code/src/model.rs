@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effort_returns_none_on_no_tier_model() {
+    fn resolve_effort_is_none_on_no_tier_model() {
         // Haiku 4.5 doesn't accept the effort field — both pick=None
         // and pick=Some collapse to None so the request omits the
         // field rather than 400-ing the gateway.
@@ -583,7 +583,7 @@ mod tests {
     // ── marketing_or_id ──
 
     #[test]
-    fn marketing_or_id_returns_marketing_for_known_id() {
+    fn marketing_or_id_produces_marketing_for_known_id() {
         assert_eq!(marketing_or_id("claude-opus-4-7"), "Claude Opus 4.7");
     }
 
