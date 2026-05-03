@@ -99,7 +99,7 @@ pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
 fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
     match registry::lookup_in(commands, &parsed.name) {
         None => SlashKind::Unknown,
-        Some(cmd) if cmd.is_read_only() => SlashKind::ReadOnly,
+        Some(cmd) if cmd.is_read_only(&parsed.args) => SlashKind::ReadOnly,
         Some(_) => SlashKind::Mutating,
     }
 }
