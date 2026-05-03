@@ -688,6 +688,10 @@ mod tests {
         let mut client = client_with("claude-opus-4-7", Some(Effort::High));
         assert_eq!(client.set_model("claude-opus-5-0".to_owned()), None);
         assert_eq!(client.model(), "claude-opus-5-0");
+        assert_eq!(
+            client.config.effort, None,
+            "stored effort must clear so the next request omits the field",
+        );
     }
 
     #[test]

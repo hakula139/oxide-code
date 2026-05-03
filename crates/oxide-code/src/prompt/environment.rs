@@ -323,6 +323,22 @@ mod tests {
         );
     }
 
+    // ── marketing_or_id ──
+
+    #[test]
+    fn marketing_or_id_returns_marketing_for_known_id() {
+        assert_eq!(marketing_or_id("claude-opus-4-7"), "Claude Opus 4.7");
+    }
+
+    #[test]
+    fn marketing_or_id_falls_back_to_raw_id_for_unknown() {
+        // Single seam for the unknown-id fallback — every UI surface
+        // (status bar, /status, /config, swap confirmation) goes
+        // through this. A regression that returned a placeholder or
+        // panicked here would show up everywhere at once.
+        assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
+    }
+
     // ── knowledge_cutoff ──
 
     #[test]

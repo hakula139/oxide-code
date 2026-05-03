@@ -1494,6 +1494,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_effort_swap_during_busy_refuses_with_system_message_no_forward() {
+        // /effort mirrors /model's args-aware mid-turn rule. Without
+        // this pin a regression that special-cases only /model leaks.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/effort xhigh".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "SwitchEffort must not reach user_tx mid-turn",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/effort runs only when idle"),
+            "refusal must name the gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_bare_effort_during_busy_runs_list_view() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/effort".to_owned()));
+
+        let body = app.chat.last_system_text().expect("system block from list");
+        assert!(body.starts_with("Effort levels for"), "{body}");
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
         // Unknown commands route through `dispatch` so the user sees
         // the canonical "unknown command" error with recovery hints

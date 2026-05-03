@@ -203,10 +203,17 @@ mod tests {
 
     #[test]
     fn execute_no_args_marks_only_the_active_level() {
+        // `test_session_info` ships effort=High; assert both the row
+        // count AND that "high" is the marked one so a misrouted
+        // marker (e.g. always-mark-low regression) fails here.
         let (chat, _) = run_execute("");
         let body = chat.last_system_text().unwrap();
         let marked: Vec<&str> = body.lines().filter(|l| l.contains(" * ")).collect();
         assert_eq!(marked.len(), 1, "exactly one marker row: {marked:?}");
+        assert!(
+            marked[0].contains("high"),
+            "active row marks `high`: {marked:?}",
+        );
     }
 
     #[test]

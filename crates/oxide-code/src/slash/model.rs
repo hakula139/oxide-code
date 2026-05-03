@@ -347,8 +347,9 @@ mod tests {
 
     #[test]
     fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
-        // Exact match works on every typeable row, including
-        // non-SELECTABLE older ids and their 1M variants.
+        // Pass-through tier returns the arg unchanged when `lookup`
+        // recognizes it. Covers every canonical id including
+        // non-SELECTABLE older rows and their 1M variants.
         for id in [
             "claude-opus-4-7",
             "claude-opus-4-7[1m]",
@@ -361,16 +362,16 @@ mod tests {
             assert_eq!(
                 outcome,
                 Ok(SlashOutcome::Action(UserAction::SwitchModel(id.to_owned()))),
-                "exact `{id}` must round-trip",
+                "canonical `{id}` must round-trip",
             );
         }
     }
 
     #[test]
-    fn execute_unique_substring_resolves_against_typeable_set() {
-        // Substring tier reaches non-SELECTABLE rows. `opus-4-1` is
-        // only in MODELS, not SELECTABLE, but a unique substring still
-        // resolves it.
+    fn execute_short_id_resolves_via_suffix_tier() {
+        // Suffix tier turns short forms into canonical ids without
+        // an explicit alias entry. Covers non-SELECTABLE rows like
+        // `opus-4-1` that are reachable only by manual entry.
         for (arg, expected) in [
             ("haiku-4-5", "claude-haiku-4-5"),
             ("opus-4-1", "claude-opus-4-1"),
@@ -388,10 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_bare_substring_prefers_bare_row_over_1m_variant() {
-        // `sonnet-4-6` (no [1m]) clearly means the non-1M variant —
-        // the substring filter excludes [1m] candidates so the user
-        // doesn't get a spurious ambiguity error.
+    fn execute_bare_arg_resolves_to_bare_row_not_1m_variant() {
+        // `sonnet-4-6` (no [1m]) is the non-1M variant. The strip-
+        // resolve-reattach pipeline never re-attaches [1m] when the
+        // arg lacks it, so the bare row wins without ambiguity.
         let (_, outcome) = run_execute("sonnet-4-6");
         assert_eq!(
             outcome,
@@ -402,10 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_1m_substring_resolves_to_1m_variant_only() {
-        // Mirror image of the bare case — `[1m]` arg only considers
-        // [1m] candidates, so `opus-4-6[1m]` lands on the 1M row
-        // without ambiguity against the bare row.
+    fn execute_1m_arg_re_attaches_tag_after_resolving_base() {
+        // Strip `[1m]`, resolve `opus-4-6` via suffix, re-attach `[1m]`
+        // because Opus 4.6 caps allow it. Pin the round-trip so a
+        // regression in the strip-reattach pipeline shows up here.
         let (_, outcome) = run_execute("opus-4-6[1m]");
         assert_eq!(
             outcome,
