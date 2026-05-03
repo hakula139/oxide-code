@@ -1,22 +1,50 @@
-//! `/model` — list models or swap the active one mid-session.
+//! `/model` — list selectable models or swap the active one mid-session.
 //!
-//! Bare `/model` lists [`crate::model::MODELS`] with the active row
-//! marked. `/model <id>` resolves the argument by substring match
-//! against the same table and returns
-//! [`UserAction::SwitchModel`]; the agent loop calls
+//! Bare `/model` lists the curated [`SELECTABLE`] set with the active
+//! row marked. `/model <arg>` resolves through three tiers: alias map,
+//! exact id match, then unique-substring match against [`SELECTABLE`].
+//! On a unique match, the dispatcher hands [`UserAction::SwitchModel`]
+//! to the agent loop, which calls
 //! [`Client::set_model`](crate::client::anthropic::Client::set_model)
-//! and emits
-//! [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched),
-//! which the App turns into the confirmation system block.
+//! and emits [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched).
 //!
-//! Persistence: session-only — see `model.md`.
+//! `[1m]` is a first-class selectable variant — `/model opus-4-7`
+//! means non-1M Opus 4.7; `/model opus-4-7[1m]` means the 1M variant.
+//! See `model.md` § Design Decisions.
 
 use std::fmt::Write as _;
 
 use super::context::{SessionInfo, SlashContext};
+use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ModelInfo, lookup};
+use crate::prompt::environment::marketing_or_id;
+
+/// Selectable model ids, presented in the list view in this order.
+/// Curated from [`crate::model::MODELS`] — older / family-base rows
+/// are visible to the capability layer (so a user with `model =
+/// "claude-opus-4-1"` in config still gets the right beta headers)
+/// but `/model` only swaps within this set.
+const SELECTABLE: &[&str] = &[
+    "claude-opus-4-7",
+    "claude-opus-4-7[1m]",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6[1m]",
+    "claude-haiku-4-5",
+];
+
+/// Short aliases the user can type instead of the canonical id.
+/// `opus`/`sonnet`/`haiku` map to the latest non-1M row of each
+/// family; `opus[1m]` and `sonnet[1m]` opt into 1M context. Haiku 4.5
+/// has no 1M variant, so `haiku[1m]` falls through to the
+/// "unknown model" error.
+const ALIASES: &[(&str, &str)] = &[
+    ("opus", "claude-opus-4-7"),
+    ("opus[1m]", "claude-opus-4-7[1m]"),
+    ("sonnet", "claude-sonnet-4-6"),
+    ("sonnet[1m]", "claude-sonnet-4-6[1m]"),
+    ("haiku", "claude-haiku-4-5"),
+];
 
 pub(super) struct ModelCmd;
 
@@ -26,18 +54,17 @@ impl SlashCommand for ModelCmd {
     }
 
     fn description(&self) -> &'static str {
-        "List models or switch the active one (effort clamps to the new model)"
+        "List models or switch the active one"
     }
 
-    fn is_read_only(&self) -> bool {
-        // The arg-swap form races the in-flight `Client`. Refuse
-        // both forms uniformly — args-aware classification isn't
-        // worth its plumbing for a one-turn wait on the list view.
-        false
+    fn is_read_only(&self, args: &str) -> bool {
+        // Bare `/model` (list view) is safe mid-turn; the swap form
+        // races the in-flight `Client` and must wait for idle.
+        args.trim().is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some("[<model-id>]")
+        Some("[<id>]")
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -51,61 +78,87 @@ impl SlashCommand for ModelCmd {
     }
 }
 
-/// Substring-matches `arg` against each [`MODELS`] row's canonical
-/// id. Returns the canonical id on a unique match; `Err` on no
-/// match or ambiguity. Family-base ids (`claude-opus-4`) are
-/// substrings of every more-specific row, so they always come back
-/// ambiguous — that's the intended UX.
+/// Three-tier resolution: alias substitution → exact id match →
+/// unique-substring match against [`SELECTABLE`]. Exact match wins
+/// over substring so `/model opus-4-7` reaches the bare row instead
+/// of being ambiguous with `claude-opus-4-7[1m]`.
 fn resolve_model_arg(arg: &str) -> Result<&'static str, String> {
-    let matches: Vec<&'static str> = MODELS
+    if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
+        return Ok(target);
+    }
+    if let Some(&exact) = SELECTABLE.iter().find(|id| **id == arg) {
+        return Ok(exact);
+    }
+    let matches: Vec<&'static str> = SELECTABLE
         .iter()
-        .filter(|info| info.id_substr.contains(arg))
-        .map(|info| info.id_substr)
+        .copied()
+        .filter(|id| id.contains(arg))
         .collect();
     match matches.as_slice() {
-        [] => Err(format!("unknown model: {arg}. Run /model for the list.")),
+        [] => Err(format!(
+            "Unknown model: `{arg}`. Run `/model` for the list of selectable models.",
+        )),
         [id] => Ok(*id),
         _ => Err(format!(
-            "ambiguous: {arg} matches {n} models ({list}). Try a more specific id.",
+            "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
             n = matches.len(),
             list = matches.join(", "),
         )),
     }
 }
 
-/// `id  marketing` table with a `*` on the active row plus the
-/// switch hint. Active row is the [`lookup`] resolution of the
-/// session's `model_id`; substring equality would also mark family
-/// bases when the user is on a 4.x release.
+/// `* id  marketing` table with a legend header. Active row marker is
+/// an exact match between [`SessionInfo`]'s `config.model_id` and a
+/// [`SELECTABLE`] entry — `[1m]` distinctness matters because the
+/// 1M-tagged variant is a separate selectable row.
 fn render_model_list(info: &SessionInfo) -> String {
-    let active_id = lookup(&info.config.model_id).map(|m| m.id_substr);
-    let gutter = MODELS.iter().map(|m| m.id_substr.len()).max().unwrap_or(0);
-    let mut out = String::from("Available models\n\n");
-    for ModelInfo {
-        id_substr,
-        marketing,
-        ..
-    } in MODELS
-    {
-        let marker = if active_id == Some(id_substr) {
-            '*'
-        } else {
-            ' '
-        };
-        let pad = gutter.saturating_sub(id_substr.len());
-        _ = writeln!(
+    let active = info.config.model_id.as_str();
+    let labels: Vec<String> = SELECTABLE
+        .iter()
+        .map(|id| label_for(id, *id == active))
+        .collect();
+    let descriptions: Vec<String> = SELECTABLE.iter().map(|id| description_for(id)).collect();
+    let rows = labels
+        .iter()
+        .zip(&descriptions)
+        .map(|(label, desc)| (label.as_str(), desc.as_str()));
+
+    let mut out = String::from("Available models  (* = active)\n\n");
+    write_kv_table(&mut out, rows);
+
+    out.push_str("\nSwitch with: /model <id>\n");
+    out.push_str(
+        "Short aliases: /model opus, /model sonnet, /model haiku. Append [1m] for 1M context (Opus 4.7, Sonnet 4.6).\n",
+    );
+    out.push_str("Effort re-clamps to the new model's ceiling and is not restored on swap-back.");
+
+    if !SELECTABLE.contains(&active) {
+        _ = write!(
             out,
-            "  {marker} {id_substr}{spaces}  {marketing}",
-            spaces = " ".repeat(pad),
+            "\n\nCurrent model: {active} (not in the selectable list).",
         );
     }
-    out.push_str(
-        "\nSwitch with `/model <id>`. A unique substring works (e.g. `/model haiku-4-5`).\n",
-    );
-    out.push_str(
-        "Effort clamps to the new model's ceiling; the user pick is not preserved across swaps.",
-    );
     out
+}
+
+/// `* id` on the active row, `  id` otherwise. Width-aligned by
+/// [`write_kv_table`]'s gutter so the marker column stays straight.
+fn label_for(id: &'static str, active: bool) -> String {
+    let marker = if active { '*' } else { ' ' };
+    format!("{marker} {id}")
+}
+
+/// Marketing name + ` (1M context)` when the id carries the `[1m]`
+/// opt-in tag. [`marketing_or_id`] falls back to the raw id for
+/// unknown rows; `[1m]` is stripped by the substring lookup, so
+/// the marketing name comes from the bare row.
+fn description_for(id: &'static str) -> String {
+    let name = marketing_or_id(id);
+    if id.ends_with("[1m]") {
+        format!("{name} (1M context)")
+    } else {
+        name.into_owned()
+    }
 }
 
 #[cfg(test)]
@@ -122,14 +175,17 @@ mod tests {
         assert_eq!(ModelCmd.name(), "model");
         assert!(ModelCmd.aliases().is_empty());
         assert!(!ModelCmd.description().is_empty());
-        assert_eq!(ModelCmd.usage(), Some("[<model-id>]"));
+        assert_eq!(ModelCmd.usage(), Some("[<id>]"));
     }
 
     #[test]
-    fn is_read_only_is_false() {
-        // The arg-swap form races the in-flight stream — overrides
-        // the `true` trait default so the dispatcher refuses mid-turn.
-        assert!(!ModelCmd.is_read_only());
+    fn is_read_only_splits_on_args() {
+        // Bare list form stays read-only; arg-bearing form refuses
+        // mid-turn. Whitespace-only args route the same as bare.
+        assert!(ModelCmd.is_read_only(""));
+        assert!(ModelCmd.is_read_only("   "));
+        assert!(!ModelCmd.is_read_only("opus"));
+        assert!(!ModelCmd.is_read_only("claude-opus-4-7"));
     }
 
     // ── ModelCmd::execute ──
@@ -142,35 +198,46 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_pushes_list_and_returns_local() {
+    fn execute_no_args_pushes_list_with_legend_aliases_and_clamp_note() {
         let (chat, outcome) = run_execute("");
         assert_eq!(outcome, Ok(SlashOutcome::Local));
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
         let body = chat.last_system_text().expect("system block present");
-        for info in MODELS {
-            assert!(
-                body.contains(info.id_substr),
-                "list must mention every id: missing {}",
-                info.id_substr,
-            );
-            assert!(
-                body.contains(info.marketing),
-                "list must mention every marketing name: missing {}",
-                info.marketing,
-            );
-        }
         assert!(
-            body.contains("Switch with `/model <id>`"),
-            "list must end with the switch hint: {body}",
+            body.starts_with("Available models  (* = active)"),
+            "header + legend must lead the output: {body}",
         );
+        assert!(body.contains("Switch with: /model <id>"), "{body}");
+        assert!(body.contains("Short aliases"), "alias hint: {body}");
+        assert!(body.contains("[1m]"), "1M opt-in hint: {body}");
+        assert!(body.contains("Effort re-clamps"), "clamp note: {body}");
     }
 
     #[test]
-    fn execute_no_args_marks_only_the_current_model() {
-        // Exactly one `*` even though `claude-opus-4-7` is a superstring
-        // of `claude-opus-4` — substring equality on `id_substr` would
-        // mark both, so the renderer must use `lookup` resolution.
+    fn execute_no_args_lists_every_selectable_in_declared_order() {
+        // Pin the row order — a mutation reversing or sorting the
+        // SELECTABLE iteration would survive a per-row contains check.
+        let (chat, _) = run_execute("");
+        let body = chat.last_system_text().unwrap();
+        let mut last_idx = 0usize;
+        for id in SELECTABLE {
+            let idx = body
+                .find(id)
+                .unwrap_or_else(|| panic!("missing {id}: {body}"));
+            assert!(
+                idx >= last_idx,
+                "row order broken: {id} at {idx} before previous row at {last_idx}",
+            );
+            last_idx = idx;
+        }
+    }
+
+    #[test]
+    fn execute_no_args_marks_only_the_active_row() {
+        // Active row is the exact-match against SELECTABLE.
+        // `claude-opus-4-7` (bare) marks only itself, never
+        // `claude-opus-4-7[1m]` — `[1m]` distinctness matters.
         let mut chat = ChatView::new(&Theme::default(), false);
         let mut info = test_session_info();
         info.config.model_id = "claude-opus-4-7".to_owned();
@@ -178,30 +245,80 @@ mod tests {
             .execute("", &mut SlashContext::new(&mut chat, &info))
             .unwrap();
         let body = chat.last_system_text().unwrap();
-        let marked: Vec<&str> = body.lines().filter(|l| l.starts_with("  * ")).collect();
-        assert_eq!(marked.len(), 1, "exactly one current marker: {marked:?}");
+        let marked: Vec<&str> = body.lines().filter(|l| l.contains(" * ")).collect();
+        assert_eq!(marked.len(), 1, "exactly one marker row: {marked:?}");
+        assert!(marked[0].contains("claude-opus-4-7"), "{marked:?}");
         assert!(
-            marked[0].contains("claude-opus-4-7"),
-            "marker on the current id: {marked:?}",
+            !marked[0].contains("[1m]"),
+            "bare id must not match the [1m] row: {marked:?}",
         );
     }
 
     #[test]
-    fn execute_with_canonical_id_returns_switch_action() {
-        let (chat, outcome) = run_execute("claude-sonnet-4-6");
+    fn execute_no_args_warns_when_current_model_is_not_selectable() {
+        // A user with `model = claude-opus-4-1` set via config gets
+        // an unmarked list plus a footer naming their current model
+        // so they understand why nothing is starred.
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let mut info = test_session_info();
+        info.config.model_id = "claude-opus-4-1".to_owned();
+        ModelCmd
+            .execute("", &mut SlashContext::new(&mut chat, &info))
+            .unwrap();
+        let body = chat.last_system_text().unwrap();
+        assert!(
+            body.contains("Current model: claude-opus-4-1 (not in the selectable list)"),
+            "warning footer expected: {body}",
+        );
+    }
+
+    #[test]
+    fn execute_with_alias_resolves_to_canonical_id() {
+        for (alias, expected) in [
+            ("opus", "claude-opus-4-7"),
+            ("opus[1m]", "claude-opus-4-7[1m]"),
+            ("sonnet", "claude-sonnet-4-6"),
+            ("sonnet[1m]", "claude-sonnet-4-6[1m]"),
+            ("haiku", "claude-haiku-4-5"),
+        ] {
+            let (_, outcome) = run_execute(alias);
+            assert_eq!(
+                outcome,
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(
+                    expected.to_owned(),
+                ))),
+                "alias `{alias}` should route to `{expected}`",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_haiku_1m_alias_is_unknown_because_haiku_has_no_1m_variant() {
+        // `haiku[1m]` is not in `ALIASES` and not a substring of any
+        // SELECTABLE entry; falls through to Unknown.
+        let (_, outcome) = run_execute("haiku[1m]");
+        let msg = outcome.expect_err("haiku[1m] must error");
+        assert!(msg.starts_with("Unknown model: `haiku[1m]`"), "{msg}");
+    }
+
+    #[test]
+    fn execute_with_exact_id_wins_over_substring_match() {
+        // Exact match for `claude-opus-4-7` resolves to the bare row,
+        // even though it's a substring of `claude-opus-4-7[1m]` (which
+        // would otherwise make it ambiguous).
+        let (_, outcome) = run_execute("claude-opus-4-7");
         assert_eq!(
             outcome,
             Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-sonnet-4-6".to_owned(),
+                "claude-opus-4-7".to_owned(),
             ))),
         );
-        // Confirmation lands later via `ModelSwitched`; execute paints
-        // nothing on the success path.
-        assert_eq!(chat.entry_count(), 0);
     }
 
     #[test]
     fn execute_with_unique_substring_resolves_to_canonical_id() {
+        // `haiku-4-5` is unique against SELECTABLE (Haiku has no 1M
+        // variant in the curated set).
         let (_, outcome) = run_execute("haiku-4-5");
         assert_eq!(
             outcome,
@@ -212,36 +329,49 @@ mod tests {
     }
 
     #[test]
-    fn execute_with_unknown_arg_returns_err() {
-        let (chat, outcome) = run_execute("gpt-4");
-        let msg = outcome.expect_err("unknown arg must error");
-        assert!(msg.contains("unknown model"), "{msg}");
-        assert!(msg.contains("/model"), "recovery hint: {msg}");
+    fn execute_with_canonical_1m_id_resolves_to_1m_variant() {
+        // `[1m]` is first-class — exact-match path returns the
+        // 1M-tagged id verbatim so the [1m] opt-in survives.
+        let (_, outcome) = run_execute("claude-opus-4-7[1m]");
         assert_eq!(
-            chat.entry_count(),
-            0,
-            "execute does not push on the error path",
+            outcome,
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(
+                "claude-opus-4-7[1m]".to_owned(),
+            ))),
         );
     }
 
     #[test]
-    fn execute_with_ambiguous_arg_returns_err_listing_candidates() {
-        // `sonnet` matches every Sonnet row.
-        let (_, outcome) = run_execute("sonnet");
+    fn execute_with_unknown_arg_returns_capitalized_error_with_recovery_hint() {
+        let (chat, outcome) = run_execute("gpt-4");
+        let msg = outcome.expect_err("unknown arg must error");
+        assert!(
+            msg.starts_with("Unknown model: `gpt-4`."),
+            "leading capital + backticked input: {msg}",
+        );
+        assert!(msg.contains("Run `/model`"), "recovery hint: {msg}");
+        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
+    }
+
+    #[test]
+    fn execute_with_ambiguous_substring_lists_count_and_each_candidate() {
+        // `opus-4-7` matches both bare and [1m] rows. The error must
+        // surface the count AND every candidate so the user can pick.
+        let (_, outcome) = run_execute("opus-4-7");
         let msg = outcome.expect_err("ambiguous arg must error");
-        assert!(msg.contains("ambiguous"), "{msg}");
-        for needle in ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4"] {
-            assert!(
-                msg.contains(needle),
-                "candidate must be listed for disambiguation: {msg}",
-            );
+        assert!(
+            msg.starts_with("`opus-4-7` matches 2 models:"),
+            "leading backtick + count substring: {msg}",
+        );
+        for needle in ["claude-opus-4-7", "claude-opus-4-7[1m]"] {
+            assert!(msg.contains(needle), "candidate listed: {msg}");
         }
+        assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
     }
 
     #[test]
     fn execute_trims_whitespace_around_arg() {
-        // Padded input must resolve the same as bare input — dropping
-        // the trim would NotFound, since no id has leading whitespace.
+        // Padded input resolves the same as bare input.
         let (_, outcome) = run_execute("  haiku-4-5  ");
         assert_eq!(
             outcome,
@@ -254,62 +384,70 @@ mod tests {
     // ── resolve_model_arg ──
 
     #[test]
-    fn resolve_model_arg_unique_substring_returns_canonical_id() {
-        assert_eq!(resolve_model_arg("opus-4-7"), Ok("claude-opus-4-7"));
-        assert_eq!(resolve_model_arg("haiku-4-5"), Ok("claude-haiku-4-5"));
+    fn resolve_model_arg_alias_substitution_runs_before_substring_match() {
+        // `opus` matches every Opus row as a substring (would be
+        // ambiguous), but the alias map intercepts and routes it to
+        // the canonical opus-4-7 row. Pin the precedence directly.
+        assert_eq!(resolve_model_arg("opus"), Ok("claude-opus-4-7"));
     }
 
     #[test]
-    fn resolve_model_arg_leaf_id_is_a_unique_match() {
-        // Versioned leaf ids (`claude-opus-4-7`, etc.) match only
-        // themselves. Family-base ids (`claude-opus-4`) are
-        // intentionally ambiguous — see `..._family_base_id_is_ambiguous`.
-        for leaf in [
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
-            "claude-opus-4-1",
-        ] {
-            assert_eq!(resolve_model_arg(leaf), Ok(leaf), "{leaf}");
+    fn resolve_model_arg_each_selectable_id_matches_itself_exactly() {
+        for id in SELECTABLE {
+            assert_eq!(resolve_model_arg(id), Ok(*id), "{id}");
         }
     }
 
-    #[test]
-    fn resolve_model_arg_family_base_id_is_ambiguous() {
-        // Pin the intentional ambiguity: the family-base id is a
-        // substring of every more-specific row in its family, so
-        // typing it must surface the disambiguation error rather
-        // than silently route to the experimental base.
-        let err = resolve_model_arg("claude-opus-4").unwrap_err();
-        assert!(err.starts_with("ambiguous: claude-opus-4"), "{err}");
-        for needle in ["claude-opus-4-7", "claude-opus-4-1", "claude-opus-4"] {
-            assert!(err.contains(needle), "{err}");
-        }
+    // ── render_model_list ──
+
+    fn render(model_id: &str) -> String {
+        let mut info = test_session_info();
+        info.config.model_id = model_id.to_owned();
+        render_model_list(&info)
     }
 
     #[test]
-    fn resolve_model_arg_unknown_yields_not_found() {
-        let err = resolve_model_arg("gpt-4").unwrap_err();
-        assert!(err.contains("unknown model: gpt-4"), "{err}");
+    fn render_model_list_marker_column_aligns_within_table() {
+        // Pin the column alignment — `write_kv_table` pads to the
+        // longest id, and the marker prepended by the active-row
+        // logic must not break that gutter. Compare the description
+        // column position across rows.
+        let body = render("claude-opus-4-7");
+        let value_cols: Vec<usize> = body
+            .lines()
+            .filter(|l| l.contains("claude-"))
+            .map(|l| l.find("Claude").expect("description present"))
+            .collect();
+        assert!(value_cols.len() >= 2, "expected multiple rows: {body}");
+        assert!(
+            value_cols.windows(2).all(|w| w[0] == w[1]),
+            "columns not aligned: {value_cols:?} — body: {body}",
+        );
     }
 
     #[test]
-    fn resolve_model_arg_ambiguous_lists_every_match() {
-        // `opus-4` matches Opus 4.7 / 4.6 / 4.5 / 4.1 and the base
-        // family row. The error must list all of them.
-        let err = resolve_model_arg("opus-4").unwrap_err();
-        assert!(err.starts_with("ambiguous: opus-4"), "{err}");
-        for needle in [
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-opus-4-5",
-            "claude-opus-4-1",
-            "claude-opus-4",
-        ] {
-            assert!(err.contains(needle), "{err}");
+    fn render_model_list_appends_1m_context_suffix_to_1m_rows() {
+        let body = render("claude-opus-4-7");
+        // Every [1m] entry must carry the `(1M context)` suffix
+        // so users can tell variants apart in the list.
+        for id in SELECTABLE.iter().filter(|id| id.ends_with("[1m]")) {
+            let row = body
+                .lines()
+                .find(|l| l.contains(id))
+                .unwrap_or_else(|| panic!("row for {id} missing: {body}"));
+            assert!(
+                row.contains("(1M context)"),
+                "1M suffix missing on {id}: {row}",
+            );
         }
+        // Non-1M rows must NOT carry the suffix.
+        let bare_row = body
+            .lines()
+            .find(|l| l.contains("claude-opus-4-7  "))
+            .expect("bare opus-4-7 row");
+        assert!(
+            !bare_row.contains("(1M context)"),
+            "leaked suffix: {bare_row}"
+        );
     }
 }
