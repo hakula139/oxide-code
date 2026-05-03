@@ -27,12 +27,10 @@ use self::blocks::{
     InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
     ToolResultBlock, UserMessage, last_has_width,
 };
-use crate::agent::pending_calls::{
-    FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header,
-};
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
+use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.

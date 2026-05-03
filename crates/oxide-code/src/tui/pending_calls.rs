@@ -1,5 +1,4 @@
-//! Tool-call correlation state shared by live streaming and transcript
-//! resume, so both paths evolve together.
+//! Tool-call correlation state shared by live streaming and transcript resume.
 
 use std::collections::HashMap;
 
