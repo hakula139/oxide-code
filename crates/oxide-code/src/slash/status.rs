@@ -52,14 +52,16 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    // ── Status trait ──
+    // ── StatusCmd metadata ──
 
     #[test]
-    fn status_metadata_exposes_canonical_name_and_description() {
-        // Pin canonical name + non-empty description.
+    fn metadata_matches_built_ins_contract() {
         assert_eq!(StatusCmd.name(), "status");
+        assert!(StatusCmd.aliases().is_empty());
         assert!(!StatusCmd.description().is_empty());
     }
+
+    // ── StatusCmd::execute ──
 
     #[test]
     fn status_execute_pushes_a_non_error_block() {

@@ -91,13 +91,16 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    // ── Config trait ──
+    // ── ConfigCmd metadata ──
 
     #[test]
-    fn config_metadata_exposes_canonical_name_and_description() {
+    fn metadata_matches_built_ins_contract() {
         assert_eq!(ConfigCmd.name(), "config");
+        assert!(ConfigCmd.aliases().is_empty());
         assert!(!ConfigCmd.description().is_empty());
     }
+
+    // ── ConfigCmd::execute ──
 
     #[test]
     fn config_execute_pushes_a_non_error_block() {

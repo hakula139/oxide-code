@@ -206,6 +206,15 @@ mod tests {
         (dir, path)
     }
 
+    // ── DiffCmd metadata ──
+
+    #[test]
+    fn metadata_matches_built_ins_contract() {
+        assert_eq!(DiffCmd.name(), "diff");
+        assert!(DiffCmd.aliases().is_empty());
+        assert!(!DiffCmd.description().is_empty());
+    }
+
     // ── execute ──
 
     #[test]
