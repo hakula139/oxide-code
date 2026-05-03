@@ -2,12 +2,11 @@
 //!
 //! Bare `/model` lists the curated [`SELECTABLE`] set with the active
 //! row marked. `/model <arg>` resolves through four tiers against the
-//! broader [`crate::model::MODELS`] table: alias map, lookup
-//! pass-through (the arg already matches via [`crate::model::lookup`],
-//! e.g. dated `claude-opus-4-6-20250805`), unique suffix (so `opus-4`
-//! lands on `claude-opus-4` rather than 5-way ambiguous), then unique
-//! substring. Manual entry of older or dated ids works even though the
-//! curated list only surfaces 4.7. On a unique match, the dispatcher hands
+//! broader [`crate::model::MODELS`] table: alias map, exact / dated-id
+//! pass-through, unique suffix (so `opus-4` lands on `claude-opus-4`
+//! rather than 5-way ambiguous), then unique substring. Manual entry of
+//! older or dated ids works even though the curated list only surfaces 4.7.
+//! On a unique match, the dispatcher hands
 //! [`UserAction::SwitchModel`] to the agent loop, which calls
 //! [`Client::set_model`](crate::client::anthropic::Client::set_model)
 //! and emits [`AgentEvent::ModelSwitched`](crate::agent::event::AgentEvent::ModelSwitched).
@@ -111,15 +110,13 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
     Ok(format!("{base_id}{TAG_1M}"))
 }
 
-/// Four-tier resolution against [`MODELS`]: alias → pass-through (arg
-/// is already a recognized id, including dated forms like
-/// `claude-opus-4-6-20250805`) → unique suffix (so `opus-4` lands on
-/// `claude-opus-4`, not 5-way ambiguous) → unique substring.
+/// Four-tier resolution against [`MODELS`]: alias → exact / dated-id
+/// pass-through → unique suffix → unique substring.
 fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target.to_owned());
     }
-    if lookup(arg).is_some() {
+    if is_known_model_id(arg) || is_dated_model_id(arg) {
         return Ok(arg.to_owned());
     }
     if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
@@ -138,6 +135,24 @@ fn resolve_base(arg: &str) -> Result<String, String> {
              any id from the model table works (e.g. `claude-opus-4-6`).",
         )),
     }
+}
+
+fn is_known_model_id(arg: &str) -> bool {
+    MODELS.iter().any(|m| m.id_substr == arg)
+}
+
+fn is_dated_model_id(arg: &str) -> bool {
+    MODELS.iter().any(|m| has_dated_suffix(arg, m.id_substr))
+}
+
+fn has_dated_suffix(arg: &str, base: &str) -> bool {
+    let Some(suffix) = arg.strip_prefix(base) else {
+        return false;
+    };
+    let Some(date) = suffix.strip_prefix('-') else {
+        return false;
+    };
+    date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
@@ -344,9 +359,8 @@ mod tests {
 
     #[test]
     fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
-        // Pass-through tier returns the arg unchanged when `lookup`
-        // recognizes it. Covers every canonical id including
-        // non-SELECTABLE older rows and their 1M variants.
+        // Pass-through tier returns exact table rows unchanged, including
+        // non-SELECTABLE older rows and 1M variants.
         for id in [
             "claude-opus-4-7",
             "claude-opus-4-7[1m]",
@@ -484,6 +498,22 @@ mod tests {
                 resolve_model_arg(dated).as_deref(),
                 Ok(dated),
                 "{dated} must pass through",
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_model_arg_rejects_malformed_ids_that_only_contain_known_rows() {
+        for arg in [
+            "claude-opus-4-7x",
+            "foo-claude-opus-4-7",
+            "claude-opus-4-7[1m]-bad",
+            "claude-opus-4-7-2026010x",
+            "claude-opus-4-7-202601011",
+        ] {
+            assert!(
+                resolve_model_arg(arg).is_err(),
+                "malformed id must not pass through: {arg}",
             );
         }
     }
