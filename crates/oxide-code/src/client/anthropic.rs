@@ -1435,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn first_user_text_returns_empty_when_absent() {
+    fn first_user_text_is_empty_when_absent() {
         assert_eq!(first_user_text(&[]), "");
         assert_eq!(first_user_text(&[Message::assistant("hi")]), "");
         let tool_only = vec![Message {

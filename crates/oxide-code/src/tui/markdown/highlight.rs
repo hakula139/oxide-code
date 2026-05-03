@@ -1,3 +1,5 @@
+//! Syntax highlighting via syntect.
+
 use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};

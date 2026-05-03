@@ -1,7 +1,6 @@
 //! Per-session file-change tracker: Read-before-Edit gate with mtime + xxh64 staleness detection.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -19,7 +18,7 @@ pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     content_hash: u64,
     mtime: SystemTime,
@@ -28,17 +27,26 @@ struct FileState {
     recorded_at: OffsetDateTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
     Full,
     Partial { offset: usize, limit: usize },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
     Write,
+}
+
+impl GatePurpose {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Edit => "editing",
+            Self::Write => "writing to",
+        }
+    }
 }
 
 impl FileTracker {
@@ -199,11 +207,17 @@ impl FileTracker {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, FileState>> {
-        self.by_path.lock().expect("FileTracker mutex poisoned")
+        match self.by_path.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!("FileTracker mutex poisoned, recovering");
+                e.into_inner()
+            }
+        }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
     pub(crate) content_hash: u64,
@@ -215,65 +229,26 @@ pub(crate) struct FileSnapshot {
     pub(crate) recorded_at: OffsetDateTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
     CacheHit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatCheck {
     Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
+    #[error("File {} has not been read in this session. Use the Read tool first before {} it.", .path.display(), .purpose.verb())]
     NeverRead { path: PathBuf, purpose: GatePurpose },
+    #[error("File {} has only been read partially (with offset / limit). Read the full file before {} it.", .path.display(), .purpose.verb())]
     PartialRead { path: PathBuf, purpose: GatePurpose },
+    #[error("File {} has been modified externally since it was last read. Re-read it before {} it.", .path.display(), .purpose.verb())]
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
-}
-
-impl fmt::Display for GateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let verb = match self.purpose() {
-            GatePurpose::Edit => "editing",
-            GatePurpose::Write => "writing to",
-        };
-        let path = self.path().display();
-        match self {
-            Self::NeverRead { .. } => write!(
-                f,
-                "File {path} has not been read in this session. Use the Read tool first before {verb} it.",
-            ),
-            Self::PartialRead { .. } => write!(
-                f,
-                "File {path} has only been read partially (with offset / limit). Read the full file before {verb} it.",
-            ),
-            Self::ContentDrifted { .. } => write!(
-                f,
-                "File {path} has been modified externally since it was last read. Re-read it before {verb} it.",
-            ),
-        }
-    }
-}
-
-impl GateError {
-    fn path(&self) -> &Path {
-        match self {
-            Self::NeverRead { path, .. }
-            | Self::PartialRead { path, .. }
-            | Self::ContentDrifted { path, .. } => path,
-        }
-    }
-
-    fn purpose(&self) -> GatePurpose {
-        match self {
-            Self::NeverRead { purpose, .. }
-            | Self::PartialRead { purpose, .. }
-            | Self::ContentDrifted { purpose, .. } => *purpose,
-        }
-    }
 }
 
 /// Stub returned in place of file bytes on a full re-Read of an
@@ -361,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn record_read_redundant_full_read_returns_cache_hit() {
+    fn record_read_redundant_full_read_is_cache_hit() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(path, b"hello", UNIX_EPOCH, 5, LastView::Full);
@@ -495,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_mtime_drift_returns_stored_hash() {
+    fn check_stat_mtime_drift_produces_stored_hash() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -514,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_size_drift_returns_stored_hash() {
+    fn check_stat_size_drift_produces_stored_hash() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -714,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_all_empty_tracker_returns_empty_vec() {
+    fn snapshot_all_empty_tracker_is_empty() {
         let snaps = FileTracker::default().snapshot_all();
         assert!(snaps.is_empty());
     }

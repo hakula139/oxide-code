@@ -41,7 +41,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_unknown_name_returns_none() {
+    fn lookup_unknown_name_is_none() {
         assert!(lookup("solarized").is_none());
         assert!(lookup("").is_none());
     }

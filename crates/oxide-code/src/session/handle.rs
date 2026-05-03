@@ -60,8 +60,12 @@ pub(super) struct SharedState {
 
 impl SharedState {
     pub(super) fn record_flush_failure(&self, msg: &str) {
-        if let Ok(mut slot) = self.last_flush_failure.lock() {
-            *slot = Some(msg.to_owned());
+        match self.last_flush_failure.lock() {
+            Ok(mut slot) => *slot = Some(msg.to_owned()),
+            Err(e) => {
+                tracing::warn!("last_flush_failure mutex poisoned, recovering");
+                *e.into_inner() = Some(msg.to_owned());
+            }
         }
     }
 
@@ -80,7 +84,13 @@ impl SharedState {
 
     /// Most recent flush error, threaded into actor-gone messages.
     pub(super) fn last_flush_failure(&self) -> Option<String> {
-        self.last_flush_failure.lock().ok().and_then(|s| s.clone())
+        match self.last_flush_failure.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::warn!("last_flush_failure mutex poisoned, recovering");
+                e.into_inner().clone()
+            }
+        }
     }
 }
 
@@ -192,7 +202,13 @@ impl SessionHandle {
             _ = rx.await;
         }
         drop(cmd_tx);
-        let join = actor_join.lock().ok().and_then(|mut g| g.take());
+        let join = match actor_join.lock() {
+            Ok(mut g) => g.take(),
+            Err(e) => {
+                tracing::warn!("actor_join mutex poisoned, recovering");
+                e.into_inner().take()
+            }
+        };
         if let Some(j) = join {
             _ = j.await;
         }
@@ -383,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_message_returns_ai_title_seed_only_for_first_user_text() {
+    async fn record_message_seeds_ai_title_only_for_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -709,7 +725,7 @@ mod tests {
     // ── finalize ──
 
     #[tokio::test]
-    async fn finalize_writes_summary_then_returns_none_on_success() {
+    async fn finalize_writes_summary_then_succeeds() {
         // Pins the success contract: summary lands on disk and the
         // returned failure is `None`.
         let dir = tempfile::tempdir().unwrap();
@@ -729,7 +745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_returns_failure_when_actor_dead() {
+    async fn finalize_fails_when_actor_dead() {
         // Dead-actor path must surface so callers can route the
         // failure (warn-log on exit, sink on `/clear` roll).
         let handle = testing::dead("dead");
@@ -740,7 +756,7 @@ mod tests {
     // ── shutdown ──
 
     #[tokio::test]
-    async fn shutdown_after_record_returns_after_actor_exits() {
+    async fn shutdown_after_record_completes_after_actor_exits() {
         // shutdown's contract: the recorded message must be on disk by
         // the time the await returns.
         let dir = tempfile::tempdir().unwrap();
@@ -1039,7 +1055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_empty_session_returns_error() {
+    async fn resume_empty_session_errors() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1051,7 +1067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_all_messages_sanitized_returns_error() {
+    async fn resume_all_messages_sanitized_errors() {
         // Sanitize drops the lone unresolved tool_use, leaving an
         // empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();

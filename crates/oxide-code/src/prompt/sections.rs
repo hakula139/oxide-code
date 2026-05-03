@@ -1,3 +1,5 @@
+//! Static system prompt section constants.
+
 use indoc::indoc;
 
 pub(super) const INTRO: &str = indoc! {"

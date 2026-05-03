@@ -1,3 +1,5 @@
+//! Runtime environment detection for system prompt context.
+
 use std::path::Path;
 
 use indoc::formatdoc;
@@ -198,7 +200,7 @@ mod tests {
     // ── Environment::date ──
 
     #[test]
-    fn date_returns_formatted_string() {
+    fn date_produces_formatted_string() {
         let env = Environment {
             cwd: "/tmp".to_owned(),
             is_git: false,
@@ -309,7 +311,7 @@ mod tests {
     // ── detect_shell ──
 
     #[test]
-    fn detect_shell_returns_basename() {
+    fn detect_shell_produces_basename() {
         let shell = detect_shell();
         assert!(!shell.is_empty());
         assert!(!shell.contains('/'), "should be a basename, got: {shell:?}");
@@ -318,9 +320,12 @@ mod tests {
     // ── detect_os_version ──
 
     #[test]
-    fn detect_os_version_is_nonempty() {
+    fn detect_os_version_contains_platform_and_version() {
         let version = detect_os_version();
-        assert!(!version.is_empty());
+        assert!(
+            version.contains(' '),
+            "expected 'Platform Version', got: {version:?}",
+        );
     }
 
     // ── current_date ──

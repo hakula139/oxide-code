@@ -1,3 +1,5 @@
+//! Channel-based [`AgentSink`] transport for the TUI.
+
 use tokio::sync::mpsc;
 
 use crate::agent::event::{AGENT_EVENT_CHANNEL_CAP, AgentEvent, AgentSink};

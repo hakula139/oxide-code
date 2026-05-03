@@ -5,11 +5,6 @@
 //! implementation. [`ChatView`] is the thin container: it appends
 //! blocks, owns the streaming buffer, handles scroll state, and stacks
 //! `render` outputs with appropriate blank-line separators.
-//!
-//! Adding a new block type — plan approval, task list, permission
-//! prompt, skill invocation — means writing a new `impl ChatBlock`
-//! module. No cascade through a giant match, no prefix-constant
-//! editing spree.
 
 mod blocks;
 
@@ -27,14 +22,10 @@ use self::blocks::{
     InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
     ToolResultBlock, UserMessage, last_has_width,
 };
-use crate::agent::event::UserAction;
-use crate::agent::pending_calls::{
-    FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header,
-};
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
-use crate::tui::component::Component;
+use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
 use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
@@ -55,9 +46,7 @@ pub(crate) struct ChatView {
 
     // View state
     scroll_offset: u16,
-    /// Total content height from the last render (for scroll bounds).
-    /// `Cell` for interior mutability so `render` (`&self`) can update
-    /// it during the render pass without a second `build_text` call.
+    /// Updated during render to avoid a redundant `build_text` call.
     content_height: Cell<u16>,
     viewport_height: u16,
     viewport_width: u16,
@@ -198,10 +187,7 @@ impl ChatView {
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
-    /// Appends a tool result with a pre-built structured view. Used
-    /// by [`App::handle_agent_event`](super::super::app::App::handle_agent_event)
-    /// (which builds the view from the cached tool name + input) and
-    /// by [`load_history`](Self::load_history) when resuming sessions.
+    /// Appends a tool result with a pre-built structured view.
     pub(crate) fn push_tool_result_view(
         &mut self,
         label: &str,
@@ -212,8 +198,7 @@ impl ChatView {
             .push(Box::new(ToolResultBlock::new(label, view, is_error)));
     }
 
-    /// Test shortcut for the `Text` variant — production callers
-    /// route through [`push_tool_result_view`](Self::push_tool_result_view).
+    /// Test-only shortcut for the Text variant.
     #[cfg(test)]
     pub(crate) fn push_tool_result(&mut self, label: &str, content: &str, is_error: bool) {
         let view = ToolResultView::Text {
@@ -227,33 +212,24 @@ impl ChatView {
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
     }
 
-    /// Appends informational output from a locally-dispatched slash
-    /// command (`/help`, `/status`, `/diff`, ...). Rendered with a
-    /// `▎` left-bar in `accent` so command output reads as distinct
-    /// from agent prose.
+    /// Appends informational output from a slash command.
     pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
         self.blocks.push(Box::new(SystemMessageBlock::new(body)));
     }
 
-    /// Appends a `git diff` body rendered with the same red / green
-    /// row backgrounds and left line-number gutter as the Edit-tool
-    /// diff. Used by `/diff` so uncommitted changes read at a glance.
+    /// Appends a unified diff body for display.
     pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
         self.blocks.push(Box::new(GitDiffBlock::new(text)));
     }
 
-    /// Appends a dim italic `(interrupted)` marker. Finalizes any
-    /// in-flight streaming buffer first — a cancel implicitly ends
-    /// the current assistant turn's text, mirroring
-    /// [`push_tool_call`](Self::push_tool_call).
+    /// Appends an interrupted marker. Flushes any in-flight streaming
+    /// buffer first.
     pub(crate) fn push_interrupted_marker(&mut self) {
         self.commit_streaming();
         self.blocks.push(Box::new(InterruptedMarker));
     }
 
-    /// Reset to fresh-construction shape: drop blocks, streaming /
-    /// thinking buffers, scroll position. Theme, `show_thinking`, and
-    /// viewport sizes stay — they mirror terminal state.
+    /// Resets transient state, preserving terminal-tied fields.
     pub(crate) fn clear_history(&mut self) {
         self.blocks.clear();
         self.streaming = None;
@@ -263,35 +239,25 @@ impl ChatView {
         self.auto_scroll = true;
     }
 
-    /// Number of committed chat blocks. Exposed for observable state in
-    /// sibling-module tests (`tui::app`) so they don't need to reach
-    /// through the private `blocks` field.
+    /// Number of committed chat blocks.
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
         self.blocks.len()
     }
 
-    /// Whether the tail block is an [`ErrorBlock`]. Same rationale as
-    /// [`entry_count`][Self::entry_count] — lets `tui::app` tests assert
-    /// on error dispatch without reaching through the private `blocks`
-    /// field or the block module's internals.
+    /// Whether the tail block is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(|b| b.is_error_marker())
     }
 
-    /// User-visible text of the tail block when it's an `ErrorBlock`,
-    /// otherwise `None`. Lets slash-dispatch tests assert on the
-    /// rendered wording (alphabetic chars, not bar glyphs) without
-    /// reaching into block internals.
+    /// Error text of the tail block, if it is an [`ErrorBlock`].
     #[cfg(test)]
     pub(crate) fn last_error_text(&self) -> Option<&str> {
         self.blocks.last().and_then(|b| b.error_text())
     }
 
-    /// User-visible text of the tail block when it's a
-    /// `SystemMessageBlock`. Mirrors [`Self::last_error_text`] for
-    /// slash-command confirmation rows.
+    /// Body text of the tail block, if it is a [`SystemMessageBlock`].
     #[cfg(test)]
     pub(crate) fn last_system_text(&self) -> Option<&str> {
         self.blocks.last().and_then(|b| b.system_text())
@@ -316,8 +282,8 @@ impl ChatView {
     }
 }
 
-impl Component for ChatView {
-    fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
+impl ChatView {
+    pub(crate) fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -325,10 +291,7 @@ impl Component for ChatView {
             | Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 ..
-            }) => {
-                self.scroll_up(1);
-                None
-            }
+            }) => self.scroll_up(1),
             Event::Key(KeyEvent {
                 code: KeyCode::Down,
                 ..
@@ -336,24 +299,15 @@ impl Component for ChatView {
             | Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 ..
-            }) => {
-                self.scroll_down(1);
-                None
-            }
+            }) => self.scroll_down(1),
             Event::Key(KeyEvent {
                 code: KeyCode::PageUp,
                 ..
-            }) => {
-                self.scroll_up(self.viewport_height.saturating_sub(2));
-                None
-            }
+            }) => self.scroll_up(self.viewport_height.saturating_sub(2)),
             Event::Key(KeyEvent {
                 code: KeyCode::PageDown,
                 ..
-            }) => {
-                self.scroll_down(self.viewport_height.saturating_sub(2));
-                None
-            }
+            }) => self.scroll_down(self.viewport_height.saturating_sub(2)),
             Event::Key(KeyEvent {
                 code: KeyCode::Home,
                 modifiers: KeyModifiers::CONTROL,
@@ -361,7 +315,6 @@ impl Component for ChatView {
             }) => {
                 self.scroll_offset = 0;
                 self.auto_scroll = false;
-                None
             }
             Event::Key(KeyEvent {
                 code: KeyCode::End,
@@ -370,13 +323,12 @@ impl Component for ChatView {
             }) => {
                 self.scroll_to_bottom();
                 self.auto_scroll = true;
-                None
             }
-            _ => None,
+            _ => {}
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         let text = self.build_text(area.width);
         #[expect(
             clippy::cast_possible_truncation,
@@ -486,10 +438,7 @@ impl ChatView {
         }
     }
 
-    /// Whether streaming tokens continue the last committed assistant
-    /// turn. `false` when the preceding block is anything other than
-    /// assistant text (user message, tool entry, error) — in which case
-    /// streaming starts a fresh turn with its own icon and gap.
+    /// Whether streaming tokens continue the last committed assistant turn.
     fn streaming_continues_turn(&self) -> bool {
         self.blocks
             .last()
@@ -501,8 +450,7 @@ impl ChatView {
     }
 }
 
-/// Welcome splash for an empty chat: two blank lines + centered title +
-/// centered subtitle.
+/// Welcome splash for an empty chat.
 fn push_welcome(lines: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>) {
     let title = "Welcome to ox";
     let subtitle = "Ask anything to begin.";
@@ -1462,213 +1410,6 @@ mod tests {
         }
     }
 
-    // ── push_tool_result ──
-
-    #[test]
-    fn push_tool_result_success() {
-        let mut chat = test_chat();
-        chat.push_tool_result("done", "output text", false);
-        let text = all_text(&chat);
-        assert!(text.contains(TOOL_SUCCESS));
-        assert!(text.contains("done"));
-        assert!(text.contains("output text"));
-    }
-
-    #[test]
-    fn push_tool_result_error() {
-        let mut chat = test_chat();
-        chat.push_tool_result("failed", "error details", true);
-        let text = all_text(&chat);
-        assert!(text.contains(TOOL_ERROR));
-        assert!(text.contains("failed"));
-        assert!(text.contains("error details"));
-        let rendered = chat.build_text(60);
-        let bar_style = rendered
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.contains(BAR))
-            .map(|s| s.style)
-            .expect("rendered line should contain a ▎ span");
-        assert_eq!(
-            bar_style,
-            Theme::default().error(),
-            "error-result bar should use the theme error style, got {bar_style:?}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_wraps_long_label() {
-        let mut chat = test_chat();
-        let long_label =
-            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
-        chat.push_tool_result(long_label, "", false);
-        let text = chat.build_text(50);
-        assert!(
-            text.lines.len() > 1,
-            "long tool result label should wrap: {}",
-            text.lines.len(),
-        );
-        for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
-            assert!(
-                width <= 50,
-                "wrapped tool result line must fit width (got {width}): {line:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn push_tool_result_truncation() {
-        let mut chat = test_chat();
-        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
-        chat.push_tool_result("result", &long_output.join("\n"), false);
-        let text = all_text(&chat);
-
-        assert!(text.contains("line 0"));
-        assert!(text.contains("line 4"));
-        assert!(!text.contains("line 5"));
-        assert!(text.contains("... +5 lines"));
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
-            "tool result body should indent past the status indicator: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_empty_content_adds_nothing() {
-        let mut chat = test_chat();
-        chat.push_tool_result("result", "  \n  ", false);
-        let before = line_count(&chat);
-
-        let mut chat2 = test_chat();
-        chat2.push_tool_result("result", "", false);
-        let after = line_count(&chat2);
-
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files
-                a.rs
-                b.rs"
-            },
-            false,
-        );
-        let text = all_text(&chat);
-        assert_eq!(
-            text.matches("Found 2 files").count(),
-            1,
-            "label must not appear twice: {text}",
-        );
-        assert!(text.contains("a.rs"));
-        assert!(text.contains("b.rs"));
-    }
-
-    #[test]
-    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
-        let mut chat = test_chat();
-        chat.push_tool_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files in cache
-                a.rs"
-            },
-            false,
-        );
-        let text = all_text(&chat);
-        assert!(
-            text.contains("Found 2 files in cache"),
-            "body preserved: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
-        let mut chat = test_chat();
-        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
-        let text = all_text(&chat);
-        assert!(
-            text.contains(" a.rs | 1 +"),
-            "first body line must keep its leading space: {text}",
-        );
-        assert!(text.contains(" b.rs | 2 +"));
-    }
-
-    #[test]
-    fn push_tool_result_drops_surrounding_blank_lines() {
-        let mut chat = test_chat();
-        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
-        let text = all_text(&chat);
-        let body_row_count = text
-            .lines()
-            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
-            .count();
-        assert_eq!(
-            body_row_count, 1,
-            "expected one body row after blank-line stripping: {text}",
-        );
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
-            "data-line indent must survive: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result("No matches found", "No matches found", false);
-        let text = all_text(&chat);
-        assert_eq!(
-            text.matches("No matches found").count(),
-            1,
-            "body collapses when it only repeats the label: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_exactly_max_no_truncation() {
-        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(
-            !text.contains("... +"),
-            "no truncation summary expected: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_one_over_max_shows_singular_line() {
-        const MAX: usize = 5;
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(text.contains("... +1 line"));
-        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
-    }
-
-    #[test]
-    fn push_tool_result_long_line_is_truncated() {
-        const MAX_CHARS: usize = 512;
-        let mut chat = test_chat();
-        let long_line = "x".repeat(MAX_CHARS + 100);
-        chat.push_tool_result("result", &long_line, false);
-        let text = all_text(&chat);
-        assert!(text.contains("..."), "long line should be truncated");
-        assert!(
-            !text.contains(&long_line),
-            "full long line should not appear"
-        );
-    }
-
     // ── push_tool_result_view ──
 
     #[test]
@@ -1937,6 +1678,213 @@ mod tests {
         );
     }
 
+    // ── push_tool_result ──
+
+    #[test]
+    fn push_tool_result_success() {
+        let mut chat = test_chat();
+        chat.push_tool_result("done", "output text", false);
+        let text = all_text(&chat);
+        assert!(text.contains(TOOL_SUCCESS));
+        assert!(text.contains("done"));
+        assert!(text.contains("output text"));
+    }
+
+    #[test]
+    fn push_tool_result_error() {
+        let mut chat = test_chat();
+        chat.push_tool_result("failed", "error details", true);
+        let text = all_text(&chat);
+        assert!(text.contains(TOOL_ERROR));
+        assert!(text.contains("failed"));
+        assert!(text.contains("error details"));
+        let rendered = chat.build_text(60);
+        let bar_style = rendered
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(BAR))
+            .map(|s| s.style)
+            .expect("rendered line should contain a ▎ span");
+        assert_eq!(
+            bar_style,
+            Theme::default().error(),
+            "error-result bar should use the theme error style, got {bar_style:?}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_label =
+            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
+        chat.push_tool_result(long_label, "", false);
+        let text = chat.build_text(50);
+        assert!(
+            text.lines.len() > 1,
+            "long tool result label should wrap: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                width <= 50,
+                "wrapped tool result line must fit width (got {width}): {line:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn push_tool_result_truncation() {
+        let mut chat = test_chat();
+        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        chat.push_tool_result("result", &long_output.join("\n"), false);
+        let text = all_text(&chat);
+
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 4"));
+        assert!(!text.contains("line 5"));
+        assert!(text.contains("... +5 lines"));
+        assert!(
+            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
+            "tool result body should indent past the status indicator: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_empty_content_adds_nothing() {
+        let mut chat = test_chat();
+        chat.push_tool_result("result", "  \n  ", false);
+        let before = line_count(&chat);
+
+        let mut chat2 = test_chat();
+        chat2.push_tool_result("result", "", false);
+        let after = line_count(&chat2);
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
+        let mut chat = test_chat();
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files
+                a.rs
+                b.rs"
+            },
+            false,
+        );
+        let text = all_text(&chat);
+        assert_eq!(
+            text.matches("Found 2 files").count(),
+            1,
+            "label must not appear twice: {text}",
+        );
+        assert!(text.contains("a.rs"));
+        assert!(text.contains("b.rs"));
+    }
+
+    #[test]
+    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
+        let mut chat = test_chat();
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files in cache
+                a.rs"
+            },
+            false,
+        );
+        let text = all_text(&chat);
+        assert!(
+            text.contains("Found 2 files in cache"),
+            "body preserved: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
+        let mut chat = test_chat();
+        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains(" a.rs | 1 +"),
+            "first body line must keep its leading space: {text}",
+        );
+        assert!(text.contains(" b.rs | 2 +"));
+    }
+
+    #[test]
+    fn push_tool_result_drops_surrounding_blank_lines() {
+        let mut chat = test_chat();
+        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
+        let text = all_text(&chat);
+        let body_row_count = text
+            .lines()
+            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
+            .count();
+        assert_eq!(
+            body_row_count, 1,
+            "expected one body row after blank-line stripping: {text}",
+        );
+        assert!(
+            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
+            "data-line indent must survive: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
+        let mut chat = test_chat();
+        chat.push_tool_result("No matches found", "No matches found", false);
+        let text = all_text(&chat);
+        assert_eq!(
+            text.matches("No matches found").count(),
+            1,
+            "body collapses when it only repeats the label: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_exactly_max_no_truncation() {
+        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(
+            !text.contains("... +"),
+            "no truncation summary expected: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_one_over_max_shows_singular_line() {
+        const MAX: usize = 5;
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(text.contains("... +1 line"));
+        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
+    }
+
+    #[test]
+    fn push_tool_result_long_line_is_truncated() {
+        const MAX_CHARS: usize = 512;
+        let mut chat = test_chat();
+        let long_line = "x".repeat(MAX_CHARS + 100);
+        chat.push_tool_result("result", &long_line, false);
+        let text = all_text(&chat);
+        assert!(text.contains("..."), "long line should be truncated");
+        assert!(
+            !text.contains(&long_line),
+            "full long line should not appear"
+        );
+    }
+
     // ── push_error ──
 
     #[test]
@@ -2013,7 +1961,7 @@ mod tests {
     // ── last_system_text ──
 
     #[test]
-    fn last_system_text_returns_body_for_system_message() {
+    fn last_system_text_produces_body_for_system_message() {
         let mut chat = test_chat();
         chat.push_system_message("hello there");
         assert_eq!(chat.last_system_text(), Some("hello there"));
@@ -2059,7 +2007,7 @@ mod tests {
     }
 
     #[test]
-    fn update_layout_returns_false_when_offset_unchanged() {
+    fn update_layout_is_false_when_offset_unchanged() {
         let mut chat = test_chat();
         chat.content_height.set(100);
         chat.auto_scroll = true;
@@ -2105,8 +2053,7 @@ mod tests {
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
 
-        let action = chat.handle_event(&key_event(KeyCode::Up));
-        assert!(action.is_none());
+        chat.handle_event(&key_event(KeyCode::Up));
         assert_eq!(chat.scroll_offset, 9);
         assert!(!chat.auto_scroll);
     }
@@ -2119,8 +2066,7 @@ mod tests {
         chat.scroll_offset = 10;
         chat.auto_scroll = false;
 
-        let action = chat.handle_event(&key_event(KeyCode::Down));
-        assert!(action.is_none());
+        chat.handle_event(&key_event(KeyCode::Down));
         assert_eq!(chat.scroll_offset, 11);
     }
 
@@ -2131,8 +2077,7 @@ mod tests {
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
 
-        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
-        assert!(action.is_none());
+        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollUp));
         assert_eq!(chat.scroll_offset, 9);
     }
 
@@ -2144,8 +2089,7 @@ mod tests {
         chat.scroll_offset = 10;
         chat.auto_scroll = false;
 
-        let action = chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
-        assert!(action.is_none());
+        chat.handle_event(&mouse_scroll(MouseEventKind::ScrollDown));
         assert_eq!(chat.scroll_offset, 11);
     }
 
@@ -2198,10 +2142,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_unhandled_key_produces_no_action() {
+    fn handle_event_unhandled_key_leaves_state_unchanged() {
         let mut chat = test_chat();
-        let action = chat.handle_event(&key_event(KeyCode::Char('a')));
-        assert!(action.is_none());
+        chat.content_height.set(100);
+        chat.viewport_height = 20;
+        chat.scroll_offset = 10;
+
+        chat.handle_event(&key_event(KeyCode::Char('a')));
+        assert_eq!(chat.scroll_offset, 10);
     }
 
     // ── render ──

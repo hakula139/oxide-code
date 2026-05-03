@@ -165,14 +165,11 @@ fn parse_hunk_extents(line: &str) -> Option<usize> {
 
 /// `start[,count]` → `start + count - 1`. Bare `start` ⇒ one line.
 fn parse_range_extent(s: &str) -> Option<usize> {
-    let stop = s.find([',', ' ']).unwrap_or(s.len());
-    let start: usize = s[..stop].parse().ok()?;
-    if s.as_bytes().get(stop) != Some(&b',') {
+    let start = parse_first_number(s)?;
+    let Some(comma) = s.find(',') else {
         return Some(start);
-    }
-    let rest = &s[stop + 1..];
-    let stop2 = rest.find(' ').unwrap_or(rest.len());
-    let count: usize = rest[..stop2].parse().ok()?;
+    };
+    let count = parse_first_number(&s[comma + 1..])?;
     Some(start + count.saturating_sub(1))
 }
 
@@ -194,7 +191,7 @@ mod tests {
     // ── parse_diff_git_path ──
 
     #[test]
-    fn parse_diff_git_path_returns_a_path() {
+    fn parse_diff_git_path_extracts_a_path() {
         assert_eq!(
             parse_diff_git_path("diff --git a/src/main.rs b/src/main.rs"),
             Some("src/main.rs"),
@@ -202,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_diff_git_path_returns_none_for_unrelated_line() {
+    fn parse_diff_git_path_is_none_for_unrelated_line() {
         assert_eq!(parse_diff_git_path("@@ -1 +1 @@"), None);
         assert_eq!(parse_diff_git_path("plain text"), None);
     }
@@ -222,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_hunk_starts_returns_none_for_non_hunk() {
+    fn parse_hunk_starts_is_none_for_non_hunk() {
         assert_eq!(parse_hunk_starts("+ added line"), None);
         assert_eq!(parse_hunk_starts(""), None);
     }
@@ -230,7 +227,7 @@ mod tests {
     // ── strip_marker ──
 
     #[test]
-    fn strip_marker_returns_body_for_real_diff_lines() {
+    fn strip_marker_extracts_body_for_real_diff_lines() {
         assert_eq!(strip_marker("+added", '+'), Some("added"));
         assert_eq!(strip_marker("-removed", '-'), Some("removed"));
     }
@@ -262,7 +259,7 @@ mod tests {
     // ── parse_hunk_extents ──
 
     #[test]
-    fn parse_hunk_extents_returns_max_of_old_and_new_sides() {
+    fn parse_hunk_extents_produces_max_of_old_and_new_sides() {
         // Pin `.max()` directly; the integration test above only
         // catches losses that change the rendered gutter width.
         assert_eq!(parse_hunk_extents("@@ -1,1 +1,10 @@"), Some(10));
@@ -275,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_hunk_extents_returns_none_for_non_hunk() {
+    fn parse_hunk_extents_is_none_for_non_hunk() {
         assert_eq!(parse_hunk_extents("plain"), None);
     }
 

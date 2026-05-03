@@ -169,7 +169,7 @@ mod tests {
     // ── filter_and_rank ──
 
     #[test]
-    fn filter_and_rank_empty_query_returns_full_registry_in_declared_order() {
+    fn filter_and_rank_empty_query_yields_full_registry_in_declared_order() {
         // The "just typed `/`" state — order tracks `BUILT_INS`.
         let rows = filter_and_rank("", &registry());
         assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_and_rank_unmatched_query_returns_empty() {
+    fn filter_and_rank_unmatched_query_is_empty() {
         let rows = filter_and_rank("zzz", &registry());
         assert!(rows.is_empty());
     }
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn best_match_returns_none_when_neither_name_nor_alias_match() {
+    fn best_match_is_none_when_neither_name_nor_alias_match() {
         assert!(best_match("zzz", &CLEAR).is_none());
     }
 

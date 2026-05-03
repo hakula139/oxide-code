@@ -1534,14 +1534,14 @@ mod tests {
     }
 
     #[test]
-    fn wrap_cell_empty_returns_single_empty_sub_line() {
+    fn wrap_cell_empty_produces_single_empty_sub_line() {
         let out = wrap_cell(&[], 10);
         assert_eq!(out.len(), 1);
         assert!(out[0].is_empty());
     }
 
     #[test]
-    fn wrap_cell_zero_target_width_returns_cell_as_is() {
+    fn wrap_cell_zero_target_width_preserves_cell() {
         let cell = vec![Span::raw("hello".to_owned())];
         let out = wrap_cell(&cell, 0);
         assert_eq!(out.len(), 1);

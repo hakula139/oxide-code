@@ -24,10 +24,7 @@ impl SlashCommand for ClearCmd {
         false
     }
 
-    fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        ctx.chat.clear_history();
-        ctx.chat
-            .push_system_message("Conversation cleared. Next message starts fresh.");
+    fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         Ok(SlashOutcome::Action(UserAction::Clear))
     }
 }
@@ -58,24 +55,16 @@ mod tests {
     // ── ClearCmd::execute ──
 
     #[test]
-    fn execute_drops_history_pushes_confirmation_and_returns_clear_action() {
+    fn execute_produces_clear_action_without_local_side_effects() {
         let mut chat = ChatView::new(&Theme::default(), false);
         chat.push_user_message("prompt".to_owned());
-        chat.push_tool_call("$", "ls");
-        chat.push_user_message("/clear".to_owned());
         let info = test_session_info();
 
         let outcome = ClearCmd
             .execute("", &mut SlashContext::new(&mut chat, &info))
             .expect("/clear must succeed");
 
-        assert_eq!(chat.entry_count(), 1, "only the system message remains");
-        assert!(!chat.last_is_error());
-        assert_eq!(
-            chat.last_system_text(),
-            Some("Conversation cleared. Next message starts fresh."),
-            "confirmation body must match — wording regressions surface here",
-        );
         assert_eq!(outcome, SlashOutcome::Action(UserAction::Clear));
+        assert_eq!(chat.entry_count(), 1, "execute must not touch the chat");
     }
 }

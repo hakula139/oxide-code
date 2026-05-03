@@ -1,3 +1,5 @@
+//! Agent event types and the sink trait for delivering them to a UI.
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -334,14 +336,5 @@ mod tests {
     fn render_error_prefixes_with_error_label() {
         let (_, stderr) = render_one(&test_sink(false), AgentEvent::Error("boom".to_owned()));
         assert_eq!(stderr, "Error: boom\n");
-    }
-
-    // ── StdioSink::send ──
-
-    #[test]
-    fn send_prompt_drained_accepts_tui_only_event() {
-        test_sink(false)
-            .send(AgentEvent::PromptDrained("queued".to_owned()))
-            .unwrap();
     }
 }

@@ -150,7 +150,7 @@ fn chunk_anchor_line(chunk: &DiffChunk) -> Option<usize> {
         .map(|l| l.number)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Del,
     Add,
@@ -446,13 +446,13 @@ mod tests {
     // ── any_chunk_has_content ──
 
     #[test]
-    fn any_chunk_has_content_empty_chunks_returns_false() {
+    fn any_chunk_has_content_empty_chunks_is_false() {
         let chunks = vec![chunk_of(&[], &[])];
         assert!(!any_chunk_has_content(&chunks));
     }
 
     #[test]
-    fn any_chunk_has_content_one_side_filled_returns_true() {
+    fn any_chunk_has_content_one_side_filled_is_true() {
         let chunks = vec![chunk_of(&["a"], &[])];
         assert!(any_chunk_has_content(&chunks));
         let chunks = vec![chunk_of(&[], &["b"])];
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn any_chunk_has_content_empty_vec_returns_false() {
+    fn any_chunk_has_content_empty_vec_is_false() {
         assert!(!any_chunk_has_content(&[]));
     }
 
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_anchor_line_returns_none_when_both_sides_empty() {
+    fn chunk_anchor_line_is_none_when_both_sides_empty() {
         let chunk = chunk_of(&[], &[]);
         assert_eq!(chunk_anchor_line(&chunk), None);
     }
@@ -606,7 +606,7 @@ mod tests {
     // ── split_budget ──
 
     #[test]
-    fn split_budget_under_budget_returns_input_lengths() {
+    fn split_budget_under_budget_preserves_input_lengths() {
         assert_eq!(split_budget(2, 3, 10), (2, 3));
     }
 

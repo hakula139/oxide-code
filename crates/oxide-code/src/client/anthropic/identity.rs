@@ -114,7 +114,7 @@ mod tests {
     // ── fallback_to_ephemeral ──
 
     #[test]
-    fn fallback_to_ephemeral_returns_persisted_id_on_ok() {
+    fn fallback_to_ephemeral_uses_persisted_id_on_ok() {
         let persisted = "a".repeat(64);
         assert_eq!(fallback_to_ephemeral(Ok(persisted.clone())), persisted);
     }

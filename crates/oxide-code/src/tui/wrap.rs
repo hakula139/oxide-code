@@ -1,3 +1,5 @@
+//! Word-wrap with continuation indent for styled lines.
+
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -211,10 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_width_returns_unchanged() {
+    fn zero_width_passes_through_unchanged() {
         let line = Line::from("Hello, world!");
         let result = wrap_line(line, 0, 4, None);
         assert_eq!(result.len(), 1);
+        assert_eq!(result[0].spans[0].content.as_ref(), "Hello, world!");
     }
 
     #[test]

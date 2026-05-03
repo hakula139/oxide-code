@@ -18,15 +18,14 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
-use super::component::Component;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
-use crate::agent::pending_calls::{PendingCall, PendingCalls, result_header};
 use crate::message::Message;
 use crate::slash::{self, SessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
@@ -355,6 +354,9 @@ impl App {
             AgentEvent::SessionRolled { id } => {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
+                self.chat.clear_history();
+                self.chat
+                    .push_system_message("Conversation cleared. Next message starts fresh.");
             }
             AgentEvent::ModelSwitched { model_id, effort } => {
                 let prev_effort = self.session_info.config.effort;
@@ -1573,13 +1575,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_session_rolled_rebinds_session_id_and_drops_stale_title() {
-        // `/clear` swaps the session UUID; the App must rebind the
-        // `/status`-visible id so it reflects the live session, and
-        // wipe the now-stale AI title so the bar isn't lying about
-        // which conversation is on screen.
+    fn handle_session_rolled_clears_chat_rebinds_id_and_drops_stale_title() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old session title"));
+        app.chat.push_user_message("old prompt".to_owned());
         let original_id = app.session_info.session_id.clone();
+
         app.handle_agent_event(AgentEvent::SessionRolled {
             id: "rolled-session".to_owned(),
         });
@@ -1592,6 +1592,15 @@ mod tests {
         assert!(
             app.status_bar.title().is_none(),
             "stale AI title must be cleared on roll",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "only the confirmation message remains after clear",
+        );
+        assert_eq!(
+            app.chat.last_system_text(),
+            Some("Conversation cleared. Next message starts fresh."),
         );
         assert!(app.dirty);
     }
@@ -1637,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_cancelled_commits_partial_stream_with_marker_and_returns_idle() {
+    fn handle_cancelled_commits_partial_stream_with_marker_and_becomes_idle() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         app.handle_agent_event(AgentEvent::StreamToken("partial answer".into()));
@@ -1816,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_turn_complete_returns_to_idle_and_reenables_input() {
+    fn handle_turn_complete_becomes_idle_and_reenables_input() {
         let (mut app, _rx, _agent_tx) = test_app(None);
         // Drive into streaming first so TurnComplete has state to tear down.
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
@@ -1978,7 +1987,7 @@ mod tests {
     // ── expire_armed_exit ──
 
     #[test]
-    fn expire_armed_exit_returns_to_idle_after_window() {
+    fn expire_armed_exit_becomes_idle_after_window() {
         // After the 1 s window the armed state evaporates so the user
         // isn't left staring at an exit hint they didn't act on.
         let (mut app, _rx, _agent_tx) = test_app(None);

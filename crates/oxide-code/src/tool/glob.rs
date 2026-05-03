@@ -1,3 +1,5 @@
+//! File pattern matching tool (glob).
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -647,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_total_from_footer_returns_none_for_malformed_input() {
+    fn parse_total_from_footer_is_none_for_malformed_input() {
         assert_eq!(
             parse_total_from_footer("Showing 100 of 1234 matches."),
             None,

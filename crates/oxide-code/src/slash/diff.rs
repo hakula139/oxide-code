@@ -206,6 +206,15 @@ mod tests {
         (dir, path)
     }
 
+    // ── DiffCmd metadata ──
+
+    #[test]
+    fn metadata_matches_built_ins_contract() {
+        assert_eq!(DiffCmd.name(), "diff");
+        assert!(DiffCmd.aliases().is_empty());
+        assert!(!DiffCmd.description().is_empty());
+    }
+
     // ── execute ──
 
     #[test]
@@ -261,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_in_outside_a_repo_returns_err_string() {
+    fn execute_in_outside_a_repo_errors() {
         // Pin the actionable wording survives the `anyhow → String`
         // boundary on the trait return type.
         use crate::slash::test_session_info;
@@ -326,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_diff_in_returns_error_outside_a_repo() {
+    fn collect_diff_in_errors_outside_a_repo() {
         let dir = tempfile::tempdir().unwrap();
         let err = collect_diff_in(dir.path()).unwrap_err();
         assert!(
@@ -390,13 +399,13 @@ mod tests {
     // ── inside_git_repo ──
 
     #[test]
-    fn inside_git_repo_returns_true_for_real_repo() {
+    fn inside_git_repo_is_true_for_real_repo() {
         let (_dir, repo) = fresh_repo();
         assert!(inside_git_repo(&repo).unwrap());
     }
 
     #[test]
-    fn inside_git_repo_returns_false_outside_a_repo() {
+    fn inside_git_repo_is_false_outside_a_repo() {
         // A bare tempdir with no `.git` is not a repo.
         let dir = tempfile::tempdir().unwrap();
         assert!(!inside_git_repo(dir.path()).unwrap());
@@ -468,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn truncate_at_exact_cap_returns_input_unchanged() {
+    fn truncate_at_exact_cap_preserves_input() {
         // Boundary: gate is `<=`, so MAX_BYTES is in-bounds. Flipping
         // to `<` would footer every full-cap diff.
         let s = "a".repeat(MAX_BYTES);

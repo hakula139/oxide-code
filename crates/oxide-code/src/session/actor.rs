@@ -473,7 +473,7 @@ mod tests {
     // ── surface_failure ──
 
     #[test]
-    fn surface_failure_first_call_after_record_returns_message_then_silences() {
+    fn surface_failure_first_call_after_record_produces_message_then_silences() {
         let shared = SharedState::default();
         shared.record_flush_failure("boom");
         let first = surface_failure(Some("boom"), &shared);
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_failure_no_failure_returns_none() {
+    fn surface_failure_no_failure_is_none() {
         let shared = SharedState::default();
         assert!(surface_failure(None, &shared).is_none());
     }

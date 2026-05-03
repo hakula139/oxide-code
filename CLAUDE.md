@@ -25,8 +25,7 @@ ox                                          # Start an interactive session
 .
 ├── agent.rs                                # Agent turn loop, stream accumulation, tool dispatch
 ├── agent/
-│   ├── event.rs                            # AgentEvent, UserAction, AgentSink trait, StdioSink
-│   └── pending_calls.rs                    # PendingCall / PendingCalls correlation state shared by live streaming and transcript resume
+│   └── event.rs                            # AgentEvent, UserAction, AgentSink trait, StdioSink
 ├── client.rs                               # Client module root
 ├── client/
 │   ├── anthropic.rs                        # Anthropic Messages API client (Client struct + streaming)
@@ -94,7 +93,6 @@ ox                                          # Start an interactive session
 ├── tui.rs                                  # TUI module root
 ├── tui/
 │   ├── app.rs                              # Root App struct, tokio::select! event loop, render dispatch
-│   ├── component.rs                        # Component trait (components report UserAction back to the agent loop)
 │   ├── components.rs                       # Components module root
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
 │   ├── theme/
@@ -102,7 +100,7 @@ ox                                          # Start an interactive session
 │   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
 │   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
 │   ├── components/
-│   │   ├── chat.rs                         # ChatView container (scroll, event dispatch, block stacking, load_history)
+│   │   ├── chat.rs                         # ChatView: scrollable chat with block stacking and history load
 │   │   ├── chat/
 │   │   │   ├── blocks.rs                   # ChatBlock trait + RenderCtx + icon-prefix helpers
 │   │   │   └── blocks/
@@ -133,6 +131,7 @@ ox                                          # Start an interactive session
 │   ├── markdown/
 │   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
+│   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   └── wrap.rs                             # Word-wrap with continuation indent for styled lines
 ├── util.rs                                 # Shared utilities module root

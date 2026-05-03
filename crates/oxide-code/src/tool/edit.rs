@@ -1,3 +1,5 @@
+//! Exact string replacement tool for file editing.
+
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::Path;
@@ -391,7 +393,7 @@ mod tests {
     // ── result_view ──
 
     #[test]
-    fn result_view_returns_none_when_new_string_missing_with_old_string_present() {
+    fn result_view_is_none_when_new_string_missing_with_old_string_present() {
         let tool = EditTool::new(Arc::new(FileTracker::default()));
         let view = tool.result_view(
             &serde_json::json!({"old_string": "x"}),
@@ -547,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn result_view_returns_none_when_required_inputs_missing() {
+    fn result_view_is_none_when_required_inputs_missing() {
         let input = serde_json::json!({"file_path": "/tmp/x"});
         assert!(
             EditTool::new(tracker())
@@ -557,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn result_view_returns_none_when_field_type_is_wrong() {
+    fn result_view_is_none_when_field_type_is_wrong() {
         let bad_old = serde_json::json!({
             "file_path": "/tmp/x",
             "old_string": 42,
@@ -1338,12 +1340,12 @@ mod tests {
     }
 
     #[test]
-    fn match_positions_no_match_returns_empty() {
+    fn match_positions_no_match_is_empty() {
         assert!(match_positions("hello", "xyz", usize::MAX).is_empty());
     }
 
     #[test]
-    fn match_positions_take_zero_returns_empty() {
+    fn match_positions_take_zero_is_empty() {
         assert!(match_positions("aXbXcX", "X", 0).is_empty());
     }
 
@@ -1512,14 +1514,14 @@ mod tests {
     // ── common_boundaries ──
 
     #[test]
-    fn common_boundaries_returns_prefix_and_suffix_counts() {
+    fn common_boundaries_produces_prefix_and_suffix_counts() {
         let old = ["a", "b", "c", "d"];
         let new = ["a", "X", "Y", "d"];
         assert_eq!(common_boundaries(&old, &new), (1, 1));
     }
 
     #[test]
-    fn common_boundaries_disjoint_returns_zero() {
+    fn common_boundaries_disjoint_is_zero() {
         assert_eq!(common_boundaries(&["a"], &["b"]), (0, 0));
     }
 
@@ -1602,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_replacement_count_returns_none_for_unrelated_messages() {
+    fn parse_replacement_count_is_none_for_unrelated_messages() {
         assert_eq!(parse_replacement_count("Successfully edited /tmp/x."), None);
         assert_eq!(parse_replacement_count(""), None);
     }
@@ -1613,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_replacement_count_returns_none_when_only_prefix_present() {
+    fn parse_replacement_count_is_none_when_only_prefix_present() {
         assert_eq!(parse_replacement_count("Replaced "), None);
     }
 

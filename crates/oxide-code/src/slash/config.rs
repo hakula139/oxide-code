@@ -91,13 +91,16 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    // ── Config trait ──
+    // ── ConfigCmd metadata ──
 
     #[test]
-    fn config_metadata_exposes_canonical_name_and_description() {
+    fn metadata_matches_built_ins_contract() {
         assert_eq!(ConfigCmd.name(), "config");
+        assert!(ConfigCmd.aliases().is_empty());
         assert!(!ConfigCmd.description().is_empty());
     }
+
+    // ── ConfigCmd::execute ──
 
     #[test]
     fn config_execute_pushes_a_non_error_block() {
@@ -216,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn display_path_existing_file_returns_tildified_value_only() {
+    fn display_path_existing_file_is_tildified_value_only() {
         // Workspace `Cargo.toml` is guaranteed to exist at test time.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(here.exists(), "test fixture missing");

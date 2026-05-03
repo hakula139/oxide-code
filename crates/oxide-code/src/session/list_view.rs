@@ -172,8 +172,6 @@ mod tests {
         SessionInfo {
             session_id: session_id.to_owned(),
             cwd: "/work/project".to_owned(),
-            model: "claude-opus".to_owned(),
-            created_at: last_active_at,
             last_active_at,
             title: None,
             exit: None,
@@ -193,7 +191,7 @@ mod tests {
     // ── render_list ──
 
     #[test]
-    fn render_list_empty_store_returns_no_sessions_notice() {
+    fn render_list_empty_store_shows_no_sessions_notice() {
         // Covers the `render_list → render_sessions` glue; empty store
         // keeps the test fixture-free.
         let dir = tempfile::tempdir().unwrap();

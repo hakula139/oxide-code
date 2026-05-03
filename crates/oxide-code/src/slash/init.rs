@@ -94,13 +94,11 @@ mod tests {
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
 
-    fn run_execute() -> (SlashOutcome, ChatView) {
+    fn run_execute() -> (ChatView, Result<SlashOutcome, String>) {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
-        let outcome = InitCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info))
-            .expect("/init must succeed");
-        (outcome, chat)
+        let outcome = InitCmd.execute("", &mut SlashContext::new(&mut chat, &info));
+        (chat, outcome)
     }
 
     // ── InitCmd metadata ──
@@ -126,18 +124,18 @@ mod tests {
     fn execute_does_not_push_chat_blocks() {
         // The agent loop's response stream is the only block source —
         // an extra push here would land before the typed `/init` row.
-        let (_outcome, chat) = run_execute();
+        let (chat, _outcome) = run_execute();
         assert_eq!(chat.entry_count(), 0);
     }
 
     #[test]
     fn execute_prompt_targets_agents_md_and_claude_md() {
         // Subsumes non-emptiness.
-        let (outcome, _chat) = run_execute();
+        let (_chat, outcome) = run_execute();
         assert!(
             matches!(
                 &outcome,
-                SlashOutcome::Action(UserAction::SubmitPrompt(p))
+                Ok(SlashOutcome::Action(UserAction::SubmitPrompt(p)))
                     if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
             ),
             "prompt must target both AGENTS.md and CLAUDE.md: {outcome:?}",
@@ -148,11 +146,11 @@ mod tests {
     fn execute_prompt_says_do_not_overwrite_existing_file() {
         // Conjunction pins the actual rule — `contains("overwrite")`
         // alone would pass `"please overwrite all existing files"`.
-        let (outcome, _chat) = run_execute();
+        let (_chat, outcome) = run_execute();
         assert!(
             matches!(
                 &outcome,
-                SlashOutcome::Action(UserAction::SubmitPrompt(p))
+                Ok(SlashOutcome::Action(UserAction::SubmitPrompt(p)))
                     if p.contains("already exists") && p.contains("not overwrite")
             ),
             "prompt must instruct the model not to overwrite an existing file: {outcome:?}",

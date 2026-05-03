@@ -60,7 +60,7 @@ fn default_version() -> u32 {
     CURRENT_VERSION
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TitleSource {
     #[default]
@@ -85,16 +85,6 @@ pub(crate) struct ExitInfo {
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
     pub(crate) cwd: String,
-    #[expect(
-        dead_code,
-        reason = "read from header for completeness but not consumed by list output"
-    )]
-    pub(crate) model: String,
-    #[expect(
-        dead_code,
-        reason = "kept for diagnostics but superseded by last_active_at for display and sort"
-    )]
-    pub(crate) created_at: OffsetDateTime,
     pub(crate) last_active_at: OffsetDateTime,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) exit: Option<ExitInfo>,
@@ -291,7 +281,6 @@ mod tests {
         assert_eq!(json["metadata"]["title"], "Edited f.rs");
         assert_eq!(json["metadata"]["replacements"], 3);
         assert_eq!(json["timestamp"], "2026-04-16T12:06:00Z");
-        assert!(json["metadata"].get("exit_code").is_none());
 
         let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);

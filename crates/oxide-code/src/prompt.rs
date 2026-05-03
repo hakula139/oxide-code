@@ -189,7 +189,7 @@ mod tests {
     /// This test runs inside the oxide-code repo which has CLAUDE.md, so the
     /// `user_context` branch should be exercised.
     #[tokio::test]
-    async fn build_prompt_returns_user_context_with_claude_md() {
+    async fn build_prompt_includes_user_context_with_claude_md() {
         let parts = build_prompt("test-model").await;
         let ctx = parts
             .user_context

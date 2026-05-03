@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_oauth_token_sends_grant_and_client_id_and_returns_parsed_response() {
+    async fn refresh_oauth_token_sends_grant_and_client_id_and_produces_parsed_response() {
         let server = MockServer::start().await;
         let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let captured_clone = Arc::clone(&captured);

@@ -6,7 +6,6 @@
 //! cap [`MAX_TOOL_ROUNDS`] trips.
 
 pub(crate) mod event;
-pub(crate) mod pending_calls;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -28,31 +27,14 @@ const MAX_TOOL_ROUNDS: usize = 25;
 // ── Turn Abort ──
 
 /// Reasons a turn ends before normal completion.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
-    /// User pressed Esc / Ctrl+C.
+    #[error("turn cancelled")]
     Cancelled,
-    /// User quit or TUI dropped the channel.
+    #[error("turn quit")]
     Quit,
-    /// Stream / tool / API error.
-    Failed(anyhow::Error),
-}
-
-impl From<anyhow::Error> for TurnAbort {
-    fn from(e: anyhow::Error) -> Self {
-        Self::Failed(e)
-    }
-}
-
-impl std::fmt::Display for TurnAbort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cancelled => f.write_str("turn cancelled"),
-            Self::Quit => f.write_str("turn quit"),
-            Self::Failed(e) if f.alternate() => write!(f, "{e:#}"),
-            Self::Failed(e) => write!(f, "{e}"),
-        }
-    }
+    #[error(transparent)]
+    Failed(#[from] anyhow::Error),
 }
 
 type AbortResult<T> = std::result::Result<T, TurnAbort>;
@@ -1076,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_stream_returns_cancelled_abort() {
+    async fn agent_turn_cancel_during_stream_is_cancelled_abort() {
         // Biased select picks the queued Cancel before the synchronous
         // stream future, so the turn never produces an assistant
         // message. The session must stay at its pre-turn tail and the
@@ -1108,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_quit_during_stream_returns_quit_abort() {
+    async fn agent_turn_quit_during_stream_is_quit_abort() {
         // `Quit` is the explicit teardown signal; the agent loop relies
         // on it to break out of its outer driver. Pre-queueing it must
         // surface as Err(Quit) so callers don't conflate it with cancel.
@@ -1209,7 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_cancel_during_tool_round_returns_cancelled_outcome() {
+    async fn agent_turn_cancel_during_tool_round_is_cancelled_outcome() {
         // Drives the tool-round path of `await_unless_aborted`: the
         // stream completes synchronously, then `dispatch_tool_call`
         // parks on `GateTool`'s pending future. Sending Cancel after
@@ -1659,7 +1641,7 @@ data: {"type":"message_stop"}
     }
 
     #[test]
-    fn parse_tool_json_malformed_returns_empty_object_and_error() {
+    fn parse_tool_json_malformed_produces_empty_object_and_error() {
         let (value, err) = parse_tool_json("{unclosed");
         assert_eq!(value, json!({}));
         let err = err.expect("parse error surfaced");

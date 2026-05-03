@@ -1,3 +1,5 @@
+//! Instruction file discovery and loading (CLAUDE.md, AGENTS.md).
+
 use std::path::{Path, PathBuf};
 
 use indoc::indoc;
@@ -307,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_root_to_cwd_outside_root_returns_root_only() {
+    fn walk_root_to_cwd_outside_root_yields_root_only() {
         let root = PathBuf::from("/repo");
         let cwd = PathBuf::from("/other/dir");
         let dirs = walk_root_to_cwd(&root, Some(&cwd));
@@ -315,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_root_to_cwd_none_returns_root_only() {
+    fn walk_root_to_cwd_none_yields_root_only() {
         let root = PathBuf::from("/repo");
         let dirs = walk_root_to_cwd(&root, None);
         assert_eq!(dirs, vec![PathBuf::from("/repo")]);

@@ -352,7 +352,7 @@ mod tests {
     // ── finish_entries ──
 
     #[test]
-    fn finish_entries_after_record_returns_summary_with_count() {
+    fn finish_entries_after_record_produces_summary_with_count() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_entries_pending_writer_returns_empty_and_marks_finished() {
+    fn finish_entries_pending_writer_is_empty_and_marks_finished() {
         // Nothing recorded → nothing to summarize, but `finished` still
         // latches so a later record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_user_text_returns_none_for_tool_result_only() {
+    fn extract_user_text_is_none_for_tool_result_only() {
         let msg = Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {

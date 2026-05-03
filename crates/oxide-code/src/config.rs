@@ -81,7 +81,7 @@ pub(crate) enum ThinkingDisplay {
 /// Intelligence-vs-latency tier sent as `output_config.effort` on
 /// effort-capable models. The per-model ceiling lives in
 /// [`crate::model::Capabilities`].
-#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Effort {
     Low,
@@ -133,7 +133,7 @@ impl FromStr for Effort {
 /// Prompt-cache TTL sent as `cache_control.ttl`. Anthropic silently
 /// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
 /// explicit opt-in. oxide-code defaults to `OneHour`.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PromptCacheTtl {
     #[serde(rename = "5m")]
     FiveMin,

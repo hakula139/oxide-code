@@ -1,3 +1,5 @@
+//! Shell command execution tool with timeout.
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -187,10 +189,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     ToolOutput {
         content,
         is_error: false,
-        metadata: ToolMetadata {
-            exit_code,
-            ..ToolMetadata::default()
-        },
+        metadata: ToolMetadata::default(),
     }
 }
 

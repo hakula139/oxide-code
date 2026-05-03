@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_unknown_arg_returns_error_with_recovery_hint() {
+    fn execute_unknown_arg_errors_with_recovery_hint() {
         let (chat, outcome) = run_execute("gpt-4");
         let msg = outcome.expect_err("unknown arg must error");
         assert!(

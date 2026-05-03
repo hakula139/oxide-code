@@ -1,3 +1,5 @@
+//! Terminal initialization, restore, and panic hook.
+
 use std::io::{self, Stdout, Write};
 
 use anyhow::Result;

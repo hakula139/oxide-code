@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_unknown_level_returns_error_listing_valid_options() {
+    fn execute_unknown_level_errors_listing_valid_options() {
         let (chat, outcome) = run_execute("turbo");
         let msg = outcome.expect_err("unknown level must error");
         assert!(msg.starts_with("Unknown effort: `turbo`."), "{msg}");

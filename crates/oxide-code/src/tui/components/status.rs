@@ -1,14 +1,13 @@
+//! Status bar component (model, spinner, working directory).
+
 use std::time::Instant;
 
-use crossterm::event::Event;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::event::UserAction;
-use crate::tui::component::Component;
 use crate::tui::glyphs::SPINNER_FRAMES;
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
@@ -98,12 +97,8 @@ impl StatusBar {
     }
 }
 
-impl Component for StatusBar {
-    fn handle_event(&mut self, _event: &Event) -> Option<UserAction> {
-        None
-    }
-
-    fn render(&self, frame: &mut Frame, area: Rect) {
+impl StatusBar {
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         let sep = self.theme.separator_span();
         let area_width = usize::from(area.width);
 
@@ -323,7 +318,7 @@ mod tests {
     // ── tick ──
 
     #[test]
-    fn tick_idle_returns_false() {
+    fn tick_idle_is_false() {
         let mut bar = test_bar();
         assert!(!bar.tick());
         assert_eq!(bar.spinner_frame, 0);
@@ -366,18 +361,6 @@ mod tests {
             bar.tick();
         }
         assert_eq!(bar.spinner_frame, 0);
-    }
-
-    // ── handle_event ──
-
-    #[test]
-    fn handle_event_is_inert() {
-        let mut bar = test_bar();
-        let key = Event::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        assert!(bar.handle_event(&key).is_none());
     }
 
     // ── render ──

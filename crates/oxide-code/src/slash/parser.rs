@@ -136,13 +136,13 @@ mod tests {
     // ── popup_query ──
 
     #[test]
-    fn popup_query_bare_slash_returns_empty_query() {
+    fn popup_query_bare_slash_is_empty_query() {
         // Just `/` is the popup's "show full registry" state.
         assert_eq!(popup_query("/"), Some(""));
     }
 
     #[test]
-    fn popup_query_partial_name_returns_typed_chars() {
+    fn popup_query_partial_name_produces_typed_chars() {
         assert_eq!(popup_query("/cl"), Some("cl"));
         assert_eq!(popup_query("/clear"), Some("clear"));
     }

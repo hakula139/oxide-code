@@ -66,6 +66,15 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 mod tests {
     use super::*;
 
+    // ── HelpCmd metadata ──
+
+    #[test]
+    fn metadata_matches_built_ins_contract() {
+        assert_eq!(HelpCmd.name(), "help");
+        assert!(HelpCmd.aliases().is_empty());
+        assert!(!HelpCmd.description().is_empty());
+    }
+
     // ── render_help ──
 
     #[test]

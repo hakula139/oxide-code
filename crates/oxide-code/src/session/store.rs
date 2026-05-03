@@ -421,7 +421,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let Entry::Header {
         session_id,
         cwd,
-        model,
         created_at,
         ..
     } = header
@@ -477,8 +476,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     Ok(SessionInfo {
         session_id,
         cwd,
-        model,
-        created_at,
         last_active_at,
         title,
         exit,
@@ -754,7 +751,7 @@ mod tests {
     // ── load_session_data ──
 
     #[tokio::test]
-    async fn load_session_data_returns_only_messages_with_last_uuid() {
+    async fn load_session_data_includes_only_messages_with_last_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut writer = store.create(&sample_header("load-test")).unwrap();
@@ -1060,7 +1057,7 @@ mod tests {
     // ── read_session_id_from_path ──
 
     #[test]
-    fn read_session_id_from_path_returns_header_session_id() {
+    fn read_session_id_from_path_produces_header_session_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("standalone.jsonl");
         fs::write(
@@ -1109,7 +1106,7 @@ mod tests {
     // ── list ──
 
     #[tokio::test]
-    async fn list_returns_sessions_in_mtime_order_newest_first() {
+    async fn list_orders_sessions_by_mtime_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
@@ -1282,7 +1279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_works_without_title_or_summary() {
+    async fn list_absent_title_and_exit_fields_are_none() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let _writer = store.create(&sample_header("bare")).unwrap();
