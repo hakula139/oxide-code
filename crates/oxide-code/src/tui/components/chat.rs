@@ -1410,213 +1410,6 @@ mod tests {
         }
     }
 
-    // ── push_tool_result ──
-
-    #[test]
-    fn push_tool_result_success() {
-        let mut chat = test_chat();
-        chat.push_tool_result("done", "output text", false);
-        let text = all_text(&chat);
-        assert!(text.contains(TOOL_SUCCESS));
-        assert!(text.contains("done"));
-        assert!(text.contains("output text"));
-    }
-
-    #[test]
-    fn push_tool_result_error() {
-        let mut chat = test_chat();
-        chat.push_tool_result("failed", "error details", true);
-        let text = all_text(&chat);
-        assert!(text.contains(TOOL_ERROR));
-        assert!(text.contains("failed"));
-        assert!(text.contains("error details"));
-        let rendered = chat.build_text(60);
-        let bar_style = rendered
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.contains(BAR))
-            .map(|s| s.style)
-            .expect("rendered line should contain a ▎ span");
-        assert_eq!(
-            bar_style,
-            Theme::default().error(),
-            "error-result bar should use the theme error style, got {bar_style:?}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_wraps_long_label() {
-        let mut chat = test_chat();
-        let long_label =
-            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
-        chat.push_tool_result(long_label, "", false);
-        let text = chat.build_text(50);
-        assert!(
-            text.lines.len() > 1,
-            "long tool result label should wrap: {}",
-            text.lines.len(),
-        );
-        for line in &text.lines {
-            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
-            assert!(
-                width <= 50,
-                "wrapped tool result line must fit width (got {width}): {line:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn push_tool_result_truncation() {
-        let mut chat = test_chat();
-        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
-        chat.push_tool_result("result", &long_output.join("\n"), false);
-        let text = all_text(&chat);
-
-        assert!(text.contains("line 0"));
-        assert!(text.contains("line 4"));
-        assert!(!text.contains("line 5"));
-        assert!(text.contains("... +5 lines"));
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
-            "tool result body should indent past the status indicator: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_empty_content_adds_nothing() {
-        let mut chat = test_chat();
-        chat.push_tool_result("result", "  \n  ", false);
-        let before = line_count(&chat);
-
-        let mut chat2 = test_chat();
-        chat2.push_tool_result("result", "", false);
-        let after = line_count(&chat2);
-
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files
-                a.rs
-                b.rs"
-            },
-            false,
-        );
-        let text = all_text(&chat);
-        assert_eq!(
-            text.matches("Found 2 files").count(),
-            1,
-            "label must not appear twice: {text}",
-        );
-        assert!(text.contains("a.rs"));
-        assert!(text.contains("b.rs"));
-    }
-
-    #[test]
-    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
-        let mut chat = test_chat();
-        chat.push_tool_result(
-            "Found 2 files",
-            indoc! {"
-                Found 2 files in cache
-                a.rs"
-            },
-            false,
-        );
-        let text = all_text(&chat);
-        assert!(
-            text.contains("Found 2 files in cache"),
-            "body preserved: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
-        let mut chat = test_chat();
-        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
-        let text = all_text(&chat);
-        assert!(
-            text.contains(" a.rs | 1 +"),
-            "first body line must keep its leading space: {text}",
-        );
-        assert!(text.contains(" b.rs | 2 +"));
-    }
-
-    #[test]
-    fn push_tool_result_drops_surrounding_blank_lines() {
-        let mut chat = test_chat();
-        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
-        let text = all_text(&chat);
-        let body_row_count = text
-            .lines()
-            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
-            .count();
-        assert_eq!(
-            body_row_count, 1,
-            "expected one body row after blank-line stripping: {text}",
-        );
-        assert!(
-            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
-            "data-line indent must survive: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
-        let mut chat = test_chat();
-        chat.push_tool_result("No matches found", "No matches found", false);
-        let text = all_text(&chat);
-        assert_eq!(
-            text.matches("No matches found").count(),
-            1,
-            "body collapses when it only repeats the label: {text}",
-        );
-    }
-
-    #[test]
-    fn push_tool_result_exactly_max_no_truncation() {
-        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(
-            !text.contains("... +"),
-            "no truncation summary expected: {text}"
-        );
-    }
-
-    #[test]
-    fn push_tool_result_one_over_max_shows_singular_line() {
-        const MAX: usize = 5;
-        let mut chat = test_chat();
-        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
-        chat.push_tool_result("result", &output.join("\n"), false);
-        let text = all_text(&chat);
-        assert!(text.contains("... +1 line"));
-        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
-    }
-
-    #[test]
-    fn push_tool_result_long_line_is_truncated() {
-        const MAX_CHARS: usize = 512;
-        let mut chat = test_chat();
-        let long_line = "x".repeat(MAX_CHARS + 100);
-        chat.push_tool_result("result", &long_line, false);
-        let text = all_text(&chat);
-        assert!(text.contains("..."), "long line should be truncated");
-        assert!(
-            !text.contains(&long_line),
-            "full long line should not appear"
-        );
-    }
-
     // ── push_tool_result_view ──
 
     #[test]
@@ -1882,6 +1675,213 @@ mod tests {
         assert!(
             text.contains("... +2 files (limit reached)"),
             "footer text wrong: {text}",
+        );
+    }
+
+    // ── push_tool_result ──
+
+    #[test]
+    fn push_tool_result_success() {
+        let mut chat = test_chat();
+        chat.push_tool_result("done", "output text", false);
+        let text = all_text(&chat);
+        assert!(text.contains(TOOL_SUCCESS));
+        assert!(text.contains("done"));
+        assert!(text.contains("output text"));
+    }
+
+    #[test]
+    fn push_tool_result_error() {
+        let mut chat = test_chat();
+        chat.push_tool_result("failed", "error details", true);
+        let text = all_text(&chat);
+        assert!(text.contains(TOOL_ERROR));
+        assert!(text.contains("failed"));
+        assert!(text.contains("error details"));
+        let rendered = chat.build_text(60);
+        let bar_style = rendered
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(BAR))
+            .map(|s| s.style)
+            .expect("rendered line should contain a ▎ span");
+        assert_eq!(
+            bar_style,
+            Theme::default().error(),
+            "error-result bar should use the theme error style, got {bar_style:?}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_wraps_long_label() {
+        let mut chat = test_chat();
+        let long_label =
+            "some-very-long-file-path-that-exceeds.the.width.budget/and/then/more/path";
+        chat.push_tool_result(long_label, "", false);
+        let text = chat.build_text(50);
+        assert!(
+            text.lines.len() > 1,
+            "long tool result label should wrap: {}",
+            text.lines.len(),
+        );
+        for line in &text.lines {
+            let width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                width <= 50,
+                "wrapped tool result line must fit width (got {width}): {line:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn push_tool_result_truncation() {
+        let mut chat = test_chat();
+        let long_output = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        chat.push_tool_result("result", &long_output.join("\n"), false);
+        let text = all_text(&chat);
+
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 4"));
+        assert!(!text.contains("line 5"));
+        assert!(text.contains("... +5 lines"));
+        assert!(
+            text.contains(&format!("{TOOL_BORDER_CONT}line 0")),
+            "tool result body should indent past the status indicator: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_empty_content_adds_nothing() {
+        let mut chat = test_chat();
+        chat.push_tool_result("result", "  \n  ", false);
+        let before = line_count(&chat);
+
+        let mut chat2 = test_chat();
+        chat2.push_tool_result("result", "", false);
+        let after = line_count(&chat2);
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn push_tool_result_dedup_drops_first_body_line_matching_label() {
+        let mut chat = test_chat();
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files
+                a.rs
+                b.rs"
+            },
+            false,
+        );
+        let text = all_text(&chat);
+        assert_eq!(
+            text.matches("Found 2 files").count(),
+            1,
+            "label must not appear twice: {text}",
+        );
+        assert!(text.contains("a.rs"));
+        assert!(text.contains("b.rs"));
+    }
+
+    #[test]
+    fn push_tool_result_dedup_leaves_unrelated_first_line_intact() {
+        let mut chat = test_chat();
+        chat.push_tool_result(
+            "Found 2 files",
+            indoc! {"
+                Found 2 files in cache
+                a.rs"
+            },
+            false,
+        );
+        let text = all_text(&chat);
+        assert!(
+            text.contains("Found 2 files in cache"),
+            "body preserved: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_preserves_leading_whitespace_on_first_body_line() {
+        let mut chat = test_chat();
+        chat.push_tool_result("out", " a.rs | 1 +\n b.rs | 2 +", false);
+        let text = all_text(&chat);
+        assert!(
+            text.contains(" a.rs | 1 +"),
+            "first body line must keep its leading space: {text}",
+        );
+        assert!(text.contains(" b.rs | 2 +"));
+    }
+
+    #[test]
+    fn push_tool_result_drops_surrounding_blank_lines() {
+        let mut chat = test_chat();
+        chat.push_tool_result("out", "\n\n real line\n\n\n", false);
+        let text = all_text(&chat);
+        let body_row_count = text
+            .lines()
+            .filter(|l| l.starts_with(TOOL_BORDER_CONT))
+            .count();
+        assert_eq!(
+            body_row_count, 1,
+            "expected one body row after blank-line stripping: {text}",
+        );
+        assert!(
+            text.contains(&format!("{TOOL_BORDER_CONT} real line")),
+            "data-line indent must survive: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_dedup_collapses_body_when_only_line_matches_label() {
+        let mut chat = test_chat();
+        chat.push_tool_result("No matches found", "No matches found", false);
+        let text = all_text(&chat);
+        assert_eq!(
+            text.matches("No matches found").count(),
+            1,
+            "body collapses when it only repeats the label: {text}",
+        );
+    }
+
+    #[test]
+    fn push_tool_result_exactly_max_no_truncation() {
+        const MAX: usize = 5; // matches MAX_TOOL_OUTPUT_LINES in tool.rs
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(
+            !text.contains("... +"),
+            "no truncation summary expected: {text}"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_one_over_max_shows_singular_line() {
+        const MAX: usize = 5;
+        let mut chat = test_chat();
+        let output: Vec<_> = (0..=MAX).map(|i| format!("line {i}")).collect();
+        chat.push_tool_result("result", &output.join("\n"), false);
+        let text = all_text(&chat);
+        assert!(text.contains("... +1 line"));
+        assert!(!text.contains("lines"), "singular 'line' expected: {text}");
+    }
+
+    #[test]
+    fn push_tool_result_long_line_is_truncated() {
+        const MAX_CHARS: usize = 512;
+        let mut chat = test_chat();
+        let long_line = "x".repeat(MAX_CHARS + 100);
+        chat.push_tool_result("result", &long_line, false);
+        let text = all_text(&chat);
+        assert!(text.contains("..."), "long line should be truncated");
+        assert!(
+            !text.contains(&long_line),
+            "full long line should not appear"
         );
     }
 
