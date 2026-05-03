@@ -421,7 +421,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     let Entry::Header {
         session_id,
         cwd,
-        model,
         created_at,
         ..
     } = header
@@ -477,8 +476,6 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
     Ok(SessionInfo {
         session_id,
         cwd,
-        model,
-        created_at,
         last_active_at,
         title,
         exit,

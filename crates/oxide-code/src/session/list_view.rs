@@ -172,8 +172,6 @@ mod tests {
         SessionInfo {
             session_id: session_id.to_owned(),
             cwd: "/work/project".to_owned(),
-            model: "claude-opus".to_owned(),
-            created_at: last_active_at,
             last_active_at,
             title: None,
             exit: None,

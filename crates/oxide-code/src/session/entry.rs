@@ -85,16 +85,6 @@ pub(crate) struct ExitInfo {
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,
     pub(crate) cwd: String,
-    #[expect(
-        dead_code,
-        reason = "read from header for completeness but not consumed by list output"
-    )]
-    pub(crate) model: String,
-    #[expect(
-        dead_code,
-        reason = "kept for diagnostics but superseded by last_active_at for display and sort"
-    )]
-    pub(crate) created_at: OffsetDateTime,
     pub(crate) last_active_at: OffsetDateTime,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) exit: Option<ExitInfo>,
