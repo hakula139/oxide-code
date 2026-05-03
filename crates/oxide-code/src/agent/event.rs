@@ -101,9 +101,6 @@ impl StdioSink {
 }
 
 impl StdioSink {
-    /// Write `event` to the supplied byte sinks. Extracted so tests
-    /// can pass `Vec<u8>` and assert on rendered bytes; production
-    /// passes locked stdout / stderr.
     fn render<W1: std::io::Write, W2: std::io::Write>(
         &self,
         event: AgentEvent,
@@ -145,11 +142,9 @@ impl StdioSink {
             | AgentEvent::ModelSwitched { .. }
             | AgentEvent::EffortSwitched { .. } => {}
             AgentEvent::TurnComplete => {
-                // Newline after streamed text.
                 writeln!(stdout)?;
             }
             AgentEvent::Cancelled => {
-                // Marker on stderr so captured stdout (`-p`) stays reproducible.
                 writeln!(stdout)?;
                 writeln!(stderr, "{INTERRUPTED_MARKER}")?;
             }
@@ -171,10 +166,6 @@ impl AgentSink for StdioSink {
 
 // ── Test Fixtures ──
 
-/// Collects every event the code under test sends so assertions can
-/// inspect both the sequence and the payload. Shared by `agent` and
-/// `session::title_generator` tests (both drive code that writes
-/// through an [`AgentSink`]).
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct CapturingSink(std::sync::Arc<std::sync::Mutex<Vec<AgentEvent>>>);
@@ -209,8 +200,6 @@ mod tests {
         StdioSink::new(show_thinking, Arc::new(ToolRegistry::new(Vec::new())))
     }
 
-    /// Capture stdout / stderr bytes for one event so assertions can
-    /// pin the exact rendered shape (not just `Ok(())`).
     fn render_one(sink: &StdioSink, event: AgentEvent) -> (String, String) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -253,7 +242,6 @@ mod tests {
 
     #[test]
     fn render_tool_call_start_writes_icon_label_to_stderr() {
-        // Unregistered tool name exercises the label fallback path.
         let (_, stderr) = render_one(
             &test_sink(false),
             AgentEvent::ToolCallStart {
@@ -263,9 +251,6 @@ mod tests {
             },
         );
         assert!(stderr.ends_with('\n'));
-        // Generic icon + tool name fallback when registry doesn't know
-        // the tool — the exact icon depends on ToolRegistry's default
-        // but the stderr must non-emptily render *something* on one line.
         assert_eq!(stderr.lines().count(), 1);
         assert!(stderr.contains("unregistered"));
     }
@@ -288,7 +273,6 @@ mod tests {
         assert_eq!(lines[0], "  ls");
         assert_eq!(lines[1], "file1");
         assert_eq!(lines[2], "file2");
-        // Trailing blank separator between tool blocks.
         assert!(stderr.ends_with("\n\n"));
     }
 
@@ -303,16 +287,11 @@ mod tests {
                 metadata: crate::tool::ToolMetadata::default(),
             },
         );
-        // No title and whitespace-only content — only the trailing
-        // separator newline lands on stderr.
         assert_eq!(stderr, "\n");
     }
 
     #[test]
     fn render_tui_only_events_emit_nothing_on_either_stream() {
-        // Pin every TUI-only variant — a regression that moves any of
-        // them out of the no-op group leaks stdout / stderr noise into
-        // the headless / bare-REPL paths.
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
             AgentEvent::SessionTitleUpdated {

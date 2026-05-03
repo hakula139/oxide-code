@@ -1,9 +1,4 @@
-//! Binary entry point.
-//!
-//! Parses CLI flags, loads [`Config`], resolves which session to
-//! resume (if any), and dispatches into one of three run modes: TUI
-//! (default), bare REPL (`--no-tui`), or headless one-shot (`-p`).
-//! Signal handling and session summary writes on abort live here.
+//! CLI entry point: config loading, session resolution, mode dispatch.
 
 mod agent;
 mod client;
@@ -44,12 +39,7 @@ use tool::{
 };
 use util::path::tildify;
 
-/// Cached local UTC offset, computed before the tokio runtime starts.
-///
-/// `time::UtcOffset::current_local_offset()` is unsound under
-/// multi-threaded runtimes on Linux (it reads `/etc/localtime` via
-/// `localtime_r` while other threads may call `setenv`). Computing the
-/// offset in single-threaded `fn main()` avoids the issue.
+/// Computed before the tokio runtime starts (unsound under multi-threaded).
 static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
 
 #[derive(Parser)]
@@ -107,18 +97,10 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Decide mode before subscriber init so the writer can match it.
-    // TUI mode routes tracing into a file under `$XDG_STATE_HOME` so
-    // diagnostics never bleed onto the alternate screen; every other
-    // mode keeps stderr (its natural surface for command-line output).
     let tui_mode =
         !cli.no_tui && cli.prompt.is_none() && !cli.list && std::io::stdout().is_terminal();
-    // Bind for the function lifetime so the appender's worker thread
-    // keeps flushing right up to the final teardown warning. `None` in
-    // stderr modes — no async worker to drain.
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
-    // Handle --list before loading config (no API access needed).
     if cli.list {
         return list_sessions(cli.all);
     }
@@ -129,13 +111,9 @@ async fn async_main() -> Result<()> {
     let theme = config.theme.clone();
     let snapshot = config.snapshot();
 
-    // Resolve which session to resume (if any) before creating the client,
-    // so we can pass the session ID to the API headers.
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::default());
     let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    // Restore before the agent loop so resumed Reads clear the gate
-    // without forcing a re-Read.
     file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
 
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
@@ -183,8 +161,6 @@ async fn async_main() -> Result<()> {
 
 // ── Session Helpers ──
 
-/// Prints a table of recent sessions and exits. With `all = true`, spans
-/// every project; otherwise scoped to the current working directory.
 fn list_sessions(all: bool) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
@@ -198,10 +174,6 @@ fn list_sessions(all: bool) -> Result<()> {
     )
 }
 
-/// Detects the terminal width for title truncation in `--list`.
-/// Returns `None` when stdout is not a TTY (piped / redirected) or
-/// when the window size cannot be queried — the renderer skips
-/// truncation in either case so downstream tools see the full title.
 fn detect_terminal_width() -> Option<usize> {
     if !std::io::stdout().is_terminal() {
         return None;
@@ -222,20 +194,7 @@ fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
     ])
 }
 
-/// Waits for any shutdown signal — SIGINT (portable), SIGTERM, or
-/// SIGHUP (Unix only). Returns when the first signal arrives.
-///
-/// Installs the handlers lazily on first call. Callers that embed this
-/// in a `tokio::select!` let the arbiter cut off the other branch and
-/// run cleanup (session `finish()`, terminal restore, etc.) before the
-/// process exits. Crucially, `tokio::signal::ctrl_c` overrides tokio's
-/// default "terminate on SIGINT" behavior — without this handler our
-/// bare REPL / headless modes would exit without writing a Summary.
-///
-/// In the TUI, SIGINT from Ctrl+C is already intercepted by crossterm's
-/// raw-mode input; this handler catches it only when raw mode is not
-/// engaged (e.g., during setup / teardown) and still catches SIGTERM /
-/// SIGHUP regardless of mode.
+/// Waits for SIGINT, SIGTERM, or SIGHUP (Unix). Returns on first arrival.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -283,15 +242,11 @@ async fn run_tui(
         messages: resumed_messages,
         title: resumed_title,
         tool_result_metadata: resumed_tool_metadata,
-        // Snapshots were already drained into the tracker by the caller.
         file_snapshots: _,
     } = resumed;
     tui::terminal::install_panic_hook();
 
     let (agent_sink, agent_rx) = tui::event::channel();
-    // 32 is plenty: UserAction fires at human typing speed. Bounded so a
-    // stalled agent loop surfaces `try_send` failure instead of growing the
-    // queue without bound.
     let (user_tx, user_rx) = mpsc::channel::<UserAction>(32);
 
     let cwd = std::env::current_dir()
@@ -339,10 +294,6 @@ async fn run_tui(
         })
     };
 
-    // Run the TUI on the main thread (it needs terminal access).
-    // Race against shutdown signals (SIGTERM / SIGHUP — raw mode eats
-    // SIGINT before it reaches us) so external signals trigger the
-    // same teardown path as a normal quit.
     let result = tokio::select! {
         result = app.run(&mut terminal) => result,
         () = shutdown_signal() => {
@@ -353,7 +304,6 @@ async fn run_tui(
 
     tui::terminal::restore();
 
-    // Cancel the agent loop — it may be blocked on an API stream.
     agent_handle.abort();
     match agent_handle.await {
         Ok(Err(e)) => warn!("agent loop error: {e}"),
@@ -361,7 +311,6 @@ async fn run_tui(
         _ => {}
     }
 
-    // Summary write after abort — sink is gone, so warn-log on failure.
     if let Some(msg) = session.finalize(file_tracker.snapshot_all()).await {
         warn!("session finish failed: {msg}");
     }
@@ -369,17 +318,8 @@ async fn run_tui(
     result
 }
 
-/// Drives the TUI's agent loop: reads `UserAction`s from `user_rx`,
-/// runs each `SubmitPrompt` through [`agent_turn`], and forwards the
-/// outcome to the [`tui::event::ChannelSink`]. Owns the live
-/// [`SessionHandle`] and [`Client`] so `/clear` can roll both
-/// in-place without bouncing the values back to `run_tui`.
-///
-/// `Error` and `TurnComplete` are mutually exclusive — the TUI's
-/// `Error` handler runs the same teardown as `TurnComplete` (drain
-/// queue, re-enable input), so emitting both after a failed turn
-/// would double-drain `pending_prompts`'s head. Each [`TurnAbort`]
-/// arm emits exactly one terminal event.
+/// Each `TurnAbort` arm emits exactly one terminal event (`Error` and
+/// `TurnComplete` are mutually exclusive).
 #[expect(
     clippy::too_many_arguments,
     reason = "session lifecycle (store, handle, file tracker) lives here for /clear; bundling into a struct would just rename the dependencies"
@@ -404,9 +344,6 @@ async fn agent_loop_task(
                 sink.session_write_error(outcome.failure.as_deref());
                 messages.push(user_msg);
 
-                // The actor sets the seed only on a fresh session's
-                // first user-text message — fire-and-forget the AI
-                // title generator from there.
                 if let Some(seed) = outcome.ai_title_seed {
                     session::title_generator::spawn(
                         client.clone(),
@@ -436,18 +373,10 @@ async fn agent_loop_task(
                     }
                     Err(TurnAbort::Quit) => break,
                     Err(TurnAbort::Failed(e)) => {
-                        // `{e:#}` flattens the anyhow cause chain so the
-                        // user sees both the outer "stream error" and the
-                        // inner "HTTP 503" — plain `Display` would drop
-                        // every layer below the outermost context.
                         _ = sink.send(AgentEvent::Error(format!("{e:#}")));
                     }
                 }
             }
-            // `Cancel` arrives idle when the user hammered Esc /
-            // Ctrl+C with no turn in flight. `ConfirmExit` is TUI-only;
-            // `apply_action_locally` short-circuits it before the
-            // forward path, so it never reaches `recv` here.
             UserAction::Cancel | UserAction::ConfirmExit => {}
             UserAction::Clear => {
                 let outcome =
@@ -455,10 +384,6 @@ async fn agent_loop_task(
                 sink.session_write_error(outcome.finalize_failure.as_deref());
                 client.set_session_id(outcome.new_id.clone());
                 messages.clear();
-                // `sink.send` only errors when the channel closed —
-                // i.e. during shutdown. The state mutation has already
-                // happened on `client`; the missing confirmation is the
-                // least of the user's problems at that point.
                 if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
                     warn!("session-rolled event dropped: {e}");
                 }
@@ -482,8 +407,6 @@ async fn agent_loop_task(
         }
     }
 
-    // Summary is written by the caller (run_tui) to guarantee it runs
-    // regardless of how this task exits.
     Ok(())
 }
 
@@ -502,13 +425,7 @@ async fn bare_repl(
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut messages: Vec<Message> = resumed_messages;
-    // Tracks whether we broke out of the loop due to a shutdown signal
-    // (as opposed to EOF / error). See the post-`finish()` exit note
-    // below for why we care.
     let mut shutdown_fired = false;
-    // Bare REPL has no in-process source of `UserAction`s — Ctrl+C
-    // arrives via `shutdown_signal()` and drops the turn future from
-    // the outer `select!`.
     let (_user_tx, mut user_rx) = inert_user_action_channel();
 
     let result: Result<()> = async {
@@ -516,9 +433,6 @@ async fn bare_repl(
             eprint!("> ");
             std::io::stderr().flush()?;
 
-            // Race stdin input against shutdown signals so Ctrl+C (SIGINT),
-            // SIGTERM, or SIGHUP break the loop cleanly and fall through
-            // to `finish()` below.
             let line = tokio::select! {
                 line = lines.next_line() => line?,
                 () = shutdown_signal() => {
@@ -541,9 +455,6 @@ async fn bare_repl(
             sink.session_write_error(outcome.failure.as_deref());
             messages.push(user_msg);
             let prompt = prompt::build_prompt(model).await;
-            // Allow the in-flight turn to be interrupted too; the
-            // session state that's already been written persists and
-            // resume-side sanitization heals any dangling tool_use.
             let turn = agent_turn(
                 client,
                 &tools,
@@ -561,12 +472,6 @@ async fn bare_repl(
                     break;
                 }
             };
-            // Bare REPL routes Ctrl+C via `shutdown_signal()` (which
-            // drops the turn future from the outer `select!`), not via
-            // `UserAction::Cancel`, so `Cancelled` / `Quit` aborts only
-            // arrive in test harnesses; treat them the same as a
-            // completed turn for shell purposes. Real failures still
-            // propagate so the exit code reflects the result.
             match turn_result {
                 Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
                 Err(TurnAbort::Failed(e)) => return Err(e),
@@ -580,14 +485,7 @@ async fn bare_repl(
     let failure = session.finalize(file_tracker.snapshot_all()).await;
     sink.session_write_error(failure.as_deref());
 
-    // `tokio::io::stdin()` spawns a blocking thread that cannot be
-    // cancelled (see tokio::io::stdin docs), so on a signal-induced
-    // exit the runtime Drop would hang waiting for that thread until
-    // the user hits Enter. Our explicit cleanup (`finish()`) has
-    // already run, so skip the runtime teardown entirely via
-    // `std::process::exit(0)`. Only do this on signal exit —
-    // normal EOF / error paths should return through `main` so the
-    // exit code reflects the result.
+    // tokio::io::stdin's blocking thread hangs runtime Drop on signal exit.
     if shutdown_fired {
         std::process::exit(0);
     }
@@ -611,9 +509,6 @@ async fn headless(
     sink.session_write_error(outcome.failure.as_deref());
     let mut messages = vec![user_msg];
     let prompt = prompt::build_prompt(model).await;
-    // Race the single turn against shutdown signals so the recorded
-    // user message still gets a Summary entry on Ctrl+C / SIGTERM /
-    // SIGHUP; resume-side sanitization heals any dangling state.
     let mut shutdown_fired = false;
     let (_user_tx, mut user_rx) = inert_user_action_channel();
     let turn = agent_turn(
@@ -626,9 +521,6 @@ async fn headless(
         &mut user_rx,
     );
     let result: Result<()> = tokio::select! {
-        // Headless has no follow-up surface, so user-initiated aborts
-        // (Cancelled / Quit) collapse to a clean exit; only a real
-        // `Failed` propagates so the exit code reflects the failure.
         r = turn => match r {
             Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
             Err(TurnAbort::Failed(e)) => Err(e),
@@ -642,10 +534,6 @@ async fn headless(
     let failure = session.finalize(file_tracker.snapshot_all()).await;
     sink.session_write_error(failure.as_deref());
 
-    // Mirror `bare_repl`: on signal exit, skip runtime Drop so any
-    // outstanding HTTP / reqwest connection pool doesn't hold the
-    // process open. Headless does not touch `tokio::io::stdin`, so
-    // this is defensive rather than strictly necessary.
     if shutdown_fired {
         std::process::exit(0);
     }
