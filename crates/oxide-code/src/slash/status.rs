@@ -7,6 +7,7 @@
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
+use crate::config::display_effort;
 
 pub(crate) struct StatusCmd;
 
@@ -31,10 +32,7 @@ impl SlashCommand for StatusCmd {
 /// glance shows the trio that drives every per-request decision.
 fn render_status(info: &SessionInfo) -> String {
     let model = info.marketing_name();
-    let effort = info
-        .config
-        .effort
-        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
+    let effort = display_effort(info.config.effort);
     let rows: [(&str, &str); 7] = [
         ("Model", &model),
         ("Model ID", &info.config.model_id),
@@ -142,11 +140,10 @@ mod tests {
     }
 
     #[test]
-    fn render_status_renders_effort_fallback_marker_when_none() {
-        // Mirror /config — `None` shows `(model default)`, never blank.
+    fn render_status_renders_no_effort_tier_when_none() {
         let mut info = test_session_info();
         info.config.effort = None;
         let body = render_status(&info);
-        assert!(body.contains("(model default)"), "{body}");
+        assert!(body.contains("(no effort tier)"), "{body}");
     }
 }

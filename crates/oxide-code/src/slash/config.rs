@@ -12,7 +12,7 @@ use std::path::Path;
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::file;
+use crate::config::{display_effort, file};
 use crate::util::path::tildify;
 
 pub(crate) struct ConfigCmd;
@@ -43,9 +43,7 @@ fn render_config(
     project_path: Option<&Path>,
 ) -> String {
     let cfg = &info.config;
-    let effort = cfg
-        .effort
-        .map_or_else(|| "(model default)".to_owned(), |e| e.to_string());
+    let effort = display_effort(cfg.effort);
     let max_tokens = cfg.max_tokens.to_string();
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
     let thinking = if cfg.show_thinking { "yes" } else { "no" };
@@ -160,13 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn render_config_renders_effort_fallback_marker_when_none() {
-        // `None` must render explicit "(model default)", not "None"
-        // or empty, so the user sees the fallback is intentional.
+    fn render_config_renders_no_effort_tier_when_none() {
         let mut info = test_session_info();
         info.config.effort = None;
         let body = render_config(&info, None, None);
-        assert!(body.contains("(model default)"), "{body}");
+        assert!(body.contains("(no effort tier)"), "{body}");
     }
 
     #[test]

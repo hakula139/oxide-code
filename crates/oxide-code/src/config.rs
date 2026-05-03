@@ -44,7 +44,7 @@ impl Auth {
 /// secret. Built at startup from [`Config::snapshot`] and handed into
 /// the slash dispatcher; survives the move when [`Config`] itself is
 /// consumed by the API client. `model_id` and `effort` are rebound by
-/// the `/model` swap path so the snapshot reflects the live values.
+/// runtime slash-command swaps so the snapshot reflects live values.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) model_id: String,
@@ -175,10 +175,13 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: String,
+    /// User-declared effort selection. `None` means auto: resolve from
+    /// the active model's default whenever the model changes.
+    pub(crate) effort_pick: Option<Effort>,
     /// `output_config.effort` for the streaming path. `None` means
     /// the model doesn't accept the parameter and the field is
     /// omitted. Resolved once at [`Config::load`]; mutated mid-session
-    /// by `/effort` and re-clamped on `/model` swaps.
+    /// by `/effort` and re-resolved on `/model` swaps.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
@@ -268,6 +271,7 @@ impl Config {
 
         Ok(Self {
             model,
+            effort_pick,
             effort,
             auth,
             base_url,
@@ -293,6 +297,10 @@ impl Config {
             show_thinking: self.show_thinking,
         }
     }
+}
+
+pub(crate) fn display_effort(effort: Option<Effort>) -> String {
+    effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
 
 /// Per-effort `max_tokens` default; overridden by
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.max_tokens, 64_000);
+        assert_eq!(config.effort_pick, None);
         assert_eq!(config.effort, Some(Effort::Xhigh));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(!config.show_thinking);
@@ -710,6 +719,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
+        assert_eq!(config.effort_pick, Some(Effort::Low));
         assert_eq!(config.effort, Some(Effort::Low));
     }
 
@@ -726,6 +736,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
+        assert_eq!(config.effort_pick, Some(Effort::Xhigh));
         assert_eq!(config.effort, Some(Effort::High));
     }
 
@@ -740,6 +751,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
+        assert_eq!(config.effort_pick, Some(Effort::Max));
         assert_eq!(config.effort, None);
     }
 
@@ -757,6 +769,7 @@ mod tests {
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
+        assert_eq!(config.effort_pick, Some(Effort::Medium));
         assert_eq!(config.effort, Some(Effort::Medium));
     }
 
@@ -775,6 +788,7 @@ mod tests {
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
             .unwrap();
+        assert_eq!(config.effort_pick, Some(Effort::Max));
         assert_eq!(config.effort, Some(Effort::Max));
     }
 
@@ -790,6 +804,14 @@ mod tests {
         assert!(msg.contains("insane"), "{msg}");
     }
 
+    // ── display_effort ──
+
+    #[test]
+    fn display_effort_names_effective_tier_or_no_tier() {
+        assert_eq!(display_effort(Some(Effort::High)), "high");
+        assert_eq!(display_effort(None), "(no effort tier)");
+    }
+
     // ── Config::snapshot ──
 
     #[test]
@@ -803,6 +825,7 @@ mod tests {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),
             model: "claude-test-1-0".to_owned(),
+            effort_pick: Some(Effort::Xhigh),
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
             prompt_cache_ttl: PromptCacheTtl::FiveMin,

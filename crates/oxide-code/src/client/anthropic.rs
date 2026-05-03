@@ -180,14 +180,11 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-clamps `config.effort` against
-    /// the new caps. Returns the resolved effort so the agent loop
-    /// ships it without a second `model::lookup`. Effort is lossy
-    /// across swaps — an `xhigh`-clamped-to-`high` model doesn't
-    /// restore `xhigh` on swap-back.
+    /// Swaps the active model and re-resolves the stored effort pick
+    /// against the new caps. Returns the effective effort for display.
     pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
-        let effort = caps.resolve_effort(self.config.effort);
+        let effort = caps.resolve_effort(self.config.effort_pick);
         self.config.effort = effort;
         self.config.model = model;
         effort
@@ -199,6 +196,7 @@ impl Client {
     pub(crate) fn set_effort(&mut self, pick: Option<Effort>) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&self.config.model);
         let effort = caps.resolve_effort(pick);
+        self.config.effort_pick = pick;
         self.config.effort = effort;
         effort
     }
@@ -615,8 +613,17 @@ mod tests {
 
     // ── Client::set_model ──
 
-    fn client_with(model: &str, effort: Option<Effort>) -> Client {
+    fn client_with(model: &str, effort_pick: Option<Effort>) -> Client {
         let mut cfg = test_config(OFFLINE_URL, api_key(), model);
+        cfg.effort_pick = effort_pick;
+        let caps = crate::model::capabilities_for(model);
+        cfg.effort = caps.resolve_effort(effort_pick);
+        Client::new(cfg, Some("sid".to_owned())).unwrap()
+    }
+
+    fn client_with_effective_effort(model: &str, effort: Option<Effort>) -> Client {
+        let mut cfg = test_config(OFFLINE_URL, api_key(), model);
+        cfg.effort_pick = effort;
         cfg.effort = effort;
         Client::new(cfg, Some("sid".to_owned())).unwrap()
     }
@@ -653,6 +660,12 @@ mod tests {
                 Some(Effort::Xhigh),
             ),
             (
+                "claude-sonnet-4-6",
+                None,
+                "claude-opus-4-7",
+                Some(Effort::Xhigh),
+            ),
+            (
                 "claude-opus-4-7",
                 Some(Effort::High),
                 "claude-opus-5-0",
@@ -665,6 +678,10 @@ mod tests {
             assert_eq!(
                 client.config.effort, expect,
                 "{from_model} → {swap_to}: stored effort",
+            );
+            assert_eq!(
+                client.config.effort_pick, from_effort,
+                "{from_model} → {swap_to}: stored pick",
             );
             assert_eq!(client.model(), swap_to, "{swap_to}: stored id");
         }
@@ -710,11 +727,15 @@ mod tests {
             ("claude-haiku-4-5", None, Some(Effort::High), None),
             ("claude-haiku-4-5", None, None, None),
         ] {
-            let mut client = client_with(model, initial);
+            let mut client = client_with_effective_effort(model, initial);
             assert_eq!(client.set_effort(pick), expect, "{model} pick={pick:?}");
             assert_eq!(
                 client.config.effort, expect,
                 "{model} pick={pick:?}: stored effort",
+            );
+            assert_eq!(
+                client.config.effort_pick, pick,
+                "{model} pick={pick:?}: stored pick",
             );
         }
     }

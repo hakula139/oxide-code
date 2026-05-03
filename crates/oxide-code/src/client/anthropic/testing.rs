@@ -15,6 +15,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         auth,
         base_url: base_url.into(),
         model: model.to_owned(),
+        effort_pick: None,
         effort: None,
         max_tokens: 128,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
