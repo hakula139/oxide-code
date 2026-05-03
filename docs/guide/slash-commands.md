@@ -52,7 +52,7 @@ When you swap, your current effort tier is capped to the new model's max — for
 
 `/effort <level>` swaps to that tier. Valid: `low`, `medium`, `high`, `xhigh`, `max`. The active model's caps clamp the pick — `/effort xhigh` on Sonnet 4.6 lands on `high` and the confirmation says `effort high (clamped from xhigh)`.
 
-`/effort auto` (alias `unset`) clears your pick so the model's default kicks in (Opus 4.7 → `xhigh`, other effort-capable models → `high`, no-effort models → no parameter).
+`/effort auto` (alias `unset`) clears your pick so the model's default kicks in. The new tier surfaces in the `/effort` list as the active row.
 
 `/effort xhigh` on a model with no effort tier (Haiku 4.5) errors upfront with a recovery hint to `/model` first — silent acceptance would degrade to "no effort param" and confuse the user.
 

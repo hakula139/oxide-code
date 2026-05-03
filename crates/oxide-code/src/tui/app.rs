@@ -673,8 +673,8 @@ fn format_effort_confirmation(
     effort: Option<crate::config::Effort>,
 ) -> String {
     match (pick, effort) {
-        (None, None) => "Effort: (none) — model has no effort tier.".to_owned(),
-        (None, Some(level)) => format!("Effort set to {level} (model default)."),
+        (None, None) => "Effort cleared — model has no effort tier.".to_owned(),
+        (None, Some(level)) => format!("Effort cleared. Using {level} (model default)."),
         (Some(p), Some(level)) if p == level => format!("Effort set to {level}."),
         (Some(p), Some(level)) => format!("Effort set to {level} (clamped from {p})."),
         (Some(p), None) => {
@@ -1712,9 +1712,13 @@ mod tests {
     }
 
     #[test]
-    fn format_effort_confirmation_auto_marks_model_default() {
+    fn format_effort_confirmation_auto_acknowledges_clear_and_resolves_default() {
+        // /effort auto reads back as a confirmation that the user
+        // pick was cleared, then names the model default that took
+        // its place — not "Effort set to ..." which would read like
+        // the system overrode the user's input.
         let s = format_effort_confirmation(None, Some(crate::config::Effort::Xhigh));
-        assert_eq!(s, "Effort set to xhigh (model default).");
+        assert_eq!(s, "Effort cleared. Using xhigh (model default).");
     }
 
     #[test]
@@ -1731,7 +1735,7 @@ mod tests {
     #[test]
     fn format_effort_confirmation_auto_on_no_tier_model_acknowledges_no_op() {
         let s = format_effort_confirmation(None, None);
-        assert_eq!(s, "Effort: (none) — model has no effort tier.");
+        assert_eq!(s, "Effort cleared — model has no effort tier.");
     }
 
     #[test]

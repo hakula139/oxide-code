@@ -61,7 +61,7 @@ impl SlashCommand for EffortCmd {
         let caps = capabilities_for(&ctx.info.config.model_id);
         if pick.is_some() && !caps.effort {
             return Err(format!(
-                "{}: no effort tier — output_config.effort isn't accepted. Switch models first with /model.",
+                "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
                 marketing_or_id(&ctx.info.config.model_id),
             ));
         }
@@ -95,10 +95,7 @@ fn render_effort_list(info: &SessionInfo) -> String {
     let mut out = format!("Effort levels for {marketing}  (* = active)\n\n");
 
     if !caps.effort {
-        _ = writeln!(
-            out,
-            "  (no effort tier — {marketing} doesn't accept output_config.effort)",
-        );
+        _ = writeln!(out, "  (no effort tier — {marketing} ignores effort)");
         out.push_str("\nSwitch models first with /model.");
         return out;
     }
