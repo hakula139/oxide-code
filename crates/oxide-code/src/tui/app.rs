@@ -1432,6 +1432,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_model_swap_during_busy_refuses_with_system_message_no_forward() {
+        // Arg-bearing /model mutates the live Client and must wait for
+        // idle; the typed line still lands but the SwitchModel action
+        // is suppressed.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        rx.recv().await.expect("active submit forwarded");
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model opus".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "SwitchModel must not reach user_tx mid-turn",
+        );
+        let body = app.chat.last_system_text().expect("refusal system message");
+        assert!(
+            body.contains("/model runs only when idle"),
+            "refusal must name the gate: {body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_bare_model_during_busy_runs_list_view() {
+        // The list form is read-only and must dispatch immediately
+        // even mid-turn — `is_read_only(args)` returns true for
+        // empty args. Pinning this so a regression that drops the
+        // args-aware classification surfaces here.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model".to_owned()));
+
+        let body = app.chat.last_system_text().expect("system block from list");
+        assert!(body.starts_with("Available models"), "{body}");
+    }
+
+    #[tokio::test]
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
         // Unknown commands route through `dispatch` so the user sees
         // the canonical "unknown command" error with recovery hints
@@ -1478,6 +1515,105 @@ mod tests {
             app.status_bar.title(),
             Some("First prompt"),
             "current-session title must survive a stale event",
+        );
+    }
+
+    #[test]
+    fn handle_model_switched_refreshes_status_bar_session_info_and_chat() {
+        // Three surfaces refresh in one shot: status-bar label,
+        // `session_info` (backs `/status` / `/config`), and a chat
+        // confirmation block. Marketing name is derived locally from
+        // `model_id`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::ModelSwitched {
+            model_id: "claude-sonnet-4-6".to_owned(),
+            effort: Some(crate::config::Effort::High),
+        });
+
+        assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert!(
+            body.contains("Switched to Claude Sonnet 4.6 (claude-sonnet-4-6)"),
+            "marketing + id present: {body}",
+        );
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn format_swap_confirmation_both_none_omits_effort_clause() {
+        // Pin: no `effort` substring at all, never a stray "none"
+        // word. Mutation that prints `effort none.` would surface here.
+        let s = format_swap_confirmation("Claude Haiku 4.5", "claude-haiku-4-5", None, None);
+        assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
+    }
+
+    #[test]
+    fn format_swap_confirmation_clears_effort_when_new_model_drops_it() {
+        // User had a tier; new model has none. Surface the change so
+        // the user knows their effort just disappeared.
+        let s = format_swap_confirmation(
+            "Claude Haiku 4.5",
+            "claude-haiku-4-5",
+            Some(crate::config::Effort::Xhigh),
+            None,
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Haiku 4.5 (claude-haiku-4-5). Effort cleared (model has no effort tier)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_marks_default_when_previous_was_none() {
+        // None → Some means the new model's default kicked in;
+        // distinguishing this from "user's pick survived" prevents
+        // the user from thinking they chose this tier.
+        let s = format_swap_confirmation(
+            "Claude Opus 4.7",
+            "claude-opus-4-7",
+            None,
+            Some(crate::config::Effort::Xhigh),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort xhigh (model default)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_marks_clamp_when_new_effort_below_previous() {
+        // The lossy-swap warning the design doc trades for simplicity:
+        // user can at least see what they just lost.
+        let s = format_swap_confirmation(
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6",
+            Some(crate::config::Effort::Xhigh),
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high (clamped from xhigh)."
+        );
+    }
+
+    #[test]
+    fn format_swap_confirmation_quiet_when_effort_unchanged() {
+        // Same tier survives — no clamp / default annotation. Pin
+        // exact format so a stray suffix (`(unchanged)`) would fail.
+        let s = format_swap_confirmation(
+            "Claude Opus 4.7",
+            "claude-opus-4-7",
+            Some(crate::config::Effort::High),
+            Some(crate::config::Effort::High),
+        );
+        assert_eq!(
+            s,
+            "Switched to Claude Opus 4.7 (claude-opus-4-7) · effort high.",
         );
     }
 

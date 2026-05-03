@@ -378,17 +378,27 @@ mod tests {
     }
 
     #[test]
-    fn render_prompt_drained_and_session_title_are_silent() {
+    fn render_tui_only_events_emit_nothing_on_either_stream() {
+        // Pin every TUI-only variant — a regression that moves any of
+        // them out of the no-op group leaks stdout / stderr noise into
+        // the headless / bare-REPL paths.
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
             AgentEvent::SessionTitleUpdated {
                 session_id: "sid".to_owned(),
                 title: "New title".to_owned(),
             },
+            AgentEvent::SessionRolled {
+                id: "rolled".to_owned(),
+            },
+            AgentEvent::ModelSwitched {
+                model_id: "claude-opus-4-7".to_owned(),
+                effort: Some(Effort::Xhigh),
+            },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
-            assert!(stdout.is_empty());
-            assert!(stderr.is_empty());
+            assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
+            assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
         }
     }
 

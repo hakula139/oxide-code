@@ -82,10 +82,15 @@ impl StatusBar {
         self.title = title.filter(|t| !t.trim().is_empty());
     }
 
-    /// Replaces the model label between `ox` and the status slot.
-    /// Called on `/model` swap — the bar keeps its own copy rather
-    /// than re-reading `session_info` per frame.
+    /// Replaces the cached model label so render doesn't re-read
+    /// `session_info` per frame. Empty input would render a doubled
+    /// separator with no label between — assert rather than silently
+    /// paint a malformed bar.
     pub(crate) fn set_model(&mut self, model: String) {
+        debug_assert!(
+            !model.trim().is_empty(),
+            "set_model received empty / whitespace-only label",
+        );
         self.model = model;
     }
 
