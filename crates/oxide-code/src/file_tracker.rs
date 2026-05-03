@@ -199,7 +199,13 @@ impl FileTracker {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, FileState>> {
-        self.by_path.lock().expect("FileTracker mutex poisoned")
+        match self.by_path.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!("FileTracker mutex poisoned, recovering");
+                e.into_inner()
+            }
+        }
     }
 }
 
