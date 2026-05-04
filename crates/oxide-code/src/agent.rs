@@ -498,6 +498,7 @@ mod tests {
     };
     use crate::config::{Auth, Effort};
     use crate::message::Role;
+    use crate::model::ResolvedModelId;
     use crate::session::handle::{self, SessionHandle};
     use crate::session::store::test_store;
     use crate::tool::{Tool, ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
@@ -1157,7 +1158,7 @@ mod tests {
         for action in [
             UserAction::ConfirmExit,
             UserAction::Clear,
-            UserAction::SwitchModel("claude-opus-4-7".to_owned()),
+            UserAction::SwitchModel(ResolvedModelId::new("claude-opus-4-7".to_owned())),
             UserAction::SwitchEffort(Effort::High),
         ] {
             let dir = tempfile::tempdir().unwrap();

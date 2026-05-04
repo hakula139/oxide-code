@@ -41,7 +41,7 @@ Returns `SlashOutcome::Action(UserAction::SubmitPrompt(PROMPT))` with a static b
 
 ### /model
 
-Bare `/model` lists the curated `SELECTABLE` set marking the active row. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy -- re-clamps current effort against the new model.
+Bare `/model` lists the curated `LISTED_MODELS` set marking the active row. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy -- re-clamps current effort against the new model.
 
 ### /effort
 
@@ -53,7 +53,7 @@ Mirrors `/model` shape. Accepts concrete tiers (`low`, `medium`, `high`, `xhigh`
 - `crates/oxide-code/src/slash/registry.rs` -- `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
 - `crates/oxide-code/src/slash/clear.rs` -- `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/init.rs` -- `InitCmd`, `PROMPT`.
-- `crates/oxide-code/src/slash/model.rs` -- `ModelCmd`, `SELECTABLE`, resolver.
+- `crates/oxide-code/src/slash/model.rs` -- `ModelCmd`, `LISTED_MODELS`, resolver.
 - `crates/oxide-code/src/slash/effort.rs` -- `EffortCmd`, level parser.
 - `crates/oxide-code/src/tui/app.rs` -- `dispatch_user_action`, `apply_action_locally`.
 - `crates/oxide-code/src/agent.rs` -- `agent_loop_task` Clear arm, model/effort switch handling.

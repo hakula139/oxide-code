@@ -209,8 +209,14 @@ impl SessionHandle {
                 e.into_inner().take()
             }
         };
-        if let Some(j) = join {
-            _ = j.await;
+        if let Some(j) = join
+            && let Err(e) = j.await
+        {
+            if e.is_panic() {
+                tracing::error!("session actor panicked: {e}");
+            } else {
+                tracing::warn!("session actor task cancelled: {e}");
+            }
         }
     }
 
@@ -782,6 +788,49 @@ mod tests {
         handle.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn shutdown_logs_actor_panic_instead_of_silently_discarding() {
+        // An actor that panics mid-batch must surface via tracing::error,
+        // not disappear into `_ = j.await`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        handle
+            .cmd_tx
+            .send(super::super::actor::SessionCmd::Panic)
+            .await
+            .unwrap();
+        // shutdown must not panic itself — it handles the JoinError.
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_surfaces_panic_from_stand_in_actor() {
+        // Exercises the Panic arm in acks_then_drops (testing.rs),
+        // which panics the stand-in actor task. shutdown must catch the
+        // JoinError and log via tracing::error.
+        let handle = testing::acks_then_drops("test", 1);
+        handle
+            .cmd_tx
+            .send(super::super::actor::SessionCmd::Panic)
+            .await
+            .unwrap();
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_logs_cancellation_when_actor_task_aborted() {
+        // Abort produces a JoinError where is_panic() == false,
+        // exercising the "cancelled" branch in shutdown.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
+            j.abort();
+        }
+        handle.shutdown().await;
+    }
+
     // ── start ──
 
     #[tokio::test]
@@ -1163,5 +1212,52 @@ mod tests {
             Some(msg_uuids[1].0),
             "post-resume message chains to pre-resume tail",
         );
+    }
+
+    // ── SharedState poison recovery ──
+
+    #[test]
+    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let _guard = s.last_flush_failure.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // Mutex is now poisoned. record_flush_failure must recover.
+        shared.record_flush_failure("disk full");
+        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        // Poison by writing then panicking.
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let mut guard = s.last_flush_failure.lock().unwrap();
+            *guard = Some("pre-poison".to_owned());
+            panic!("deliberate poison");
+        })
+        .join();
+        // Recovery path must still return the value written pre-panic.
+        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+    }
+
+    #[tokio::test]
+    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        // Poison the actor_join mutex.
+        let join_ref = Arc::clone(&handle.actor_join);
+        _ = std::thread::spawn(move || {
+            let _guard = join_ref.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // shutdown must recover (take the JoinHandle) and not panic.
+        handle.shutdown().await;
     }
 }

@@ -1192,7 +1192,9 @@ mod tests {
     fn dispatch_local_only_actions_return_false_to_prevent_double_send() {
         for action in [
             UserAction::Clear,
-            UserAction::SwitchModel("claude-opus-4-7".to_owned()),
+            UserAction::SwitchModel(crate::model::ResolvedModelId::new(
+                "claude-opus-4-7".to_owned(),
+            )),
             UserAction::SwitchEffort(crate::config::Effort::High),
         ] {
             let (mut app, mut rx, _agent_tx) = test_app(None);

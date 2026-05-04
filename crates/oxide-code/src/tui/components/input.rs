@@ -19,6 +19,8 @@ use crate::slash::popup_query;
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
+// ── Constants ──
+
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
 
@@ -36,6 +38,8 @@ enum PopupKey {
 const PLACEHOLDER_IDLE: &str = "Ask anything...";
 const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
 const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds another";
+
+// ── InputArea ──
 
 /// Multi-line input area with dynamic height and slash-command popup.
 pub(crate) struct InputArea {
@@ -60,6 +64,8 @@ pub(crate) struct InputArea {
     /// is not publicly accessible.
     scroll_top: Cell<u16>,
 }
+
+// ── Public API ──
 
 impl InputArea {
     pub(crate) fn new(theme: &Theme) -> Self {
@@ -152,6 +158,8 @@ impl InputArea {
         self.popup.render(frame, area);
     }
 }
+
+// ── Event Handling & Rendering ──
 
 impl InputArea {
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
@@ -290,6 +298,8 @@ impl InputArea {
     }
 }
 
+// ── Private Helpers ──
+
 impl InputArea {
     // ── Render Helpers ──
 
@@ -306,7 +316,7 @@ impl InputArea {
         self.textarea.set_placeholder_text(text);
     }
 
-    // ── Private Helpers ──
+    // ── Popup & State ──
 
     /// Route a key through the slash popup when it owns focus. Tab
     /// and Enter only route here under no modifiers so Shift+Enter
@@ -445,6 +455,8 @@ impl InputArea {
         Some(UserAction::SubmitPrompt(trimmed))
     }
 }
+
+// ── Free Functions ──
 
 /// Lossy `usize → u16` cast scoped to cursor / column positions, where
 /// the source value is bounded by terminal dimensions. Centralises the

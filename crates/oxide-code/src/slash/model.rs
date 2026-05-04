@@ -9,15 +9,18 @@ use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_table;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, lookup, marketing_or_id};
+use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
+
+// ── Constants ──
 
 /// `[1m]` opt-in tag — appended to a canonical id to request the 1M
 /// context window on models whose capability row has `context_1m`.
 const TAG_1M: &str = "[1m]";
 
-/// Curated UI surface for the list view. Manual swap accepts any id
-/// from [`MODELS`] plus its `[1m]` variant where `context_1m` is true.
-const SELECTABLE: &[&str] = &[
+/// Curated roster shown by bare `/model`. Manual swap resolves against
+/// the full [`MODELS`] table — this constant only governs what the list
+/// view displays.
+const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
     "claude-sonnet-4-6",
@@ -31,6 +34,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("sonnet", "claude-sonnet-4-6"),
     ("haiku", "claude-haiku-4-5"),
 ];
+
+// ── ModelCmd ──
 
 pub(super) struct ModelCmd;
 
@@ -64,8 +69,10 @@ impl SlashCommand for ModelCmd {
     }
 }
 
+// ── Resolver ──
+
 /// Strips `[1m]`, resolves base, re-attaches if supported. Case-insensitive.
-fn resolve_model_arg(arg: &str) -> Result<String, String> {
+fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     let arg = arg.to_ascii_lowercase();
     let (base_arg, want_1m) = match arg.strip_suffix(TAG_1M) {
         Some(rest) => (rest, true),
@@ -78,7 +85,7 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
     }
     let base_id = resolve_base(base_arg)?;
     if !want_1m {
-        return Ok(base_id);
+        return Ok(ResolvedModelId::new(base_id));
     }
     let info = lookup(&base_id).expect("base_id resolves via lookup");
     if !info.capabilities.context_1m {
@@ -87,7 +94,7 @@ fn resolve_model_arg(arg: &str) -> Result<String, String> {
             info.marketing,
         ));
     }
-    Ok(format!("{base_id}{TAG_1M}"))
+    Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
 /// Four-tier resolution against [`MODELS`]: alias → exact / dated-id
@@ -143,14 +150,16 @@ fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
         .collect()
 }
 
+// ── List View ──
+
 /// Renders the selectable model table with active marker.
 fn render_model_list(info: &SessionInfo) -> String {
     let active = info.config.model_id.as_str();
-    let labels: Vec<String> = SELECTABLE
+    let labels: Vec<String> = LISTED_MODELS
         .iter()
         .map(|id| label_for(id, *id == active))
         .collect();
-    let descriptions: Vec<String> = SELECTABLE.iter().map(|id| description_for(id)).collect();
+    let descriptions: Vec<String> = LISTED_MODELS.iter().map(|id| description_for(id)).collect();
     let rows = labels
         .iter()
         .zip(&descriptions)
@@ -161,7 +170,7 @@ fn render_model_list(info: &SessionInfo) -> String {
 
     out.push_str("\nSwitch: /model <id>  (aliases: opus, sonnet, haiku)");
 
-    if !SELECTABLE.contains(&active) {
+    if !LISTED_MODELS.contains(&active) {
         _ = write!(
             out,
             "\n\nCurrent model: {active} (not in the selectable list).",
@@ -191,6 +200,10 @@ mod tests {
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
+
+    fn resolved(id: &str) -> ResolvedModelId {
+        ResolvedModelId::new(id.to_owned())
+    }
 
     // ── ModelCmd metadata ──
 
@@ -239,11 +252,11 @@ mod tests {
     #[test]
     fn execute_no_args_lists_every_selectable_in_declared_order() {
         // Pin the row order — a mutation reversing or sorting the
-        // SELECTABLE iteration would survive a per-row contains check.
+        // LISTED_MODELS iteration would survive a per-row contains check.
         let (chat, _) = run_execute("");
         let body = chat.last_system_text().unwrap();
         let mut last_idx = 0usize;
-        for id in SELECTABLE {
+        for id in LISTED_MODELS {
             let idx = body
                 .find(id)
                 .unwrap_or_else(|| panic!("missing {id}: {body}"));
@@ -257,7 +270,7 @@ mod tests {
 
     #[test]
     fn execute_no_args_marks_only_the_active_row() {
-        // Active row is the exact-match against SELECTABLE.
+        // Active row is the exact-match against LISTED_MODELS.
         // `claude-opus-4-7` (bare) marks only itself, never
         // `claude-opus-4-7[1m]` — `[1m]` distinctness matters.
         let mut chat = ChatView::new(&Theme::default(), false);
@@ -306,9 +319,9 @@ mod tests {
             let (_, outcome) = run_execute(alias);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                    expected.to_owned(),
-                ))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                    expected
+                )))),
                 "alias `{alias}` should route to `{expected}`",
             );
         }
@@ -332,7 +345,7 @@ mod tests {
     #[test]
     fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
         // Pass-through tier returns exact table rows unchanged, including
-        // non-SELECTABLE older rows and 1M variants.
+        // non-LISTED_MODELS older rows and 1M variants.
         for id in [
             "claude-opus-4-7",
             "claude-opus-4-7[1m]",
@@ -344,7 +357,7 @@ mod tests {
             let (_, outcome) = run_execute(id);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(id.to_owned()))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(id)))),
                 "canonical `{id}` must round-trip",
             );
         }
@@ -365,9 +378,9 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                    expected.to_owned()
-                ))),
+                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                    expected
+                )))),
                 "`{arg}` should resolve to `{expected}`",
             );
         }
@@ -397,9 +410,9 @@ mod tests {
         let (_, outcome) = run_execute("opus-4");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-opus-4".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-opus-4"
+            )))),
         );
     }
 
@@ -425,9 +438,9 @@ mod tests {
         let (_, outcome) = run_execute("haiku-4-");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-haiku-4-5".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-haiku-4-5"
+            )))),
         );
     }
 
@@ -437,9 +450,9 @@ mod tests {
         let (_, outcome) = run_execute("  haiku-4-5  ");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(
-                "claude-haiku-4-5".to_owned(),
-            ))),
+            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                "claude-haiku-4-5"
+            )))),
         );
     }
 
@@ -450,7 +463,12 @@ mod tests {
         // `opus` matches every Opus row as a substring (would be
         // ambiguous), but the alias map intercepts and routes it to
         // the canonical opus-4-7 row. Pin the precedence directly.
-        assert_eq!(resolve_model_arg("opus").as_deref(), Ok("claude-opus-4-7"));
+        assert_eq!(
+            resolve_model_arg("opus")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
+            Ok("claude-opus-4-7")
+        );
     }
 
     #[test]
@@ -459,7 +477,9 @@ mod tests {
         // surface — every row must be exactly typeable.
         for info in MODELS {
             assert_eq!(
-                resolve_model_arg(info.id_substr).as_deref(),
+                resolve_model_arg(info.id_substr)
+                    .as_ref()
+                    .map(ResolvedModelId::as_str),
                 Ok(info.id_substr),
                 "{}",
                 info.id_substr,
@@ -478,7 +498,9 @@ mod tests {
             "claude-sonnet-4-5-20250929",
         ] {
             assert_eq!(
-                resolve_model_arg(dated).as_deref(),
+                resolve_model_arg(dated)
+                    .as_ref()
+                    .map(ResolvedModelId::as_str),
                 Ok(dated),
                 "{dated} must pass through",
             );
@@ -505,13 +527,22 @@ mod tests {
     fn resolve_model_arg_lowercases_arg_before_matching() {
         // Mirrors `/effort`'s case-insensitivity so `/model OPUS`
         // doesn't silently fail with "Unknown model".
-        assert_eq!(resolve_model_arg("OPUS").as_deref(), Ok("claude-opus-4-7"));
         assert_eq!(
-            resolve_model_arg("Claude-Opus-4-7").as_deref(),
+            resolve_model_arg("OPUS")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
+            Ok("claude-opus-4-7")
+        );
+        assert_eq!(
+            resolve_model_arg("Claude-Opus-4-7")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
             Ok("claude-opus-4-7"),
         );
         assert_eq!(
-            resolve_model_arg("OPUS[1M]").as_deref(),
+            resolve_model_arg("OPUS[1M]")
+                .as_ref()
+                .map(ResolvedModelId::as_str),
             Ok("claude-opus-4-7[1m]"),
         );
     }
@@ -546,7 +577,7 @@ mod tests {
             .filter(|l| l.contains("claude-") && l.contains("Claude"))
             .map(|l| l.find("Claude").expect("description present"))
             .collect();
-        assert_eq!(value_cols.len(), SELECTABLE.len(), "row count: {body}");
+        assert_eq!(value_cols.len(), LISTED_MODELS.len(), "row count: {body}");
         assert!(
             value_cols.windows(2).all(|w| w[0] == w[1]),
             "columns not aligned: {value_cols:?} — body: {body}",
@@ -558,7 +589,7 @@ mod tests {
         let body = render("claude-opus-4-7");
         // Every [1m] entry must carry the `(1M context)` suffix
         // so users can tell variants apart in the list.
-        for id in SELECTABLE.iter().filter(|id| id.ends_with("[1m]")) {
+        for id in LISTED_MODELS.iter().filter(|id| id.ends_with("[1m]")) {
             let row = body
                 .lines()
                 .find(|l| l.contains(id))

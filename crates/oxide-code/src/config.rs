@@ -20,6 +20,8 @@ use crate::util::env;
 const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
+// ── Auth ──
+
 #[derive(Debug, Clone)]
 pub(crate) enum Auth {
     /// Explicit API key (`x-api-key` header).
@@ -40,6 +42,8 @@ impl Auth {
     }
 }
 
+// ── ConfigSnapshot ──
+
 /// Resolved-config view — every field [`Config`] holds except the
 /// secret. Built at startup from [`Config::snapshot`] and handed into
 /// the slash dispatcher; survives the move when [`Config`] itself is
@@ -55,6 +59,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) show_thinking: bool,
 }
+
+// ── ThinkingConfig ──
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,6 +83,8 @@ pub(crate) enum ThinkingConfig {
 pub(crate) enum ThinkingDisplay {
     Summarized,
 }
+
+// ── Effort ──
 
 /// Intelligence-vs-latency tier sent as `output_config.effort` on
 /// effort-capable models. The per-model ceiling lives in
@@ -130,6 +138,8 @@ impl FromStr for Effort {
     }
 }
 
+// ── PromptCacheTtl ──
+
 /// Prompt-cache TTL sent as `cache_control.ttl`. Anthropic silently
 /// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
 /// explicit opt-in. oxide-code defaults to `OneHour`.
@@ -176,6 +186,8 @@ impl FromStr for PromptCacheTtl {
         }
     }
 }
+
+// ── Config ──
 
 /// Resolved configuration.
 #[derive(Debug, Clone)]
@@ -300,6 +312,8 @@ impl Config {
         }
     }
 }
+
+// ── Helpers ──
 
 pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())

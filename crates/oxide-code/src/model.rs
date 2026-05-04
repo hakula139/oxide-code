@@ -8,6 +8,8 @@ use std::borrow::Cow;
 
 use crate::config::Effort;
 
+// ── ModelInfo ──
+
 /// Metadata and capability flags for a single Claude model.
 pub(crate) struct ModelInfo {
     /// Substring that identifies this model. The first substring match in
@@ -19,6 +21,8 @@ pub(crate) struct ModelInfo {
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
 }
+
+// ── Capabilities ──
 
 /// Per-model feature flags consulted by the API client to gate beta
 /// headers and body fields. `interleaved_thinking`, `context_management`,
@@ -60,6 +64,8 @@ pub(crate) struct Capabilities {
     /// the beta header rather than 400ing on the gateway.
     pub(crate) structured_outputs: bool,
 }
+
+// ── MODELS ──
 
 /// Ordered table: most-specific substring first. No inheritance between rows.
 pub(crate) const MODELS: &[ModelInfo] = &[
@@ -279,6 +285,32 @@ impl Capabilities {
     }
 }
 
+// ── ResolvedModelId ──
+
+/// A model id that has passed through the `/model` resolver. The private
+/// inner field ensures arbitrary strings cannot flow into
+/// [`UserAction::SwitchModel`] without validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelId(String);
+
+impl ResolvedModelId {
+    /// Wraps a resolver-validated id. Call sites outside the resolver
+    /// (tests, deserialization) should audit that the value is valid.
+    pub(crate) fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+// ── Lookup ──
+
 /// First-match substring lookup against [`MODELS`]. Returns `None` for
 /// model strings that don't contain any known family stem (e.g. a future
 /// `claude-opus-5` before the table is bumped); callers decide whether
@@ -312,33 +344,6 @@ pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── lookup ──
-
-    #[test]
-    fn lookup_matches_most_specific_row_before_family_base() {
-        // `claude-opus-4-6` must hit the 4.6 row, not fall through to
-        // the `claude-opus-4` base.
-        let info = lookup("claude-opus-4-6").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
-        assert!(info.capabilities.effort);
-    }
-
-    #[test]
-    fn lookup_unknown_model_family_is_absent() {
-        // A hypothetical future family with no entry should miss entirely
-        // so callers can opt into conservative defaults.
-        assert!(lookup("claude-opus-5-0").is_none());
-        assert!(lookup("gpt-4").is_none());
-    }
-
-    #[test]
-    fn lookup_ignores_1m_suffix_tag_for_matching() {
-        // `[1m]` is a client-side opt-in marker; the substring match
-        // still finds the base model row.
-        let info = lookup("claude-opus-4-6[1m]").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
-    }
 
     // ── capability rows ──
 
@@ -542,6 +547,41 @@ mod tests {
         let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
         assert_eq!(haiku_4_5.resolve_effort(None), None);
         assert_eq!(haiku_4_5.resolve_effort(Some(Effort::High)), None);
+    }
+
+    // ── ResolvedModelId ──
+
+    #[test]
+    fn resolved_model_id_into_inner_returns_wrapped_string() {
+        let id = ResolvedModelId::new("claude-opus-4-7".to_owned());
+        assert_eq!(id.into_inner(), "claude-opus-4-7");
+    }
+
+    // ── lookup ──
+
+    #[test]
+    fn lookup_matches_most_specific_row_before_family_base() {
+        // `claude-opus-4-6` must hit the 4.6 row, not fall through to
+        // the `claude-opus-4` base.
+        let info = lookup("claude-opus-4-6").unwrap();
+        assert_eq!(info.marketing, "Claude Opus 4.6");
+        assert!(info.capabilities.effort);
+    }
+
+    #[test]
+    fn lookup_unknown_model_family_is_absent() {
+        // A hypothetical future family with no entry should miss entirely
+        // so callers can opt into conservative defaults.
+        assert!(lookup("claude-opus-5-0").is_none());
+        assert!(lookup("gpt-4").is_none());
+    }
+
+    #[test]
+    fn lookup_ignores_1m_suffix_tag_for_matching() {
+        // `[1m]` is a client-side opt-in marker; the substring match
+        // still finds the base model row.
+        let info = lookup("claude-opus-4-6[1m]").unwrap();
+        assert_eq!(info.marketing, "Claude Opus 4.6");
     }
 
     // ── marketing_name ──

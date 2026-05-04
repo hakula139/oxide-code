@@ -42,6 +42,8 @@ use wire::{
     StreamEvent, SystemBlock,
 };
 
+// ── Constants ──
+
 const API_VERSION: &str = "2023-06-01";
 
 /// Pinned to the latest packaged claude-code release; gateways
@@ -58,6 +60,8 @@ const STAINLESS_TIMEOUT_SECS: &str = "600";
 /// models with OAuth tokens unless the system prompt starts with this exact
 /// string in its own text block.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+// ── Client ──
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -281,6 +285,8 @@ impl Client {
     }
 }
 
+// ── Request Building ──
+
 /// Stringified `metadata.user_id`. Field order is load-bearing (gateway check).
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
@@ -329,6 +335,8 @@ fn build_system_blocks<'a, const N: usize>(
     blocks
 }
 
+// ── Platform Normalization ──
+
 /// Maps `std::env::consts::OS` to the Stainless SDK's `normalizePlatform` names.
 fn normalize_platform(os: &str) -> &'static str {
     match os {
@@ -353,6 +361,8 @@ fn normalize_arch(arch: &str) -> &'static str {
         _ => "unknown",
     }
 }
+
+// ── System Prompt Helpers ──
 
 /// Splits system sections at the boundary marker into static and dynamic parts.
 ///

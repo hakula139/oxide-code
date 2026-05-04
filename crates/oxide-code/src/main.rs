@@ -389,9 +389,9 @@ async fn agent_loop_task(
                 }
             }
             UserAction::SwitchModel(id) => {
-                let effort = client.set_model(id.clone());
+                let effort = client.set_model(id.as_str().to_owned());
                 if let Err(e) = sink.send(AgentEvent::ModelSwitched {
-                    model_id: id,
+                    model_id: id.into_inner(),
                     effort,
                 }) {
                     warn!("model-switched event dropped: {e}");
