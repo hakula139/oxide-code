@@ -71,17 +71,19 @@ ox                                          # Start an interactive session
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo) handed to each command's execute
+│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo + modal slot) handed to each command's execute
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
-│   ├── effort.rs                           # /effort — list / swap explicit effort tier
+│   ├── effort.rs                           # /effort — bare opens picker focused on effort; `/effort <level>` swaps directly
 │   ├── format.rs                           # Shared kv-section / kv-table renderer
 │   ├── help.rs                             # /help — registry-driven command listing
 │   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
-│   ├── model.rs                            # /model — list / swap; resolver alias → lookup → unique suffix → unique substring; `[1m]` first-class
+│   ├── model.rs                            # /model — bare opens picker; `/model <id>` resolves alias → lookup → unique suffix → unique substring; `[1m]` first-class
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
+│   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + BUILT_INS slice + alias-aware lookup
-│   └── status.rs                           # /status — model, effort, cwd, version, auth, session id
+│   ├── status.rs                           # /status — opens StatusModal
+│   └── status_modal.rs                     # StatusModal — read-only kv-overview of the live session (Esc / Enter close)
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout
@@ -131,6 +133,9 @@ ox                                          # Start an interactive session
 │   ├── markdown/
 │   │   ├── highlight.rs                    # Syntax highlighting (syntect lazy-loaded SyntaxSet / ThemeSet)
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
+│   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack — focus-grabbing UI overlays
+│   ├── modal/
+│   │   └── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   └── wrap.rs                             # Word-wrap with continuation indent for styled lines

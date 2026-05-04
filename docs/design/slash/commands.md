@@ -18,7 +18,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 2. **Parse at submit, not in `InputArea`.** `App::dispatch_user_action` runs `parse_slash` first, then dispatches locally or forwards.
 3. **One synthetic block kind: `SystemMessageBlock`.** Left-bar in `accent`. Errors reuse `ErrorBlock`.
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.` for future `/plugin:cmd` namespace.
-5. **Mid-session model + effort swap via `&mut Client`.** `/model` returns `Forward(UserAction::SwitchModel(id))`, `/effort` returns `Forward(UserAction::SwitchEffort(pick))`. Per-request paths re-read config every call so betas / `output_config` pick up the swap. `classify(&self, args: &str) -> SlashKind` lets bare list-view forms dispatch mid-turn while arg-bearing forms refuse.
+5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })` — the same payload the picker modal emits, so the typed-arg path and the modal share one resolver. Per-request paths re-read config every call so betas / `output_config` pick up the swap. `classify(&self, args: &str) -> SlashKind` lets bare forms (which open the picker, [`docs/design/slash/modals.md`](modals.md)) dispatch mid-turn while arg-bearing forms refuse.
 6. **Slash commands never write user config files.** Session-only state. Restart returns to config.toml values. Deliberate rejection of Claude Code's silent mega-file writes.
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical; `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 8. **No `/quit` or `/exit`.** Ctrl+C x2 / Ctrl+D already exit.
@@ -26,6 +26,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 10. **Built-in only in v1.** The trait registry leaves room for `~/.config/ox/commands/*.md` discovery later.
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`; dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 12. **Two command kinds, one trait return: `SlashOutcome { Done, Forward(UserAction) }`.** `Done` covers read-only commands. `Forward(_)` is state-mutating: handed back to the App, which forwards to the agent loop.
+13. **Modals open via a `SlashContext` side-channel, not a third `SlashOutcome` variant.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`; the dispatcher harvests the slot after `execute` and pushes onto the App's modal stack. Keeps `SlashOutcome` derive-clean. See [modals.md](modals.md) for the full modal design.
 
 ## Per-Command Notes
 
@@ -41,19 +42,28 @@ Returns `SlashOutcome::Forward(UserAction::SubmitPrompt(PROMPT))` with a static 
 
 ### /model
 
-Bare `/model` lists the curated `LISTED_MODELS` set marking the active row. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy -- re-clamps current effort against the new model.
+Bare `/model` opens the combined picker modal ([modals.md](modals.md)) focused on the model axis. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy -- re-clamps current effort against the new model. Both forms emit the same `UserAction::SwapConfig`.
 
 ### /effort
 
-Mirrors `/model` shape. Accepts concrete tiers (`low`, `medium`, `high`, `xhigh`, `max`). No `auto` state.
+Bare `/effort` opens the combined picker modal pre-armed on the effort axis. `/effort <level>` accepts concrete tiers (`low`, `medium`, `high`, `xhigh`, `max`). No `auto` state.
+
+### /status
+
+Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No args, no chat output -- the modal is the surface. Esc / Enter close.
 
 ## Sources
 
 - `crates/oxide-code/src/slash.rs` -- dispatch, `SlashOutcome`.
 - `crates/oxide-code/src/slash/registry.rs` -- `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
+- `crates/oxide-code/src/slash/context.rs` -- `SlashContext`, `open_modal` / `take_modal`.
 - `crates/oxide-code/src/slash/clear.rs` -- `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/init.rs` -- `InitCmd`, `PROMPT`.
-- `crates/oxide-code/src/slash/model.rs` -- `ModelCmd`, `LISTED_MODELS`, resolver.
+- `crates/oxide-code/src/slash/model.rs` -- `ModelCmd`, resolver.
 - `crates/oxide-code/src/slash/effort.rs` -- `EffortCmd`, level parser.
-- `crates/oxide-code/src/tui/app.rs` -- `dispatch_user_action`, `apply_action_locally`.
-- `crates/oxide-code/src/agent.rs` -- `agent_loop_task` Clear arm, model/effort switch handling.
+- `crates/oxide-code/src/slash/picker.rs` -- combined model + effort picker modal.
+- `crates/oxide-code/src/slash/status_modal.rs` -- `/status` overview modal.
+- `crates/oxide-code/src/tui/app.rs` -- `dispatch_user_action`, `apply_action_locally`, modal gate.
+- `crates/oxide-code/src/tui/modal.rs` -- `Modal` trait, `ModalStack`, key routing.
+- `crates/oxide-code/src/tui/modal/list_picker.rs` -- generic `ListPicker` primitive.
+- `crates/oxide-code/src/agent.rs` -- `agent_loop_task` Clear and SwapConfig arms.
