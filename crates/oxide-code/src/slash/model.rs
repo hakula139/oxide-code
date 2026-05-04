@@ -1,32 +1,20 @@
-//! `/model` — list selectable models or swap the active one.
+//! `/model` — open the picker, or swap directly with `/model <id>`.
 //!
-//! Resolution tiers: alias → exact / dated-id → unique suffix → unique substring.
-//! `[1m]` is a first-class variant; rejected on models without `context_1m`.
+//! Resolution tiers for the typed-arg form: alias → exact / dated-id →
+//! unique suffix → unique substring. `[1m]` is a first-class variant;
+//! rejected on models without `context_1m`. The bare form opens
+//! [`super::picker::ModelEffortPicker`]; the curated roster lives there.
 
-use std::fmt::Write as _;
-
-use super::context::{SessionInfo, SlashContext};
-use super::format::write_kv_table;
+use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
+use crate::model::{MODELS, ResolvedModelId, lookup};
 
 // ── Constants ──
 
 /// `[1m]` opt-in tag — appended to a canonical id to request the 1M
 /// context window on models whose capability row has `context_1m`.
 const TAG_1M: &str = "[1m]";
-
-/// Curated roster shown by bare `/model`. Manual swap resolves against
-/// the full [`MODELS`] table — this constant only governs what the list
-/// view displays.
-const LISTED_MODELS: &[&str] = &[
-    "claude-opus-4-7",
-    "claude-opus-4-7[1m]",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-];
 
 /// Short aliases resolved before suffix / substring matching.
 const ALIASES: &[(&str, &str)] = &[
@@ -45,11 +33,12 @@ impl SlashCommand for ModelCmd {
     }
 
     fn description(&self) -> &'static str {
-        "List models or switch the active one"
+        "Open the model picker or switch directly with `/model <id>`"
     }
 
     fn classify(&self, args: &str) -> SlashKind {
-        // Bare lists; the swap form races the in-flight `Client`.
+        // Bare opens the picker (UI-local; safe mid-turn). The
+        // swap form races the in-flight `Client` and must wait.
         if args.trim().is_empty() {
             SlashKind::ReadOnly
         } else {
@@ -64,7 +53,10 @@ impl SlashCommand for ModelCmd {
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.chat.push_system_message(render_model_list(ctx.info));
+            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(
+                ctx.info,
+                super::picker::InitialFocus::Model,
+            )));
             return Ok(SlashOutcome::Done);
         }
         let id = resolve_model_arg(arg)?;
@@ -156,50 +148,6 @@ fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
         .collect()
 }
 
-// ── List View ──
-
-/// Renders the selectable model table with active marker.
-fn render_model_list(info: &SessionInfo) -> String {
-    let active = info.config.model_id.as_str();
-    let labels: Vec<String> = LISTED_MODELS
-        .iter()
-        .map(|id| label_for(id, *id == active))
-        .collect();
-    let descriptions: Vec<String> = LISTED_MODELS.iter().map(|id| description_for(id)).collect();
-    let rows = labels
-        .iter()
-        .zip(&descriptions)
-        .map(|(label, desc)| (label.as_str(), desc.as_str()));
-
-    let mut out = String::from("Available models  (* = active)\n\n");
-    write_kv_table(&mut out, rows);
-
-    out.push_str("\nSwitch: /model <id>  (aliases: opus, sonnet, haiku)");
-
-    if !LISTED_MODELS.contains(&active) {
-        _ = write!(
-            out,
-            "\n\nCurrent model: {active} (not in the selectable list).",
-        );
-    }
-    out
-}
-
-fn label_for(id: &'static str, active: bool) -> String {
-    let marker = if active { '*' } else { ' ' };
-    format!("{marker} {id}")
-}
-
-/// Marketing name, appending `(1M context)` for `[1m]` variants.
-fn description_for(id: &'static str) -> String {
-    let name = marketing_or_id(id);
-    if id.ends_with("[1m]") {
-        format!("{name} (1M context)")
-    } else {
-        name.into_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,76 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_pushes_list_with_legend_and_switch_hint() {
-        let (chat, outcome) = run_execute("");
+    fn execute_no_args_opens_picker_via_ctx_and_pushes_no_chat_block() {
+        // Bare `/model` opens the combined picker. Nothing should land
+        // in the chat — the modal is the UI. The picker's own tests in
+        // `slash::picker` cover its initial state and key handling.
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        let outcome = ModelCmd.execute("", &mut ctx);
         assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert_eq!(chat.entry_count(), 1);
-        assert!(!chat.last_is_error());
-        let body = chat.last_system_text().expect("system block present");
         assert!(
-            body.starts_with("Available models  (* = active)"),
-            "header + legend must lead the output: {body}",
+            ctx.take_modal().is_some(),
+            "bare /model must populate the modal slot",
         );
-        assert!(body.contains("Switch: /model <id>"), "switch hint: {body}");
-        assert!(body.contains("aliases: opus, sonnet, haiku"), "{body}");
-    }
-
-    #[test]
-    fn execute_no_args_lists_every_selectable_in_declared_order() {
-        // Pin the row order — a mutation reversing or sorting the
-        // LISTED_MODELS iteration would survive a per-row contains check.
-        let (chat, _) = run_execute("");
-        let body = chat.last_system_text().unwrap();
-        let mut last_idx = 0usize;
-        for id in LISTED_MODELS {
-            let idx = body
-                .find(id)
-                .unwrap_or_else(|| panic!("missing {id}: {body}"));
-            assert!(
-                idx >= last_idx,
-                "row order broken: {id} at {idx} before previous row at {last_idx}",
-            );
-            last_idx = idx;
-        }
-    }
-
-    #[test]
-    fn execute_no_args_marks_only_the_active_row() {
-        // Active row is the exact-match against LISTED_MODELS.
-        // `claude-opus-4-7` (bare) marks only itself, never
-        // `claude-opus-4-7[1m]` — `[1m]` distinctness matters.
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let mut info = test_session_info();
-        info.config.model_id = "claude-opus-4-7".to_owned();
-        ModelCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info))
-            .unwrap();
-        let body = chat.last_system_text().unwrap();
-        let marked: Vec<&str> = body.lines().filter(|l| l.contains(" * ")).collect();
-        assert_eq!(marked.len(), 1, "exactly one marker row: {marked:?}");
-        assert!(marked[0].contains("claude-opus-4-7"), "{marked:?}");
-        assert!(
-            !marked[0].contains("[1m]"),
-            "bare id must not match the [1m] row: {marked:?}",
-        );
-    }
-
-    #[test]
-    fn execute_no_args_warns_when_current_model_is_not_selectable() {
-        // A user with `model = claude-opus-4-1` set via config gets
-        // an unmarked list plus a footer naming their current model
-        // so they understand why nothing is starred.
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let mut info = test_session_info();
-        info.config.model_id = "claude-opus-4-1".to_owned();
-        ModelCmd
-            .execute("", &mut SlashContext::new(&mut chat, &info))
-            .unwrap();
-        let body = chat.last_system_text().unwrap();
-        assert!(
-            body.contains("Current model: claude-opus-4-1 (not in the selectable list)"),
-            "warning footer expected: {body}",
-        );
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
     }
 
     #[test]
@@ -548,58 +440,5 @@ mod tests {
         let msg = resolve_model_arg("[1m]").expect_err("must error");
         assert!(msg.contains("tag, not a model"), "{msg}");
         assert!(!msg.contains("matches"), "must not list candidates: {msg}");
-    }
-
-    // ── render_model_list ──
-
-    fn render(model_id: &str) -> String {
-        let mut info = test_session_info();
-        info.config.model_id = model_id.to_owned();
-        render_model_list(&info)
-    }
-
-    #[test]
-    fn render_model_list_marker_column_aligns_within_table() {
-        // Pin the column alignment — `write_kv_table` pads to the
-        // longest id, and the marker prepended by the active-row
-        // logic must not break that gutter. Filter to table rows
-        // (have BOTH the canonical id AND the marketing name).
-        let body = render("claude-opus-4-7");
-        let value_cols: Vec<usize> = body
-            .lines()
-            .filter(|l| l.contains("claude-") && l.contains("Claude"))
-            .map(|l| l.find("Claude").expect("description present"))
-            .collect();
-        assert_eq!(value_cols.len(), LISTED_MODELS.len(), "row count: {body}");
-        assert!(
-            value_cols.windows(2).all(|w| w[0] == w[1]),
-            "columns not aligned: {value_cols:?} — body: {body}",
-        );
-    }
-
-    #[test]
-    fn render_model_list_appends_1m_context_suffix_to_1m_rows() {
-        let body = render("claude-opus-4-7");
-        // Every [1m] entry must carry the `(1M context)` suffix
-        // so users can tell variants apart in the list.
-        for id in LISTED_MODELS.iter().filter(|id| id.ends_with("[1m]")) {
-            let row = body
-                .lines()
-                .find(|l| l.contains(id))
-                .unwrap_or_else(|| panic!("row for {id} missing: {body}"));
-            assert!(
-                row.contains("(1M context)"),
-                "1M suffix missing on {id}: {row}",
-            );
-        }
-        // Non-1M rows must NOT carry the suffix.
-        let bare_row = body
-            .lines()
-            .find(|l| l.contains("claude-opus-4-7  "))
-            .expect("bare opus-4-7 row");
-        assert!(
-            !bare_row.contains("(1M context)"),
-            "leaked suffix: {bare_row}"
-        );
     }
 }

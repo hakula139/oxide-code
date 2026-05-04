@@ -1,13 +1,11 @@
-//! `/effort` — list / swap the active effort tier mid-session.
-//!
-//! Bare lists the levels supported by the active model with the current
-//! marked. `/effort <level>` swaps to that tier. The agent loop calls
+//! `/effort` — open the model+effort picker focused on the effort
+//! axis, or `/effort <level>` to swap directly. The agent loop calls
 //! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
-//! which clamps against the active model's caps.
+//! on the typed-arg path; the picker emits a single
+//! [`UserAction::SwapConfig`] which routes through the same client
+//! resolver.
 
-use std::fmt::Write as _;
-
-use super::context::{SessionInfo, SlashContext};
+use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
@@ -21,10 +19,12 @@ impl SlashCommand for EffortCmd {
     }
 
     fn description(&self) -> &'static str {
-        "List effort levels or set the active one"
+        "Open the picker focused on effort, or set a level with `/effort <level>`"
     }
 
     fn classify(&self, args: &str) -> SlashKind {
+        // Bare opens the picker (UI-local; safe mid-turn). The
+        // typed-arg form races the in-flight `Client` and must wait.
         if args.trim().is_empty() {
             SlashKind::ReadOnly
         } else {
@@ -39,7 +39,10 @@ impl SlashCommand for EffortCmd {
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.chat.push_system_message(render_effort_list(ctx.info));
+            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(
+                ctx.info,
+                super::picker::InitialFocus::Effort,
+            )));
             return Ok(SlashOutcome::Done);
         }
         let pick = parse_effort_arg(arg)?;
@@ -65,35 +68,6 @@ fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
     lower
         .parse()
         .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))
-}
-
-/// `* level` list with the active marker, plus a header naming the
-/// active model so the user knows which caps the levels reflect.
-fn render_effort_list(info: &SessionInfo) -> String {
-    let marketing = marketing_or_id(&info.config.model_id);
-    let caps = capabilities_for(&info.config.model_id);
-    let active = info.config.effort;
-
-    let mut out = format!("Effort levels for {marketing}  (* = active)\n\n");
-
-    if !caps.effort {
-        _ = writeln!(out, "  (no effort tier — {marketing} ignores effort)");
-        out.push_str("\nSwitch models first with /model.");
-        return out;
-    }
-
-    for level in Effort::ALL
-        .iter()
-        .copied()
-        .filter(|level| caps.accepts_effort(*level))
-    {
-        let marker = if Some(level) == active { '*' } else { ' ' };
-        _ = writeln!(out, "  {marker} {level}");
-    }
-
-    out.push_str("\nSwitch with: /effort <level>\n");
-    out.push_str("Only levels supported by the active model are shown.");
-    out
 }
 
 #[cfg(test)]
@@ -141,62 +115,20 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_pushes_list_with_marker_and_swap_hint() {
-        let (chat, outcome) = run_execute("");
+    fn execute_no_args_opens_picker_focused_on_effort() {
+        // Bare `/effort` opens the same picker as `/model`, but pre-armed
+        // on the effort axis so a single Enter submits the active level.
+        // Picker behavior is covered in `slash::picker` tests.
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        let outcome = EffortCmd.execute("", &mut ctx);
         assert_eq!(outcome, Ok(SlashOutcome::Done));
-        let body = chat.last_system_text().expect("system block present");
         assert!(
-            body.starts_with("Effort levels for"),
-            "header leads the output: {body}",
+            ctx.take_modal().is_some(),
+            "bare /effort must populate the modal slot",
         );
-        assert!(body.contains("Switch with: /effort <level>"), "{body}");
-        assert!(
-            body.contains("Only levels supported"),
-            "supported-level hint: {body}",
-        );
-        for level in [Effort::Low, Effort::Medium, Effort::High] {
-            assert!(
-                body.contains(&level.to_string()),
-                "level `{level}` listed: {body}",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_no_args_marks_only_the_active_level() {
-        // `test_session_info` ships effort=High; assert both the row
-        // count AND that "high" is the marked one so a misrouted
-        // marker (e.g. always-mark-low regression) fails here.
-        let (chat, _) = run_execute("");
-        let body = chat.last_system_text().unwrap();
-        let marked: Vec<&str> = body.lines().filter(|l| l.contains(" * ")).collect();
-        assert_eq!(marked.len(), 1, "exactly one marker row: {marked:?}");
-        assert!(
-            marked[0].contains("high"),
-            "active row marks `high`: {marked:?}",
-        );
-    }
-
-    #[test]
-    fn execute_no_args_hides_unsupported_levels() {
-        let (chat, _) = run_execute_with_model("claude-sonnet-4-6", "");
-        let body = chat.last_system_text().unwrap();
-        for unsupported in ["xhigh", "max"] {
-            assert!(
-                !body.contains(unsupported),
-                "unsupported level `{unsupported}` should not be listed: {body}",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_no_args_warns_when_active_model_has_no_effort_tier() {
-        let (chat, _) = run_execute_with_model("claude-haiku-4-5", "");
-        let body = chat.last_system_text().unwrap();
-        assert!(
-            body.contains("no effort tier") && body.contains("/model"),
-            "no-tier warning + recovery hint: {body}",
-        );
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
     }
 
     #[test]

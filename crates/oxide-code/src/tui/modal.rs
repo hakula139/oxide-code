@@ -53,13 +53,7 @@ pub(crate) trait Modal: Send {
 // ── Outcomes ──
 
 /// Outcome of a single key event delivered to a modal.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "trait-return variants are constructed by Modal impls; production impls land in upcoming concrete-modal commits — only fixture impls exist in test builds today"
-    )
-)]
+#[derive(Debug)]
 pub(crate) enum ModalKey {
     /// Stay open. Key was consumed.
     Consumed,
@@ -70,6 +64,7 @@ pub(crate) enum ModalKey {
 }
 
 /// What a submitted modal asks the manager to do.
+#[derive(Debug)]
 pub(crate) enum ModalAction {
     /// Modal already applied its effect locally — no dispatch needed.
     /// Reserved for future live-preview modals (e.g. `/theme`) where
@@ -78,13 +73,6 @@ pub(crate) enum ModalAction {
     /// Forward a [`UserAction`] to the agent loop. Same channel as a
     /// keyboard-typed action, so `/model` swaps and friends share one
     /// path.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed by modal impls forwarding UserActions; production impls land in upcoming concrete-modal commits"
-        )
-    )]
     User(UserAction),
 }
 
@@ -109,13 +97,6 @@ impl ModalStack {
 
     /// Push a modal onto the stack. The new modal receives keys until
     /// it submits or cancels; the previous top resumes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "production push site is the slash-dispatch OpenModal arm; lands with the first concrete modal"
-        )
-    )]
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
     }

@@ -25,6 +25,7 @@ mod init;
 mod matcher;
 mod model;
 mod parser;
+mod picker;
 mod registry;
 mod status;
 

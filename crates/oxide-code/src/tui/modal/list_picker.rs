@@ -10,14 +10,6 @@
 //! `is_active` for the active marker, and an optional `key_hint`
 //! character (typically `'1'`–`'9'`) for muscle-memory jumps.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "primitive is exercised by its own unit tests; concrete picker consumers land in upcoming commits"
-    )
-)]
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -112,9 +104,10 @@ impl<T: PickerItem> ListPicker<T> {
         self.items.get(self.selected)
     }
 
-    /// Cursor row index. Useful when the wrapping modal needs to render
-    /// secondary state for the highlighted row (e.g. the effort axis
-    /// for the model picker).
+    /// Cursor row index. Test-only — production picker logic reaches
+    /// the highlighted row through [`Self::selected`] which already
+    /// returns the value most callers need.
+    #[cfg(test)]
     pub(crate) fn selected_index(&self) -> usize {
         self.selected
     }

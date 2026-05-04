@@ -263,10 +263,14 @@ impl App {
                 if self.input.is_enabled() {
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let synthesized = {
+                        let (synthesized, modal) = {
                             let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                            slash::dispatch(&parsed, &mut ctx)
+                            let action = slash::dispatch(&parsed, &mut ctx);
+                            (action, ctx.take_modal())
                         };
+                        if let Some(modal) = modal {
+                            self.modals.push(modal);
+                        }
                         if let Some(action) = synthesized {
                             if matches!(action, UserAction::SubmitPrompt(_)) {
                                 self.input.set_enabled(false);
@@ -285,8 +289,15 @@ impl App {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
                             SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                                _ = slash::dispatch(&parsed, &mut ctx);
+                                let modal = {
+                                    let mut ctx =
+                                        SlashContext::new(&mut self.chat, &self.session_info);
+                                    _ = slash::dispatch(&parsed, &mut ctx);
+                                    ctx.take_modal()
+                                };
+                                if let Some(modal) = modal {
+                                    self.modals.push(modal);
+                                }
                             }
                             SlashKind::Mutating => {
                                 self.chat.push_system_message(format!(
@@ -1467,21 +1478,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_bare_slash_during_busy_runs_list_view() {
-        // Bare form classifies as ReadOnly so it dispatches mid-turn;
-        // arg-bearing form refuses. Regressing the args-aware
-        // classification fails here.
-        for (cmd, header_prefix) in [
-            ("/model", "Available models"),
-            ("/effort", "Effort levels for"),
-        ] {
+    async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
+        // Bare form classifies as ReadOnly so it dispatches mid-turn —
+        // and now opens the picker modal instead of printing a list.
+        // The arg-bearing form continues to refuse mid-turn.
+        for cmd in ["/model", "/effort"] {
             let (mut app, _rx, _agent_tx) = test_app(None);
             app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
             app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
 
-            let body = app.chat.last_system_text().expect("system block from list");
-            assert!(body.starts_with(header_prefix), "{cmd}: {body}");
+            assert!(
+                app.modals.is_active(),
+                "{cmd}: bare form must push a modal mid-turn",
+            );
         }
     }
 

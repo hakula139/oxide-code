@@ -1,0 +1,506 @@
+//! Combined `/model + /effort` picker modal.
+//!
+//! Bare `/model` and bare `/effort` both open this surface — the only
+//! difference is initial focus (model axis vs effort axis). The two
+//! axes commit through a single [`UserAction::SwapConfig`] event, so
+//! the agent loop sees one atomic config swap.
+//!
+//! Companion design: `docs/design/slash/modals.md` (added with the
+//! design-notes commit at the end of this PR).
+
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+
+use crate::agent::event::UserAction;
+use crate::config::Effort;
+use crate::model::{ResolvedModelId, capabilities_for, marketing_or_id};
+use crate::tui::modal::list_picker::{ListPicker, PickerItem};
+use crate::tui::modal::{Modal, ModalAction, ModalKey};
+use crate::tui::theme::Theme;
+
+use super::context::SessionInfo;
+
+// ── Constants ──
+
+/// Curated roster shown in the picker. Manual `/model <id>` resolves
+/// against the full `MODELS` table; this slice only governs what the
+/// modal lists. Mirrors `slash::model::LISTED_MODELS` — the typed-arg
+/// path and the picker share semantics deliberately.
+const LISTED_MODELS: &[&str] = &[
+    "claude-opus-4-7",
+    "claude-opus-4-7[1m]",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6[1m]",
+    "claude-haiku-4-5",
+];
+
+// ── PickerItem ──
+
+/// One model row in the picker. Holds the canonical id plus the active
+/// flag; `key_hint` derives from the row's position in the list.
+struct ModelRow {
+    id: &'static str,
+    is_active: bool,
+    description: String,
+    hint: Option<char>,
+}
+
+impl ModelRow {
+    fn build(active_id: &str) -> Vec<Self> {
+        LISTED_MODELS
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| Self {
+                id,
+                is_active: *id == active_id,
+                description: describe(id),
+                hint: numeric_hint(idx),
+            })
+            .collect()
+    }
+}
+
+/// Marketing name + "(1M context)" suffix for `[1m]` rows.
+fn describe(id: &str) -> String {
+    let name = marketing_or_id(id);
+    if id.ends_with("[1m]") {
+        format!("{name} (1M context)")
+    } else {
+        name.into_owned()
+    }
+}
+
+/// `'1'`–`'9'` for the first nine rows; `None` after that. Numeric
+/// shortcuts are muscle-memory aids, not addressability for every row.
+fn numeric_hint(idx: usize) -> Option<char> {
+    let digit = u32::try_from(idx).ok()?.checked_add(1)?;
+    if (1..=9).contains(&digit) {
+        char::from_digit(digit, 10)
+    } else {
+        None
+    }
+}
+
+impl PickerItem for ModelRow {
+    fn label(&self) -> &str {
+        self.id
+    }
+    fn description(&self) -> Option<&str> {
+        Some(&self.description)
+    }
+    fn is_active(&self) -> bool {
+        self.is_active
+    }
+    fn key_hint(&self) -> Option<char> {
+        self.hint
+    }
+}
+
+// ── ModelEffortPicker ──
+
+/// Initial focus. `/model` opens with the model list active;
+/// `/effort` opens with the effort axis pre-armed so Enter submits
+/// just-the-effort change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitialFocus {
+    Model,
+    Effort,
+}
+
+pub(super) struct ModelEffortPicker {
+    list: ListPicker<ModelRow>,
+    /// Active model captured at open — used to detect whether the user
+    /// changed the model axis on submit.
+    active_model: String,
+    /// Active effort captured at open. Same purpose for the effort axis.
+    active_effort: Option<Effort>,
+    /// User's current effort pick. Tracks Left/Right navigation.
+    /// `None` when the highlighted model has no effort tier.
+    effort: Option<Effort>,
+    /// Whether the user touched the effort axis after open. When false
+    /// and the model didn't change either, Enter is a no-op.
+    effort_dirty: bool,
+}
+
+impl ModelEffortPicker {
+    pub(super) fn new(info: &SessionInfo, focus: InitialFocus) -> Self {
+        let active_model = info.config.model_id.clone();
+        let active_effort = info.config.effort;
+        let rows = ModelRow::build(&active_model);
+
+        let mut list = ListPicker::new(
+            "Select model",
+            rows,
+        )
+        .with_description(
+            "Switch the active model. Applies to this session only — restart returns to your config.",
+        );
+        list.select_initial(|row| row.is_active);
+
+        // Bare `/effort` arms the effort axis so Left/Right is the
+        // first navigation; bare `/model` leaves both axes pristine.
+        let effort_dirty = matches!(focus, InitialFocus::Effort);
+        let effort = effort_for_highlighted(&list, active_effort);
+
+        Self {
+            list,
+            active_model,
+            active_effort,
+            effort,
+            effort_dirty,
+        }
+    }
+
+    /// Re-resolve the effort axis after the cursor moves. The axis
+    /// reflects the highlighted model's caps — `None` when that model
+    /// has no effort tier.
+    fn refresh_effort_for_cursor(&mut self) {
+        self.effort = effort_for_highlighted(&self.list, self.effort_or_active());
+    }
+
+    fn effort_or_active(&self) -> Option<Effort> {
+        self.effort.or(self.active_effort)
+    }
+
+    fn cycle_effort(&mut self, direction: Direction) {
+        let Some(row) = self.list.selected() else {
+            return;
+        };
+        let caps = capabilities_for(row.id);
+        if !caps.effort {
+            return;
+        }
+        let supported: Vec<Effort> = Effort::ALL
+            .iter()
+            .copied()
+            .filter(|level| caps.accepts_effort(*level))
+            .collect();
+        if supported.is_empty() {
+            return;
+        }
+        let current_idx = self
+            .effort
+            .and_then(|e| supported.iter().position(|s| *s == e))
+            .unwrap_or(0);
+        let next_idx = match direction {
+            Direction::Forward => (current_idx + 1) % supported.len(),
+            Direction::Backward => {
+                if current_idx == 0 {
+                    supported.len() - 1
+                } else {
+                    current_idx - 1
+                }
+            }
+        };
+        self.effort = Some(supported[next_idx]);
+        self.effort_dirty = true;
+    }
+
+    fn submit(&self) -> ModalKey {
+        let model = self
+            .list
+            .selected()
+            .map_or_else(|| self.active_model.clone(), |row| row.id.to_owned());
+        let model_changed = model != self.active_model;
+        let effort_changed = self.effort_dirty && self.effort != self.active_effort;
+
+        if !model_changed && !effort_changed {
+            return ModalKey::Cancelled;
+        }
+        ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig {
+            model: model_changed.then(|| ResolvedModelId::new(model)),
+            effort: effort_changed.then_some(self.effort).flatten(),
+        }))
+    }
+
+    fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
+        let row = self.list.selected()?;
+        let caps = capabilities_for(row.id);
+        if !caps.effort {
+            return None;
+        }
+        let level = self.effort_or_active()?;
+        let was_default = self.active_effort.is_none() && !self.effort_dirty;
+        let suffix = if was_default { " (default)" } else { "" };
+        Some(Line::from(vec![
+            Span::styled("● ", theme.accent()),
+            Span::styled(
+                format!("{level} effort{suffix}"),
+                theme.text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ← →  to adjust", theme.dim()),
+        ]))
+    }
+}
+
+impl Modal for ModelEffortPicker {
+    fn height(&self, width: u16) -> u16 {
+        // List height + (effort row + spacer)? + footer + spacer
+        let list_height = self.list.height(width);
+        let mut h = list_height + 1; // spacer before footer
+        if self.list.selected().is_some_and(has_effort_tier) {
+            h += 2; // spacer + effort row
+        }
+        h + 1 // footer line
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let list_h = self.list.height(area.width);
+        let list_area = Rect {
+            height: list_h.min(area.height),
+            ..area
+        };
+        self.list.render(frame, list_area, theme);
+
+        let mut cursor_y = area.y.saturating_add(list_h);
+        let mut remaining = area.height.saturating_sub(list_h);
+
+        if let Some(line) = self.render_effort_row(theme) {
+            cursor_y = cursor_y.saturating_add(1);
+            remaining = remaining.saturating_sub(1);
+            let row_area = Rect {
+                x: area.x,
+                y: cursor_y,
+                width: area.width,
+                height: 1.min(remaining),
+            };
+            frame.render_widget(Paragraph::new(line).style(theme.surface()), row_area);
+            cursor_y = cursor_y.saturating_add(1);
+            remaining = remaining.saturating_sub(1);
+        }
+
+        if remaining >= 2 {
+            let footer_area = Rect {
+                x: area.x,
+                y: cursor_y.saturating_add(1),
+                width: area.width,
+                height: 1,
+            };
+            let footer = Line::from(Span::styled(
+                "Enter to confirm  ·  Esc to cancel",
+                theme.dim(),
+            ));
+            frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
+        }
+    }
+
+    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
+        match event.code {
+            KeyCode::Esc => ModalKey::Cancelled,
+            KeyCode::Enter => self.submit(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.list.select_prev();
+                self.refresh_effort_for_cursor();
+                ModalKey::Consumed
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.list.select_next();
+                self.refresh_effort_for_cursor();
+                ModalKey::Consumed
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.cycle_effort(Direction::Forward);
+                ModalKey::Consumed
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.cycle_effort(Direction::Backward);
+                ModalKey::Consumed
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                if self.list.select_by_hint(c) {
+                    self.refresh_effort_for_cursor();
+                }
+                ModalKey::Consumed
+            }
+            _ => ModalKey::Consumed,
+        }
+    }
+}
+
+// ── Helpers ──
+
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Forward,
+    Backward,
+}
+
+fn has_effort_tier(row: &ModelRow) -> bool {
+    capabilities_for(row.id).effort
+}
+
+fn effort_for_highlighted(list: &ListPicker<ModelRow>, fallback: Option<Effort>) -> Option<Effort> {
+    let row = list.selected()?;
+    let caps = capabilities_for(row.id);
+    if !caps.effort {
+        return None;
+    }
+    Some(caps.resolve_effort(fallback).unwrap_or(Effort::High))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slash::test_session_info;
+
+    fn picker(focus: InitialFocus) -> ModelEffortPicker {
+        ModelEffortPicker::new(&test_session_info(), focus)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::from(code)
+    }
+
+    // ── Initial state ──
+
+    #[test]
+    fn new_positions_cursor_on_active_model() {
+        // `test_session_info` ships claude-opus-4-7 active.
+        let p = picker(InitialFocus::Model);
+        let row = p.list.selected().expect("active row");
+        assert_eq!(row.id, "claude-opus-4-7");
+        assert!(row.is_active);
+    }
+
+    #[test]
+    fn new_with_effort_focus_marks_effort_dirty() {
+        // Bare /effort opens the picker with the effort axis already
+        // armed, so a single Enter submits the current pick.
+        let p = picker(InitialFocus::Effort);
+        assert!(
+            p.effort_dirty,
+            "InitialFocus::Effort must arm the effort axis",
+        );
+    }
+
+    #[test]
+    fn new_with_model_focus_keeps_effort_clean() {
+        let p = picker(InitialFocus::Model);
+        assert!(!p.effort_dirty);
+    }
+
+    // ── handle_key navigation ──
+
+    #[test]
+    fn down_arrow_advances_cursor_and_refreshes_effort() {
+        let mut p = picker(InitialFocus::Model);
+        let before = p.list.selected_index();
+        p.handle_key(&key(KeyCode::Down));
+        assert_eq!(p.list.selected_index(), before + 1);
+    }
+
+    #[test]
+    fn numeric_jump_routes_cursor_to_matching_row() {
+        // `5` jumps to the fifth listed model — Haiku 4.5.
+        let mut p = picker(InitialFocus::Model);
+        p.handle_key(&key(KeyCode::Char('5')));
+        let row = p.list.selected().expect("selected row");
+        assert_eq!(row.id, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn right_arrow_cycles_effort_within_supported_levels() {
+        // Opus 4.7 supports the full ladder. Pressing Right walks
+        // through it; Left walks back.
+        let mut p = picker(InitialFocus::Model);
+        let initial = p.effort;
+        p.handle_key(&key(KeyCode::Right));
+        assert_ne!(p.effort, initial, "Right must change effort");
+        assert!(p.effort_dirty, "navigation marks effort dirty");
+    }
+
+    #[test]
+    fn right_arrow_on_no_tier_model_is_a_noop() {
+        // Haiku 4.5 has no effort tier — Left/Right must not mutate
+        // the (None) effort state.
+        let mut p = picker(InitialFocus::Model);
+        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
+        assert!(p.effort.is_none());
+        assert!(!p.effort_dirty);
+        p.handle_key(&key(KeyCode::Right));
+        assert!(p.effort.is_none(), "no-tier model must stay None");
+        assert!(
+            !p.effort_dirty,
+            "navigation that no-ops must not mark effort dirty",
+        );
+    }
+
+    // ── submit ──
+
+    #[test]
+    fn enter_with_no_changes_returns_cancelled() {
+        // Open + Enter without touching anything is the same shape as
+        // Esc — nothing to dispatch.
+        let mut p = picker(InitialFocus::Model);
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn enter_after_model_change_emits_swap_with_model_only() {
+        let mut p = picker(InitialFocus::Model);
+        p.handle_key(&key(KeyCode::Down));
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        match outcome {
+            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
+                assert!(model.is_some(), "model must be set");
+                assert!(
+                    effort.is_none(),
+                    "effort must NOT be set when only the model axis moved",
+                );
+            }
+            other => panic!("expected Submitted(SwapConfig {{ model: Some, .. }}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_after_effort_change_emits_swap_with_effort_only() {
+        // Opus 4.7 active + xhigh; cycle effort once, model unchanged.
+        let mut p = picker(InitialFocus::Effort);
+        p.handle_key(&key(KeyCode::Right));
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        match outcome {
+            ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
+                assert!(
+                    model.is_none(),
+                    "model must NOT be set when only the effort axis moved",
+                );
+                assert!(effort.is_some(), "effort must be set");
+            }
+            other => panic!("expected Submitted with effort-only SwapConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_returns_cancelled_regardless_of_axis_state() {
+        let mut p = picker(InitialFocus::Model);
+        p.handle_key(&key(KeyCode::Down));
+        p.handle_key(&key(KeyCode::Right));
+        let outcome = p.handle_key(&key(KeyCode::Esc));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    // ── Render smoke ──
+
+    #[test]
+    fn render_runs_at_typical_widths_without_panicking() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let p = picker(InitialFocus::Model);
+        let theme = Theme::default();
+        for width in [40_u16, 80, 120] {
+            let h = p.height(width).min(20);
+            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+            terminal
+                .draw(|frame| {
+                    p.render(frame, Rect::new(0, 0, width, h), &theme);
+                })
+                .expect("render must not panic");
+        }
+    }
+}

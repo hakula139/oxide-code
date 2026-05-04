@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use crate::config::ConfigSnapshot;
 use crate::model::marketing_or_id;
 use crate::tui::components::chat::ChatView;
+use crate::tui::modal::Modal;
 
 /// Session-level descriptors surfaced by read-only slash commands.
 /// Built at TUI startup, then rebound mid-session by
@@ -39,14 +40,38 @@ impl SessionInfo {
 /// Borrowed view of App-owned state for one
 /// [`super::registry::SlashCommand::execute`] call. Never stored.
 /// State-mutating commands return [`super::registry::SlashOutcome::Forward`];
-/// the dispatcher owns forwarding to the agent loop.
+/// the dispatcher owns forwarding to the agent loop. Commands open
+/// modals via [`SlashContext::open_modal`] — the dispatcher harvests
+/// the slot after `execute` returns and pushes onto the App's modal
+/// stack.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a SessionInfo,
+    /// Out-parameter for modals opened by `execute`. `None` until set.
+    /// One slot per dispatch — only one modal can open per command.
+    modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
     pub(crate) fn new(chat: &'a mut ChatView, info: &'a SessionInfo) -> Self {
-        Self { chat, info }
+        Self {
+            chat,
+            info,
+            modal: None,
+        }
+    }
+
+    /// Open `modal` after this command finishes. Overwriting an
+    /// existing slot is a programmer error — only one modal per
+    /// dispatch is meaningful.
+    pub(crate) fn open_modal(&mut self, modal: Box<dyn Modal>) {
+        debug_assert!(self.modal.is_none(), "modal slot set twice in one dispatch");
+        self.modal = Some(modal);
+    }
+
+    /// Take the modal slot, if any. The dispatcher calls this once
+    /// after `execute` returns.
+    pub(crate) fn take_modal(&mut self) -> Option<Box<dyn Modal>> {
+        self.modal.take()
     }
 }
