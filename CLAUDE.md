@@ -144,6 +144,11 @@ ox                                          # Start an interactive session
     └── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
 ```
 
+## Documentation
+
+- [`docs/README.md`](docs/README.md) — top-level index of design specs, research notes, user guides, and the roadmap.
+- Subdirectories under [`docs/research/`](docs/research/) and [`docs/design/`](docs/design/) carry their own README index with per-doc summaries grouped by topic (api, session, slash, tools, tui).
+
 ## Coding Conventions
 
 ### Trait Design
@@ -241,7 +246,7 @@ Follows global CLAUDE.md commit / branch / PR conventions, plus:
 - Keep `README.md` user-facing. It should describe value, supported features, and usage, not internal progress tracking.
 - Keep `docs/roadmap.md` as the canonical in-repo roadmap / status summary. Update it when shipped capability areas or planned priorities change.
 - Crate structure diagrams must match the actual filesystem. When adding, removing, or renaming modules, update the tree in this file. Entries are sorted alphabetically; directories sort alongside their parent `.rs` file.
-- After substantive changes, sweep docs for stale claims: `README.md` status bullets, `docs/roadmap.md` Working Today / Current Focus sections, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/*` deferred / follow-up notes that the change now resolves.
+- After substantive changes, sweep docs for stale claims: `README.md` status bullets, `docs/roadmap.md` Working Today / Current Focus sections, this file's crate tree and conventions, `docs/guide/*` user instructions, and `docs/research/**/*` deferred / follow-up notes that the change now resolves.
 
 ## Verification
 

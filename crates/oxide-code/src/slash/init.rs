@@ -1,6 +1,6 @@
 //! `/init` — synthesizes a prompt asking the model to author or update
 //! the project's `AGENTS.md` / `CLAUDE.md`. See
-//! `docs/research/design/slash-commands/init.md`.
+//! `docs/design/slash/commands.md` § /init.
 
 use indoc::indoc;
 

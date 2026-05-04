@@ -22,7 +22,6 @@ deserialize
 desync
 disambiguable
 dtolnay
-frappe
 EACCES
 EISDIR
 ENOENT
@@ -30,6 +29,7 @@ ENOSPC
 ENOTDIR
 ESRCH
 feff
+frappe
 getpwuid
 gitui
 hakula
@@ -38,6 +38,7 @@ indoc
 insta
 isatty
 killpg
+Kobalte
 latte
 macchiato
 misparse

@@ -12,7 +12,7 @@
 //!
 //! Persistence: commands never write user config files. Mutations are
 //! session-local; restart returns to the user-declared config (see
-//! `docs/research/design/slash-commands.md` § Design Decisions 6).
+//! `docs/design/slash/commands.md` § Design Decisions 6).
 
 mod clear;
 mod config;
