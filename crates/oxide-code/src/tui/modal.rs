@@ -16,6 +16,8 @@
 //!
 //! Related research: `docs/research/slash/modals.md`.
 
+pub(crate) mod list_picker;
+
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
