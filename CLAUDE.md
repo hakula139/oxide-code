@@ -147,7 +147,9 @@ ox                                          # Start an interactive session
 ## Documentation
 
 - [`docs/README.md`](docs/README.md) — top-level index of design specs, research notes, user guides, and the roadmap.
-- Subdirectories under [`docs/research/`](docs/research/) and [`docs/design/`](docs/design/) carry their own README index with per-doc summaries grouped by topic (api, session, slash, tools, tui).
+- [`docs/guide/`](docs/guide/) — user-facing docs (quickstart, configuration, slash commands, instructions, sessions, theming).
+- [`docs/design/`](docs/design/) and [`docs/research/`](docs/research/) — internal architecture decisions and external research, both organized by topic (api, session, slash, tools, tui). Each subdirectory has its own README with per-doc summaries.
+- [`docs/roadmap.md`](docs/roadmap.md) — working features, current focus, and explicit non-goals.
 
 ## Coding Conventions
 
