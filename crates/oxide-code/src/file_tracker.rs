@@ -868,7 +868,7 @@ mod tests {
     fn lock_recovers_from_poisoned_mutex() {
         let tracker = Arc::new(FileTracker::default());
         let t = Arc::clone(&tracker);
-        let _ = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             let _guard = t.by_path.lock().unwrap();
             panic!("deliberate poison");
         })

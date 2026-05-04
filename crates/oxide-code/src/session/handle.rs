@@ -1193,7 +1193,7 @@ mod tests {
     fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
         let shared = Arc::new(SharedState::default());
         let s = Arc::clone(&shared);
-        let _ = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             let _guard = s.last_flush_failure.lock().unwrap();
             panic!("deliberate poison");
         })
@@ -1208,7 +1208,7 @@ mod tests {
         let shared = Arc::new(SharedState::default());
         // Poison by writing then panicking.
         let s = Arc::clone(&shared);
-        let _ = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             let mut guard = s.last_flush_failure.lock().unwrap();
             *guard = Some("pre-poison".to_owned());
             panic!("deliberate poison");
@@ -1225,7 +1225,7 @@ mod tests {
         let handle = start(&store, "m");
         // Poison the actor_join mutex.
         let join_ref = Arc::clone(&handle.actor_join);
-        let _ = std::thread::spawn(move || {
+        _ = std::thread::spawn(move || {
             let _guard = join_ref.lock().unwrap();
             panic!("deliberate poison");
         })
