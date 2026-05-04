@@ -28,6 +28,7 @@ mod parser;
 mod picker;
 mod registry;
 mod status;
+mod status_modal;
 
 pub(crate) use context::{SessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
