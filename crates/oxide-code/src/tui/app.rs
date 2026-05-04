@@ -22,6 +22,7 @@ use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
@@ -58,6 +59,8 @@ pub(crate) struct App {
     pending_calls: PendingCalls,
     /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
+    /// Active modal overlay(s). Empty when no modal is on screen.
+    modals: ModalStack,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -98,6 +101,7 @@ impl App {
             tools,
             pending_calls: PendingCalls::new(),
             pending_prompts: VecDeque::new(),
+            modals: ModalStack::new(),
             should_quit: false,
             dirty: true,
         }
@@ -160,6 +164,17 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
+        // First-priority: an active modal owns keyboard focus end-to-end.
+        // Other components don't see the key until the modal closes.
+        if let Event::Key(key) = event
+            && self.modals.is_active()
+        {
+            if let Some(action) = self.modals.handle_key(key) {
+                self.apply_modal_action(action);
+            }
+            self.dirty = true;
+            return;
+        }
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
@@ -184,6 +199,20 @@ impl App {
             Event::Resize(..) => {}
             _ => return,
         }
+        self.dirty = true;
+    }
+
+    /// Dispatcher for actions emitted by a closed modal.
+    fn apply_modal_action(&mut self, action: ModalAction) {
+        match action {
+            ModalAction::None => {}
+            ModalAction::User(user_action) => self.dispatch_user_action(user_action),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_modal(&mut self, modal: Box<dyn super::modal::Modal>) {
+        self.modals.push(modal);
         self.dirty = true;
     }
 
@@ -461,10 +490,12 @@ impl App {
         let input_height = self.input.height();
         let preview_height = self.preview_height();
         let popup_height = self.input.popup_height();
+        let modal_height = self.modals.height(frame.area().width);
         let chunks = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(preview_height),
+            Constraint::Length(modal_height),
             Constraint::Length(popup_height),
             Constraint::Length(input_height),
         ])
@@ -475,10 +506,13 @@ impl App {
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
-        if popup_height > 0 {
-            self.input.render_popup(frame, chunks[3]);
+        if modal_height > 0 {
+            self.modals.render(frame, chunks[3], &self.theme);
         }
-        self.input.render(frame, chunks[4]);
+        if popup_height > 0 {
+            self.input.render_popup(frame, chunks[4]);
+        }
+        self.input.render(frame, chunks[5]);
         chunks[1]
     }
 
@@ -950,6 +984,60 @@ mod tests {
             vec!["/help ".to_owned()],
             "buffer reflects the completed canonical name + space",
         );
+    }
+
+    // ── modal gate ──
+
+    #[tokio::test]
+    async fn modal_gate_intercepts_keys_before_input_sees_them() {
+        // While a modal is on screen, any key event lands on the modal
+        // first — the input area must NOT receive them. Pin so a
+        // regression that fans keys to both surfaces (double-handling
+        // a single keystroke) fails here.
+        use crate::tui::modal::ModalAction;
+        use crate::tui::modal::testing::ScriptedModal;
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::User(
+            UserAction::Cancel,
+        ))));
+
+        // Type a printable that the input area would otherwise capture.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(
+            app.input.lines().iter().all(String::is_empty),
+            "input must stay empty while modal is active",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no UserAction must reach user_tx for a key the modal consumed",
+        );
+
+        // Submit the modal — its action flows through the normal
+        // dispatch path, just like a keyboard-typed UserAction.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
+        let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[test]
+    fn modal_gate_cancel_closes_modal_without_dispatching() {
+        // `ModalKey::Cancelled` pops the modal but does not dispatch a
+        // UserAction. The next key must reach the input area.
+        use crate::tui::modal::ModalAction;
+        use crate::tui::modal::testing::ScriptedModal;
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "Cancelled must not dispatch any UserAction",
+        );
+        // Modal closed; subsequent keys reach the input.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.input.lines(), vec!["y".to_owned()]);
     }
 
     // ── handle_esc ──
