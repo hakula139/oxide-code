@@ -309,12 +309,6 @@ impl ResolvedModelId {
     }
 }
 
-impl std::fmt::Display for ResolvedModelId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 // ── Lookup ──
 
 /// First-match substring lookup against [`MODELS`]. Returns `None` for
@@ -350,33 +344,6 @@ pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── lookup ──
-
-    #[test]
-    fn lookup_matches_most_specific_row_before_family_base() {
-        // `claude-opus-4-6` must hit the 4.6 row, not fall through to
-        // the `claude-opus-4` base.
-        let info = lookup("claude-opus-4-6").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
-        assert!(info.capabilities.effort);
-    }
-
-    #[test]
-    fn lookup_unknown_model_family_is_absent() {
-        // A hypothetical future family with no entry should miss entirely
-        // so callers can opt into conservative defaults.
-        assert!(lookup("claude-opus-5-0").is_none());
-        assert!(lookup("gpt-4").is_none());
-    }
-
-    #[test]
-    fn lookup_ignores_1m_suffix_tag_for_matching() {
-        // `[1m]` is a client-side opt-in marker; the substring match
-        // still finds the base model row.
-        let info = lookup("claude-opus-4-6[1m]").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
-    }
 
     // ── capability rows ──
 
@@ -580,6 +547,41 @@ mod tests {
         let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
         assert_eq!(haiku_4_5.resolve_effort(None), None);
         assert_eq!(haiku_4_5.resolve_effort(Some(Effort::High)), None);
+    }
+
+    // ── ResolvedModelId ──
+
+    #[test]
+    fn resolved_model_id_into_inner_returns_wrapped_string() {
+        let id = ResolvedModelId::new("claude-opus-4-7".to_owned());
+        assert_eq!(id.into_inner(), "claude-opus-4-7");
+    }
+
+    // ── lookup ──
+
+    #[test]
+    fn lookup_matches_most_specific_row_before_family_base() {
+        // `claude-opus-4-6` must hit the 4.6 row, not fall through to
+        // the `claude-opus-4` base.
+        let info = lookup("claude-opus-4-6").unwrap();
+        assert_eq!(info.marketing, "Claude Opus 4.6");
+        assert!(info.capabilities.effort);
+    }
+
+    #[test]
+    fn lookup_unknown_model_family_is_absent() {
+        // A hypothetical future family with no entry should miss entirely
+        // so callers can opt into conservative defaults.
+        assert!(lookup("claude-opus-5-0").is_none());
+        assert!(lookup("gpt-4").is_none());
+    }
+
+    #[test]
+    fn lookup_ignores_1m_suffix_tag_for_matching() {
+        // `[1m]` is a client-side opt-in marker; the substring match
+        // still finds the base model row.
+        let info = lookup("claude-opus-4-6[1m]").unwrap();
+        assert_eq!(info.marketing, "Claude Opus 4.6");
     }
 
     // ── marketing_name ──

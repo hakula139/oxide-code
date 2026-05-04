@@ -804,6 +804,33 @@ mod tests {
         handle.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn shutdown_surfaces_panic_from_stand_in_actor() {
+        // Exercises the Panic arm in acks_then_drops (testing.rs),
+        // which panics the stand-in actor task. shutdown must catch the
+        // JoinError and log via tracing::error.
+        let handle = testing::acks_then_drops("test", 1);
+        handle
+            .cmd_tx
+            .send(super::super::actor::SessionCmd::Panic)
+            .await
+            .unwrap();
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_logs_cancellation_when_actor_task_aborted() {
+        // Abort produces a JoinError where is_panic() == false,
+        // exercising the "cancelled" branch in shutdown.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
+            j.abort();
+        }
+        handle.shutdown().await;
+    }
+
     // ── start ──
 
     #[tokio::test]
