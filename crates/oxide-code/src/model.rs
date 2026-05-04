@@ -289,7 +289,8 @@ impl Capabilities {
 
 /// A model id that has passed through the `/model` resolver. The private
 /// inner field ensures arbitrary strings cannot flow into
-/// [`UserAction::SwitchModel`] without validation.
+/// [`UserAction::SwapConfig`](crate::agent::event::UserAction::SwapConfig)
+/// without validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelId(String);
 
@@ -300,12 +301,13 @@ impl ResolvedModelId {
         Self(id)
     }
 
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
     pub(crate) fn into_inner(self) -> String {
         self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

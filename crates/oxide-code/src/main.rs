@@ -25,9 +25,10 @@ use tracing::{debug, warn};
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
 use agent::{TurnAbort, agent_turn};
 use client::anthropic::Client;
-use config::Config;
+use config::{Config, Effort};
 use file_tracker::FileTracker;
 use message::Message;
+use model::ResolvedModelId;
 use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
@@ -388,26 +389,41 @@ async fn agent_loop_task(
                     warn!("session-rolled event dropped: {e}");
                 }
             }
-            UserAction::SwitchModel(id) => {
-                let effort = client.set_model(id.as_str().to_owned());
-                if let Err(e) = sink.send(AgentEvent::ModelSwitched {
-                    model_id: id.into_inner(),
-                    effort,
-                }) {
-                    warn!("model-switched event dropped: {e}");
-                }
-            }
-            UserAction::SwitchEffort(pick) => {
-                let effort = client.set_effort(pick);
-                if let Err(e) = sink.send(AgentEvent::EffortSwitched { pick, effort }) {
-                    warn!("effort-switched event dropped: {e}");
-                }
+            UserAction::SwapConfig { model, effort } => {
+                apply_swap_config(&mut client, &sink, model, effort);
             }
             UserAction::Quit => break,
         }
     }
 
     Ok(())
+}
+
+/// Apply a [`UserAction::SwapConfig`] to the live `Client` and emit
+/// [`AgentEvent::ConfigChanged`]. Order is load-bearing: the model
+/// swap re-clamps existing effort first, then the explicit effort
+/// pick (if any) clamps against the new model's caps. `requested_effort`
+/// echoes the user's pick so the UI can surface clamping.
+fn apply_swap_config(
+    client: &mut Client,
+    sink: &dyn AgentSink,
+    model: Option<ResolvedModelId>,
+    effort: Option<Effort>,
+) {
+    if let Some(id) = model {
+        client.set_model(id.into_inner());
+    }
+    let resolved = match effort {
+        Some(pick) => client.set_effort(pick),
+        None => client.effort(),
+    };
+    if let Err(e) = sink.send(AgentEvent::ConfigChanged {
+        model_id: client.model().to_owned(),
+        effort: resolved,
+        requested_effort: effort,
+    }) {
+        warn!("config-changed event dropped: {e}");
+    }
 }
 
 // ── Bare REPL Mode ──

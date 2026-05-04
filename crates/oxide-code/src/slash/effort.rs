@@ -53,7 +53,10 @@ impl SlashCommand for EffortCmd {
                 marketing_or_id(&ctx.info.config.model_id),
             ));
         }
-        Ok(SlashOutcome::Forward(UserAction::SwitchEffort(pick)))
+        Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+            model: None,
+            effort: Some(pick),
+        }))
     }
 }
 
@@ -197,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_with_level_dispatches_switch_effort() {
+    fn execute_with_level_forwards_swap_config_with_effort_only() {
         for (arg, level) in [
             ("low", Effort::Low),
             ("medium", Effort::Medium),
@@ -208,8 +211,11 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwitchEffort(level))),
-                "`{arg}` should dispatch SwitchEffort({level:?})",
+                Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+                    model: None,
+                    effort: Some(level),
+                })),
+                "`{arg}` should forward SwapConfig {{ effort: Some({level:?}) }}",
             );
         }
     }

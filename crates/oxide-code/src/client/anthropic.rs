@@ -155,6 +155,11 @@ impl Client {
         &self.config.model
     }
 
+    /// Returns the effort tier the next request will be issued at.
+    pub(crate) fn effort(&self) -> Option<Effort> {
+        self.config.effort
+    }
+
     /// Client-side session id carried in `x-claude-code-session-id` and
     /// billing metadata. Caller-supplied or auto-generated UUID v4.
     #[cfg(test)]

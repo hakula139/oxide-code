@@ -257,8 +257,7 @@ where
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
-                    | UserAction::SwitchModel(_)
-                    | UserAction::SwitchEffort(_)),
+                    | UserAction::SwapConfig { .. }),
                 ) => warn!("dropped mid-turn action: {action:?}"),
             },
             output = &mut fut => return Ok(output),
@@ -1158,8 +1157,14 @@ mod tests {
         for action in [
             UserAction::ConfirmExit,
             UserAction::Clear,
-            UserAction::SwitchModel(ResolvedModelId::new("claude-opus-4-7".to_owned())),
-            UserAction::SwitchEffort(Effort::High),
+            UserAction::SwapConfig {
+                model: Some(ResolvedModelId::new("claude-opus-4-7".to_owned())),
+                effort: None,
+            },
+            UserAction::SwapConfig {
+                model: None,
+                effort: Some(Effort::High),
+            },
         ] {
             let dir = tempfile::tempdir().unwrap();
             let session = test_session(dir.path());

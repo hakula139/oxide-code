@@ -68,7 +68,10 @@ impl SlashCommand for ModelCmd {
             return Ok(SlashOutcome::Done);
         }
         let id = resolve_model_arg(arg)?;
-        Ok(SlashOutcome::Forward(UserAction::SwitchModel(id)))
+        Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+            model: Some(id),
+            effort: None,
+        }))
     }
 }
 
@@ -208,6 +211,13 @@ mod tests {
         ResolvedModelId::new(id.to_owned())
     }
 
+    fn swap_model(id: &str) -> SlashOutcome {
+        SlashOutcome::Forward(UserAction::SwapConfig {
+            model: Some(resolved(id)),
+            effort: None,
+        })
+    }
+
     // ── ModelCmd metadata ──
 
     #[test]
@@ -321,9 +331,7 @@ mod tests {
             let (_, outcome) = run_execute(alias);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
-                    expected
-                )))),
+                Ok(swap_model(expected)),
                 "alias `{alias}` should route to `{expected}`",
             );
         }
@@ -359,7 +367,7 @@ mod tests {
             let (_, outcome) = run_execute(id);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(id)))),
+                Ok(swap_model(id)),
                 "canonical `{id}` must round-trip",
             );
         }
@@ -380,9 +388,7 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
-                    expected
-                )))),
+                Ok(swap_model(expected)),
                 "`{arg}` should resolve to `{expected}`",
             );
         }
@@ -410,12 +416,7 @@ mod tests {
         // the suffix tier must short-circuit before the substring
         // ambiguity check runs.
         let (_, outcome) = run_execute("opus-4");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
-                "claude-opus-4"
-            )))),
-        );
+        assert_eq!(outcome, Ok(swap_model("claude-opus-4")));
     }
 
     #[test]
@@ -438,24 +439,14 @@ mod tests {
     #[test]
     fn execute_unique_substring_resolves_after_suffix_tier_misses() {
         let (_, outcome) = run_execute("haiku-4-");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
-                "claude-haiku-4-5"
-            )))),
-        );
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
 
     #[test]
     fn execute_trims_whitespace_around_arg() {
         // Padded input resolves the same as bare input.
         let (_, outcome) = run_execute("  haiku-4-5  ");
-        assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
-                "claude-haiku-4-5"
-            )))),
-        );
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
 
     // ── resolve_model_arg ──

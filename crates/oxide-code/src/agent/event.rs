@@ -41,13 +41,14 @@ pub(crate) enum AgentEvent {
     SessionRolled {
         id: String,
     },
-    ModelSwitched {
+    /// Live config after a [`UserAction::SwapConfig`] applied. `effort`
+    /// is the resolved value (post-clamp); `requested_effort` is the
+    /// user's pick if they explicitly chose one — used to surface
+    /// `(clamped from X)` in the confirmation message.
+    ConfigChanged {
         model_id: String,
         effort: Option<Effort>,
-    },
-    EffortSwitched {
-        pick: Effort,
-        effort: Option<Effort>,
+        requested_effort: Option<Effort>,
     },
     Error(String),
 }
@@ -58,8 +59,14 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
-    SwitchModel(ResolvedModelId),
-    SwitchEffort(Effort),
+    /// Symmetric model + effort swap. At least one field must be `Some`;
+    /// `None` means "leave that axis as-is". Modal pickers and the
+    /// typed-arg `/model <id>` / `/effort <tier>` paths both flow
+    /// through here.
+    SwapConfig {
+        model: Option<ResolvedModelId>,
+        effort: Option<Effort>,
+    },
     Cancel,
     /// TUI-only; agent loop ignores this.
     ConfirmExit,
@@ -142,8 +149,7 @@ impl StdioSink {
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
-            | AgentEvent::ModelSwitched { .. }
-            | AgentEvent::EffortSwitched { .. } => {}
+            | AgentEvent::ConfigChanged { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;
             }
@@ -304,13 +310,10 @@ mod tests {
             AgentEvent::SessionRolled {
                 id: "rolled".to_owned(),
             },
-            AgentEvent::ModelSwitched {
+            AgentEvent::ConfigChanged {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
-            },
-            AgentEvent::EffortSwitched {
-                pick: Effort::High,
-                effort: Some(Effort::High),
+                requested_effort: Some(Effort::Xhigh),
             },
         ] {
             let (stdout, stderr) = render_one(&test_sink(false), event);
