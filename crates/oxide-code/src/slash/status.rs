@@ -22,7 +22,7 @@ impl SlashCommand for StatusCmd {
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.chat.push_system_message(render_status(ctx.info));
-        Ok(SlashOutcome::Local)
+        Ok(SlashOutcome::Done)
     }
 }
 

@@ -1359,9 +1359,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_bare_slash_during_busy_runs_list_view() {
-        // The bare form is read-only via `is_read_only(args)` returning
-        // true for empty args, so it dispatches immediately even
-        // mid-turn. Regressing the args-aware classification fails here.
+        // Bare form classifies as ReadOnly so it dispatches mid-turn;
+        // arg-bearing form refuses. Regressing the args-aware
+        // classification fails here.
         for (cmd, header_prefix) in [
             ("/model", "Available models"),
             ("/effort", "Effort levels for"),

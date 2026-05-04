@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use super::context::{SessionInfo, SlashContext};
 use super::format::write_kv_table;
-use super::registry::{SlashCommand, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::model::{MODELS, ResolvedModelId, lookup, marketing_or_id};
 
@@ -48,10 +48,13 @@ impl SlashCommand for ModelCmd {
         "List models or switch the active one"
     }
 
-    fn is_read_only(&self, args: &str) -> bool {
-        // Bare `/model` (list view) is safe mid-turn; the swap form
-        // races the in-flight `Client` and must wait for idle.
-        args.trim().is_empty()
+    fn classify(&self, args: &str) -> SlashKind {
+        // Bare lists; the swap form races the in-flight `Client`.
+        if args.trim().is_empty() {
+            SlashKind::ReadOnly
+        } else {
+            SlashKind::Mutating
+        }
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -62,10 +65,10 @@ impl SlashCommand for ModelCmd {
         let arg = args.trim();
         if arg.is_empty() {
             ctx.chat.push_system_message(render_model_list(ctx.info));
-            return Ok(SlashOutcome::Local);
+            return Ok(SlashOutcome::Done);
         }
         let id = resolve_model_arg(arg)?;
-        Ok(SlashOutcome::Action(UserAction::SwitchModel(id)))
+        Ok(SlashOutcome::Forward(UserAction::SwitchModel(id)))
     }
 }
 
@@ -216,13 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only_splits_on_args() {
-        // Bare list form stays read-only; arg-bearing form refuses
-        // mid-turn. Whitespace-only args route the same as bare.
-        assert!(ModelCmd.is_read_only(""));
-        assert!(ModelCmd.is_read_only("   "));
-        assert!(!ModelCmd.is_read_only("opus"));
-        assert!(!ModelCmd.is_read_only("claude-opus-4-7"));
+    fn classify_splits_on_args() {
+        // Whitespace-only args route the same as bare.
+        assert_eq!(ModelCmd.classify(""), SlashKind::ReadOnly);
+        assert_eq!(ModelCmd.classify("   "), SlashKind::ReadOnly);
+        assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
+        assert_eq!(ModelCmd.classify("claude-opus-4-7"), SlashKind::Mutating);
     }
 
     // ── ModelCmd::execute ──
@@ -237,7 +239,7 @@ mod tests {
     #[test]
     fn execute_no_args_pushes_list_with_legend_and_switch_hint() {
         let (chat, outcome) = run_execute("");
-        assert_eq!(outcome, Ok(SlashOutcome::Local));
+        assert_eq!(outcome, Ok(SlashOutcome::Done));
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
         let body = chat.last_system_text().expect("system block present");
@@ -319,7 +321,7 @@ mod tests {
             let (_, outcome) = run_execute(alias);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
                     expected
                 )))),
                 "alias `{alias}` should route to `{expected}`",
@@ -357,7 +359,7 @@ mod tests {
             let (_, outcome) = run_execute(id);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(id)))),
+                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(id)))),
                 "canonical `{id}` must round-trip",
             );
         }
@@ -378,7 +380,7 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+                Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
                     expected
                 )))),
                 "`{arg}` should resolve to `{expected}`",
@@ -410,7 +412,7 @@ mod tests {
         let (_, outcome) = run_execute("opus-4");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
                 "claude-opus-4"
             )))),
         );
@@ -438,7 +440,7 @@ mod tests {
         let (_, outcome) = run_execute("haiku-4-");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
                 "claude-haiku-4-5"
             )))),
         );
@@ -450,7 +452,7 @@ mod tests {
         let (_, outcome) = run_execute("  haiku-4-5  ");
         assert_eq!(
             outcome,
-            Ok(SlashOutcome::Action(UserAction::SwitchModel(resolved(
+            Ok(SlashOutcome::Forward(UserAction::SwitchModel(resolved(
                 "claude-haiku-4-5"
             )))),
         );

@@ -40,7 +40,7 @@ impl SessionInfo {
 
 /// Borrowed view of App-owned state for one
 /// [`super::registry::SlashCommand::execute`] call. Never stored.
-/// State-mutating commands return [`super::registry::SlashOutcome::Action`];
+/// State-mutating commands return [`super::registry::SlashOutcome::Forward`];
 /// the dispatcher owns forwarding to the agent loop.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,

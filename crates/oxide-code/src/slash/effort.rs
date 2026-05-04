@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use super::context::{SessionInfo, SlashContext};
-use super::registry::{SlashCommand, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
@@ -24,8 +24,12 @@ impl SlashCommand for EffortCmd {
         "List effort levels or set the active one"
     }
 
-    fn is_read_only(&self, args: &str) -> bool {
-        args.trim().is_empty()
+    fn classify(&self, args: &str) -> SlashKind {
+        if args.trim().is_empty() {
+            SlashKind::ReadOnly
+        } else {
+            SlashKind::Mutating
+        }
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -36,7 +40,7 @@ impl SlashCommand for EffortCmd {
         let arg = args.trim();
         if arg.is_empty() {
             ctx.chat.push_system_message(render_effort_list(ctx.info));
-            return Ok(SlashOutcome::Local);
+            return Ok(SlashOutcome::Done);
         }
         let pick = parse_effort_arg(arg)?;
         // Preflight: setting an explicit level on a no-effort model is
@@ -49,7 +53,7 @@ impl SlashCommand for EffortCmd {
                 marketing_or_id(&ctx.info.config.model_id),
             ));
         }
-        Ok(SlashOutcome::Action(UserAction::SwitchEffort(pick)))
+        Ok(SlashOutcome::Forward(UserAction::SwitchEffort(pick)))
     }
 }
 
@@ -107,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only_splits_on_args() {
-        assert!(EffortCmd.is_read_only(""));
-        assert!(EffortCmd.is_read_only("   "));
-        assert!(!EffortCmd.is_read_only("xhigh"));
+    fn classify_splits_on_args() {
+        assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
+        assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
+        assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
     // ── EffortCmd::execute ──
@@ -136,7 +140,7 @@ mod tests {
     #[test]
     fn execute_no_args_pushes_list_with_marker_and_swap_hint() {
         let (chat, outcome) = run_execute("");
-        assert_eq!(outcome, Ok(SlashOutcome::Local));
+        assert_eq!(outcome, Ok(SlashOutcome::Done));
         let body = chat.last_system_text().expect("system block present");
         assert!(
             body.starts_with("Effort levels for"),
@@ -204,7 +208,7 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchEffort(level))),
+                Ok(SlashOutcome::Forward(UserAction::SwitchEffort(level))),
                 "`{arg}` should dispatch SwitchEffort({level:?})",
             );
         }

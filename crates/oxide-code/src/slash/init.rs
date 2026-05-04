@@ -5,7 +5,7 @@
 use indoc::indoc;
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 
 pub(super) struct InitCmd;
@@ -19,12 +19,12 @@ impl SlashCommand for InitCmd {
         "Generate or update the project's `AGENTS.md` / `CLAUDE.md`"
     }
 
-    fn is_read_only(&self, _args: &str) -> bool {
-        false
+    fn classify(&self, _args: &str) -> SlashKind {
+        SlashKind::Mutating
     }
 
     fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Action(UserAction::SubmitPrompt(
+        Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(
             PROMPT.to_owned(),
         )))
     }
@@ -112,10 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only_is_false() {
+    fn classify_is_mutating() {
         // Override is load-bearing: a parallel turn would race the
         // in-flight one over `messages` / the session writer.
-        assert!(!InitCmd.is_read_only(""));
+        assert_eq!(InitCmd.classify(""), SlashKind::Mutating);
     }
 
     // ── InitCmd::execute ──
@@ -135,7 +135,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                Ok(SlashOutcome::Action(UserAction::SubmitPrompt(p)))
+                Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p)))
                     if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
             ),
             "prompt must target both AGENTS.md and CLAUDE.md: {outcome:?}",
@@ -150,7 +150,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome,
-                Ok(SlashOutcome::Action(UserAction::SubmitPrompt(p)))
+                Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p)))
                     if p.contains("already exists") && p.contains("not overwrite")
             ),
             "prompt must instruct the model not to overwrite an existing file: {outcome:?}",

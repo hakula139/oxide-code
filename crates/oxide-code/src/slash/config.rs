@@ -31,7 +31,7 @@ impl SlashCommand for ConfigCmd {
         let project = file::find_project_config();
         ctx.chat
             .push_system_message(render_config(ctx.info, user.as_deref(), project.as_deref()));
-        Ok(SlashOutcome::Local)
+        Ok(SlashOutcome::Done)
     }
 }
 

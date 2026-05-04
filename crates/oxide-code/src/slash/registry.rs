@@ -16,15 +16,31 @@ use super::model::ModelCmd;
 use super::status::StatusCmd;
 use crate::agent::event::UserAction;
 
-/// What [`SlashCommand::execute`] returns. `Local` for client-side
-/// work that finishes via `ctx`; `Action` for state-mutating
+/// What [`SlashCommand::execute`] returns. `Done` for client-side
+/// work that finishes via `ctx`; `Forward` for state-mutating
 /// commands that hand a [`UserAction`] back for the dispatcher to
 /// forward to the agent loop. The trait stays the only seam — slash
 /// impls never reach into `user_tx` themselves.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashOutcome {
-    Local,
-    Action(UserAction),
+    Done,
+    Forward(UserAction),
+}
+
+/// Whether a slash command can run while the agent is busy. Returned
+/// by [`SlashCommand::classify`]; the free [`super::classify`] wraps
+/// it with `Unknown` when lookup fails.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SlashKind {
+    /// Safe mid-turn — dispatch immediately.
+    ReadOnly,
+    /// State-mutating — refuse mid-turn, let the user retry when idle.
+    Mutating,
+    /// Not in the registry — dispatch anyway so the user sees the
+    /// canonical "unknown command" error block with recovery hints.
+    /// Trait implementations never return this; only the free
+    /// dispatcher does.
+    Unknown,
 }
 
 /// A locally-dispatched command typed as `/name args`. Each command
@@ -45,12 +61,13 @@ pub(crate) trait SlashCommand: Sync {
     /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether this invocation is safe to run mid-turn. Mutating
-    /// commands return `false` to refuse instead of racing the live
-    /// turn. `args` enables per-form classification — `/model` lists
-    /// when bare and mutates when given an id.
-    fn is_read_only(&self, _args: &str) -> bool {
-        true
+    /// Whether this invocation is safe to run mid-turn. `args` enables
+    /// per-form classification — `/model` lists when bare and mutates
+    /// when given an id. Trait implementations return `ReadOnly` or
+    /// `Mutating`; never `Unknown` (that's the dispatcher's lookup
+    /// signal).
+    fn classify(&self, _args: &str) -> SlashKind {
+        SlashKind::ReadOnly
     }
 
     /// Optional usage hint used by the error message when the command
@@ -62,8 +79,8 @@ pub(crate) trait SlashCommand: Sync {
 
     /// Runs the command. Mutations land through `ctx`. `Err(msg)` is
     /// rendered by the dispatcher as a single `ErrorBlock` — commands
-    /// must not push errors themselves. `Ok(Local)` commands push
-    /// their own informational block; `Ok(Action(_))` commands hand
+    /// must not push errors themselves. `Ok(Done)` commands push
+    /// their own informational block; `Ok(Forward(_))` commands hand
     /// a `UserAction` back for the dispatcher to forward.
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
@@ -169,7 +186,7 @@ mod tests {
                 "collide"
             }
             fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(SlashOutcome::Local)
+                Ok(SlashOutcome::Done)
             }
         }
         let registry: &[&dyn SlashCommand] = &[&HelpCmd, &ColliderCmd];
@@ -177,7 +194,7 @@ mod tests {
 
         // Exercise the trait stubs the helper doesn't reach.
         assert_eq!(ColliderCmd.description(), "collide");
-        assert_eq!(run_execute(&ColliderCmd, ""), Ok(SlashOutcome::Local));
+        assert_eq!(run_execute(&ColliderCmd, ""), Ok(SlashOutcome::Done));
     }
 
     #[test]
@@ -202,13 +219,13 @@ mod tests {
                 ""
             }
             fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-                Ok(SlashOutcome::Local)
+                Ok(SlashOutcome::Done)
             }
         }
         assert_eq!(empty_metadata_offenders(&[&EmptyDescCmd]), vec!["no-desc"]);
 
         // Exercise the execute stub the offender helper doesn't reach.
-        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(SlashOutcome::Local));
+        assert_eq!(run_execute(&EmptyDescCmd, ""), Ok(SlashOutcome::Done));
     }
 
     // ── lookup_in ──
@@ -227,22 +244,19 @@ mod tests {
             "fake"
         }
         fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Local)
+            Ok(SlashOutcome::Done)
         }
     }
 
     #[test]
     fn aliased_cmd_fixture_satisfies_trait_contract() {
-        // Pin so a fixture drift fails here rather than silently
-        // misleading the lookup_in tests. The `is_read_only` calls
-        // also exercise the trait's default body — `AliasedCmd`
-        // doesn't override it.
+        // The `classify` calls exercise the trait default body.
         assert_eq!(AliasedCmd.name(), "primary");
         assert_eq!(AliasedCmd.aliases(), &["alt", "shortcut"]);
         assert_eq!(AliasedCmd.description(), "fake");
-        assert!(AliasedCmd.is_read_only(""));
-        assert!(AliasedCmd.is_read_only("anything"));
-        assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Local));
+        assert_eq!(AliasedCmd.classify(""), SlashKind::ReadOnly);
+        assert_eq!(AliasedCmd.classify("anything"), SlashKind::ReadOnly);
+        assert_eq!(run_execute(&AliasedCmd, ""), Ok(SlashOutcome::Done));
     }
 
     #[test]
