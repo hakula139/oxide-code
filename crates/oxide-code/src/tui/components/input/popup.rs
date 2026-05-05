@@ -33,6 +33,10 @@ impl SlashPopup {
         }
     }
 
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+    }
+
     pub(crate) fn set_query(&mut self, query: Option<&str>) {
         let Some(q) = query else {
             self.matches.clear();

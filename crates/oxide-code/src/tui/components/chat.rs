@@ -56,6 +56,12 @@ impl ChatView {
         }
     }
 
+    /// Re-skin every subsequent render. Mid-session theme swap (`/theme`) calls this to repaint
+    /// the existing block stack — block content stays cached, only the styles change next frame.
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+    }
+
     /// Populates from resumed transcript, projecting the same block shapes as live rendering.
     pub(crate) fn load_history(
         &mut self,

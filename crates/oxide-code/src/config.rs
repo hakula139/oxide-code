@@ -17,6 +17,8 @@ use crate::util::env;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// Mirrors the fallback `loader::resolve_theme` applies when no `[tui.theme] base` is set.
+pub(crate) const DEFAULT_THEME: &str = "mocha";
 
 // ── Auth ──
 
@@ -49,6 +51,9 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) show_thinking: bool,
+    /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
+    /// to mark the active row in the picker.
+    pub(crate) theme_name: String,
 }
 
 // ── ThinkingConfig ──
@@ -183,6 +188,9 @@ pub(crate) struct Config {
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
     pub(crate) theme: Theme,
+    /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path; mirrors `[tui.theme] base`,
+    /// falling back to [`DEFAULT_THEME`] when unset.
+    pub(crate) theme_name: String,
 }
 
 impl Config {
@@ -245,6 +253,10 @@ impl Config {
             None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
         };
 
+        let theme_name = theme_config
+            .base
+            .clone()
+            .unwrap_or_else(|| DEFAULT_THEME.to_owned());
         let theme = theme::resolve_theme(
             theme_config.base.as_deref(),
             &theme_config.overrides.unwrap_or_default(),
@@ -260,6 +272,7 @@ impl Config {
             thinking,
             show_thinking,
             theme,
+            theme_name,
         })
     }
 
@@ -273,6 +286,7 @@ impl Config {
             max_tokens: self.max_tokens,
             prompt_cache_ttl: self.prompt_cache_ttl,
             show_thinking: self.show_thinking,
+            theme_name: self.theme_name.clone(),
         }
     }
 }
@@ -461,6 +475,23 @@ mod tests {
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(!config.show_thinking);
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
+        assert_eq!(config.theme_name, DEFAULT_THEME);
+    }
+
+    #[tokio::test]
+    async fn load_theme_name_reflects_user_picked_base() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [tui.theme]
+                base = "latte"
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.theme_name, "latte");
     }
 
     #[tokio::test]
@@ -825,6 +856,7 @@ mod tests {
             thinking: None,
             show_thinking: true,
             theme: Theme::default(),
+            theme_name: "macchiato".to_owned(),
         };
         let snap = cfg.snapshot();
         assert_eq!(snap.auth_label, "OAuth");
@@ -834,6 +866,7 @@ mod tests {
         assert_eq!(snap.max_tokens, 64_000);
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert!(snap.show_thinking);
+        assert_eq!(snap.theme_name, "macchiato");
     }
 
     // ── display_effort ──

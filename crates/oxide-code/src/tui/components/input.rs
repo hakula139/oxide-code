@@ -72,6 +72,15 @@ impl InputArea {
         input
     }
 
+    /// Re-skin subsequent renders. The textarea keeps a cached `Style`, so the previous theme's
+    /// text / placeholder colors would persist if not reapplied here.
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+        self.textarea.set_style(theme.text());
+        self.textarea.set_placeholder_style(theme.dim());
+        self.popup.set_theme(theme);
+    }
+
     pub(crate) fn set_has_queued(&mut self, has_queued: bool) {
         if self.has_queued == has_queued {
             return;

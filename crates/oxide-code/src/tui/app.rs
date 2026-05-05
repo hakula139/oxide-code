@@ -52,6 +52,9 @@ pub(crate) struct App {
     /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     modals: ModalStack,
+    /// Saved theme captured when a `/theme` picker opens; restored if the modal cancels so
+    /// live-preview moves don't leak into the rest of the session.
+    preview_theme_snapshot: Option<Theme>,
     should_quit: bool,
     dirty: bool,
 }
@@ -92,6 +95,7 @@ impl App {
             pending_calls: PendingCalls::new(),
             pending_prompts: VecDeque::new(),
             modals: ModalStack::new(),
+            preview_theme_snapshot: None,
             should_quit: false,
             dirty: true,
         }
@@ -202,9 +206,26 @@ impl App {
 
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            ModalAction::None => {}
+            // Modal cancelled or silently closed: undo any in-flight theme preview so the user
+            // returns to exactly the state before opening the picker.
+            ModalAction::None => {
+                if let Some(theme) = self.preview_theme_snapshot.take() {
+                    self.apply_theme(&theme);
+                }
+            }
             ModalAction::User(user_action) => self.dispatch_user_action(user_action),
         }
+    }
+
+    /// Repaint every component with `theme`. Sole entry point for mid-session theme swaps so the
+    /// per-component `set_theme` calls stay grouped — adding a new theme-styled component should
+    /// only need a single edit here.
+    fn apply_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+        self.chat.set_theme(theme);
+        self.status_bar.set_theme(theme);
+        self.input.set_theme(theme);
+        self.dirty = true;
     }
 
     #[cfg(test)]
@@ -335,6 +356,28 @@ impl App {
                 true
             }
             UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::PreviewTheme { name } => {
+                if let Some(preview) = super::theme::load_builtin(name) {
+                    if self.preview_theme_snapshot.is_none() {
+                        self.preview_theme_snapshot = Some(self.theme.clone());
+                    }
+                    self.apply_theme(&preview);
+                }
+                false
+            }
+            UserAction::SwapTheme { name } => {
+                if let Some(theme) = super::theme::load_builtin(name) {
+                    self.preview_theme_snapshot = None;
+                    self.session_info.config.theme_name.clone_from(name);
+                    self.apply_theme(&theme);
+                    self.chat
+                        .push_system_message(format!("Theme set to {name}."));
+                } else {
+                    self.chat
+                        .push_error(&format!("unknown theme: `{name}` (this is a bug)"));
+                }
+                false
+            }
         }
     }
 
@@ -683,6 +726,7 @@ mod tests {
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 show_thinking: false,
+                theme_name: "mocha".to_owned(),
             },
         }
     }
@@ -2271,6 +2315,81 @@ mod tests {
         assert_eq!(
             app.preview_height(),
             u16::try_from(PREVIEW_VISIBLE + 1).unwrap(),
+        );
+    }
+
+    // ── apply_action_locally / theme ──
+
+    #[test]
+    fn preview_theme_repaints_components_and_caches_original() {
+        // First PreviewTheme captures the snapshot; cursor moves on the picker repaint without
+        // committing. Apply a known mocha → latte swap and confirm both axes mutate.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            app.preview_theme_snapshot.is_some(),
+            "first PreviewTheme must cache the original",
+        );
+        assert_ne!(app.theme.text, original.text, "live theme must change");
+        // session_info.config.theme_name unchanged — preview is not a commit.
+        assert_eq!(app.session_info.config.theme_name, "mocha");
+    }
+
+    #[test]
+    fn preview_theme_then_modal_cancel_restores_original() {
+        // Esc / Ctrl+C surface as ModalAction::None; the snapshot must roll back.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.apply_modal_action(ModalAction::None);
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "snapshot consumed on cancel",
+        );
+        assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
+    }
+
+    #[test]
+    fn swap_theme_commits_and_clears_snapshot() {
+        // Enter on a moved cursor: snapshot drops, session theme name updates, chat shows the
+        // confirmation. A subsequent ModalAction::None then must NOT roll anything back.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        let previewed = app.theme.clone();
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.session_info.config.theme_name, "latte");
+        assert_eq!(app.theme.text, previewed.text);
+
+        app.apply_modal_action(ModalAction::None);
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "post-commit cancel must not restore the pre-preview theme",
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_actions_are_not_forwarded_to_agent_loop() {
+        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "theme actions must stay client-side",
         );
     }
 

@@ -18,6 +18,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         thinking: None,
         show_thinking: false,
         theme: Theme::default(),
+        theme_name: "mocha".to_owned(),
     }
 }
 

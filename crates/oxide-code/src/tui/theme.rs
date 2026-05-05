@@ -11,6 +11,14 @@ mod loader;
 
 pub(crate) use loader::{SlotPatch, resolve_theme};
 
+/// Resolve a built-in theme name (mocha / latte / ...) to a parsed [`Theme`]. `None` for unknown
+/// names; never reads the filesystem. Used by `/theme` for live preview where each cursor move
+/// must be cheap.
+pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
+    let body = builtin::lookup(name)?;
+    loader::parse_theme(body).ok()
+}
+
 /// One theme slot — optional fg, bg, and modifiers composed into a [`Style`].
 ///
 /// Each component is independently optional so an override can patch one axis (e.g., bg only)
