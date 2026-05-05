@@ -229,6 +229,10 @@ pub(crate) fn title_case(s: &str) -> String {
 
 // ── Tool Registry ──
 
+/// Owns the set of [`Tool`]s available to the agent and dispatches calls by name.
+///
+/// The registry is built once at session start with the tools the model is allowed to invoke.
+/// Lookups are linear over a small `Vec` (registry size is fixed at < 10), so no map is needed.
 pub(crate) struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
@@ -279,6 +283,9 @@ impl ToolRegistry {
         output
     }
 
+    /// Resolves the structured result view for a tool call. Errors short-circuit to
+    /// [`ToolResultView::Text`] regardless of the tool's preference, so failure messages render
+    /// consistently across the chat. Unknown tool names also fall back to text.
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -306,10 +313,14 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
-// Keeps head + tail of oversize output and replaces the middle with a `[N bytes truncated]`
-// marker. Skips truncation when the omitted slice is smaller than the marker itself, since
-// truncating would grow the output rather than shrink it. Char-boundary floors guarantee the
-// returned `String` stays valid UTF-8 even when the cap lands inside a multibyte sequence.
+/// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
+/// middle with a `[N bytes truncated]` marker.
+///
+/// Returns `(content, original_len)` — `original_len` is `Some` only when truncation actually
+/// fired, so the caller can record the pre-cap size. Skips truncation when the omitted slice is
+/// smaller than the marker itself (truncating would grow the output rather than shrink it).
+/// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
+/// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -338,6 +349,11 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
+/// Deserializes a tool's typed input from the raw JSON the agent loop hands us.
+///
+/// On failure returns a fully-formed [`ToolOutput`] with `is_error: true` (not a normal
+/// `serde_json::Error`) so the caller can short-circuit straight back to the model with a
+/// user-visible "Invalid input: ..." message — no extra mapping needed at every call site.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
@@ -370,6 +386,11 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
     }
 }
 
+/// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
+///
+/// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
+/// Falls back to the bare title-cased tool name when the field is absent or non-string. Path
+/// is rendered through [`display_cwd_path`] so it appears relative to cwd.
 pub(crate) fn summarize_path_call(
     tool_name: &str,
     input: &serde_json::Value,
@@ -382,6 +403,11 @@ pub(crate) fn summarize_path_call(
     }
 }
 
+/// Renders `path` for chat display.
+///
+/// Strips `base` if it's a prefix; when `path == base` (relative path is empty) returns the file
+/// name so the chat row says `foo.rs` rather than `.`. Paths outside `base` render as their full
+/// string. Lossy UTF-8 conversion is acceptable here because the result is for display only.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
@@ -395,6 +421,9 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Returns the trailing filename component, falling back to the input string when no component
+/// can be extracted (root path, non-UTF-8 component). The fallback is what makes this safe to
+/// call on user-supplied path strings.
 pub(crate) fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
@@ -429,6 +458,11 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
+/// Reads the entry's modification time for sorting / display.
+///
+/// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
+/// platform without mtime). Callers use the result for ordering only — a synthetic epoch
+/// timestamp sorts oldest, which is a sane default for unreadable entries.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -449,6 +483,12 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
 
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
+/// Caps a line at [`MAX_LINE_LENGTH`] characters and appends `... [N chars]` when truncation
+/// fires.
+///
+/// Returns `Cow::Borrowed` (no allocation) when the line already fits — both the byte fast-path
+/// and the char-count fallback short-circuit. The `[N chars]` footer surfaces the original length
+/// so the model can decide whether to read more.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
@@ -646,14 +686,6 @@ mod tests {
             let got = t.summarize_call(&serde_json::json!({}));
             assert_eq!(got, title_case(t.name()), "tool {}", t.name());
         }
-    }
-
-    #[test]
-    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
-        assert_eq!(
-            display_cwd_path_from("/tmp/example.rs", None),
-            "/tmp/example.rs"
-        );
     }
 
     #[test]
@@ -1059,6 +1091,16 @@ mod tests {
     fn resolve_base_dir_none_uses_cwd() {
         let result = resolve_base_dir(None).unwrap();
         assert_eq!(result, std::env::current_dir().unwrap());
+    }
+
+    // ── display_cwd_path_from ──
+
+    #[test]
+    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
+        assert_eq!(
+            display_cwd_path_from("/tmp/example.rs", None),
+            "/tmp/example.rs"
+        );
     }
 
     // ── display_path ──
