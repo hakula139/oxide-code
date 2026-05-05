@@ -70,16 +70,6 @@ impl EffortSlider {
         })
     }
 
-    fn step_left(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    fn step_right(&mut self) {
-        if self.selected + 1 < self.supported.len() {
-            self.selected += 1;
-        }
-    }
-
     /// No-touch Enter (or a touch that returns to the initial pick) cancels — avoids a spurious
     /// `SwapConfig` that would re-resolve config defaults.
     fn submit(&self) -> ModalKey {
@@ -106,55 +96,7 @@ impl EffortSlider {
     fn track_width(&self) -> usize {
         (self.supported.len() - 1) * SLOT_WIDTH + 1
     }
-}
 
-impl Modal for EffortSlider {
-    fn height(&self, _width: u16) -> u16 {
-        BODY_HEIGHT
-    }
-
-    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let lines = vec![
-            Line::from(Span::styled(
-                TITLE,
-                theme.accent().add_modifier(Modifier::BOLD),
-            )),
-            Line::default(),
-            self.line_speed_intel(theme),
-            self.line_track(theme),
-            self.line_marker(theme),
-            self.line_tier_labels(theme),
-            Line::default(),
-            Line::from(Span::styled(FOOTER, theme.dim())),
-        ];
-
-        frame.render_widget(
-            Paragraph::new(lines)
-                .alignment(Alignment::Center)
-                .style(theme.surface()),
-            area,
-        );
-    }
-
-    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => self.submit(),
-            KeyCode::Right | KeyCode::Char('l') => {
-                self.step_right();
-                ModalKey::Consumed
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                self.step_left();
-                ModalKey::Consumed
-            }
-            _ => ModalKey::Consumed,
-        }
-    }
-}
-
-// ── Render helpers ──
-
-impl EffortSlider {
     fn line_speed_intel(&self, theme: &Theme) -> Line<'static> {
         let total = self.slider_width();
         let n = self.supported.len();
@@ -233,6 +175,52 @@ impl EffortSlider {
             spans.push(Span::raw(" ".repeat(total - col)));
         }
         Line::from(spans)
+    }
+}
+
+impl Modal for EffortSlider {
+    fn height(&self, _width: u16) -> u16 {
+        BODY_HEIGHT
+    }
+
+    fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let lines = vec![
+            Line::from(Span::styled(
+                TITLE,
+                theme.accent().add_modifier(Modifier::BOLD),
+            )),
+            Line::default(),
+            self.line_speed_intel(theme),
+            self.line_track(theme),
+            self.line_marker(theme),
+            self.line_tier_labels(theme),
+            Line::default(),
+            Line::from(Span::styled(FOOTER, theme.dim())),
+        ];
+
+        frame.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .style(theme.surface()),
+            area,
+        );
+    }
+
+    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
+        match event.code {
+            KeyCode::Enter => self.submit(),
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.selected + 1 < self.supported.len() {
+                    self.selected += 1;
+                }
+                ModalKey::Consumed
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.selected = self.selected.saturating_sub(1);
+                ModalKey::Consumed
+            }
+            _ => ModalKey::Consumed,
+        }
     }
 }
 
