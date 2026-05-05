@@ -166,6 +166,21 @@ mod tests {
         assert_eq!(thinking_row.1, "off");
     }
 
+    #[test]
+    fn new_renders_thinking_on_when_snapshot_says_true() {
+        // Pin the on-branch so a regression that always renders "off"
+        // fails here. The off-branch test alone can't catch that.
+        let mut info = test_session_info();
+        info.config.show_thinking = true;
+        let m = StatusModal::new(&info);
+        let thinking_row = m
+            .rows
+            .iter()
+            .find(|(k, _)| *k == "Show Thinking")
+            .expect("show-thinking row");
+        assert_eq!(thinking_row.1, "on");
+    }
+
     // ── handle_key ──
 
     #[test]

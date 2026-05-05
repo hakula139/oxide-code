@@ -429,6 +429,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn left_arrow_walks_effort_backward_with_wrap() {
+        // Backward branch in `cycle_effort` has different arithmetic
+        // from the forward branch — pin it independently. Cycle Left
+        // until the effort returns to the initial pick, asserting it
+        // wraps past the first tier (ladder length is finite).
+        let mut p = picker(InitialFocus::Effort);
+        let initial = p.effort.expect("Opus 4.7 has an effort axis");
+        for _ in 0..16 {
+            p.handle_key(&key(KeyCode::Left));
+            if p.effort == Some(initial) {
+                return; // wrapped back to the starting tier
+            }
+        }
+        panic!(
+            "Left-arrow cycle never returned to the starting tier; got {:?}",
+            p.effort
+        );
+    }
+
     // ── submit ──
 
     #[test]
@@ -484,6 +504,24 @@ mod tests {
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
+    // ── height ──
+
+    #[test]
+    fn height_drops_when_highlighted_model_lacks_effort_tier() {
+        // The effort row + spacer (2 rows) only render when the
+        // highlighted model has an effort tier. Pin the no-tier path
+        // so a regression that always reserves the row fails here.
+        let mut p = picker(InitialFocus::Model);
+        let with_tier = p.height(80);
+        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku 4.5
+        let no_tier = p.height(80);
+        assert_eq!(
+            with_tier.saturating_sub(no_tier),
+            2,
+            "no-tier model drops exactly the effort row + spacer",
+        );
+    }
+
     // ── Render smoke ──
 
     #[test]
@@ -491,16 +529,28 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let p = picker(InitialFocus::Model);
         let theme = Theme::default();
-        for width in [40_u16, 80, 120] {
-            let h = p.height(width).min(20);
-            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-            terminal
-                .draw(|frame| {
-                    p.render(frame, Rect::new(0, 0, width, h), &theme);
-                })
-                .expect("render must not panic");
+        // Two cursor positions: an effort-tier model (Opus 4.7) so the
+        // effort row renders, and a no-tier model (Haiku 4.5) so the
+        // hide branch executes. Without the second case the hide path
+        // is reachable only via mutation tests.
+        for setup in [
+            None,                     // Opus 4.7 — has effort tier
+            Some(KeyCode::Char('5')), // Haiku 4.5 — no effort tier
+        ] {
+            let mut p = picker(InitialFocus::Model);
+            if let Some(jump) = setup {
+                p.handle_key(&key(jump));
+            }
+            for width in [40_u16, 80, 120] {
+                let h = p.height(width).min(20);
+                let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        p.render(frame, Rect::new(0, 0, width, h), &theme);
+                    })
+                    .expect("render must not panic");
+            }
         }
     }
 }
