@@ -11,6 +11,8 @@ use crate::tool::ToolRegistry;
 
 // ── Visible Markers ──
 
+/// Inline glyph appended to the chat (and stderr in `--no-tui` mode) when a turn is cancelled
+/// mid-stream. Matched by the chat block layer to render as a dim italic separator.
 pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Agent Events ──
@@ -19,29 +21,36 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 /// (TUI [`ChannelSink`](crate::tui::event::ChannelSink) or stdio [`StdioSink`]).
 #[derive(Debug, Clone)]
 pub(crate) enum AgentEvent {
+    /// Assistant text chunk to append to the in-flight reply.
     StreamToken(String),
+    /// Extended-thinking chunk; rendered separately from `StreamToken` and only when the user
+    /// has thinking display enabled.
     ThinkingToken(String),
+    /// The model invoked a tool — render the call row and prepare the result slot.
     ToolCallStart {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+    /// Tool finished — fill the slot opened by the matching [`Self::ToolCallStart`].
     ToolCallEnd {
         id: String,
         content: String,
         is_error: bool,
         metadata: crate::tool::ToolMetadata,
     },
+    /// A queued mid-turn submit was just spliced into the live transcript; the UI clears its
+    /// queued-prompt indicator.
     PromptDrained(String),
+    /// Turn ended cleanly with a final assistant reply (no further tool rounds).
     TurnComplete,
+    /// User cancelled mid-turn ([`UserAction::Cancel`]); the in-flight reply is truncated and the
+    /// inline [`INTERRUPTED_MARKER`] is rendered.
     Cancelled,
-    SessionTitleUpdated {
-        session_id: String,
-        title: String,
-    },
-    SessionRolled {
-        id: String,
-    },
+    /// Background title generator finished; UI updates the chrome label.
+    SessionTitleUpdated { session_id: String, title: String },
+    /// `/clear` rolled the session — a new session UUID is now active.
+    SessionRolled { id: String },
     /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
     /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
@@ -49,6 +58,8 @@ pub(crate) enum AgentEvent {
         effort: Option<Effort>,
         requested_effort: Option<Effort>,
     },
+    /// User-visible error from the agent loop, session writer, or tool dispatch. Renders as a
+    /// dedicated chat block.
     Error(String),
 }
 
