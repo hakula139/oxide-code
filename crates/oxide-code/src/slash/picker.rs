@@ -95,6 +95,7 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
+    /// Always succeeds — the model list and effort axis are populated unconditionally.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let active_model = info.config.model_id.clone();
         let active_effort = info.config.effort;

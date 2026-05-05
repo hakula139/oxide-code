@@ -1,4 +1,5 @@
-//! `/status` overview modal — read-only single panel of session descriptors. Esc / Enter close.
+//! `/status` overview modal — read-only single panel of session descriptors. Enter closes;
+//! Esc / Ctrl+C cancel via the modal stack's universal handler.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
