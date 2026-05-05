@@ -2,9 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
-    *v == T::default()
-}
+// ── Role ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -12,6 +10,8 @@ pub(crate) enum Role {
     User,
     Assistant,
 }
+
+// ── ContentBlock ──
 
 /// One entry in a [`Message::content`] vector. Variants mirror the Anthropic Messages API
 /// content-block taxonomy verbatim so the same struct serves the wire format, the JSONL
@@ -47,6 +47,12 @@ pub(crate) enum ContentBlock {
         data: String,
     },
 }
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+// ── Message ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Message {
