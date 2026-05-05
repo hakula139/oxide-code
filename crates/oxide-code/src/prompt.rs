@@ -3,8 +3,7 @@
 //! Builds [`PromptParts`]: static sections (identity, guidance, tool
 //! use) that live in the API `system` parameter and cache globally,
 //! plus a `<system-reminder>`-wrapped user context (CLAUDE.md, date)
-//! prepended to the messages array so per-session content doesn't
-//! invalidate the static cache.
+//! prepended to the messages array so per-session content doesn't invalidate the static cache.
 
 pub(crate) mod environment;
 mod instructions;
@@ -20,19 +19,10 @@ use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
 
-/// Marker between static (globally cacheable) and dynamic (per-session)
-/// system prompt sections. Used by the API client to apply `cache_control`
-/// scopes to the static portion.
+/// Marker between static (globally cacheable) and dynamic (per-session) system prompt sections.
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
-/// Assembled prompt split into two API surfaces.
-///
-/// `system_sections` contains the static system prompt sections — one
-/// per API text block, so `cache_control` can apply to the static
-/// portion without re-caching on every turn. `user_context` contains
-/// dynamic content (CLAUDE.md, date) that is prepended to the
-/// `messages` array as a `<system-reminder>`-wrapped user message, so
-/// per-session content doesn't invalidate the static cache.
+/// Static system prompt sections plus dynamic user context (CLAUDE.md, date).
 pub(crate) struct PromptParts {
     pub(crate) system_sections: Vec<String>,
     pub(crate) user_context: Option<String>,
@@ -46,10 +36,6 @@ impl PromptParts {
     }
 }
 
-/// Builds the prompt parts for the agent.
-///
-/// Resolves the working directory and git root automatically, then delegates
-/// to [`assemble`].
 pub(crate) async fn build_prompt(model: &str) -> PromptParts {
     let cwd = std::env::current_dir().ok();
     let git_root = match &cwd {
@@ -60,12 +46,6 @@ pub(crate) async fn build_prompt(model: &str) -> PromptParts {
     assemble(model, cwd.as_deref(), git_root.as_deref()).await
 }
 
-/// Assembles the prompt from explicit path parameters.
-///
-/// The identity prefix required for OAuth is handled by the API client as a
-/// separate system block. This function builds the remaining prompt content:
-/// identity body and static guidance sections go into `system`; CLAUDE.md
-/// and date go into `user_context` as a `<system-reminder>` block.
 async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> PromptParts {
     let env = Environment::detect(model, cwd, git_root);
     let claude_md = instructions::load(cwd, git_root).await;
@@ -97,11 +77,6 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
     }
 }
 
-/// Builds the `<system-reminder>` user message content from dynamic context.
-///
-/// CLAUDE.md and date ride in a synthetic user message rather than the
-/// `system` parameter so per-session content doesn't invalidate the
-/// static-section prompt cache.
 fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     if claude_md.is_empty() {
         return None;
@@ -125,10 +100,6 @@ fn build_user_context(claude_md: &str, date: &str) -> Option<String> {
     })
 }
 
-/// Finds the git repository root from a working directory.
-///
-/// Returns `None` when not inside a git repository or when `git` is not
-/// available.
 async fn find_git_root(cwd: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])

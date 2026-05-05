@@ -47,8 +47,6 @@ mod tests {
 
     #[test]
     fn classify_is_mutating() {
-        // Refuses mid-turn rather than racing the live `messages` /
-        // session writer.
         assert_eq!(ClearCmd.classify(""), SlashKind::Mutating);
     }
 

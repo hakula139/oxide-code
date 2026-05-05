@@ -2,13 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolves an XDG-style directory: prefers `xdg` when set and absolute,
-/// otherwise fall back to `home/home_fallback`. Both branches append
-/// `subdir`. Returns `None` when neither base directory is available.
-///
-/// The `home_fallback` parameter selects the legacy XDG default
-/// (typically `.local/share` for `$XDG_DATA_HOME` or `.config` for
-/// `$XDG_CONFIG_HOME`).
+/// Prefers `xdg` when set and absolute, otherwise `home/home_fallback`. Appends `subdir`.
 pub(crate) fn xdg_dir(
     xdg: Option<PathBuf>,
     home: Option<PathBuf>,
@@ -21,10 +15,7 @@ pub(crate) fn xdg_dir(
     Some(base.join(subdir))
 }
 
-/// Returns `path` as a display string, replacing a `$HOME` prefix with
-/// `~/` when applicable. Falls back to the full absolute display when
-/// the home directory cannot be determined or the path does not live
-/// under it.
+/// Replaces a `$HOME` prefix with `~/`, falling back to the full path.
 pub(crate) fn tildify(path: &Path) -> String {
     dirs::home_dir()
         .and_then(|home| path.strip_prefix(&home).ok().map(Path::to_path_buf))

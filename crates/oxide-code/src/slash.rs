@@ -7,8 +7,7 @@
 //! [`registry::BUILT_INS`].
 //!
 //! Output: every command pushes a `SystemMessageBlock` (info / results)
-//! or an `ErrorBlock` (unknown command, bad args) to the chat. No modal
-//! overlays.
+//! or an `ErrorBlock` (unknown command, bad args) to the chat. No modal overlays.
 //!
 //! Persistence: commands never write user config files. Mutations are
 //! session-local; restart returns to the user-declared config (see
@@ -35,16 +34,12 @@ pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, parse_slash, popup_query};
 pub(crate) use registry::SlashKind;
 
-/// Filter the built-in registry against a popup query (the buffer
-/// with the leading `/` stripped). Convenience wrapper around
-/// [`matcher::filter_and_rank`] so the popup component never touches
-/// `BUILT_INS` directly.
+/// Filter the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
 
-/// Resolves and runs a parsed slash command against the built-in
-/// registry. See [`dispatch_with`].
+/// Resolves and runs a parsed slash command against the built-in registry.
 pub(crate) fn dispatch(
     parsed: &Parsed,
     ctx: &mut SlashContext<'_>,
@@ -52,12 +47,9 @@ pub(crate) fn dispatch(
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
 
-/// Resolves `parsed` against `commands` and runs the matching impl.
-/// Returns `Some(action)` for state-mutating commands so the caller
-/// can forward it to the agent loop; `None` for local / unknown /
-/// errored paths (which already pushed the appropriate chat block).
-///
-/// Extracted so tests can drive the dispatcher with a synthetic registry.
+/// Resolves `parsed` against `commands` and runs the matching impl. Returns `Some(action)` for
+/// state-mutating commands; `None` for local / unknown / errored paths (which already pushed the
+/// appropriate chat block). Extracted so tests can drive a synthetic registry.
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
@@ -95,7 +87,7 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     out
 }
 
-/// Routes a parsed command for the busy-turn dispatch path.
+/// Classify whether `parsed` is safe to dispatch mid-turn.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }
@@ -107,16 +99,12 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     }
 }
 
-/// Shared test fixture — a fully-populated `SessionInfo` for the
-/// per-command test modules.
+/// Shared test fixture — a fully-populated `SessionInfo` for per-command test modules.
 #[cfg(test)]
 pub(crate) fn test_session_info() -> SessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
-    // model_id resolves to a real `MODELS` row so the
-    // `info.marketing_name()` accessor produces a known marketing
-    // name in tests; switch to a non-known id only when the test
-    // explicitly exercises the unknown-id fallback.
+    // model_id resolves to a real MODELS row so marketing_name() produces a known name in tests.
     SessionInfo {
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
@@ -158,16 +146,11 @@ mod tests {
         assert!(outcome.is_none(), "/help is Done, not Forward");
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
-        // Pin: SystemMessageBlock inherits `error_text` default `None`
-        // — flipping that default would let non-error blocks claim
-        // error wording.
         assert_eq!(chat.last_error_text(), None);
     }
 
     #[test]
     fn dispatch_prompt_submit_command_produces_synthesized_body() {
-        // Pin: public `dispatch` (not just `dispatch_with`) surfaces
-        // the synthesized body so the App-side caller can forward it.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -204,8 +187,6 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_command_message_lists_available_and_escape_hint() {
-        // The error must surface alternatives (commands) and the
-        // `//foo` escape — those are the user's two recovery paths.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -227,9 +208,7 @@ mod tests {
 
     // ── dispatch_with ──
 
-    /// Synthetic command with two aliases that always errors — drives
-    /// the dispatcher's alias-resolution and error-wrapping branches
-    /// against a test-controlled registry.
+    /// Always-erroring command with aliases — drives dispatch error-wrapping and alias resolution.
     struct Failing;
     impl registry::SlashCommand for Failing {
         fn name(&self) -> &'static str {
@@ -248,8 +227,6 @@ mod tests {
 
     #[test]
     fn failing_fixture_metadata_matches_what_dispatcher_tests_assume() {
-        // Pin so a fixture drift (one alias missing, no Err) fails
-        // here rather than silently misleading the dispatcher tests.
         assert_eq!(Failing.name(), "failing");
         assert_eq!(Failing.aliases(), &["bust", "boom"]);
         assert_eq!(Failing.description(), "test");
@@ -257,8 +234,6 @@ mod tests {
 
     #[test]
     fn dispatch_with_command_failure_renders_error_block_prefixed_with_name() {
-        // `Err` from `execute` must land as `/name: msg`. Driven through
-        // the real `dispatch_with`, not a reimplementation of its tail.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -272,8 +247,7 @@ mod tests {
 
     #[test]
     fn dispatch_with_alias_routes_to_canonical_impl() {
-        // Alias must run the canonical impl — and the error wrapping
-        // must echo the typed name back (the alias), not the canonical.
+        // Error wrapping must echo the typed alias, not the canonical name.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {
@@ -298,8 +272,6 @@ mod tests {
 
     #[test]
     fn classify_built_in_state_mutating_command_is_mutating() {
-        // `/clear` (rolls state) and `/init` (starts turn) both
-        // override `is_read_only`. Aliases route to the same impl.
         for name in ["clear", "new", "reset", "init"] {
             let parsed = Parsed {
                 name: name.to_owned(),

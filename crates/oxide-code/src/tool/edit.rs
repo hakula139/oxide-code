@@ -250,7 +250,6 @@ async fn edit_file(
 
 // ── Diff Production ──
 
-/// Builds per-match diff chunks with real file line numbers.
 fn build_diff_chunks(
     original: &str,
     old_string: &str,
@@ -372,7 +371,6 @@ fn parse_replacement_count(content: &str) -> Option<usize> {
         .ok()
 }
 
-/// Builds a fallback chunk from raw input strings (line 1).
 pub(crate) fn synthesize_chunk(old: &str, new: &str) -> DiffChunk {
     let mut chunk = DiffChunk {
         old: split_into_diff_lines(old, 1),

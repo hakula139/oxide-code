@@ -1,8 +1,4 @@
-//! `/help` — list every registered command.
-//!
-//! Renders one row per command (not one row per name): aliases live
-//! parenthesized after the canonical name, matching the popup's
-//! display rule.
+//! `/help` — list every registered command. Aliases appear parenthesized after the canonical name.
 
 use std::fmt::Write as _;
 
@@ -27,8 +23,6 @@ impl SlashCommand for HelpCmd {
     }
 }
 
-/// Heading + key-value table + escape-hint footer. The footer is the
-/// only discoverable path to `//foo` short of typing an unknown command.
 fn render_help() -> String {
     let labels: Vec<String> = BUILT_INS.iter().map(|c| display_label(*c)).collect();
     let rows = labels
@@ -43,13 +37,7 @@ fn render_help() -> String {
     out
 }
 
-/// Display label combining canonical name, optional alias list, and
-/// optional usage hint into one cell:
-///
-/// - `/help` — no aliases, no args.
-/// - `/clear (new, reset)` — aliases only.
-/// - `/model <model-id>` — usage only.
-/// - `/clear (new, reset) <args>` — both.
+/// `/name (aliases) <usage>` — combines canonical name, optional alias list, and optional usage.
 fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
     if !cmd.aliases().is_empty() {
@@ -83,8 +71,6 @@ mod tests {
         let mut lines = body.lines();
         assert_eq!(lines.next(), Some("Available Commands"));
         assert_eq!(lines.next(), Some(""), "heading separated by blank line");
-        // Alias presentation is `display_label`'s test concern; here
-        // we just confirm every canonical name appears.
         for cmd in BUILT_INS {
             let needle = format!("/{}", cmd.name());
             assert!(
@@ -96,8 +82,6 @@ mod tests {
 
     #[test]
     fn render_help_includes_escape_tip_footer() {
-        // `//foo` is otherwise only discoverable through the unknown-
-        // command error; the footer is the documented path.
         let body = render_help();
         assert!(body.contains("`//`"), "footer missing tip body: {body}");
         assert!(
@@ -108,8 +92,6 @@ mod tests {
 
     #[test]
     fn render_help_aligns_descriptions_to_a_shared_gutter() {
-        // Pin the absolute column, not just "all rows match" — a
-        // uniformly broken renderer would pass the latter.
         let body = render_help();
         let longest = BUILT_INS
             .iter()
@@ -137,15 +119,11 @@ mod tests {
 
     #[test]
     fn display_label_with_aliases_lists_them_in_parens() {
-        // Synthetic fixture so the test pins the format rule, not a
-        // future built-in's alias list.
         assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
     }
 
     #[test]
     fn fake_fixture_stub_methods_satisfy_trait_contract() {
-        // `display_label` reads only name/aliases/usage; exercise the
-        // unused trait slots here so they aren't silently uncovered.
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -158,9 +136,6 @@ mod tests {
 
     #[test]
     fn display_label_with_usage_appends_hint_after_name() {
-        // No live built-in carries a usage hint, so the `usage()`
-        // branch is dead in the registry — drive synthetic fixtures
-        // to pin both usage-only and aliases+usage shapes.
         assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
         assert_eq!(
             display_label(&Fake::CLEAR_WITH_USAGE),
@@ -168,8 +143,7 @@ mod tests {
         );
     }
 
-    /// Synthetic command flipped per `Fake::*` constructor — covers the
-    /// no-alias / alias-only / usage-only / both-present matrix.
+    /// Covers the no-alias / alias-only / usage-only / both-present matrix.
     struct Fake {
         name: &'static str,
         aliases: &'static [&'static str],

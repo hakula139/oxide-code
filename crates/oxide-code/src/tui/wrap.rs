@@ -4,14 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Wraps a line to fit within `max_width`, preserving visual indentation
-/// on continuation lines.
-///
-/// `continuation_indent` is the number of leading columns consumed by
-/// the continuation prefix. Each continuation line is prefixed with the
-/// spans in `continuation_prefix` (if provided) or plain spaces.
-///
-/// Returns the original line unchanged when it fits within `max_width`.
+/// Wraps a line to fit within `max_width`, preserving visual indentation on continuation lines.
 pub(crate) fn wrap_line(
     line: Line<'static>,
     max_width: usize,
@@ -100,8 +93,7 @@ fn greedy_word_wrap(
 
 /// Consumes one visual line's worth of characters starting at `start`.
 ///
-/// Returns the characters for this line and the index of the first
-/// character of the next line.
+/// Returns the characters for this line and the index of the first character of the next line.
 fn take_one_line(
     chars: &[(char, Style)],
     start: usize,
@@ -169,8 +161,7 @@ fn chars_to_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
 
 // ── Tab Expansion ──
 
-/// Tab stop width for expanding `\t` in tool output. Ratatui renders each
-/// character into fixed-width cells, so tabs must be expanded to spaces.
+/// Tab stop width for expanding `\t` in tool output.
 const TAB_WIDTH: usize = 4;
 
 /// Expand tab characters to spaces, aligning to [`TAB_WIDTH`]-column stops.

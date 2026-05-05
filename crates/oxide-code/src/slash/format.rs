@@ -1,18 +1,11 @@
-//! Shared heading + key-value table renderer for `/help`, `/status`,
-//! and `/config`. Keys are byte-aligned because every key in the slash
-//! module is ASCII.
+//! Shared heading + key-value table renderer for `/help`, `/status`, and `/config`.
 
 use std::fmt::Write as _;
 
-/// Row prefix; leaves room for the `▎` left-bar `SystemMessageBlock`
-/// prepends.
 const ROW_PREFIX: &str = "  ";
-
-/// Gap between key and value columns.
 const COL_GAP: &str = "  ";
 
-/// Append `Heading` + blank line + key-value table. Successive sections
-/// are separated by a single blank line (the `/config` two-section shape).
+/// Append heading + blank line + key-value table. Successive sections separated by a blank line.
 pub(super) fn write_kv_section<'a>(
     out: &mut String,
     heading: &str,
@@ -26,8 +19,7 @@ pub(super) fn write_kv_section<'a>(
     write_kv_table(out, rows);
 }
 
-/// Append a `key  value` table aligned to the longest key. Empty
-/// input is a no-op so callers can branch on whether to emit a heading.
+/// Append a `key  value` table aligned to the longest key. Empty input is a no-op.
 pub(super) fn write_kv_table<'a>(
     out: &mut String,
     rows: impl IntoIterator<Item = (&'a str, &'a str)> + Clone,
@@ -63,8 +55,6 @@ mod tests {
 
     #[test]
     fn write_kv_section_second_section_inserts_blank_separator() {
-        // The `/config` two-section shape: exactly one blank line
-        // separates successive headings.
         let mut out = String::new();
         write_kv_section(&mut out, "First", [("a", "1")]);
         write_kv_section(&mut out, "Second", [("b", "2")]);
@@ -81,7 +71,6 @@ mod tests {
     fn write_kv_table_aligns_value_column_to_longest_key() {
         let mut out = String::new();
         write_kv_table(&mut out, [("a", "1"), ("longer", "2"), ("mid", "3")]);
-        // Pin the absolute byte offset, not just "all rows agree".
         let value_cols: Vec<usize> = out
             .lines()
             .map(|l| l.find(|c: char| c.is_ascii_digit()).expect("value present"))
@@ -90,14 +79,11 @@ mod tests {
             value_cols.windows(2).all(|w| w[0] == w[1]),
             "value columns not aligned: {value_cols:?}",
         );
-        // The shared offset is `prefix(2) + longest_key(6) + gap(2) = 10`.
         assert_eq!(value_cols[0], 10);
     }
 
     #[test]
     fn write_kv_table_empty_input_writes_nothing() {
-        // Pin so callers branching on `out.is_empty()` can't be
-        // regressed by an "always emit a header" tweak.
         let mut out = String::from("preexisting");
         write_kv_table(&mut out, std::iter::empty::<(&str, &str)>());
         assert_eq!(out, "preexisting");
@@ -105,7 +91,6 @@ mod tests {
 
     #[test]
     fn write_kv_table_single_row_uses_zero_padding() {
-        // `gutter == key.len()` ⇒ no padding.
         let mut out = String::new();
         write_kv_table(&mut out, [("only", "value")]);
         assert_eq!(out, "  only  value\n");
@@ -113,8 +98,6 @@ mod tests {
 
     #[test]
     fn write_kv_table_each_row_ends_in_newline() {
-        // Pin trailing `\n` so a switch from `writeln!` to `write!`
-        // would fail here.
         let mut out = String::new();
         write_kv_table(&mut out, [("a", "1"), ("b", "2")]);
         assert_eq!(out.matches('\n').count(), 2);

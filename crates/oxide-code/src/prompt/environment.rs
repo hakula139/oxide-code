@@ -8,13 +8,8 @@ use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 use crate::model::marketing_name;
 use crate::util::env;
 
-/// Fallback used in the `# Environment` prompt section when a value
-/// (cwd, shell, OS version) couldn't be detected.
 const UNKNOWN_MARKER: &str = "(unknown)";
 
-/// Detected runtime environment for the system prompt.
-///
-/// Each field maps to one or more bullets in the `# Environment` section.
 pub(super) struct Environment {
     cwd: String,
     is_git: bool,
@@ -26,10 +21,7 @@ pub(super) struct Environment {
 }
 
 impl Environment {
-    /// Detects the current runtime environment.
-    ///
-    /// All detection is best-effort: failures produce fallback values rather
-    /// than errors, so the system prompt is always constructible.
+    /// Best-effort detection; failures produce fallback values.
     pub(super) fn detect(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> Self {
         let cwd_str = cwd.map_or_else(
             || UNKNOWN_MARKER.to_owned(),
@@ -52,16 +44,10 @@ impl Environment {
         }
     }
 
-    /// The formatted date string (e.g., `"Today's date is 2026-04-12."`).
     pub(super) fn date(&self) -> String {
         format!("Today's date is {}.", self.date)
     }
 
-    /// Render the environment section for the system prompt.
-    ///
-    /// Standard markdown formatting:
-    /// - Top-level items: `- item`
-    /// - Sub-items: `  - item` (2-space indent)
     pub(super) fn render(&self) -> String {
         let model_bullet = match marketing_name(&self.model) {
             Some(name) => format!(
@@ -98,18 +84,13 @@ impl Environment {
 
 // ── Model Metadata ──
 
-/// Maps a model ID to its knowledge cutoff date.
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
     crate::model::lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
 
-/// Maps Rust's OS name to Node's `process.platform` values.
-///
-/// Rust's `std::env::consts::OS` returns `"macos"` on macOS, but Claude
-/// Code (via Node) uses `"darwin"`. This mapping ensures the environment
-/// section matches the expected format.
+/// Maps Rust's `std::env::consts::OS` to Node's `process.platform` values.
 fn normalize_node_platform(os: &str) -> &'static str {
     match os {
         "macos" => "darwin",
@@ -121,7 +102,6 @@ fn normalize_node_platform(os: &str) -> &'static str {
 
 // ── Shell Detection ──
 
-/// Extracts the shell basename from `$SHELL` (e.g. `"zsh"`, `"bash"`).
 fn detect_shell() -> String {
     let shell = env::string("SHELL").unwrap_or_else(|| "unknown".to_owned());
     std::path::Path::new(&shell)
@@ -133,10 +113,6 @@ fn detect_shell() -> String {
 
 // ── OS Version Detection ──
 
-/// Detects the OS version via `platform_info::PlatformInfo`.
-///
-/// Returns a string like `"Darwin 25.3.0"` on macOS or `"Linux 6.1.0"` on
-/// Linux. Falls back to the OS name when detection fails.
 fn detect_os_version() -> String {
     let Ok(info) = PlatformInfo::new() else {
         return std::env::consts::OS.to_owned();

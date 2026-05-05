@@ -1,22 +1,15 @@
-//! Slash-command parser.
-//!
-//! Detects whether a submitted prompt is a local slash command and, if
-//! so, splits it into a name + args pair. Names accept ASCII letters,
-//! digits, `_`, `-`, `:`, and `.` so a future plugin-namespace layer
-//! (e.g. `/plugin:cmd`) doesn't need a parser rewrite.
+//! Slash-command parser. Detects `/cmd args...` and splits into name + args. Names accept ASCII
+//! letters, digits, `_`, `-`, `:`, `.` for forward-compat with plugin namespaces.
 
-/// A parsed `/cmd args...` invocation. `name` is the command name with
-/// the leading `/` stripped; `args` is the remainder, trimmed.
+/// A parsed `/cmd args...` invocation. `name` has the leading `/` stripped; `args` is trimmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parsed {
     pub(crate) name: String,
     pub(crate) args: String,
 }
 
-/// Parses `input` as a slash command, returning `None` for plain
-/// prompts. Leading whitespace is tolerated; `//` (escape sequence),
-/// bare `/`, and names containing characters outside the allowed set
-/// all return `None`.
+/// Parses `input` as a slash command, returning `None` for plain prompts, `//` escape, bare `/`,
+/// or names with disallowed chars.
 pub(crate) fn parse_slash(input: &str) -> Option<Parsed> {
     let rest = input.trim_start().strip_prefix('/')?;
     if rest.is_empty() || rest.starts_with('/') {
@@ -36,12 +29,8 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')
 }
 
-/// Popup-trigger predicate. Returns the in-progress query (the
-/// buffer's leading `/` stripped) when `buffer` reads as a slash
-/// command being typed — `/`, `/c`, `/clear` — and `None` otherwise:
-/// plain prompts, the `//foo` escape, or anything once whitespace
-/// appears (user has committed to typing args). Leading whitespace
-/// is tolerated to match [`parse_slash`].
+/// Returns the in-progress query (leading `/` stripped) when `buffer` looks like a slash command
+/// being typed. `None` for plain prompts, `//` escape, or once whitespace appears (typing args).
 pub(crate) fn popup_query(buffer: &str) -> Option<&str> {
     let rest = buffer.trim_start().strip_prefix('/')?;
     if rest.starts_with('/') || !rest.chars().all(is_name_char) {
@@ -73,8 +62,7 @@ mod tests {
     #[test]
     fn parse_slash_collapses_inner_whitespace_into_args() {
         // The split happens at the first whitespace run; arg-side
-        // internal whitespace is preserved (e.g. `/init please write
-        // CLAUDE.md`).
+        // internal whitespace is preserved (e.g. `/init please write CLAUDE.md`).
         let parsed = parse_slash("/init please write CLAUDE.md").unwrap();
         assert_eq!(parsed.name, "init");
         assert_eq!(parsed.args, "please write CLAUDE.md");
@@ -126,8 +114,7 @@ mod tests {
     #[test]
     fn parse_slash_rejects_non_ascii_or_special_chars_in_name() {
         // Names with chars outside `[A-Za-z0-9_:.\-]` fall through as
-        // "not a command" so the user's prompt isn't hijacked by
-        // stray glyphs.
+        // "not a command" so the user's prompt isn't hijacked by stray glyphs.
         assert!(parse_slash("/foo🦀").is_none());
         assert!(parse_slash("/foo!").is_none());
         assert!(parse_slash("/foo,bar").is_none());
@@ -165,8 +152,7 @@ mod tests {
 
     #[test]
     fn popup_query_hides_for_double_slash_escape() {
-        // `//foo` routes to the model literally, so the popup must
-        // not surface command suggestions.
+        // `//foo` routes to the model literally, so the popup must not surface command suggestions.
         assert!(popup_query("//etc/hosts").is_none());
         assert!(popup_query("//").is_none());
     }

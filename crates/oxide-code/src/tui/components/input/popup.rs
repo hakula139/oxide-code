@@ -10,8 +10,7 @@
 //! normal `text` palette while the rest of the rows render dim, so
 //! the active suggestion stands out by contrast rather than by a
 //! prefix glyph or background fill. Aliases parenthesize only the
-//! alias the user typed (`/clear (new)`); the popup never paints a
-//! full alias list.
+//! alias the user typed (`/clear (new)`); the popup never paints a full alias list.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -24,19 +23,11 @@ use crate::slash::{MatchedCommand, filter_built_ins};
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
 
-/// Maximum visible rows. Beyond this the popup truncates with a
-/// `... (N more)` footer so the input layout doesn't lose half the
-/// terminal to the overlay.
 const MAX_VISIBLE_ROWS: usize = 8;
 
-/// Padding columns between the name column and the description.
 const COLUMN_GAP: usize = 2;
 
-/// Slash-command autocomplete overlay.
-///
-/// `matches.is_empty()` is the visibility predicate — callers set the
-/// query via [`Self::set_query`], and any state where the query is
-/// `None` or yields no matches collapses the popup to zero rows.
+/// Slash-command autocomplete overlay. Empty `matches` means hidden.
 pub(crate) struct SlashPopup {
     theme: Theme,
     matches: Vec<MatchedCommand>,
@@ -52,9 +43,6 @@ impl SlashPopup {
         }
     }
 
-    /// Update the popup's match list from a typed query. `query` is
-    /// the buffer with the leading `/` stripped; `None` hides the
-    /// popup outright (e.g., the buffer no longer starts with `/`).
     pub(crate) fn set_query(&mut self, query: Option<&str>) {
         let Some(q) = query else {
             self.matches.clear();
@@ -65,17 +53,14 @@ impl SlashPopup {
         self.selected = self.selected.min(self.matches.len().saturating_sub(1));
     }
 
-    /// Whether the popup currently has any matches to draw.
     pub(crate) fn is_visible(&self) -> bool {
         !self.matches.is_empty()
     }
 
-    /// Currently-selected match. `None` when the popup is hidden.
     pub(crate) fn selected(&self) -> Option<&MatchedCommand> {
         self.matches.get(self.selected)
     }
 
-    /// Advance the selection one row, wrapping past the last.
     pub(crate) fn select_next(&mut self) {
         if self.matches.is_empty() {
             return;
@@ -83,7 +68,6 @@ impl SlashPopup {
         self.selected = (self.selected + 1) % self.matches.len();
     }
 
-    /// Move the selection back one row, wrapping past the first.
     pub(crate) fn select_prev(&mut self) {
         if self.matches.is_empty() {
             return;
@@ -376,8 +360,7 @@ mod tests {
     #[test]
     fn render_alias_match_parenthesizes_only_typed_alias() {
         // No live registry command has aliases yet, but the renderer
-        // is the place where the alias-display rule lives. Drive it
-        // via a hand-rolled match list.
+        // is the place where the alias-display rule lives. Drive it via a hand-rolled match list.
         let mut popup = SlashPopup::new(&theme());
         popup.matches = vec![MatchedCommand {
             name: "clear",
@@ -406,8 +389,7 @@ mod tests {
     #[test]
     fn render_overflow_emits_n_more_footer_when_matches_exceed_cap() {
         // Cap is 8; a hand-rolled list of 10 commands triggers the
-        // "... (N more)" footer. Live registry is too small to drive
-        // this branch.
+        // "... (N more)" footer. Live registry is too small to drive this branch.
         let mut popup = SlashPopup::new(&theme());
         popup.matches = (0..10)
             .map(|i| MatchedCommand {

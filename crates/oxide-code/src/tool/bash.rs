@@ -10,12 +10,8 @@ use tokio::process::Command;
 
 use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
-/// Default per-command timeout — two minutes covers typical
-/// compile / test cycles without letting a runaway command hold
-/// the agent loop indefinitely.
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Stand-in content when a command produced no stdout / stderr.
 const NO_OUTPUT_MARKER: &str = "(no output)";
 
 pub(crate) struct BashTool;
@@ -58,12 +54,6 @@ impl Tool for BashTool {
         extract_input_field(input, "command")
     }
 
-    /// Bash uses `$ <command>` as its visual identity — the dollar
-    /// icon already reads as a shell prompt, so wrapping the command
-    /// in `Bash(...)` would be redundant. When the `command` field is
-    /// absent (malformed input — schema validation should catch this
-    /// upstream) fall back to the default shape (`Bash`) so the UI
-    /// still prints a readable label rather than a bare `$ `.
     fn summarize_call(&self, input: &serde_json::Value) -> String {
         extract_input_field(input, "command").map_or_else(|| title_case(self.name()), str::to_owned)
     }
@@ -115,8 +105,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    // Own process group so timeout can kill the whole tree, not just bash —
-    // otherwise `(sleep 3600; ...) &` outlives the direct child.
+    // Own process group so timeout can kill the whole tree.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -182,10 +171,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         content.push_str(NO_OUTPUT_MARKER);
     }
 
-    // Only flag execution failures (timeout, spawn error) as is_error.
-    // Nonzero exit codes are informational — many commands use them normally
-    // (grep returns 1 for no matches, diff returns 1 for differences, etc.).
-    // The model can determine severity from the output content itself.
+    // Nonzero exit codes are informational; only spawn/timeout failures are is_error.
     ToolOutput {
         content,
         is_error: false,
@@ -195,9 +181,6 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
 
 // ── Process Group Cleanup ──
 
-/// Best-effort SIGKILL of an entire process group on Unix via the safe
-/// `nix` wrapper around `killpg(2)`. Errors are ignored (`ESRCH` just
-/// means the group already exited).
 #[cfg(unix)]
 fn kill_process_group(pgid: Option<u32>) {
     use nix::sys::signal::{Signal, killpg};

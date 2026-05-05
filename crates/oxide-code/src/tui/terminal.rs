@@ -16,17 +16,9 @@ use ratatui::prelude::CrosstermBackend;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Initializes the terminal for TUI mode.
+/// Initializes the terminal for TUI mode (raw mode, alt screen, mouse, Kitty keyboard).
 ///
-/// - Enters raw mode (no line buffering, no echo).
-/// - Switches to the alternate screen buffer (preserves the user's scrollback).
-/// - Enables mouse capture for scroll and click events.
-/// - Pushes `DISAMBIGUATE_ESCAPE_CODES` (Kitty keyboard protocol) so
-///   Shift+Enter is distinguishable from Enter on supporting terminals.
-/// - Clears the screen.
-///
-/// Returns a [`Terminal`] ready for rendering. The caller must ensure
-/// [`restore`] is called on exit (including panics — see [`install_panic_hook`]).
+/// The caller must ensure [`restore`] is called on exit (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -48,14 +40,7 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Restores the terminal to its original state.
-///
-/// - Disables mouse capture.
-/// - Leaves the alternate screen buffer.
-/// - Disables raw mode.
-/// - Shows the cursor (in case it was hidden).
-///
-/// Safe to call multiple times — each operation is idempotent.
+/// Restores the terminal to its original state. Safe to call multiple times.
 pub(crate) fn restore() {
     let mut stdout = io::stdout();
     _ = leave_tui_mode(&mut stdout);
@@ -73,18 +58,7 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Wraps a render closure with synchronized output sequences.
-///
-/// Sends `BeginSynchronizedUpdate` before rendering and
-/// `EndSynchronizedUpdate` after, telling the terminal emulator to buffer
-/// the entire frame and paint it atomically. This eliminates tearing on
-/// terminals that support DEC private mode 2026 (Alacritty, kitty, iTerm2,
-/// `WezTerm`, Windows Terminal, tmux).
-///
-/// Terminals that don't recognize the sequence silently ignore it.
-///
-/// Generic over the backend writer so tests can drive it with an
-/// in-memory `Vec<u8>`; production callers pass the [`Tui`] alias.
+/// Brackets a render closure with DEC synchronized-update sequences to eliminate tearing.
 pub(crate) fn draw_sync<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     f: impl FnOnce(&mut ratatui::Frame),
@@ -96,9 +70,7 @@ pub(crate) fn draw_sync<W: Write>(
     Ok(())
 }
 
-/// Installs a panic hook that restores the terminal before printing the
-/// panic message. Without this, a panic leaves the terminal in raw mode
-/// with the alternate screen active, making the error unreadable.
+/// Installs a panic hook that restores the terminal before printing the panic message.
 pub(crate) fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -116,10 +88,6 @@ mod tests {
     use super::*;
 
     // ── enter_tui_mode ──
-    //
-    // `init` needs a real TTY for raw mode and terminal construction.
-    // The extracted command-emission helpers are testable with an
-    // in-memory writer, which pins the parts we own.
 
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
     const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
@@ -139,9 +107,6 @@ mod tests {
     }
 
     // ── leave_tui_mode ──
-    //
-    // `restore` also touches raw mode, so the byte-emission helper is
-    // the deterministic piece we can cover in-process.
 
     const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
@@ -161,19 +126,10 @@ mod tests {
     }
 
     // ── draw_sync ──
-    //
-    // `install_panic_hook` clobbers process-global panic state and
-    // cannot run cleanly under parallel tests. `draw_sync` is the
-    // remaining function whose behavior we can pin in-process by
-    // swapping `Stdout` for an in-memory writer.
 
-    // DEC private mode 2026 on/off escape sequences emitted by
-    // `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`.
     const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
     const END_SYNC: &[u8] = b"\x1b[?2026l";
 
-    /// `Write` sink that mirrors every byte into a shared buffer the
-    /// test can inspect after the terminal has borrowed the backend.
     #[derive(Clone)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 

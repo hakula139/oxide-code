@@ -4,10 +4,8 @@ use std::collections::HashMap;
 
 use crate::tool::ToolMetadata;
 
-/// Sentinel for orphan results whose start event is missing.
 pub(crate) const FALLBACK_RESULT_HEADER: &str = "(result)";
 
-/// Resolves the header: metadata title > pending-call label > fallback.
 pub(crate) fn result_header(metadata: &ToolMetadata, pending_label: Option<&str>) -> String {
     metadata
         .title
@@ -20,8 +18,6 @@ pub(crate) fn result_header(metadata: &ToolMetadata, pending_label: Option<&str>
 pub(crate) struct PendingCall {
     pub(crate) label: String,
     pub(crate) name: String,
-    /// Retained so structured result views can access original arguments
-    /// without re-parsing the transcript.
     pub(crate) input: serde_json::Value,
 }
 
@@ -43,7 +39,6 @@ impl PendingCalls {
         self.map.remove(id)
     }
 
-    /// Evicts stale entries at turn boundaries.
     pub(crate) fn clear(&mut self) {
         self.map.clear();
     }

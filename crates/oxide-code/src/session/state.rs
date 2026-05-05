@@ -27,20 +27,14 @@ const MAX_TITLE_LEN: usize = 80;
 // ── SessionState ──
 
 pub(super) struct SessionState {
-    /// Cloned out by `SessionHandle::session_id` so `&str` deref stays
-    /// off the cmd channel.
     pub(super) session_id: Arc<str>,
-    /// Cloned at start so the first append can drive `Pending → Active`.
     store: SessionStore,
     writer_status: WriterStatus,
-    /// `parent_uuid` for the next recorded message.
     last_message_uuid: Option<Uuid>,
-    /// Loaded message count for resumed sessions; `0` for fresh.
-    /// `finish_entries` skips the summary when nothing was added.
+    /// Loaded count on resume (`0` for fresh). `finish_entries` skips the summary when unchanged.
     initial_message_count: u32,
     message_count: u32,
-    /// Latched the first time a user-text message lands so we don't
-    /// re-promote a later user message to a duplicate title.
+    /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
     finished: bool,
 }
@@ -67,8 +61,7 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active` because the loader
-    /// already had to read the file.
+    /// Resumed sessions land directly in `Active` because the loader already read the file.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -101,9 +94,7 @@ impl SessionState {
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(message)
         {
-            // Latch the flag before the title push — if the later flush
-            // fails we still won't promote the next user message to a
-            // duplicate title.
+            // Latch before the title push so a later flush failure won't produce a duplicate.
             self.first_user_prompt_seen = true;
             ai_title_seed = Some(text.to_owned());
             entries.push(Entry::Title {
@@ -136,8 +127,7 @@ impl SessionState {
             return Vec::new();
         }
         self.finished = true;
-        // message_count rather than writer status — writer may still be Pending in a
-        // batched Finish.
+        // Writer may still be Pending in a batched Finish; key off message_count instead.
         if self.message_count == 0 {
             return Vec::new();
         }
@@ -155,7 +145,7 @@ impl SessionState {
         entries
     }
 
-    /// Writes entries in one flush; transitions writer on failure for next-batch retry.
+    /// Writes entries in one flush; transitions to Broken on failure so next batch reopens.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -167,8 +157,7 @@ impl SessionState {
             }
             writer.flush()
         })();
-        // `BufWriter`'s buffer is undefined after a partial write — flag
-        // Broken so the next batch reopens instead of poisoning the flush.
+        // BufWriter's buffer is undefined after a partial write — flag Broken so next batch reopens.
         self.writer_status = match result {
             Ok(()) => WriterStatus::Active(writer),
             Err(_) => WriterStatus::Broken,
@@ -176,9 +165,8 @@ impl SessionState {
         result
     }
 
-    /// Returns a writer, transitioning from Pending or Broken as needed.
     fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
-        // Temporarily swap with Broken to take ownership.
+        // Swap with Broken to take ownership; restore on success or error.
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
             WriterStatus::Active(w) => Ok(w),
             WriterStatus::Pending { header } => match self.store.create(&header) {
@@ -232,13 +220,7 @@ pub(super) fn extract_user_text(message: &Message) -> Option<&str> {
     })
 }
 
-/// Truncates a title to `max_len` characters, appending [`ELLIPSIS`]
-/// when truncated.
-///
-/// `max_len` must be at least `ELLIPSIS_WIDTH + 1` (room for the marker
-/// plus at least one character of the title). Only internal callers
-/// drive this with [`MAX_TITLE_LEN`] = 80, so the precondition is a
-/// sanity check, not user input handling.
+/// Truncates a title to `max_len` characters, appending [`ELLIPSIS`] when truncated.
 fn truncate_title(s: &str, max_len: usize) -> String {
     debug_assert!(
         max_len > ELLIPSIS_WIDTH,
@@ -515,8 +497,7 @@ mod tests {
 
     #[test]
     fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
-        // The next batch must retry create rather than open_append a
-        // file that was never created.
+        // The next batch must retry create rather than open_append a file that was never created.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");

@@ -7,12 +7,10 @@ use tracing::debug;
 
 use super::wire::StreamEvent;
 
-/// Hard cap on the unterminated SSE frame buffer. A misbehaving upstream that
-/// never emits `\n\n` would otherwise let `buf` grow without bound until OOM.
+/// Hard cap — a misbehaving upstream that never emits `\n\n` would otherwise grow until OOM.
 #[cfg(not(test))]
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
-/// Tests use a smaller cap so the overflow path is exercised in
-/// milliseconds without allocating 8 MiB of mock body per run.
+/// Tests use a smaller cap so the overflow path exercises without allocating 8 MiB per run.
 #[cfg(test)]
 const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
@@ -47,8 +45,7 @@ pub(super) async fn stream_sse(
     }
 
     let mut stream = response.bytes_stream();
-    // Byte buffer: reassembles UTF-8 sequences split across chunk boundaries
-    // intact (`from_utf8_lossy` would inject U+FFFD at the boundary).
+    // Byte buffer reassembles UTF-8 split across chunk boundaries (lossy would inject U+FFFD).
     let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
@@ -91,9 +88,7 @@ pub(super) async fn stream_sse(
     Ok(())
 }
 
-/// Builds an actionable error message for a non-2xx Anthropic API
-/// response. The raw body is always appended as `details: {body}` so
-/// debug context is preserved on every branch.
+/// Builds an actionable error message for a non-2xx Anthropic API response.
 pub(super) fn format_api_error(
     status: reqwest::StatusCode,
     retry_after: Option<&str>,
@@ -116,10 +111,8 @@ pub(super) fn format_api_error(
 
 /// Parses a single SSE frame into a [`StreamEvent`].
 ///
-/// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
-/// Anthropic currently emits single-line data, but we follow the spec
-/// so a future multi-line payload doesn't silently lose everything
-/// but the last line.
+/// Per the SSE spec, multiple `data:` lines concatenate with `\n`. Anthropic currently emits
+/// single-line data, but we follow the spec so multi-line payloads round-trip correctly.
 pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 

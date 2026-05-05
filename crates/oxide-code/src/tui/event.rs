@@ -7,9 +7,6 @@ use crate::agent::event::{AGENT_EVENT_CHANNEL_CAP, AgentEvent, AgentSink};
 // ── Channel Sink (TUI) ──
 
 /// Sends agent events through an `mpsc` channel for TUI consumption.
-///
-/// Cloneable so background helpers (e.g. the AI title generator) can hold
-/// their own handle and emit events alongside the main agent loop.
 #[derive(Clone)]
 pub(crate) struct ChannelSink {
     tx: mpsc::Sender<AgentEvent>,
@@ -37,8 +34,7 @@ impl AgentSink for ChannelSink {
     }
 }
 
-/// Creates a linked channel pair: the `ChannelSink` for the agent loop, and
-/// the bounded `Receiver` for the TUI.
+/// Creates a linked `ChannelSink` + bounded `Receiver` pair.
 pub(crate) fn channel() -> (ChannelSink, mpsc::Receiver<AgentEvent>) {
     let (tx, rx) = mpsc::channel(AGENT_EVENT_CHANNEL_CAP);
     (ChannelSink::new(tx), rx)

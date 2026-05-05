@@ -10,8 +10,7 @@
 //! - **Terminal default**: `"reset"` — the user's terminal palette
 //!   value; useful for slots that should follow the terminal scheme.
 //!
-//! Three-digit hex shorthand (`#fff`) is intentionally rejected to
-//! keep the format unambiguous.
+//! Three-digit hex shorthand (`#fff`) is intentionally rejected to keep the format unambiguous.
 
 use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
@@ -139,8 +138,7 @@ mod tests {
 
     #[test]
     fn parse_color_hex_rejects_missing_hash_prefix() {
-        // Without `#`, falls through to the named lookup and reports
-        // an unknown color.
+        // Without `#`, falls through to the named lookup and reports an unknown color.
         let err = parse_color("cdd6f4").expect_err("bare hex without # rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("cdd6f4"), "{msg}");

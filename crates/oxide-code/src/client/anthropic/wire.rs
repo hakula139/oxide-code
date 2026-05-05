@@ -15,36 +15,26 @@ pub(super) struct CreateMessageRequest<'a> {
     pub(super) max_tokens: u32,
     pub(super) stream: bool,
     pub(super) metadata: RequestMetadata,
-    /// Serialized before `messages` so the billing header's `cch=00000`
-    /// placeholder appears first in the JSON, making
-    /// [`super::billing::inject_cch`]'s single-occurrence replacement
-    /// safe even when tool results contain the literal placeholder
-    /// string.
+    /// Serialized before `messages` so the billing header's `cch=00000` placeholder appears
+    /// first, making [`super::billing::inject_cch`]'s single-occurrence replacement safe.
     pub(super) system: Vec<SystemBlock<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: Option<&'a ThinkingConfig>,
-    /// Carries both the `format` (JSON-schema-constrained output for
-    /// one-shot calls) and `effort` (agentic-path intelligence tier)
-    /// knobs. Wrapped in `Option` so an empty `OutputConfig` never
-    /// ships — callers build one via [`OutputConfig::new`] and pass
-    /// `None` when neither sub-field is set.
+    /// Carries both `format` (JSON-schema for one-shots) and `effort` (agentic intelligence
+    /// tier). Wrapped in `Option` so an empty `OutputConfig` never ships.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) output_config: Option<OutputConfig<'a>>,
-    /// `context_management.edits` — the client-side context-editing
-    /// directive that partners the `context-management-2025-06-27`
-    /// beta header. Populated on the streaming path for any model
-    /// with [`Capabilities::context_management`][crate::model::Capabilities::context_management]
-    /// set.
+    /// `context_management.edits` — partners the `context-management-2025-06-27` beta header.
+    /// Populated on the streaming path for any model with `Capabilities::context_management`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) context_management: Option<ContextManagement>,
     pub(super) messages: &'a [Message],
 }
 
-/// Shared wrapper for the `output_config` body field. Either field
-/// may be absent; when both are, [`Self::new`] returns `None` so the
-/// builder never ships an empty object.
+/// Shared wrapper for the `output_config` body field. [`Self::new`] returns `None` when both
+/// fields are absent so the builder never ships an empty object.
 #[derive(Serialize)]
 pub(super) struct OutputConfig<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -54,17 +44,14 @@ pub(super) struct OutputConfig<'a> {
 }
 
 impl<'a> OutputConfig<'a> {
-    /// Returns `None` when every field is empty so callers can avoid
-    /// shipping a bare `{}`. `Some(_)` otherwise.
+    /// Returns `None` when both fields are empty; `Some(_)` otherwise.
     pub(super) fn new(format: Option<&'a OutputFormat>, effort: Option<Effort>) -> Option<Self> {
         (format.is_some() || effort.is_some()).then_some(Self { format, effort })
     }
 }
 
-/// `context_management.edits` body field. oxide-code mirrors
-/// claude-code 2.1.119's observed wire shape — a single
-/// `clear_thinking_20251015` edit with `keep = "all"` on every
-/// agentic request that also ships the matching beta header.
+/// `context_management.edits` body field. Mirrors claude-code 2.1.119's wire shape — a single
+/// `clear_thinking_20251015` edit with `keep = "all"` on every agentic request.
 #[derive(Serialize)]
 pub(super) struct ContextManagement {
     edits: [ContextEdit; 1],
@@ -72,8 +59,6 @@ pub(super) struct ContextManagement {
 
 impl ContextManagement {
     /// Wire shape claude-code 2.1.119 sends on every 4.6+ request.
-    /// Single place to edit when Anthropic ships newer edit types or
-    /// we need to diverge from the default.
     pub(super) fn clear_thinking_keep_all() -> Self {
         Self {
             edits: [ContextEdit {
@@ -90,10 +75,7 @@ struct ContextEdit {
     keep: &'static str,
 }
 
-/// JSON-schema-constrained completion format. Constructed via
-/// [`OutputFormat::json_schema`]; callers typically build one per
-/// request shape (e.g., `{"title": string}`) and pass it by reference
-/// to [`super::Client::complete`].
+/// JSON-schema-constrained completion format for [`super::Client::complete`].
 #[derive(Debug, Serialize)]
 pub(crate) struct OutputFormat {
     r#type: &'static str,
@@ -101,10 +83,7 @@ pub(crate) struct OutputFormat {
 }
 
 impl OutputFormat {
-    /// Builds a `json_schema` output format from a precomputed schema
-    /// value. The schema must already match Anthropic's expectations
-    /// (`type: "object"`, `additionalProperties: false`, explicit
-    /// `required` array) — we don't validate here.
+    /// Builds a `json_schema` output format from a precomputed schema value.
     pub(crate) fn json_schema(schema: serde_json::Value) -> Self {
         Self {
             r#type: "json_schema",
@@ -113,21 +92,15 @@ impl OutputFormat {
     }
 }
 
-/// Top-level `metadata` object on every outbound request.
-///
-/// `user_id` is a stringified JSON object with the canonical claude-code
-/// shape `{device_id, account_uuid, session_id}`; field order is part of
-/// the wire fingerprint. The API receives it as a flat string, not a
-/// nested object.
+/// Top-level `metadata` object on every outbound request. `user_id` is a stringified JSON
+/// object (`{device_id, account_uuid, session_id}`); field order is part of the wire fingerprint.
 #[derive(Serialize)]
 pub(super) struct RequestMetadata {
     pub(super) user_id: String,
 }
 
-/// A text block in the system prompt array. The Anthropic API accepts `system`
-/// as either a string or an array of these blocks. Using the array form lets
-/// the identity prefix occupy its own block, which is required for OAuth
-/// validation on non-Haiku models.
+/// A text block in the system prompt array. The array form lets the identity prefix occupy its
+/// own block, which is required for OAuth validation on non-Haiku models.
 #[derive(Serialize)]
 pub(super) struct SystemBlock<'a> {
     pub(super) r#type: &'static str,
@@ -136,17 +109,9 @@ pub(super) struct SystemBlock<'a> {
     pub(super) cache_control: Option<CacheControl>,
 }
 
-/// Prompt caching control. The `scope` field determines the cache sharing
-/// level: `"global"` for static content identical across sessions (1P only),
-/// `None` for the default org-scoped ephemeral cache (universally accepted).
-/// The `ttl` field overrides the server default (5 m as of 2026-03) —
+/// Prompt caching control. `scope: "global"` shares cache across sessions (1P only); `None`
+/// uses the default org-scoped ephemeral cache. `ttl` overrides the server default (5 m) —
 /// oxide-code defaults to `"1h"`, opt-out via `prompt_cache_ttl = "5m"`.
-///
-/// `scope: "global"` must be a true prefix of all preceding request content
-/// — the server rejects a global-scoped block preceded by a non-global
-/// block (including tool definitions, which render before `system`). See
-/// [`super::betas::is_first_party_base_url`] for where the gating decision
-/// is made.
 #[derive(Serialize)]
 pub(super) struct CacheControl {
     pub(super) r#type: &'static str,
@@ -191,8 +156,6 @@ pub(crate) enum StreamEvent {
     Error {
         error: ApiError,
     },
-    /// Catch-all for unrecognized event types.
-    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
@@ -232,8 +195,6 @@ pub(crate) enum ContentBlockInfo {
     RedactedThinking {
         data: String,
     },
-    /// Catch-all for unrecognized block types.
-    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }
@@ -254,12 +215,9 @@ pub(crate) enum Delta {
     ThinkingDelta {
         thinking: String,
     },
-    /// Full signature value (overwrites, not appended).
     SignatureDelta {
         signature: String,
     },
-    /// Catch-all for unrecognized delta types.
-    /// Silently skipped during stream processing.
     #[serde(other)]
     Unknown,
 }

@@ -255,16 +255,12 @@ pub(crate) enum GateError {
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 
-/// Stub returned in place of file bytes on a full re-Read of an
-/// unchanged file. Signals that the prior Read is still authoritative.
+/// Returned in place of file bytes on a redundant full re-Read.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
 
 // ── Testing ──
 
-/// Shared test fixtures. Centralized so the five callers don't each
-/// grow near-duplicates that subtly disagree on what a "seeded
-/// tracker" means.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::Path;
@@ -273,15 +269,10 @@ pub(crate) mod testing {
 
     use super::{FileTracker, LastView};
 
-    /// Fresh `Arc<FileTracker>` for callers that need ownership
-    /// (`ReadTool::new`, `EditTool::new`, `WriteTool::new`); plain
-    /// callers use `FileTracker::default()`.
     pub(crate) fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::default())
     }
 
-    /// Seeds `tracker` with a full Read of `path` from disk, mirroring
-    /// a real Read turn.
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
         let bytes = std::fs::read(path).unwrap();
         let meta = std::fs::metadata(path).unwrap();
@@ -294,17 +285,12 @@ pub(crate) mod testing {
         );
     }
 
-    /// Fresh tracker pre-seeded with a full Read of `path` — the
-    /// shape most edit-tool tests want.
     pub(crate) fn tracker_seeded(path: &Path) -> FileTracker {
         let tracker = FileTracker::default();
         seed_full_read(&tracker, path);
         tracker
     }
 
-    /// Writes `bytes` to `path`, records the resulting state as a
-    /// successful Edit / Write, and returns the captured
-    /// `(mtime, size)` for assertions.
     pub(crate) fn record_tracked_file(
         tracker: &FileTracker,
         path: &Path,

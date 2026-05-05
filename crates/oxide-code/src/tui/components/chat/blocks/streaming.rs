@@ -2,30 +2,19 @@
 //!
 //! Holds the in-flight assistant response as tokens arrive, with a
 //! per-line rendered-prefix cache so committed text is not re-parsed on
-//! every frame. Promoted to a committed [`super::AssistantText`] block
-//! on `commit_streaming`.
+//! every frame. Promoted to a committed [`super::AssistantText`] block on `commit_streaming`.
 
 use ratatui::text::Line;
 
 use super::RenderCtx;
 use super::assistant::render_assistant_markdown;
 
-/// Mutable streaming state for the current assistant response. Not a
-/// [`ChatBlock`](super::ChatBlock) — its render path needs context from
-/// the surrounding chat (whether it continues the prior turn) that the
-/// trait doesn't carry.
 pub(crate) struct StreamingAssistant {
-    /// Full buffered text as it arrives.
     buffer: String,
-    /// Rendered lines for the stable prefix of the buffer. Avoids
-    /// re-parsing committed text on every frame.
+    /// Rendered lines for the stable prefix up to `rendered_boundary`.
     rendered: Vec<Line<'static>>,
-    /// Byte offset in `buffer` up to which `rendered` is current. Text
-    /// before this offset is cached; text past it needs parsing.
     rendered_boundary: usize,
-    /// Viewport width at which `rendered` was produced. When the
-    /// viewport resizes mid-stream, the cache must be cleared so lines
-    /// re-wrap to the new width.
+    /// Width at which `rendered` was produced; cache invalidates on resize.
     cached_width: u16,
 }
 
@@ -43,9 +32,6 @@ impl StreamingAssistant {
         self.buffer.push_str(token);
     }
 
-    /// Take ownership of the accumulated buffer, leaving the streaming
-    /// state empty. The caller promotes the buffer into an
-    /// [`AssistantText`](super::AssistantText) block.
     pub(crate) fn take_buffer(&mut self) -> String {
         self.rendered.clear();
         self.rendered_boundary = 0;
@@ -53,7 +39,6 @@ impl StreamingAssistant {
         std::mem::take(&mut self.buffer)
     }
 
-    /// Drop the cache when the viewport changes width so lines re-wrap.
     pub(crate) fn invalidate_cache_for_width(&mut self, width: u16) {
         if self.cached_width != 0 && self.cached_width != width {
             self.rendered.clear();
@@ -63,8 +48,6 @@ impl StreamingAssistant {
     }
 
     /// Caches rendered lines up to the last `\n\n` boundary.
-    /// Splitting at `\n\n` (not `\n`) preserves inter-paragraph spacing
-    /// that pulldown-cmark only emits in a single-pass parse.
     pub(crate) fn advance_cache(&mut self, ctx: &RenderCtx<'_>, continues_turn: bool) {
         if ctx.width == 0 {
             return;
@@ -100,8 +83,6 @@ impl StreamingAssistant {
         ctx: &RenderCtx<'_>,
         continues_turn: bool,
     ) {
-        // Leading gap when starting a fresh turn and the transcript
-        // already has content.
         if !continues_turn && super::last_has_width(out) {
             out.push(Line::raw(""));
         }
@@ -113,26 +94,16 @@ impl StreamingAssistant {
             return;
         }
 
-        // Cache ends on a paragraph break; the tail is a new paragraph
-        // (possibly still being typed). Insert the separator that a
-        // single-pass renderer would produce between them.
         let cache_empty = self.rendered.is_empty();
         if !cache_empty {
             out.push(Line::raw(""));
         }
 
-        // Full-tail parse: pulldown's block separators (blank-line
-        // before list / heading / fence) only fire on a single-pass
-        // parse. Splitting the tail off to render raw would strip
-        // them — a bounded one-frame flash on unclosed inline markers
-        // isn't worth that persistent bug.
+        // Full-tail parse: splitting would lose pulldown's block separators.
         let starts_new_turn = !continues_turn && cache_empty;
         out.extend(render_assistant_markdown(tail, ctx, starts_new_turn));
     }
 
-    // Test-only accessors for sibling-module tests that assert on
-    // cache bookkeeping. Gated to keep the API surface minimal in
-    // production builds.
     #[cfg(test)]
     pub(crate) fn rendered_boundary(&self) -> usize {
         self.rendered_boundary

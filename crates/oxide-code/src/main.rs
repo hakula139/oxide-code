@@ -40,7 +40,7 @@ use tool::{
 };
 use util::path::tildify;
 
-/// Computed before the tokio runtime starts (unsound under multi-threaded).
+// Computed before the tokio runtime starts (unsound under multi-threaded).
 static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
 
 #[derive(Parser)]
@@ -399,11 +399,7 @@ async fn agent_loop_task(
     Ok(())
 }
 
-/// Apply a [`UserAction::SwapConfig`] to the live `Client` and emit
-/// [`AgentEvent::ConfigChanged`]. Order is load-bearing: the model
-/// swap re-clamps existing effort first, then the explicit effort
-/// pick (if any) clamps against the new model's caps. `requested_effort`
-/// echoes the user's pick so the UI can surface clamping.
+/// Order is load-bearing: model swap re-clamps effort first, then the explicit pick.
 fn apply_swap_config(
     client: &mut Client,
     sink: &dyn AgentSink,
@@ -501,7 +497,7 @@ async fn bare_repl(
     let failure = session.finalize(file_tracker.snapshot_all()).await;
     sink.session_write_error(failure.as_deref());
 
-    // tokio::io::stdin's blocking thread hangs runtime Drop on signal exit.
+    // tokio::io::stdin's blocking thread hangs runtime Drop on signal.
     if shutdown_fired {
         std::process::exit(0);
     }

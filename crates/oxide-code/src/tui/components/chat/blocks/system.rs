@@ -42,8 +42,7 @@ impl ChatBlock for SystemMessageBlock {
             out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
         }
         if out.is_empty() {
-            // Empty content → single bar so the block is visible
-            // rather than silently dropped.
+            // Empty content → single bar so the block is visible rather than silently dropped.
             out.push(Line::from(Span::styled(
                 TOOL_BORDER_PREFIX.to_owned(),
                 bar_style,
@@ -53,8 +52,6 @@ impl ChatBlock for SystemMessageBlock {
     }
 }
 
-/// Wrap-continuation prefix that keeps `▎` aligned under the first
-/// line's bar and carries `bar_style` for theme overrides.
 fn bar_continuation_prefix(bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = TOOL_BORDER_PREFIX
         .find(BAR)
@@ -113,8 +110,7 @@ mod tests {
 
     #[test]
     fn render_trailing_newline_does_not_emit_extra_blank_row() {
-        // Pin `str::lines()` semantics — `split('\n')` would emit an
-        // extra empty trailing row.
+        // Pin `str::lines()` semantics — `split('\n')` would emit an extra empty trailing row.
         let theme = Theme::default();
         let block = SystemMessageBlock::new(indoc! {"
             alpha
@@ -127,8 +123,7 @@ mod tests {
 
     #[test]
     fn render_wraps_long_body_under_bar_at_viewport_width() {
-        // Wrapped continuation lines must re-emit the bar so the
-        // block reads as one visual unit.
+        // Wrapped continuation lines must re-emit the bar so the block reads as one visual unit.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("alpha beta gamma delta epsilon zeta");
         let lines = block.render(&ctx_at(16, &theme));

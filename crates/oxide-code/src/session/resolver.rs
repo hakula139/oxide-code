@@ -3,8 +3,7 @@
 //! Translates the `clap`-parsed `Option<Option<String>>` into either a
 //! freshly-started [`SessionHandle`] or a resumed one with its loaded
 //! messages, via [`resolve_session`]. Split out of `main.rs` so the
-//! resolution logic (parsing, prefix matching, ambiguity reporting)
-//! can be exercised by unit tests.
+//! resolution logic (parsing, prefix matching, ambiguity reporting) can be exercised by unit tests.
 
 use std::path::Path;
 
@@ -146,8 +145,7 @@ pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<Re
 /// Classify a `--continue` argument as a path when it either contains a
 /// path separator or uses the `.jsonl` extension (case-insensitive, in
 /// case a user hands us `.JSONL`). UUID v4 strings contain only hex
-/// digits and `-`, so this classifier never mis-routes a valid
-/// session-ID prefix.
+/// digits and `-`, so this classifier never mis-routes a valid session-ID prefix.
 fn looks_like_path(arg: &str) -> bool {
     arg.contains('/')
         || arg.contains('\\')

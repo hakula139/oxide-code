@@ -18,15 +18,10 @@ use crate::message::{ContentBlock, Message};
 // ── Client::complete ──
 
 impl Client {
-    /// Non-streaming completion, used for one-shot utility calls (AI
-    /// title generation, future classifiers). Returns the concatenated
-    /// text of the assistant's reply; non-text blocks are filtered out.
+    /// Non-streaming completion for one-shot utility calls. Returns concatenated assistant text.
     ///
-    /// `output_format` constrains the reply to a JSON schema via the
-    /// `structured-outputs-2025-12-15` beta. On models whose
-    /// [`Capabilities::structured_outputs`][crate::model::Capabilities::structured_outputs]
-    /// is `false`, both the body field and the beta are silently
-    /// dropped — the caller must tolerate free-form text in that case.
+    /// `output_format` constrains the reply to a JSON schema via structured outputs. On models
+    /// without the capability, both the body field and beta are silently dropped.
     pub(crate) async fn complete(
         &self,
         model: &str,
@@ -84,16 +79,8 @@ impl Client {
 
 // ── Body Builder ──
 
-/// Serializes the JSON request body for [`Client::complete`].
-///
-/// System block order matches [`Client::stream_message`]:
-///
-/// 1. Billing header (OAuth only; injected with `cch`).
-/// 2. Identity prefix (required for non-Haiku OAuth).
-/// 3. Caller-supplied system prompt (omitted when empty).
-///
-/// The caller is expected to have pre-gated `output_format` against
-/// [`supports_structured_outputs`].
+/// Serializes the JSON request body for [`Client::complete`]. System block order matches
+/// [`Client::stream_message`]: billing header (OAuth only) → identity prefix → caller system.
 #[expect(
     clippy::too_many_arguments,
     reason = "8 distinct wire fields; a wrapper struct would just rename them"
@@ -127,8 +114,7 @@ fn build_completion_body(
         tools: None,
         thinking: None,
         output_config: OutputConfig::new(output_format, None),
-        // One-shot completions never opt into context management —
-        // matches claude-code's one-shot path.
+        // One-shot completions never opt into context management.
         context_management: None,
         messages: &messages,
     })
@@ -142,8 +128,7 @@ fn build_completion_body(
 
 // ── Response Handling ──
 
-/// Flattens a `messages.create` response's content array into the
-/// assistant's user-visible text (drops tool-use / thinking blocks).
+/// Flattens a response's content array into assistant text (drops tool-use / thinking blocks).
 fn join_text_blocks(content: Vec<ContentBlock>) -> String {
     content
         .into_iter()
@@ -154,9 +139,7 @@ fn join_text_blocks(content: Vec<ContentBlock>) -> String {
         .collect()
 }
 
-/// Shape we accept back from the non-streaming `/v1/messages` endpoint.
-/// The API sends many more fields (`id`, `role`, `model`, `stop_reason`,
-/// `usage`); we only care about the content blocks — serde ignores the rest.
+/// Subset of the non-streaming `/v1/messages` response — serde ignores all other fields.
 #[derive(Deserialize)]
 struct CompletionResponse {
     content: Vec<ContentBlock>,

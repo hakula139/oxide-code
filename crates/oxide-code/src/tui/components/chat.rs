@@ -30,23 +30,15 @@ use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
-    // Config
     theme: Theme,
     show_thinking: bool,
 
-    // Committed blocks
     blocks: Vec<Box<dyn ChatBlock>>,
 
-    // Transient state (cleared per turn)
-    /// In-flight assistant tokens with a rendered-prefix cache.
     streaming: Option<StreamingAssistant>,
-    /// Live thinking tokens for the current block; flushed into a
-    /// committed [`AssistantThinking`] block on stream start or turn end.
     thinking_buffer: String,
 
-    // View state
     scroll_offset: u16,
-    /// Updated during render to avoid a redundant `build_text` call.
     content_height: Cell<u16>,
     viewport_height: u16,
     viewport_width: u16,
@@ -222,8 +214,7 @@ impl ChatView {
         self.blocks.push(Box::new(GitDiffBlock::new(text)));
     }
 
-    /// Appends an interrupted marker. Flushes any in-flight streaming
-    /// buffer first.
+    /// Appends an interrupted marker. Flushes any in-flight streaming buffer first.
     pub(crate) fn push_interrupted_marker(&mut self) {
         self.commit_streaming();
         self.blocks.push(Box::new(InterruptedMarker));

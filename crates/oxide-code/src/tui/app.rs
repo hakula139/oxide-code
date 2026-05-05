@@ -4,8 +4,7 @@
 //! cross-task channels, and runs the `tokio::select!` loop that
 //! multiplexes crossterm events, agent events, user actions, and a
 //! 60 FPS render tick. Render coalescing (dirty flag + timer) keeps
-//! redraw work proportional to state change rather than event
-//! throughput.
+//! redraw work proportional to state change rather than event throughput.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -35,12 +34,10 @@ use crate::util::text::truncate_to_width;
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Window in which a second Ctrl+C confirms exit. 1 s — comfortable for
-/// a deliberate double-tap, short enough that the hint doesn't linger.
+/// Window in which a second Ctrl+C confirms exit.
 const EXIT_WINDOW: Duration = Duration::from_secs(1);
 
-/// Maximum queued prompts shown in the preview before the row collapses
-/// into a `+N more` overflow tag. The full FIFO drains regardless.
+/// Maximum queued prompts shown in the preview before collapsing into `+N more`.
 const PREVIEW_VISIBLE: usize = 3;
 
 /// Root application state. Owns all components and drives the render loop.
@@ -49,8 +46,6 @@ pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
-    /// Frozen snapshot of session-level descriptors that `/status`,
-    /// `/config`, and other read-only slash commands surface.
     session_info: SessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
@@ -164,8 +159,6 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
-        // First-priority: an active modal owns keyboard focus end-to-end.
-        // Other components don't see the key until the modal closes.
         if let Event::Key(key) = event
             && self.modals.is_active()
         {
@@ -494,9 +487,7 @@ impl App {
         Ok(())
     }
 
-    /// Returns the chat area so the caller can refresh scroll-cache
-    /// bookkeeping. Backend-agnostic (takes `&mut Frame`) so `TestBackend`
-    /// tests share the live-crossterm layout path.
+    /// Draws all components and returns the chat area for scroll-cache bookkeeping.
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
         let input_height = self.input.height();
         let preview_height = self.preview_height();
@@ -560,10 +551,7 @@ impl App {
     }
 }
 
-/// Renders a single queued prompt as a dim user-message ghost, capped
-/// at `body_width` columns (excluding the chevron gutter). CJK / emoji
-/// are billed at their display width via `unicode-width` so the
-/// truncation budget matches what the user actually sees.
+/// Renders a single queued prompt as a dim user-message ghost, capped at `body_width` columns.
 fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static> {
     use ratatui::style::Modifier;
 
@@ -576,10 +564,7 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
-/// `AgentEvent::ConfigChanged` confirmation. Surfaces silent effort
-/// shifts — model-driven (cleared / clamped / model-default) and
-/// user-driven (clamped pick / lost on no-tier model) — so the user
-/// sees the resulting state, not just a generic "OK".
+/// `AgentEvent::ConfigChanged` confirmation, surfacing silent effort shifts.
 fn format_config_change(
     marketing: &str,
     model_id: &str,
@@ -981,8 +966,7 @@ mod tests {
     fn handle_crossterm_popup_tab_completes_canonical_name_into_buffer() {
         // Tab on a popup row inserts `/{name} ` and hides the popup —
         // the user is now in args-typing mode. Filter to /help first
-        // so the test pins the completion shape independent of the
-        // BUILT_INS-ordered first row.
+        // so the test pins the completion shape independent of the BUILT_INS-ordered first row.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_crossterm_event(&key_event(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_crossterm_event(&key_event(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -1339,8 +1323,7 @@ mod tests {
         // submit here lets it slip ahead of `pending_prompts`'s existing
         // head — the agent picks it up and starts a new turn while older
         // queued items fall behind. Hold mid-turn submits locally;
-        // `finalize_idle`'s drain re-fires them in order after `Cancelled`
-        // lands.
+        // `finalize_idle`'s drain re-fires them in order after `Cancelled` lands.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1500,8 +1483,7 @@ mod tests {
     async fn dispatch_unknown_slash_during_busy_renders_error_no_queue() {
         // Unknown commands route through `dispatch` so the user sees
         // the canonical "unknown command" error with recovery hints
-        // (alternatives + `//` escape) instead of the prompt being
-        // silently sent to the LLM.
+        // (alternatives + `//` escape) instead of the prompt being silently sent to the LLM.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1532,8 +1514,7 @@ mod tests {
     #[test]
     fn handle_session_title_updated_drops_event_for_stale_session_id() {
         // Title task spawned before `/clear` finishes after the roll;
-        // its event must not paint the old session's title onto the
-        // current one.
+        // its event must not paint the old session's title onto the current one.
         let (mut app, _rx, _agent_tx) = test_app(Some("First prompt"));
         app.handle_agent_event(AgentEvent::SessionTitleUpdated {
             session_id: "different-session".to_owned(),
@@ -1550,8 +1531,7 @@ mod tests {
     fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
-        // confirmation block. Marketing name is derived locally from
-        // `model_id`.
+        // confirmation block. Marketing name is derived locally from `model_id`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: "claude-sonnet-4-6".to_owned(),
@@ -1686,8 +1666,7 @@ mod tests {
     #[test]
     fn format_config_change_swap_with_explicit_effort_clamped_against_new_caps() {
         // Combined picker case: user asks for xhigh on Sonnet (caps at
-        // high). Surface that the *requested* tier was clamped — not
-        // the previous-effort delta.
+        // high). Surface that the *requested* tier was clamped — not the previous-effort delta.
         let s = format_config_change(
             "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
@@ -1789,8 +1768,7 @@ mod tests {
     fn handle_thinking_token_routes_to_chat_and_marks_streaming() {
         // Thinking tokens land in the chat view as a separate block
         // (not interleaved with assistant text) and must flip the bar
-        // to Streaming so the user sees the agent is working even
-        // before any visible text arrives.
+        // to Streaming so the user sees the agent is working even before any visible text arrives.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ThinkingToken("planning...".to_owned()));
         assert_eq!(app.status_bar.status(), &Status::Streaming);
@@ -1851,8 +1829,7 @@ mod tests {
         // have queued StreamToken / ToolCallStart events the agent emitted
         // before its select arm dropped the turn future. Those buffered
         // events must not flip the bar back to Streaming / ToolRunning —
-        // otherwise the cancel acknowledgement flickers off until
-        // `Cancelled` finally arrives.
+        // otherwise the cancel acknowledgement flickers off until `Cancelled` finally arrives.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("hi".to_owned()));
         app.dispatch_user_action(UserAction::Cancel);
@@ -1896,8 +1873,7 @@ mod tests {
         // aborted before `.with_title(...)`. The result must still be
         // pushed (silent swallow would hide the error body) and the
         // header must render the tool-call label stashed at
-        // `ToolCallStart`, not a blank string or the generic
-        // `(result)` fallback.
+        // `ToolCallStart`, not a blank string or the generic `(result)` fallback.
         let (mut app, _rx, _agent_tx) = test_app_with_tools();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             id: "t1".to_owned(),
@@ -1919,8 +1895,7 @@ mod tests {
         // The result header must be the stashed call label (the bash
         // command). It appears twice in the rendered view — once for
         // the tool call line, once for the result header — which is
-        // what we want to confirm: both the call row and the result
-        // row carry the same label.
+        // what we want to confirm: both the call row and the result row carry the same label.
         let text = rendered_text(&mut app, 60, 8);
         let occurrences = text.matches("distinctive_label_xyz").count();
         assert_eq!(
@@ -2052,8 +2027,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_drains_queue_head_to_match_completed_path() {
         // Cancellation does not auto-clear the queue — a user who
-        // interrupts a stuck turn typically still wants their planned
-        // follow-up to fire.
+        // interrupts a stuck turn typically still wants their planned follow-up to fire.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");

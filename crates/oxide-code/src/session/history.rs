@@ -18,8 +18,7 @@
 //!
 //! The transform is pure and owns no dependencies beyond [`Message`]. Tool
 //! label resolution is left to the caller, which usually needs a
-//! [`ToolRegistry`](crate::tool::ToolRegistry) that the session layer should
-//! not depend on.
+//! [`ToolRegistry`](crate::tool::ToolRegistry) that the session layer should not depend on.
 
 use std::collections::HashMap;
 

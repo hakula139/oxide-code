@@ -2,22 +2,11 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Truncation marker — three ASCII dots.
 pub(crate) const ELLIPSIS: &str = "...";
 
-/// Display width of [`ELLIPSIS`] in terminal columns.
 pub(crate) const ELLIPSIS_WIDTH: usize = 3;
 
-/// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`]
-/// when shortened. CJK / emoji are billed at their rendered width
-/// via `unicode-width` so the budget matches what the user actually
-/// sees.
-///
-/// Edge cases:
-///
-/// - `s` already fits: returned as-is.
-/// - `max_width < ELLIPSIS_WIDTH`: the marker won't fit either, so
-///   the result is a hard truncation without a tail.
+/// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
 pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
@@ -62,8 +51,7 @@ mod tests {
     #[test]
     fn truncate_to_width_accounts_for_cjk_double_width() {
         // 测试文本 = 4 chars × 2 cols = 8 cols. With max_width = 5 the
-        // budget is 5 − 3 (ellipsis) = 2 cols, so exactly one CJK char
-        // fits before the marker.
+        // budget is 5 − 3 (ellipsis) = 2 cols, so exactly one CJK char fits before the marker.
         assert_eq!(truncate_to_width("测试文本", 5), "测...");
     }
 

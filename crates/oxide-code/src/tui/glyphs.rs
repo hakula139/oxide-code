@@ -1,6 +1,5 @@
 //! Visual glyphs used across the TUI — single source of truth for the
-//! UI's iconography so the visual identity is easy to scan and easy
-//! to keep consistent.
+//! UI's iconography so the visual identity is easy to scan and easy to keep consistent.
 //!
 //! Conventions:
 //!
@@ -14,9 +13,7 @@
 
 // ── User prompt ──
 
-/// First-line prefix shown for any user-typed prompt — past messages
-/// in the chat history, queued prompts in the preview panel, and the
-/// active input area.
+/// First-line prefix for user-typed prompts.
 pub(crate) const USER_PROMPT_PREFIX: &str = "❯ ";
 
 /// Display width of [`USER_PROMPT_PREFIX`] in terminal columns.
@@ -35,32 +32,22 @@ pub(crate) const ASSISTANT_CONT: &str = "  ";
 
 // ── Tool / Thinking ──
 
-/// Left-bar glyph for tool blocks and the thinking block. Single
-/// column wide; usually paired with a trailing space when used as a
-/// line prefix (see [`THINKING_PREFIX`]).
+/// Left-bar glyph for tool and thinking blocks (single column wide).
 pub(crate) const BAR: &str = "▎";
 
-/// Per-line prefix for thinking blocks — [`BAR`] + space, so thinking
-/// rows align with adjacent tool-block bars.
+/// Per-line prefix for thinking blocks — [`BAR`] + space.
 pub(crate) const THINKING_PREFIX: &str = "▎ ";
 
-/// First-line prefix for tool-call and tool-result status lines — [`BAR`]
-/// + space. Content sits at col 2.
+/// First-line prefix for tool-call and tool-result status lines.
 pub(crate) const TOOL_BORDER_PREFIX: &str = "▎ ";
 
-/// Continuation prefix for lines subordinate to a tool-block status
-/// header — wrapped tool name / result label and tool output body lines.
-/// Aligns content at col 4, past the [`TOOL_SUCCESS`] / [`TOOL_ERROR`]
-/// indicator, so the body reads as a child of the status header rather
-/// than a peer.
+/// Continuation prefix for tool-block body lines (content at col 4).
 pub(crate) const TOOL_BORDER_CONT: &str = "▎   ";
 
-/// Tool-result success indicator. No trailing space — tool blocks
-/// handle their own column gap via [`BAR`] and the status-line layout.
+/// Tool-result success indicator (no trailing space).
 pub(crate) const TOOL_SUCCESS: &str = "✓";
 
-/// Tool-result failure indicator. Same glyph as [`ERROR_PREFIX`]
-/// without the trailing space.
+/// Tool-result failure indicator (no trailing space).
 pub(crate) const TOOL_ERROR: &str = "✗";
 
 // ── Error ──
@@ -70,14 +57,12 @@ pub(crate) const ERROR_PREFIX: &str = "✗ ";
 
 // ── Inline markers ──
 
-/// Inline newline replacement for collapsing multi-line previews to
-/// a single row without losing the "this is more than it looks" hint.
+/// Inline newline replacement for collapsed multi-line previews.
 pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 // ── Status spinner ──
 
-/// 8-dot Braille spinner (`cli-spinners` `dots2`), reversed for
-/// counterclockwise motion. Cycle by modulo index.
+/// 8-dot Braille spinner (counterclockwise). Cycle by modulo index.
 pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]

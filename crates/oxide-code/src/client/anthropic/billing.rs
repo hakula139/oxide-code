@@ -19,10 +19,7 @@ const CCH_PLACEHOLDER: &str = "cch=00000";
 // ── Public API ──
 
 /// Computes the 3-character hex fingerprint suffix for `cc_version`.
-///
 /// `SHA-256(salt + chars_at_indices + version)`, take first 3 hex chars.
-/// Character extraction uses Unicode scalar indexing, which matches
-/// JavaScript's UTF-16 code-unit indexing for all BMP characters.
 pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> String {
     let chars: String = FINGERPRINT_INDICES
         .iter()
@@ -46,18 +43,8 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
     )
 }
 
-/// Computes xxHash64 of the request body and replaces the `cch` placeholder.
-///
-/// The hash is computed over the body *with* the placeholder in place,
-/// then the placeholder is replaced with the 5-char hex result. Only the
-/// first occurrence is replaced — field ordering in
-/// [`super::wire::CreateMessageRequest`] ensures `system` is serialized
-/// before `messages`, so the billing header's placeholder comes first.
-///
-/// Errors out if the placeholder is missing — a release build that
-/// silently shipped `cch=00000` would still pass the gateway's signature
-/// shape check and only fail later at billing reconciliation, far from
-/// the buggy call site.
+/// Computes xxHash64 of the request body (with placeholder in place) and replaces the first
+/// `cch=00000` occurrence with the 5-char hex result. Errors if the placeholder is missing.
 pub(super) fn inject_cch(body: &str) -> Result<String> {
     if !body.contains(CCH_PLACEHOLDER) {
         bail!("billing header placeholder `{CCH_PLACEHOLDER}` missing from request body");

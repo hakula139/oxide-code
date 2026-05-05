@@ -61,8 +61,7 @@ pub(crate) enum UserAction {
     Clear,
     /// Symmetric model + effort swap. At least one field must be `Some`;
     /// `None` means "leave that axis as-is". Modal pickers and the
-    /// typed-arg `/model <id>` / `/effort <tier>` paths both flow
-    /// through here.
+    /// typed-arg `/model <id>` / `/effort <tier>` paths both flow through here.
     SwapConfig {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,

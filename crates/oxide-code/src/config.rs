@@ -31,9 +31,7 @@ pub(crate) enum Auth {
 }
 
 impl Auth {
-    /// Short label naming the credential type (`"API key"` /
-    /// `"OAuth"`). Surfaced by `/status` and `/config` so the user
-    /// knows which auth source is live without dumping the secret.
+    /// Label for the credential type, surfaced by `/status` and `/config`.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::ApiKey(_) => "API key",
@@ -44,11 +42,8 @@ impl Auth {
 
 // ── ConfigSnapshot ──
 
-/// Resolved-config view — every field [`Config`] holds except the
-/// secret. Built at startup from [`Config::snapshot`] and handed into
-/// the slash dispatcher; survives the move when [`Config`] itself is
-/// consumed by the API client. `model_id` and `effort` are rebound by
-/// runtime slash-command swaps so the snapshot reflects live values.
+/// Resolved-config view minus the secret. Survives the move when
+/// [`Config`] is consumed by the API client; rebound by runtime swaps.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) model_id: String,
@@ -65,19 +60,14 @@ pub(crate) struct ConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget (Claude 4.6+). `display`
-    /// controls what the API streams back: `Omitted` (4.7 default,
-    /// empty `thinking` field) or `Summarized` (the 4.6 default, and
-    /// what oxide-code enables whenever `show_thinking=true`).
+    /// Model decides the thinking budget (Claude 4.6+).
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ThinkingDisplay>,
     },
 }
 
-/// `thinking.display` values accepted by the API on 4.7+. Only
-/// `Summarized` is ever emitted — omitting the field entirely (via
-/// `display: None`) already yields the `omitted` default on 4.7.
+/// `thinking.display` values accepted by the API on 4.7+.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ThinkingDisplay {
@@ -86,9 +76,7 @@ pub(crate) enum ThinkingDisplay {
 
 // ── Effort ──
 
-/// Intelligence-vs-latency tier sent as `output_config.effort` on
-/// effort-capable models. The per-model ceiling lives in
-/// [`crate::model::Capabilities`].
+/// Intelligence-vs-latency tier sent as `output_config.effort`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Effort {
@@ -140,9 +128,7 @@ impl FromStr for Effort {
 
 // ── PromptCacheTtl ──
 
-/// Prompt-cache TTL sent as `cache_control.ttl`. Anthropic silently
-/// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
-/// explicit opt-in. oxide-code defaults to `OneHour`.
+/// Prompt-cache TTL sent as `cache_control.ttl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PromptCacheTtl {
     #[serde(rename = "5m")]
@@ -152,8 +138,7 @@ pub(crate) enum PromptCacheTtl {
 }
 
 impl PromptCacheTtl {
-    /// Wire value for `cache_control.ttl`. `None` when the TTL is
-    /// the server default (5 m) so the JSON omits the field entirely.
+    /// Wire value; `None` when the TTL is the server default (5 m).
     pub(crate) const fn wire(self) -> Option<&'static str> {
         match self {
             Self::FiveMin => None,
@@ -193,24 +178,14 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: String,
-    /// `output_config.effort` for the streaming path. `None` means
-    /// the model doesn't accept the parameter and the field is
-    /// omitted. Resolved once at [`Config::load`]; mutated mid-session
-    /// by `/effort` and re-clamped on `/model` swaps.
+    /// `None` when the model doesn't accept the parameter.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
-    /// `cache_control.ttl` for every cacheable block. Default is
-    /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
-    /// drop made the server default (5 m) a silent cost regression
-    /// on long sessions.
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
-    /// Resolved TUI theme — base + per-slot overrides applied at
-    /// load time. Theme-selection errors hard-fail; per-slot value
-    /// errors warn and fall back to the base value.
     pub(crate) theme: Theme,
 }
 
@@ -266,8 +241,7 @@ impl Config {
 
         // Adaptive thinking is always enabled — the model decides the
         // budget. `display` opts 4.7 into streaming summarized thinking
-        // text (its default changed to `omitted` silently); 4.6 and
-        // older ignore the field.
+        // text (its default changed to `omitted` silently); 4.6 and older ignore the field.
         let thinking = Some(ThinkingConfig::Adaptive {
             display: show_thinking.then_some(ThinkingDisplay::Summarized),
         });
@@ -297,9 +271,7 @@ impl Config {
         })
     }
 
-    /// Captures the resolved descriptors `/config` (and friends)
-    /// print, minus the auth secret. Called before `self` is moved
-    /// into the API client so the snapshot survives the move.
+    /// Captures descriptors for `/config` and `/status`, minus the auth secret.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
             model_id: self.model.clone(),
@@ -319,8 +291,6 @@ pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
 
-/// Per-effort `max_tokens` default; overridden by
-/// `ANTHROPIC_MAX_TOKENS` / `[client].max_tokens`.
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
     match effort {
         Some(Effort::Xhigh | Effort::Max) => 64_000,
@@ -353,8 +323,7 @@ mod tests {
 
     #[test]
     fn thinking_config_adaptive_without_display_serializes_bare() {
-        // Older models ignore `display`; absence keeps the wire as
-        // pre-4.7 clients expect.
+        // Older models ignore `display`; absence keeps the wire as pre-4.7 clients expect.
         let json = serde_json::to_value(&ThinkingConfig::Adaptive { display: None }).unwrap();
         assert_eq!(json["type"], "adaptive");
         assert!(json.get("display").is_none(), "display omitted: {json}");
@@ -457,11 +426,8 @@ mod tests {
         std::fs::write(config_dir.join("config.toml"), body).unwrap();
     }
 
-    /// Baseline env list (every [`ENV_KEYS`] entry unset, `ANTHROPIC_API_KEY`
-    /// set to `"sk-default"`) with `overrides` applied on top. Panics if
-    /// an override key is not in [`ENV_KEYS`] so a misspelling surfaces
-    /// immediately. Returns a `Vec` because `temp_env::async_with_vars`
-    /// takes `AsRef<[(K, Option<V>)]>`.
+    /// Baseline env (all [`ENV_KEYS`] unset, `ANTHROPIC_API_KEY` = `"sk-default"`) with overrides.
+    /// Panics on unknown keys so misspellings surface immediately.
     fn env_vars(
         overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
     ) -> Vec<(&'static str, Option<String>)> {
@@ -826,8 +792,7 @@ mod tests {
         // The snapshot is what `/config` prints; pin every field so a
         // regression that forgot to copy one (or that swapped two
         // names) shows up here, not silently in the rendered table.
-        // The auth secret never reaches the snapshot — only the
-        // `label()` projection does.
+        // The auth secret never reaches the snapshot — only the `label()` projection does.
         let cfg = Config {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),

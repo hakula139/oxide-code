@@ -1,9 +1,5 @@
-//! Slash-command trait and built-in registry.
-//!
-//! Each built-in command lives in its own module under `slash/`,
-//! implements [`SlashCommand`], and lands in [`BUILT_INS`]. Adding a
-//! new command is one file plus one slice entry — no central match
-//! arm, no enum variant.
+//! Slash-command trait and built-in registry. Adding a command is one file plus one [`BUILT_INS`]
+//! entry.
 
 use super::clear::ClearCmd;
 use super::config::ConfigCmd;
@@ -16,85 +12,52 @@ use super::model::ModelCmd;
 use super::status::StatusCmd;
 use crate::agent::event::UserAction;
 
-/// What [`SlashCommand::execute`] returns. `Done` for client-side
-/// work that finishes via `ctx`; `Forward` for state-mutating
-/// commands that hand a [`UserAction`] back for the dispatcher to
-/// forward to the agent loop. The trait stays the only seam — slash
-/// impls never reach into `user_tx` themselves.
+/// `Done` for client-side work that finishes via `ctx`; `Forward` for state-mutating commands.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashOutcome {
     Done,
     Forward(UserAction),
 }
 
-/// Whether a slash command can run while the agent is busy. Returned
-/// by [`SlashCommand::classify`]; the free [`super::classify`] wraps
-/// it with `Unknown` when lookup fails.
+/// Whether a slash command can run while the agent is busy.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashKind {
-    /// Safe mid-turn — dispatch immediately.
     ReadOnly,
-    /// State-mutating — refuse mid-turn, let the user retry when idle.
     Mutating,
-    /// Not in the registry — dispatch anyway so the user sees the
-    /// canonical "unknown command" error block with recovery hints.
-    /// Trait implementations never return this; only the free
-    /// dispatcher does.
+    /// Not in the registry. Only the free dispatcher returns this, never trait impls.
     Unknown,
 }
 
-/// A locally-dispatched command typed as `/name args`. Each command
-/// owns its display metadata so help and popup rows render from the
-/// trait alone — no parallel switch.
+/// A locally-dispatched `/name args` command. Each impl owns its display metadata so help and
+/// popup rows render from the trait alone.
 pub(crate) trait SlashCommand: Sync {
-    /// Canonical name shown first in help and popup rows. No leading
-    /// `/`. ASCII letters / digits plus `_`, `-`, `:`, `.` are allowed.
     fn name(&self) -> &'static str;
 
-    /// Alternate names that route to the same impl. Display is
-    /// consolidated as `/name (alias1, alias2)` — alias rows do not
-    /// appear separately. Default is empty.
     fn aliases(&self) -> &'static [&'static str] {
         &[]
     }
 
-    /// One-line description for help and the popup gutter.
     fn description(&self) -> &'static str;
 
-    /// Whether this invocation is safe to run mid-turn. `args` enables
-    /// per-form classification — `/model` lists when bare and mutates
-    /// when given an id. Trait implementations return `ReadOnly` or
-    /// `Mutating`; never `Unknown` (that's the dispatcher's lookup
-    /// signal).
+    /// Per-form classification — return `ReadOnly` or `Mutating`, never `Unknown`.
     fn classify(&self, _args: &str) -> SlashKind {
         SlashKind::ReadOnly
     }
 
-    /// Optional usage hint used by the error message when the command
-    /// is invoked with malformed arguments. `None` means no args are
-    /// expected.
     fn usage(&self) -> Option<&'static str> {
         None
     }
 
-    /// Runs the command. Mutations land through `ctx`. `Err(msg)` is
-    /// rendered by the dispatcher as a single `ErrorBlock` — commands
-    /// must not push errors themselves. `Ok(Done)` commands push
-    /// their own informational block; `Ok(Forward(_))` commands hand
-    /// a `UserAction` back for the dispatcher to forward.
+    /// Run the command. `Err(msg)` is rendered as an `ErrorBlock` by the dispatcher.
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }
 
-/// Every built-in command. Alphabetical for stable presentation in
-/// `/help` and the empty-query popup; the matcher already sorts
-/// alphabetically within each tier when filtering, so this keeps
-/// every popup state consistent.
+/// Alphabetical for stable presentation in `/help` and the empty-query popup.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
 ];
 
-/// Resolves `name` by canonical name first, then aliases. Generic
-/// over the slice so tests can drive it against a synthetic registry.
+/// Resolves `name` by canonical name first, then aliases.
 pub(super) fn lookup_in<'a>(
     commands: &'a [&'a dyn SlashCommand],
     name: &str,

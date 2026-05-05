@@ -24,11 +24,7 @@ pub(super) fn render(
     let border_style = border_style_for(ctx.theme, is_error);
     let text_style = ctx.theme.dim();
 
-    // Preserve per-line leading whitespace — some tools (e.g., `git
-    // diff --stat`) indent every line with a meaningful space that
-    // `content.trim()` would strip off the first line only, producing
-    // a misaligned first row. Drop whole blank surrounding lines
-    // instead, one unit of work at a time.
+    // Strip surrounding blank lines but preserve per-line leading whitespace.
     let mut output_lines: Vec<&str> = content.lines().collect();
     while output_lines.first().is_some_and(|l| l.trim().is_empty()) {
         output_lines.remove(0);
@@ -37,12 +33,7 @@ pub(super) fn render(
         output_lines.pop();
     }
 
-    // Tools (grep, glob) commonly use their own summary line as both
-    // the `title` metadata (shown in the status line) and the first
-    // line of `content` (shown in the body) — the model needs the
-    // summary to parse counts, but rendering both duplicates it on
-    // screen. Skip the first body line when it matches the label
-    // verbatim.
+    // Deduplicate when the first body line matches the status-line label.
     if output_lines
         .first()
         .is_some_and(|l| l.trim() == label.trim())

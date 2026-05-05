@@ -137,7 +137,6 @@ impl Theme {
         self.dim.style()
     }
 
-    /// Bg-only; `Color::Reset` keeps the terminal background transparent.
     pub(crate) fn surface(&self) -> Style {
         self.surface.style()
     }
@@ -174,12 +173,10 @@ impl Theme {
         self.error.style()
     }
 
-    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_add_row(&self) -> Style {
         Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
     }
 
-    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_del_row(&self) -> Style {
         Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
     }

@@ -13,9 +13,6 @@ use super::{
 };
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
-/// Per-file size cap for `grep` (1 MB). Tighter than other file tools
-/// because regex over very large files is the wrong tool — point users
-/// at a dedicated streaming search instead.
 const MAX_GREP_FILE_SIZE: u64 = 1024 * 1024;
 
 pub(crate) struct GrepTool;
@@ -206,9 +203,7 @@ struct GrepParams<'a> {
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
-    // Bound regex compilation. The default size limit is 10 MB; a pattern
-    // like `a{100000}{100000}` would allocate a massive DFA per tool call.
-    // 1 MB is plenty for any real-world search expression.
+    // Bound regex compilation to prevent degenerate patterns from OOMing.
     let re = regex::RegexBuilder::new(params.pattern)
         .case_insensitive(params.case_insensitive)
         .size_limit(1 << 20)
@@ -515,8 +510,6 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
     let truncated = total_files > head_limit;
     counts.truncate(head_limit);
 
-    // Summary first — the renderer's title-strip pass consumes it,
-    // leaving a clean `paths` body. Mirrors `format_files_with_matches`.
     let mut output = format!(
         "Found {total_matches} total {} across {total_files} {}",
         if total_matches == 1 {
@@ -538,10 +531,7 @@ fn format_count(files: &[PathBuf], base: &Path, re: &regex::Regex, head_limit: u
 
 // ── Result View ──
 
-/// Parses content-mode grep output into per-file groups. Returns `None`
-/// for any unrecognised line — skipped-file warnings, malformed rows —
-/// so the block falls through to the text body and the reader sees raw
-/// output instead of a silently truncated render.
+/// Returns `None` for any unrecognised line so the block falls through to text.
 fn parse_content_view(content: &str) -> Option<ToolResultView> {
     if content.contains("\n\nSkipped (exceeds ") {
         return None;
@@ -579,10 +569,7 @@ fn parse_content_view(content: &str) -> Option<ToolResultView> {
     Some(ToolResultView::GrepMatches { groups, truncated })
 }
 
-/// Parses one row of content-mode grep output. `path:NUM:text` is a
-/// match; `path:NUM-text` is a context line. Scans colons left-to-right
-/// to skip path-internal `:` (e.g., Windows `C:foo`) without digits
-/// after.
+/// Parses one row: `path:NUM:text` (match) or `path:NUM-text` (context).
 fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
     let mut search_start = 0;
     while let Some(off) = line[search_start..].find(':') {

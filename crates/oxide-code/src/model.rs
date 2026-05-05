@@ -1,8 +1,7 @@
 //! Ground-truth table of known Claude models.
 //!
 //! Each row carries marketing name, cutoff, and capability flags gating
-//! beta headers and body fields. Matching is substring-based; more-specific
-//! entries come first.
+//! beta headers and body fields. Matching is substring-based; more-specific entries come first.
 
 use std::borrow::Cow;
 
@@ -24,17 +23,7 @@ pub(crate) struct ModelInfo {
 
 // ── Capabilities ──
 
-/// Per-model feature flags consulted by the API client to gate beta
-/// headers and body fields. `interleaved_thinking`, `context_management`,
-/// `effort`, `context_1m`, and `structured_outputs` mirror upstream
-/// `modelSupports*` predicates; `effort_max` and `effort_xhigh` are
-/// client-side allowlists derived from the migration guide and live
-/// packet captures.
-///
-/// `context_1m` does not currently drive beta sending — that signal is
-/// the user-opt-in `[1m]` tag on the model string. The flag is kept for
-/// UI paths (a future `/model` picker) that want to hide the 1M variant
-/// on models that can't honor it.
+/// Per-model feature flags gating beta headers and body fields.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "seven independent capability flags — each maps 1:1 to a separate upstream `modelSupports*` predicate or a per-version allowlist; a bitflag or state-machine refactor would add indirection without any expressiveness gain"
@@ -44,24 +33,14 @@ pub(crate) struct Capabilities {
     pub(crate) interleaved_thinking: bool,
     pub(crate) context_management: bool,
     /// Whether the model accepts the `context-1m-2025-08-07` beta.
-    /// `compute_betas` gates the beta on `has_1m_tag(model) AND
-    /// context_1m` so a user who tags `claude-haiku-4[1m]` doesn't
-    /// silently send an unsupported beta and 400.
     pub(crate) context_1m: bool,
     /// Gates `output_config.effort` at `low` / `medium` / `high`.
-    /// Upper bound: see [`Self::effort_max`] / [`Self::effort_xhigh`].
     pub(crate) effort: bool,
     /// Whether `effort = "max"` is accepted. Opus-only.
     pub(crate) effort_max: bool,
     /// Whether `effort = "xhigh"` is accepted. Opus 4.7 only.
     pub(crate) effort_xhigh: bool,
-    /// Whether the model accepts the `structured-outputs-2025-12-15`
-    /// beta (JSON-schema-constrained text output). The upstream
-    /// allowlist is Opus 4.1/4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5;
-    /// everything else silently falls back to free-form text, which
-    /// [`Client::complete`][crate::client::anthropic::Client::complete]
-    /// mirrors by dropping the `output_config` body field together with
-    /// the beta header rather than 400ing on the gateway.
+    /// Whether the model accepts the `structured-outputs-2025-12-15` beta.
     pub(crate) structured_outputs: bool,
 }
 
@@ -109,8 +88,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             effort: true,
-            // `max` is Opus-only per the migration guide; Sonnet 4.6
-            // 400s on it.
+            // `max` is Opus-only per the migration guide; Sonnet 4.6 400s on it.
             effort_max: false,
             effort_xhigh: false,
             structured_outputs: true,
@@ -151,8 +129,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         capabilities: Capabilities {
             // Haiku 4.5 doesn't match the `opus-4 || sonnet-4`
             // substring rule that gates `interleaved-thinking`, and 3P
-            // gateways 400 on it. First-party would accept, but we
-            // target 3P throughout.
+            // gateways 400 on it. First-party would accept, but we target 3P throughout.
             interleaved_thinking: false,
             context_management: true,
             context_1m: false,
@@ -178,8 +155,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     // Unqualified base (`claude-opus-4`, `claude-opus-4-0`,
     // `claude-opus-4-20250514`). Structured outputs arrived with 4.1
-    // per upstream's explicit allowlist, so the base row must not
-    // claim them.
+    // per upstream's explicit allowlist, so the base row must not claim them.
     ModelInfo {
         id_substr: "claude-opus-4",
         marketing: "Claude Opus 4",
@@ -228,10 +204,6 @@ pub(crate) const MODELS: &[ModelInfo] = &[
 ];
 
 impl Capabilities {
-    /// Whether the model accepts `output_config.effort = <level>`.
-    /// Centralises the `low`/`medium`/`high` → [`Self::effort`],
-    /// `xhigh` → [`Self::effort_xhigh`], `max` → [`Self::effort_max`]
-    /// mapping so callers don't re-derive it.
     pub(crate) fn accepts_effort(self, level: Effort) -> bool {
         match level {
             Effort::Low | Effort::Medium | Effort::High => self.effort,
@@ -240,11 +212,7 @@ impl Capabilities {
         }
     }
 
-    /// Highest level this model accepts ≤ `pick`. `None` when the
-    /// model doesn't accept `output_config.effort` at all. Used by
-    /// [`crate::config::Config::load`] to clamp an out-of-range user
-    /// pick down to the nearest supported level rather than 400ing
-    /// the gateway.
+    /// Highest level this model accepts ≤ `pick`. `None` when the model doesn't support effort.
     pub(crate) fn clamp_effort(self, pick: Effort) -> Option<Effort> {
         if !self.effort {
             return None;
@@ -260,9 +228,6 @@ impl Capabilities {
         .find(|&level| level <= pick && self.accepts_effort(level))
     }
 
-    /// Per-model default when the user hasn't specified one: `Xhigh`
-    /// on 4.7 (matches claude-code 2.1.119), `High` on other
-    /// effort-capable models, `None` otherwise.
     pub(crate) fn default_effort(self) -> Option<Effort> {
         if self.effort_xhigh {
             Some(Effort::Xhigh)
@@ -273,10 +238,7 @@ impl Capabilities {
         }
     }
 
-    /// One-shot "user pick or model default" — clamps `pick` if
-    /// present, falls back to [`Self::default_effort`] otherwise.
-    /// Single seam for `Config::load` and runtime model swaps so the
-    /// two paths can't drift.
+    /// Clamps `pick` if present, falls back to [`Self::default_effort`] otherwise.
     pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
         match pick {
             Some(p) => self.clamp_effort(p),
@@ -287,16 +249,11 @@ impl Capabilities {
 
 // ── ResolvedModelId ──
 
-/// A model id that has passed through the `/model` resolver. The private
-/// inner field ensures arbitrary strings cannot flow into
-/// [`UserAction::SwapConfig`](crate::agent::event::UserAction::SwapConfig)
-/// without validation.
+/// A model id that has passed through the `/model` resolver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelId(String);
 
 impl ResolvedModelId {
-    /// Wraps a resolver-validated id. Call sites outside the resolver
-    /// (tests, deserialization) should audit that the value is valid.
     pub(crate) fn new(id: String) -> Self {
         Self(id)
     }
@@ -313,32 +270,23 @@ impl ResolvedModelId {
 
 // ── Lookup ──
 
-/// First-match substring lookup against [`MODELS`]. Returns `None` for
-/// model strings that don't contain any known family stem (e.g. a future
-/// `claude-opus-5` before the table is bumped); callers decide whether
-/// to fall back to empty capabilities or reject the request.
+/// First-match substring lookup against [`MODELS`].
 pub(crate) fn lookup(model: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| model.contains(info.id_substr))
 }
 
-/// Capabilities for `model`, falling back to the all-false
-/// [`Capabilities::default`] when the id doesn't match any known row.
-/// Single entry point for the "unknown model → conservative defaults"
-/// invariant so every call site decays the same way.
+/// Capabilities for `model`, falling back to [`Capabilities::default`] for unknown ids.
 pub(crate) fn capabilities_for(model: &str) -> Capabilities {
     lookup(model)
         .map(|info| info.capabilities)
         .unwrap_or_default()
 }
 
-/// Marketing display name when `model` matches a known row.
 pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
     lookup(model).map(|info| info.marketing)
 }
 
-/// Marketing name when known, raw id otherwise. Single seam for the
-/// "unknown id → fall back to literal" rule so `Config::load`,
-/// `/status`, `/config`, and the `/model` swap all decay the same way.
+/// Marketing name when known, raw id otherwise.
 pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
     marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
 }
@@ -428,8 +376,7 @@ mod tests {
     #[test]
     fn effort_max_is_opus_only() {
         // `max` effort is Opus-only per the migration guide. Sonnet
-        // 4.6 supports base `effort` but 400s on `max`; Haiku doesn't
-        // support `effort` at all.
+        // 4.6 supports base `effort` but 400s on `max`; Haiku doesn't support `effort` at all.
         for supported in ["claude-opus-4-7", "claude-opus-4-6"] {
             assert!(
                 lookup(supported).unwrap().capabilities.effort_max,
@@ -462,8 +409,7 @@ mod tests {
         assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
         assert_eq!(opus_4_7.clamp_effort(Effort::Low), Some(Effort::Low));
 
-        // Opus 4.6: Max ✓, Xhigh ✗. `xhigh` clamps down to `high`
-        // (never sideways-up to `max`).
+        // Opus 4.6: Max ✓, Xhigh ✗. `xhigh` clamps down to `high` (never sideways-up to `max`).
         let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
         assert_eq!(opus_4_6.clamp_effort(Effort::Max), Some(Effort::Max));
         assert_eq!(opus_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
@@ -563,8 +509,7 @@ mod tests {
 
     #[test]
     fn lookup_matches_most_specific_row_before_family_base() {
-        // `claude-opus-4-6` must hit the 4.6 row, not fall through to
-        // the `claude-opus-4` base.
+        // `claude-opus-4-6` must hit the 4.6 row, not fall through to the `claude-opus-4` base.
         let info = lookup("claude-opus-4-6").unwrap();
         assert_eq!(info.marketing, "Claude Opus 4.6");
         assert!(info.capabilities.effort);

@@ -9,8 +9,7 @@
 //!
 //! The renderer captures per-call state — border style, separator,
 //! optional row bg, number column width, continuation prefix — once at
-//! construction so each row only carries its own number, text, and text
-//! style.
+//! construction so each row only carries its own number, text, and text style.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -21,9 +20,6 @@ use super::{MAX_TOOL_OUTPUT_LINE_BYTES, TOOL_BORDER_CONT, truncate_to_bytes};
 use crate::tui::glyphs::BAR;
 use crate::tui::wrap::{expand_tabs, wrap_line};
 
-/// Default separator between the line-number column and the text. Read
-/// / grep render this as a dim pipe; diff sides override via
-/// [`Renderer::with_style`].
 const DEFAULT_SEPARATOR: &str = " │ ";
 
 /// Renders numbered rows under a shared bordered tool-result body.
@@ -117,11 +113,7 @@ impl<'a> Renderer<'a> {
     }
 }
 
-/// Builds the wrapped-line continuation prefix. The bar prefix area
-/// (`▎` + `TOOL_BORDER_CONT` padding) stays transparent so it doesn't
-/// inherit the row tint; the text-column padding (number + separator
-/// width) carries `row_bg` so the tint visually starts under the
-/// number column on every wrapped row.
+/// Builds the wrapped-line continuation prefix (bar area stays transparent, text area gets bg).
 fn make_cont_spans(
     border_style: Style,
     number_width: usize,
@@ -138,10 +130,6 @@ fn make_cont_spans(
     ]
 }
 
-/// Extends `line` to `target_width` cols with a trailing styled
-/// space-fill so the `row_bg` tint reads as a contiguous block instead
-/// of a ragged content-width band. No-op when the line already fills
-/// or exceeds the target.
 fn pad_to_width(line: &mut Line<'static>, target_width: usize, bg: Style) {
     let current: usize = line.spans.iter().map(|s| s.content.width()).sum();
     if current >= target_width {
@@ -280,8 +268,7 @@ mod tests {
     #[test]
     fn with_style_pads_to_full_width_with_row_bg() {
         // Trailing pad span fills the remaining columns so the bg tint
-        // reaches ctx.width — without it, the row would be a ragged
-        // band ending at the text width.
+        // reaches ctx.width — without it, the row would be a ragged band ending at the text width.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 40,
@@ -339,8 +326,7 @@ mod tests {
     fn with_style_wrapped_continuation_keeps_bg_under_text_column() {
         // After wrap, every continuation line must also pad to ctx.width
         // so the bg block stays contiguous across wraps. The bar prefix
-        // area on continuations stays transparent (mirrors the header
-        // line).
+        // area on continuations stays transparent (mirrors the header line).
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 20,
@@ -381,8 +367,7 @@ mod tests {
     fn render_wraps_with_aligned_continuation_prefix() {
         // Width forces the row to wrap. Continuation lines should
         // carry the `▎` bar plus padding aligned under the text column
-        // (4 cols of bar prefix + 2 cols of number column + 3 cols of
-        // ` │ ` = 9 cols).
+        // (4 cols of bar prefix + 2 cols of number column + 3 cols of ` │ ` = 9 cols).
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 14,

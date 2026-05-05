@@ -33,22 +33,13 @@ use crate::tui::glyphs::{BAR, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, 
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
-/// Maximum lines of tool output shown inline before truncation. Shared
-/// between the default text body and the read excerpt; both surface
-/// the same hidden-line footer when the body overflows.
 const MAX_TOOL_OUTPUT_LINES: usize = 5;
 
-/// Maximum bytes per tool output line before horizontal truncation.
-/// Measured in bytes (matched against `str::len`) rather than Unicode
-/// characters — display width is already gated by the terminal width
-/// budget; this cap exists to avoid pathological multi-kilobyte lines
-/// pasted into tool output.
 const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
 
 // ── Tool Call ──
 
-/// A running or completed tool invocation — one bordered line with the
-/// tool icon and input summary.
+/// A running or completed tool invocation — one bordered line with the tool icon and input summary.
 pub(crate) struct ToolCallBlock {
     icon: &'static str,
     label: String,
@@ -93,8 +84,7 @@ impl ChatBlock for ToolCallBlock {
 // ── Tool Result ──
 
 /// The outcome of a tool call — indicator (✓ / ✗), label, and a
-/// per-view body (truncated text by default; richer shapes for tools
-/// with structured inputs).
+/// per-view body (truncated text by default; richer shapes for tools with structured inputs).
 pub(crate) struct ToolResultBlock {
     label: String,
     view: ToolResultView,
@@ -165,8 +155,6 @@ impl ChatBlock for ToolResultBlock {
 
 // ── Shared Helpers ──
 
-/// Renders the tool-result header line — success / error indicator,
-/// styled label, and wrapped continuation under the bar.
 fn render_status_line(
     out: &mut Vec<Line<'static>>,
     ctx: &RenderCtx<'_>,
@@ -194,13 +182,7 @@ fn render_status_line(
     ));
 }
 
-/// Builds a continuation prefix that keeps the `▎` bar aligned under
-/// the original prefix. For a prefix like `"▎   "` (4 cols), produces
-/// `["", "▎", "   "]` where the bar span is styled.
-///
-/// Precondition: `prefix` must contain [`BAR`] — every tool-rendering
-/// call site passes either [`TOOL_BORDER_PREFIX`], [`TOOL_BORDER_CONT`], or
-/// the diff-side continuation, all of which satisfy it.
+/// Builds a continuation prefix keeping `▎` aligned under the original prefix.
 fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = prefix.find(BAR).expect("prefix must contain ▎ bar");
     let left = &prefix[..bar_pos];
@@ -220,9 +202,6 @@ fn border_style_for(theme: &Theme, is_error: bool) -> Style {
     }
 }
 
-/// Truncates a string to `max_bytes` bytes, appending `...` if cut.
-/// Falls back to the nearest char boundary at or before `max_bytes` to
-/// avoid splitting multi-byte UTF-8 sequences.
 fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_owned();

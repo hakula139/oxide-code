@@ -518,8 +518,7 @@ mod tests {
 
     #[test]
     fn insert_resume_sentinels_skips_append_when_trailing_user_has_text() {
-        // Mixed text + tool_result is a normal follow-up, not the
-        // post-crash shape — no sentinel.
+        // Mixed text + tool_result is a normal follow-up, not the post-crash shape — no sentinel.
         let mut messages = vec![
             Message::user("do X"),
             Message {

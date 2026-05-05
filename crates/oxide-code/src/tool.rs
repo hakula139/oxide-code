@@ -38,7 +38,7 @@ pub(crate) struct ToolOutput {
     pub(crate) metadata: ToolMetadata,
 }
 
-/// Structured data for UI display and logging, not sent to the model.
+/// Structured data for UI display and logging; not sent to the model.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,6 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolOutput {
-    /// Converts `Ok` / `Err` into a `ToolOutput` with default metadata.
     pub(crate) fn from_result(result: Result<String, String>) -> Self {
         match result {
             Ok(content) => Self {
@@ -72,19 +71,16 @@ impl ToolOutput {
         }
     }
 
-    /// Attaches a display title.
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
         self
     }
 
-    /// Records a replacement count (edit tool).
     pub(crate) fn with_replacements(mut self, count: usize) -> Self {
         self.metadata.replacements = Some(count);
         self
     }
 
-    /// Attaches per-match diff hunks (edit tool).
     pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
         self
@@ -211,15 +207,12 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
-/// Fallback icon for unknown tool names.
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 
-/// Extracts a string field from a tool input object.
 pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// Capitalizes the first character of a tool name for display.
 pub(crate) fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -303,7 +296,6 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
-/// Caps `content` at [`MAX_OUTPUT_BYTES`], keeping head and tail halves.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -332,7 +324,6 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes raw JSON into a tool's input struct.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
@@ -347,7 +338,6 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Utilities ──
 
-/// Resolves `search_path` or falls back to the current working directory.
 pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
@@ -366,7 +356,6 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
     }
 }
 
-/// Returns a tool-call label with a cwd-relative path argument.
 pub(crate) fn summarize_path_call(
     tool_name: &str,
     input: &serde_json::Value,
@@ -379,7 +368,6 @@ pub(crate) fn summarize_path_call(
     }
 }
 
-/// Returns a cwd-relative path, or absolute if outside `base`.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
@@ -393,7 +381,6 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Extracts the filename component, falling back to the full path.
 pub(crate) fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
@@ -405,7 +392,6 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Detects binary files by scanning for null bytes in the first 8 KB.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -414,7 +400,6 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 const MAX_WALK_DEPTH: usize = 64;
 
-/// Returns a gitignore-aware iterator over regular files under `base`.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)
@@ -424,7 +409,6 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
-/// Extracts the modification time, falling back to `UNIX_EPOCH`.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -435,7 +419,6 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
-/// Converts a byte count to megabytes for display.
 #[expect(
     clippy::cast_precision_loss,
     reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
@@ -446,7 +429,6 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
 
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
-/// Truncates a line beyond [`MAX_LINE_LENGTH`] characters.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);

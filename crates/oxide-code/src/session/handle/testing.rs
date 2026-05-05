@@ -33,8 +33,7 @@ pub(crate) fn dead(session_id: &str) -> SessionHandle {
 /// fires. Exercises the cross-task path where the actor task panics
 /// or stalls between receiving a cmd and sending its ack.
 ///
-/// Shutdown is honoured unconditionally so `handle.shutdown().await`
-/// returns on the stand-in.
+/// Shutdown is honoured unconditionally so `handle.shutdown().await` returns on the stand-in.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
     let count = Arc::new(AtomicUsize::new(0));

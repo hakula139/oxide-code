@@ -9,8 +9,7 @@
 //!
 //! Per-request `anthropic-beta` headers are computed from the model's
 //! [`crate::model::Capabilities`] via [`betas::compute_betas`], so
-//! gateways that reject unsupported betas don't 400 on spurious
-//! feature flags.
+//! gateways that reject unsupported betas don't 400 on spurious feature flags.
 
 mod betas;
 mod billing;
@@ -46,8 +45,7 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Pinned to the latest packaged claude-code release; gateways
-/// reject pre-allowlist versions.
+/// Pinned to the latest packaged claude-code release; gateways reject pre-allowlist versions.
 const CLAUDE_CLI_VERSION: &str = "2.1.121";
 /// `@anthropic-ai/sdk` version shipped by the pinned claude-code release.
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
@@ -56,9 +54,8 @@ const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 /// Stainless per-request timeout matching the SDK default.
 const STAINLESS_TIMEOUT_SECS: &str = "600";
 
-/// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
-/// models with OAuth tokens unless the system prompt starts with this exact
-/// string in its own text block.
+/// OAuth-required identity prefix. The API returns 429 for non-Haiku models with OAuth tokens
+/// unless the system prompt starts with this exact string in its own text block.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Client ──
@@ -131,9 +128,8 @@ impl Client {
         );
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
-        // No whole-request timeout — assistant responses can legitimately
-        // run for minutes. The 60 s read timeout catches slowloris dribble;
-        // Anthropic sends keepalives every ~15 s on healthy streams.
+        // No whole-request timeout — responses can run for minutes. The 60 s read timeout
+        // catches slowloris dribble; Anthropic sends keepalives every ~15 s on healthy streams.
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
@@ -167,10 +163,7 @@ impl Client {
         &self.session_id
     }
 
-    /// Replaces the id used for `x-claude-code-session-id` and
-    /// `metadata.user_id`. Debug-asserts header-value validity;
-    /// callers feed UUID v4s from `SessionHandle`, so failure is a
-    /// programmer error.
+    /// Replaces the id used for `x-claude-code-session-id` and `metadata.user_id`.
     pub(crate) fn set_session_id(&mut self, id: String) {
         debug_assert!(
             HeaderValue::from_str(&id).is_ok(),
@@ -179,8 +172,7 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-clamps `config.effort` against
-    /// the new caps. Returns the effective effort for display.
+    /// Swaps the active model and re-clamps `config.effort` against the new caps.
     pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
         let effort = caps.resolve_effort(self.config.effort);
@@ -189,8 +181,7 @@ impl Client {
         effort
     }
 
-    /// Swaps the active effort, clamped against the current model's
-    /// caps. Returns the resolved effort.
+    /// Swaps the active effort, clamped against the current model's caps.
     pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&self.config.model);
         let effort = caps.clamp_effort(pick);
@@ -200,16 +191,9 @@ impl Client {
 
     /// Stream a message response from the Anthropic API.
     ///
-    /// `system_sections` ship as individual `system` text blocks so
-    /// `cache_control` can apply to the static prefix only. `user_context`
-    /// is prepended as a synthetic user message (keeping dynamic content
-    /// like CLAUDE.md out of the cacheable `system` parameter).
-    ///
-    /// System-block ordering is delegated to [`build_system_blocks`].
-    /// The static section is the only block carrying `cache_control` —
-    /// `scope=global` on 1P, default org-scoped on 3P.
-    ///
-    /// Returns an mpsc receiver of [`StreamEvent`]s.
+    /// `system_sections` ship as individual `system` text blocks so `cache_control` can apply to
+    /// the static prefix only. `user_context` is prepended as a synthetic user message (keeping
+    /// dynamic content like CLAUDE.md out of the cacheable `system` parameter).
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
@@ -224,8 +208,7 @@ impl Client {
             None => messages.to_vec(),
         };
 
-        // 3P gateways reject API-key traffic without the cch
-        // attestation, so the billing block ships under both auth modes.
+        // 3P gateways reject API-key traffic without the cch attestation.
         let billing_header = {
             let fingerprint = billing::compute_fingerprint(
                 first_user_text(&effective_messages),
@@ -261,8 +244,7 @@ impl Client {
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Body and header stay in sync — claude-code 2.1.119 ships
-            // both on every 4.6+ agentic request.
+            // Body and header stay in sync — claude-code 2.1.119 ships both on every 4.6+ request.
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
@@ -369,11 +351,8 @@ fn normalize_arch(arch: &str) -> &'static str {
 
 // ── System Prompt Helpers ──
 
-/// Splits system sections at the boundary marker into static and dynamic parts.
-///
-/// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
-/// is excluded from both. Sections before the boundary are static (globally
-/// cacheable); sections after are dynamic (per-session).
+/// Splits system sections at the boundary marker into `(static, dynamic)`. The boundary marker
+/// itself is excluded from both.
 fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     let boundary_pos = sections
         .iter()
@@ -428,10 +407,7 @@ mod tests {
     const OFFLINE_URL: &str = "https://example.invalid";
     const TEST_MODEL: &str = "claude-sonnet-4-6";
 
-    /// Builds an SSE response body from `(event, data)` pairs. Each
-    /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
-    /// the frame-separator invariant in one place so call sites don't
-    /// hand-roll it (and can't silently omit the `\n\n`).
+    /// Builds an SSE response body from `(event, data)` pairs.
     fn sse_body(frames: &[(&str, &str)]) -> String {
         use std::fmt::Write;
         let mut body = String::new();
@@ -1203,9 +1179,6 @@ mod tests {
     // ── Client::stream_message / agentic body fields ──
 
     /// Captures the serialized body of a single streaming request.
-    /// Most agentic-body tests only care about what oxide-code sends,
-    /// not the response — this collapses the ceremony to two lines
-    /// per test.
     async fn capture_stream_body(config: Config) -> serde_json::Value {
         let server = MockServer::start().await;
         let sink: Captured<String> = captured();
@@ -1263,8 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn stream_message_context_management_body_present_on_4_6_plus() {
         // Every model whose `context_management` capability flag is
-        // set must also ship the body directive alongside the beta
-        // header.
+        // set must also ship the body directive alongside the beta header.
         for model in [
             "claude-opus-4-7",
             "claude-opus-4-6",

@@ -20,8 +20,7 @@ const MAX_PROJECT_DIR_LEN: usize = 80;
 const HASH_SUFFIX_HEX_LEN: usize = 16;
 
 /// Fallback subdirectory when the current working directory cannot be
-/// resolved. Rare in practice — the process would be running from a
-/// deleted directory.
+/// resolved. Rare in practice — the process would be running from a deleted directory.
 pub(crate) const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
 /// Derive a filesystem-safe subdirectory name from a working-directory

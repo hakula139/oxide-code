@@ -47,14 +47,9 @@ pub(crate) struct SessionHandle {
 /// Sticky-once failure flags shared between actor and handle clones.
 #[derive(Default)]
 pub(super) struct SharedState {
-    /// First batch-flush failure has surfaced through a caller's ack.
     flush_failure_surfaced: AtomicBool,
-    /// First actor-gone surface has fired; subsequent send/recv errors
-    /// stay silent.
     actor_gone_surfaced: AtomicBool,
-    /// Most recent flush error message. `actor_gone_failure` reads this
-    /// so the user sees the underlying I/O cause when the actor died on
-    /// a real disk error, not just the generic "session actor is gone".
+    /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
 }
 
@@ -69,10 +64,7 @@ impl SharedState {
         }
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`];
-    /// sticky `false` afterwards. Surfaces a flush error to the user
-    /// once and stays silent on every subsequent failure so a
-    /// disk-full mid-conversation doesn't drown the UI.
+    /// `true` on the first call after [`Self::record_flush_failure`]; sticky `false` afterwards.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
@@ -94,9 +86,7 @@ impl SharedState {
     }
 }
 
-/// Combines the AI-title seed and the first-failure surface into one
-/// ack so callers don't have to make a second channel round-trip after
-/// `record_message`.
+/// Combined ack from `record_message`: AI-title seed + first-failure surface in one round-trip.
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
@@ -114,8 +104,7 @@ impl SessionHandle {
         &self.session_id
     }
 
-    /// Record a conversation message. Returns after the batch flush
-    /// containing this cmd completes.
+    /// Record a conversation message. Returns after the batch flush completes.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
         if self
@@ -135,11 +124,7 @@ impl SessionHandle {
         })
     }
 
-    /// Record sidecar metadata for every tool result from one agent
-    /// turn in one shot — one cmd, one ack, one flush — realising the
-    /// plan's "a turn's worth of cmds collapse into one flush" intent
-    /// for the hot path. Items whose `metadata == ToolMetadata::default()`
-    /// add no display fields and are skipped at absorb.
+    /// Record sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
     pub(crate) async fn record_tool_metadata_batch(
         &self,
         items: Vec<(String, ToolMetadata)>,
@@ -149,48 +134,31 @@ impl SessionHandle {
             .await
     }
 
-    /// Append an AI-generated session title. Tail-scan picks the
-    /// latest title (max `updated_at`), so this supersedes the
-    /// first-prompt title on listings and resumes.
+    /// Append an AI-generated session title (supersedes the first-prompt title).
     pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
     }
 
-    /// Write the session summary and finalize. Idempotent; no-op on
-    /// fresh sessions that never recorded anything.
-    ///
-    /// `snapshots` is drained from the shared
-    /// [`FileTracker`][crate::file_tracker::FileTracker] just before
-    /// the call — one `Entry::FileSnapshot` lands per snapshot, ahead
-    /// of the `Entry::Summary`. An empty `Vec` finalizes with no
-    /// tracker entries.
+    /// Write the session summary and finalize. Idempotent; no-op on fresh sessions that never
+    /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Finish { snapshots, ack }, rx)
             .await
     }
 
-    /// Finalize and tear down: writes the summary, surfaces a flush
-    /// error (if any), and shuts the actor down. Returns the failure
-    /// message so callers can route it as fits their context (warn-log
-    /// after the TUI has torn down, [`AgentSink::session_write_error`]
-    /// while the sink is still live).
+    /// Finalize and tear down: writes the summary, surfaces a flush error (if any), and shuts
+    /// the actor down. Returns the failure message for the caller to route.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
         let outcome = self.finish(snapshots).await;
         self.shutdown().await;
         outcome.failure
     }
 
-    /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
-    /// after the current batch flushes, then awaits the join handle.
-    /// Cmd-driven exit (rather than waiting for every clone's
-    /// [`mpsc::Sender`] to drop) keeps process-exit fast even when an
-    /// orphaned clone — most importantly the detached title-generator
-    /// task — is mid-HTTP and far from dropping its handle.
-    /// Subsequent calls (on other clones) drain the join slot and
-    /// return immediately.
+    /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits
+    /// the join handle. Cmd-driven exit keeps process-exit fast when orphaned clones are mid-HTTP.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx, actor_join, ..
@@ -254,8 +222,7 @@ impl SessionHandle {
 
 // ── ResumedSession ──
 
-/// Live handle plus display-only extras the TUI uses to reconstruct
-/// what the user saw live.
+/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
 pub(crate) struct ResumedSession {
     pub(crate) handle: SessionHandle,
     pub(crate) messages: Vec<Message>,
@@ -270,8 +237,7 @@ pub(crate) struct ResumedSession {
 
 // ── Constructors ──
 
-/// Start a fresh session and spawn its actor. The file materializes
-/// lazily on the first record cmd.
+/// Start a fresh session and spawn its actor. The file materializes lazily on the first record cmd.
 pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
     spawn_actor(SessionState::fresh(store.clone(), model))
 }
@@ -284,14 +250,8 @@ pub(crate) struct RollOutcome {
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle and finalizes the old one. Two
-/// orderings matter: snapshot **before** clear (so the snapshots
-/// survive into the old JSONL via `finalize`), and replace **before**
-/// finalize (so the new session is in place before the old handle is
-/// consumed).
-///
-/// Caller must update any state derived from the session id (HTTP
-/// client header, in-memory message log) — this helper does not.
+/// Rolls `session` to a fresh handle and finalizes the old one. Snapshot before clear (so they
+/// survive into the old JSONL), replace before finalize (so the new session is already in place).
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -310,8 +270,7 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resume by session ID — loads, sanitizes, opens for append, spawns
-/// the actor.
+/// Resume by session ID — loads, sanitizes, opens for append, spawns the actor.
 pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
     let data = store.load_session_data(session_id)?;
     let writer = store.open_append(session_id)?;
@@ -334,8 +293,7 @@ fn from_resumed_data(
     writer: super::store::SessionWriter,
 ) -> Result<ResumedSession> {
     sanitize_resumed_messages(&mut data.messages);
-    // Bail rather than chain the next record onto a `last_message_uuid`
-    // that sanitize just dropped.
+    // Bail rather than chain the next record onto a `last_message_uuid` that sanitize just dropped.
     if data.messages.is_empty() {
         bail!("session {session_id} has no messages to resume");
     }
@@ -485,8 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
-        // Default-metadata items are skipped at absorb; non-defaults
-        // each produce one line.
+        // Default-metadata items are skipped at absorb; non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -732,8 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_writes_summary_then_succeeds() {
-        // Pins the success contract: summary lands on disk and the
-        // returned failure is `None`.
+        // Pins the success contract: summary lands on disk and the returned failure is `None`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -763,8 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_after_record_completes_after_actor_exits() {
-        // shutdown's contract: the recorded message must be on disk by
-        // the time the await returns.
+        // shutdown's contract: the recorded message must be on disk by the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -926,8 +881,7 @@ mod tests {
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
         // Three tracked files in → three FileSnapshot lines on disk
         // with the right paths. Counting strings would pass even if
-        // every snapshot pointed at the same file; parse and assert
-        // the path set instead.
+        // every snapshot pointed at the same file; parse and assert the path set instead.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1006,8 +960,7 @@ mod tests {
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        // Bump mtime / size before resume so the snapshot stat
-        // mismatches and the entry drops.
+        // Bump mtime / size before resume so the snapshot stat mismatches and the entry drops.
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
         let resumed_tracker = FileTracker::default();
@@ -1117,8 +1070,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_all_messages_sanitized_errors() {
-        // Sanitize drops the lone unresolved tool_use, leaving an
-        // empty chain — resume must bail.
+        // Sanitize drops the lone unresolved tool_use, leaving an empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");

@@ -30,8 +30,7 @@ struct MemoryFile {
     label: &'static str,
 }
 
-/// Discovers and loads instruction files, returning the formatted section for the
-/// system prompt.
+/// Discovers and loads instruction files, returning the formatted section for the system prompt.
 ///
 /// At each directory level, filenames are checked in
 /// [`INSTRUCTION_FILENAMES`] order — the first file found wins. Discovery
@@ -106,8 +105,7 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
 
 /// Returns every directory from `root` down to `cwd` (inclusive).
 ///
-/// If `cwd` is not a subdirectory of `root`, or `cwd` is `None`, returns
-/// just `[root]`.
+/// If `cwd` is not a subdirectory of `root`, or `cwd` is `None`, returns just `[root]`.
 fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     let Some(cwd) = cwd else {
         return vec![root.to_path_buf()];

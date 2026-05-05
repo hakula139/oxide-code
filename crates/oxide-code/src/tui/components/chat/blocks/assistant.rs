@@ -14,8 +14,7 @@ const THINKING_LABEL: &str = "Thinking...";
 
 // ── AssistantText ──
 
-/// A committed assistant text response, rendered through the markdown
-/// pipeline.
+/// A committed assistant text response, rendered through the markdown pipeline.
 pub(crate) struct AssistantText {
     text: String,
 }
@@ -36,16 +35,7 @@ impl ChatBlock for AssistantText {
     }
 }
 
-/// Render assistant prose as markdown with a first-line icon and a
-/// matching-width space indent on every subsequent line.
-///
-/// `starts_new_turn = true` emits [`ASSISTANT_PREFIX`] on the first line
-/// (a fresh turn). `false` uses [`ASSISTANT_CONT`] on every line so the
-/// block flows into an existing assistant turn (used by the streaming
-/// cache after its first line has already been emitted).
-///
-/// The markdown renderer wraps to `width - 2` so the 2-column lead-in
-/// never pushes content past the terminal edge.
+/// Renders assistant prose as markdown with a first-line icon prefix.
 pub(super) fn render_assistant_markdown(
     text: &str,
     ctx: &RenderCtx<'_>,
@@ -71,8 +61,7 @@ pub(super) fn render_assistant_markdown(
 
 // ── AssistantThinking ──
 
-/// Extended-thinking block — bar-prefixed quote with a `Thinking...`
-/// header and markdown-rendered body. Hidden when `show_thinking` is off.
+/// Extended-thinking block. Hidden when `show_thinking` is off.
 pub(crate) struct AssistantThinking {
     text: String,
 }
@@ -102,8 +91,6 @@ impl ChatBlock for AssistantThinking {
         out.extend(wrap_line(header, width, bar_width, Some(&bar_spans)));
 
         if !self.text.trim().is_empty() {
-            // Blank gutter line between header and body — keeps the
-            // bar continuous while giving the prose breathing room.
             out.push(Line::from(Span::styled(THINKING_PREFIX, style)));
             let rendered = render_markdown(&self.text, theme, md_width);
             for line in rendered.lines {
@@ -120,8 +107,7 @@ impl ChatBlock for AssistantThinking {
     }
 }
 
-/// Dims plain spans; leaves explicitly-colored spans (inline code,
-/// links, highlighted fences) at full color.
+/// Dims plain spans; leaves explicitly-colored spans at full color.
 fn apply_thinking_style(mut line: Line<'static>, theme: &Theme) -> Line<'static> {
     if line.style.fg.is_some() {
         return line;

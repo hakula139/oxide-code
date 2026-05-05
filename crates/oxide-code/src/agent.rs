@@ -2,8 +2,7 @@
 //!
 //! Drives one user → assistant round: streams the model response,
 //! dispatches any tool calls it emits, records each turn to the
-//! session, and stops when the model returns text only or the safety
-//! cap [`MAX_TOOL_ROUNDS`] trips.
+//! session, and stops when the model returns text only or the safety cap [`MAX_TOOL_ROUNDS`] trips.
 
 pub(crate) mod event;
 
@@ -219,7 +218,7 @@ async fn dispatch_tool_call(
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
-/// Splices queued prompts into the conversation and emits `PromptDrained` per item, in order.
+/// Splices queued prompts into the conversation and emits `PromptDrained` per item.
 async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
@@ -265,8 +264,7 @@ where
     }
 }
 
-/// Surfaces the first I/O failure on `sink`; drops the AI-title seed
-/// (only the fresh-start trigger in `main` consumes it).
+/// Surfaces the first I/O failure on `sink`.
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
     let outcome: RecordOutcome = session.record_message(msg).await;
     sink.session_write_error(outcome.failure.as_deref());
@@ -294,8 +292,7 @@ enum BlockAccumulator {
     RedactedThinking {
         data: String,
     },
-    /// Placeholder for unrecognized content block types. Absorbs deltas silently
-    /// and produces no [`ContentBlock`] at the end.
+    /// Absorbs deltas silently and produces no [`ContentBlock`] at the end.
     Skipped,
 }
 
@@ -721,8 +718,7 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
-    /// Handle whose actor channel is already closed; every write
-    /// returns the actor-gone failure.
+    /// Handle whose actor channel is already closed; every write returns the actor-gone failure.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
     }
@@ -941,8 +937,7 @@ mod tests {
         // round (either while the SSE stream produces frames or while
         // the tool runs). At the round boundary the agent must splice
         // the queued text into `messages` as a trailing user message
-        // and emit a `PromptDrained` event, then proceed to round 2
-        // which is text-only.
+        // and emit a `PromptDrained` event, then proceed to round 2 which is text-only.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1421,8 +1416,7 @@ mod tests {
     #[tokio::test]
     async fn agent_turn_strips_trailing_thinking_before_next_round() {
         // A trailing thinking block is legal on the first round but
-        // rejected by the API on the second — agent_turn must strip it
-        // before the follow-up turn.
+        // rejected by the API on the second — agent_turn must strip it before the follow-up turn.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("done")]);

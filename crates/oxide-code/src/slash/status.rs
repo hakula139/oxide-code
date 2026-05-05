@@ -44,8 +44,7 @@ mod tests {
     #[test]
     fn execute_opens_the_status_modal_via_ctx_and_pushes_no_chat_block() {
         // The modal is the UI; chat must stay clean. Behavioural tests
-        // for the modal's content + key handling live in
-        // `slash::status_modal`.
+        // for the modal's content + key handling live in `slash::status_modal`.
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let mut ctx = SlashContext::new(&mut chat, &info);

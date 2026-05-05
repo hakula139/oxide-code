@@ -34,8 +34,7 @@ const PROJECT_COL_MIN: usize = 8;
 /// Upper cap on the `Project` column width. A session started from a
 /// pathologically deep path should not squeeze the `Title` column into
 /// oblivion; the value overflows its padding when a row exceeds the
-/// cap (one-off alignment hiccup rather than hiding the title column
-/// for the entire listing).
+/// cap (one-off alignment hiccup rather than hiding the title column for the entire listing).
 const PROJECT_COL_MAX: usize = 40;
 
 /// Title-column fallback when a session has no recorded title yet.
@@ -47,8 +46,7 @@ const UNTITLED_MARKER: &str = "(untitled)";
 /// project; `true` spans every project the store can see.
 /// `local_offset` is applied to the displayed `Last Active` timestamp.
 /// `term_width` is the terminal width used to truncate the `Title`
-/// column; pass `None` when the output is piped or width is unknown
-/// to skip truncation.
+/// column; pass `None` when the output is piped or width is unknown to skip truncation.
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
@@ -70,8 +68,7 @@ pub(crate) fn render_list(
 ///
 /// When `all` is `true`, a `Project` column is inserted so cross-project
 /// rows can be disambiguated. In single-project mode the cwd is
-/// redundant (it's always `$PWD`), so the column is omitted to keep
-/// the output narrow.
+/// redundant (it's always `$PWD`), so the column is omitted to keep the output narrow.
 fn render_sessions(
     out: &mut dyn Write,
     sessions: &[SessionInfo],
@@ -97,8 +94,7 @@ fn render_sessions(
     };
 
     // FIXED_PREFIX_WIDTH + (Project + 1) when --all. Title starts after
-    // this many visual columns; anything beyond that must be truncated
-    // to keep rows single-line.
+    // this many visual columns; anything beyond that must be truncated to keep rows single-line.
     let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
     let title_budget = term_width.and_then(|w| {
         let budget = w.checked_sub(prefix_width)?;
@@ -192,8 +188,7 @@ mod tests {
 
     #[test]
     fn render_list_empty_store_shows_no_sessions_notice() {
-        // Covers the `render_list → render_sessions` glue; empty store
-        // keeps the test fixture-free.
+        // Covers the `render_list → render_sessions` glue; empty store keeps the test fixture-free.
         let dir = tempfile::tempdir().unwrap();
         let store = super::super::store::test_store(dir.path());
         let mut buf = Vec::new();
@@ -267,8 +262,7 @@ mod tests {
         );
 
         // All rows share the padded Project width, so the Title slot
-        // should start at the same column across rows and line up
-        // with the header.
+        // should start at the same column across rows and line up with the header.
         let header_title_col = header.find("Title").expect("header must contain Title");
         let row_title_cols: Vec<usize> = rows
             .iter()
@@ -314,8 +308,7 @@ mod tests {
             title: "A very long session title that will not fit".to_owned(),
             updated_at: datetime!(2026-04-18 09:05:00 UTC),
         });
-        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19
-        // chars + `...`).
+        // Prefix = 38, term_width = 60 → title budget = 22 (fits ~19 chars + `...`).
         let out = render_with_width(&[s], false, Some(60));
         let row = out.lines().nth(1).unwrap();
         let title = row

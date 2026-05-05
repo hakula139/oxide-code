@@ -1,14 +1,8 @@
 //! Generic list-picker primitive for [`Modal`](super::Modal) impls.
 //!
-//! [`ListPicker<T>`] is the state + render surface for "select one of
-//! N items" pickers. It is **not** a [`Modal`](super::Modal) itself —
-//! concrete pickers own their submit semantics (Enter dispatches what?
-//! Esc cancels) so the picker stays free of `Box<dyn Fn(&T) ->
-//! ModalAction>` callbacks.
-//!
-//! Each item implements [`PickerItem`]: label, optional description,
-//! `is_active` for the active marker, and an optional `key_hint`
-//! character (typically `'1'`–`'9'`) for muscle-memory jumps.
+//! [`ListPicker<T>`] is the state + render surface for "select one of N items" pickers. It is
+//! **not** a [`Modal`](super::Modal) itself — concrete pickers own their submit semantics so the
+//! picker stays free of callback indirection.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -21,27 +15,22 @@ use crate::util::text::truncate_to_width;
 
 // ── PickerItem ──
 
-/// One row in a [`ListPicker`]. Concrete picker types wrap their data
-/// in a small adapter type that implements this trait — see
-/// `slash::picker::ModelRow` for the canonical example.
+/// One row in a [`ListPicker`].
 pub(crate) trait PickerItem {
-    /// Primary text, left-aligned in the row's first column.
+    /// Primary text, left-aligned.
     fn label(&self) -> &str;
 
-    /// Optional secondary text, right-aligned. Renders dim.
+    /// Optional secondary text, right-aligned (rendered dim).
     fn description(&self) -> Option<&str> {
         None
     }
 
-    /// Marks the row currently in effect (e.g. the active model). Drawn
-    /// with a `✓` marker. Independent of cursor position.
+    /// Whether this row is the currently-active item (drawn with a `✓` marker).
     fn is_active(&self) -> bool {
         false
     }
 
-    /// Single-character mnemonic for jump-to-row (typically `'1'`–`'9'`).
-    /// `None` ⇒ row is not directly addressable; cursor reaches it via
-    /// arrows only.
+    /// Single-character mnemonic for jump-to-row (`'1'`–`'9'`).
     fn key_hint(&self) -> Option<char> {
         None
     }
@@ -49,23 +38,14 @@ pub(crate) trait PickerItem {
 
 // ── ListPicker ──
 
-/// Marker rendered to the left of the cursor row.
 const CURSOR_MARKER: &str = "> ";
-/// Width of `CURSOR_MARKER`. ASCII so byte length matches column width.
 const CURSOR_MARKER_WIDTH: usize = 2;
-/// Marker rendered to the right of the row currently in effect.
 const ACTIVE_MARKER: &str = "✓";
-
-/// Padding columns between the label and the description.
 const COLUMN_GAP: usize = 2;
-
-/// Body row count not counting items: title + blank + (description? +
-/// blank?). Updated by [`ListPicker::header_height`].
 const TITLE_ROW_HEIGHT: u16 = 1;
 const TITLE_BLANK_ROW: u16 = 1;
 
-/// Selectable list with cursor + active marker. Concrete modals embed
-/// this and forward navigation keys (`↑`/`↓`/`j`/`k`/`1`–`9`) to it.
+/// Selectable list with cursor + active marker.
 pub(crate) struct ListPicker<T: PickerItem> {
     title: String,
     description: Option<String>,
@@ -74,8 +54,6 @@ pub(crate) struct ListPicker<T: PickerItem> {
 }
 
 impl<T: PickerItem> ListPicker<T> {
-    /// New picker with cursor at index 0. Empty `items` is allowed —
-    /// height shrinks accordingly and `selected()` returns `None`.
     pub(crate) fn new(title: impl Into<String>, items: Vec<T>) -> Self {
         Self {
             title: title.into(),
@@ -85,34 +63,27 @@ impl<T: PickerItem> ListPicker<T> {
         }
     }
 
-    /// Builder: optional description line under the title (rendered dim).
     pub(crate) fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
-    /// Position the cursor on the first item matching `predicate`. No-op
-    /// if no item matches — cursor stays where it was.
+    /// Position the cursor on the first item matching `predicate`. No-op if no match.
     pub(crate) fn select_initial(&mut self, predicate: impl Fn(&T) -> bool) {
         if let Some(idx) = self.items.iter().position(predicate) {
             self.selected = idx;
         }
     }
 
-    /// Currently-highlighted item. `None` when the list is empty.
     pub(crate) fn selected(&self) -> Option<&T> {
         self.items.get(self.selected)
     }
 
-    /// Cursor row index. Test-only — production picker logic reaches
-    /// the highlighted row through [`Self::selected`] which already
-    /// returns the value most callers need.
     #[cfg(test)]
     pub(crate) fn selected_index(&self) -> usize {
         self.selected
     }
 
-    /// Move cursor down one row; wraps from last to first.
     pub(crate) fn select_next(&mut self) {
         if self.items.is_empty() {
             return;
@@ -120,7 +91,6 @@ impl<T: PickerItem> ListPicker<T> {
         self.selected = (self.selected + 1) % self.items.len();
     }
 
-    /// Move cursor up one row; wraps from first to last.
     pub(crate) fn select_prev(&mut self) {
         if self.items.is_empty() {
             return;
@@ -132,9 +102,7 @@ impl<T: PickerItem> ListPicker<T> {
         };
     }
 
-    /// Jump cursor to the row whose `key_hint` matches `c`. Returns
-    /// whether a jump happened — `false` for keys that don't address a
-    /// row, so the wrapping modal can fall through to other handling.
+    /// Jump cursor to the row whose `key_hint` matches `c`. Returns whether a jump happened.
     pub(crate) fn select_by_hint(&mut self, c: char) -> bool {
         if let Some(idx) = self.items.iter().position(|i| i.key_hint() == Some(c)) {
             self.selected = idx;

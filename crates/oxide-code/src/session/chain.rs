@@ -15,8 +15,7 @@ use crate::message::Message;
 
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
-    /// UUIDs claimed as some other message's `parent_uuid`. The DAG
-    /// leaves are `nodes.keys() - referenced`.
+    /// UUIDs claimed as some other message's `parent_uuid`. Leaves = keys − referenced.
     referenced: HashSet<Uuid>,
 }
 
@@ -34,8 +33,7 @@ impl ChainBuilder {
         }
     }
 
-    /// Last-append-wins on duplicate UUIDs so a retry / partial-write
-    /// replay collapses to the most recent representation.
+    /// Last-append-wins on duplicate UUIDs (retry / partial-write replay).
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
@@ -56,10 +54,8 @@ impl ChainBuilder {
         );
     }
 
-    /// Picks the newest leaf and walks back via `parent_uuid`. Cycles
-    /// and orphan parents act as chain terminators (preserve the
-    /// prefix collected so far) so corrupted on-disk state cannot hang
-    /// the walker.
+    /// Picks the newest leaf and walks back via `parent_uuid`. Cycles and orphan parents
+    /// terminate the walk so corrupted on-disk state cannot hang.
     pub(super) fn resolve(mut self) -> (Vec<Message>, Option<Uuid>) {
         let tip = self
             .nodes

@@ -23,17 +23,13 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 /// field by field via [`FileConfig::merge`].
 ///
 /// ```toml
-/// [client]
-/// model = "claude-sonnet-4-6"
+/// [client] model = "claude-sonnet-4-6"
 ///
-/// [tui]
-/// show_thinking = true
+/// [tui] show_thinking = true
 ///
-/// [tui.theme]
-/// base = "latte"
+/// [tui.theme] base = "latte"
 ///
-/// [tui.theme.overrides]
-/// error = "#ff0000"
+/// [tui.theme.overrides] error = "#ff0000"
 /// ```
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,10 +39,6 @@ pub(super) struct FileConfig {
 }
 
 /// API client settings (`[client]` section).
-///
-/// Fields are grouped by concern so adjacent lines stay related:
-/// connection (`api_key`, `base_url`), model selection (`model`,
-/// `effort`), then request tuning (`max_tokens`, `prompt_cache_ttl`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
@@ -67,11 +59,6 @@ pub(super) struct TuiConfig {
 }
 
 /// Theme settings (`[tui.theme]` section).
-///
-/// `base` selects a built-in name (`mocha`, `macchiato`, `frappe`,
-/// `latte`) or a filesystem path (`~/.config/ox/themes/dark.toml`)
-/// to a TOML body. The `[tui.theme.overrides]` table patches
-/// individual slots on top of the resolved base.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ThemeFileConfig {
@@ -114,11 +101,7 @@ impl TuiConfig {
 }
 
 impl ThemeFileConfig {
-    /// Merge two theme configs. `base` follows the standard "other
-    /// wins" rule. `overrides` are merged key-by-key — each side
-    /// contributes its slot patches; on key collision, `other` wins
-    /// so a project-level patch overrides a user-level patch for
-    /// the same slot.
+    /// `base` follows "other wins"; `overrides` merge key-by-key with `other` winning collisions.
     fn merge(self, other: Self) -> Self {
         let overrides = match (self.overrides, other.overrides) {
             (Some(mut s), Some(o)) => {
@@ -134,8 +117,6 @@ impl ThemeFileConfig {
     }
 }
 
-/// Merges two optional config sections. When both are present, merges their
-/// fields. When only one is present, use it as-is.
 fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> Option<T> {
     match (base, other) {
         (Some(b), Some(o)) => Some(merge(b, o)),
@@ -153,8 +134,7 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 /// Returns an error if any discovered file is unreadable or malformed —
 /// silent fallthrough would otherwise hide typos (e.g. a misplaced
 /// `show_thinking` under `[client]`) and surface as a confusing
-/// downstream "no credentials" error after the dropped config takes
-/// the API key with it.
+/// downstream "no credentials" error after the dropped config takes the API key with it.
 pub(super) fn load() -> Result<FileConfig> {
     let user = user_config_path()
         .map(|p| load_file(&p))
@@ -172,9 +152,7 @@ pub(super) fn load() -> Result<FileConfig> {
     })
 }
 
-/// Reads a single config file. `Ok(None)` when the file does not
-/// exist; `Err` when it exists but cannot be read or parsed (so the
-/// caller can surface the path and underlying TOML diagnostic).
+/// `Ok(None)` when the file does not exist; `Err` when it exists but is unreadable or malformed.
 fn load_file(path: &Path) -> Result<Option<FileConfig>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -191,8 +169,6 @@ fn load_file(path: &Path) -> Result<Option<FileConfig>> {
 
 // ── Path Discovery ──
 
-/// User config: `$XDG_CONFIG_HOME/ox/config.toml`, falling back to
-/// `~/.config/ox/config.toml`.
 pub(crate) fn user_config_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
@@ -209,8 +185,7 @@ pub(crate) fn find_project_config() -> Option<PathBuf> {
 
 /// Walks from `start` upward to find the nearest `ox.toml`.
 ///
-/// Separated from [`find_project_config`] for testability (avoids changing
-/// the process CWD).
+/// Separated from [`find_project_config`] for testability (avoids changing the process CWD).
 fn find_project_config_from(mut dir: PathBuf) -> Option<PathBuf> {
     loop {
         let candidate = dir.join(PROJECT_CONFIG_FILENAME);
@@ -370,8 +345,7 @@ mod tests {
 
     #[test]
     fn theme_merge_overrides_extend_when_both_set() {
-        // Project (other) extends user (self) — disjoint slots
-        // contribute from both layers.
+        // Project (other) extends user (self) — disjoint slots contribute from both layers.
         let base = theme_with(None, &[("error", "#aaaaaa")]);
         let other = theme_with(None, &[("accent", "#bbbbbb")]);
         let merged = base.merge(other);

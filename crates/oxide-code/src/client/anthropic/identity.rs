@@ -61,9 +61,7 @@ fn device_id_path() -> Option<PathBuf> {
     )
 }
 
-/// `Some(id)` only when `path` exists and parses as 64-char lowercase
-/// hex; missing, malformed, or non-UTF-8 content returns `None` so
-/// the caller mints fresh.
+/// `Some(id)` when `path` exists and is valid 64-char lowercase hex; `None` otherwise.
 fn read_existing(path: &Path) -> Result<Option<String>> {
     let bytes = match fs::read(path) {
         Ok(b) => b,

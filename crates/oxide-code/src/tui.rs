@@ -2,8 +2,7 @@
 //!
 //! ratatui + crossterm with a `tokio::select!` event loop. [`app::App`]
 //! is the root state; [`components`] owns the chat / input / status
-//! regions; [`markdown`] renders assistant text; [`theme`] centralizes
-//! all styling.
+//! regions; [`markdown`] renders assistant text; [`theme`] centralizes all styling.
 
 pub(crate) mod app;
 pub(crate) mod components;

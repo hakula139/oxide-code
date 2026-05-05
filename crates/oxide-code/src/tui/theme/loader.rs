@@ -1,7 +1,6 @@
 //! Theme TOML parsing and resolution.
 //!
-//! A theme document is a flat TOML body with one entry per slot.
-//! Each slot value is either:
+//! A theme document is a flat TOML body with one entry per slot. Each slot value is either:
 //!
 //! - a **bare color string** (`text = "#cdd6f4"`) — interpreted as
 //!   the slot's `fg` with no `bg` and no modifiers; or
@@ -16,8 +15,7 @@
 //! [`resolve_theme`] applies a base + per-slot overrides from
 //! `[tui.theme]` config to produce a final [`Theme`]. Theme-selection
 //! errors (unknown name, missing file) hard-fail; per-slot value
-//! errors warn and fall back to the base value so the TUI still
-//! launches.
+//! errors warn and fall back to the base value so the TUI still launches.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,8 +73,7 @@ fn load_base_body(name: &str) -> Result<String> {
     })
 }
 
-/// Expand a leading `~/` to `$HOME` for theme file paths. Other path
-/// prefixes are returned as-is.
+/// Expand a leading `~/` to `$HOME` for theme file paths. Other path prefixes are returned as-is.
 fn expand_tilde(s: &str) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -95,8 +92,7 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<(
     Ok(())
 }
 
-/// Mutable slot lookup by name. Generated so the mapping can't drift
-/// from [`Theme`]'s fields.
+/// Mutable slot lookup by name. Generated so the mapping can't drift from [`Theme`]'s fields.
 macro_rules! define_slot_for_name {
     ( $( ($name:ident, $doc:literal), )* ) => {
         fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
@@ -129,8 +125,7 @@ pub(crate) enum SlotPatch {
 }
 
 /// Inline TOML patch — every field optional. `Option<bool>` modifier
-/// flags distinguish "no change" (`None`), "set" (`Some(true)`), and
-/// "clear" (`Some(false)`).
+/// flags distinguish "no change" (`None`), "set" (`Some(true)`), and "clear" (`Some(false)`).
 ///
 /// An entirely empty patch (`error = {}`) would silently re-write the
 /// base value with itself — almost certainly a config bug. [`apply`]
@@ -138,8 +133,7 @@ pub(crate) enum SlotPatch {
 /// instead. Per-slot warnings are the right severity for a per-slot
 /// config mistake; a `SlotPatch`-level custom `Deserialize` would
 /// catch it at parse time, but serde's untagged enum dispatcher
-/// swallows inner messages, so the warn path produces a clearer
-/// diagnostic.
+/// swallows inner messages, so the warn path produces a clearer diagnostic.
 ///
 /// [`apply`]: Self::apply
 #[derive(Debug, Default, Deserialize)]
@@ -226,8 +220,7 @@ pub(super) fn parse_theme(content: &str) -> Result<Theme> {
 }
 
 /// `ThemeFile` deserialization shape + `into_theme` converter.
-/// `deny_unknown_fields` catches typos; `into_theme` wraps each
-/// slot's parse error with its name.
+/// `deny_unknown_fields` catches typos; `into_theme` wraps each slot's parse error with its name.
 macro_rules! define_theme_file {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Deserialize)]
@@ -252,8 +245,7 @@ macro_rules! define_theme_file {
 super::for_each_slot!(define_theme_file);
 
 /// One slot's TOML representation. The `untagged` enum lets serde
-/// accept either form transparently — a bare string or an inline
-/// table.
+/// accept either form transparently — a bare string or an inline table.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SlotDef {
@@ -371,8 +363,7 @@ mod tests {
     fn resolve_theme_loads_from_file_path() {
         // Write a minimal theme file (modify mocha) and resolve via
         // its absolute path. Confirms the file-path branch works
-        // end-to-end and that the override pathway can hand a file
-        // through.
+        // end-to-end and that the override pathway can hand a file through.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("custom.toml");
         let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
@@ -544,8 +535,7 @@ mod tests {
     }
 
     /// Inline-form override with a bad `fg` color exercises the
-    /// `InlinePatch::apply` fg parse path that the bare-string sibling
-    /// can't reach.
+    /// `InlinePatch::apply` fg parse path that the bare-string sibling can't reach.
     #[test]
     fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
         install_permissive_global_subscriber();
@@ -691,8 +681,7 @@ mod tests {
         // modifier fields (all `None`) must leave every base modifier
         // untouched. Catches the regression where the loop is
         // refactored to `flag.unwrap_or(false)` and silently clears
-        // every base modifier whenever an unrelated patch field is
-        // set.
+        // every base modifier whenever an unrelated patch field is set.
         let base = Slot {
             fg: Some(Color::Red),
             bg: None,
@@ -840,8 +829,7 @@ mod tests {
 
     /// Default modifier semantics: `accent` is bold, `thinking` is
     /// italic, `heading_h1` is bold + underlined, `link` is
-    /// underlined. Pinned so a vendored TOML edit can't silently
-    /// demote them.
+    /// underlined. Pinned so a vendored TOML edit can't silently demote them.
     #[test]
     fn parse_theme_mocha_modifiers_match_default() {
         let t = parse_theme(builtin::MOCHA).unwrap();
