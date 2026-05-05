@@ -609,4 +609,20 @@ mod tests {
         // Single seam for unknown-id fallback — every UI surface goes through this.
         assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
     }
+
+    // ── display_name ──
+
+    #[test]
+    fn display_name_appends_1m_context_suffix_on_1m_id() {
+        assert_eq!(
+            display_name("claude-opus-4-7[1m]"),
+            "Claude Opus 4.7 (1M context)"
+        );
+    }
+
+    #[test]
+    fn display_name_omits_suffix_on_plain_id() {
+        // Plain ids share their label with `marketing_or_id`; only `[1m]` triggers the suffix.
+        assert_eq!(display_name("claude-opus-4-7"), "Claude Opus 4.7");
+    }
 }

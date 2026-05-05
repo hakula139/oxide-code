@@ -331,10 +331,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unhandled_key_is_consumed_without_state_change() {
+        // Esc / Ctrl+C are intercepted at ModalStack; everything else (Up, Tab, letters other
+        // than h / l) must fall through to `Consumed` and leave the cursor put.
+        let mut s = slider_for("claude-opus-4-7", Some(Effort::Medium));
+        let before = s.selected;
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::Char('q')] {
+            let outcome = s.handle_key(&key(code));
+            assert!(
+                matches!(outcome, ModalKey::Consumed),
+                "{code:?} must be consumed"
+            );
+            assert_eq!(s.selected, before, "{code:?} must not move the cursor");
+        }
+    }
+
     // ── render ──
 
     #[test]
-    fn render_runs_at_typical_widths_without_panicking() {
+    fn render_emits_title_at_typical_widths() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -350,10 +366,19 @@ mod tests {
                 let h = s.height(width);
                 let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
                 terminal
-                    .draw(|frame| {
-                        s.render(frame, Rect::new(0, 0, width, h), &theme);
-                    })
+                    .draw(|frame| s.render(frame, Rect::new(0, 0, width, h), &theme))
                     .expect("render must not panic");
+                let buf = terminal.backend().buffer().clone();
+                let title_visible = (0..h).any(|y| {
+                    (0..width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(TITLE)
+                });
+                assert!(
+                    title_visible,
+                    "{model} at width {width}: title `{TITLE}` must render"
+                );
             }
         }
     }
