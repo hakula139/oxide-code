@@ -21,9 +21,15 @@ pub(crate) mod list_picker;
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use crate::agent::event::UserAction;
 use crate::tui::theme::Theme;
+
+/// One-row top separator above the modal body — visually delineates the modal from the chat.
+const TOP_BORDER_HEIGHT: u16 = 1;
+const TOP_BORDER_GLYPH: char = '─';
 
 // ── Modal Trait ──
 
@@ -101,18 +107,43 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
-    /// Total height the stack needs above the input. Today only the
-    /// top modal renders; the height reflects that. If we ever stack
-    /// visually, this sums.
+    /// Total height the stack needs above the input — top modal's body plus a one-row separator.
     pub(crate) fn height(&self, width: u16) -> u16 {
-        self.stack.last().map_or(0, |m| m.height(width))
+        self.stack
+            .last()
+            .map_or(0, |m| m.height(width).saturating_add(TOP_BORDER_HEIGHT))
     }
 
-    /// Render the visible modal into `area`. No-op if empty.
+    /// Render the visible modal into `area`. Paints a one-row top separator first, then delegates
+    /// the remainder to the modal. No-op if empty.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        if let Some(top) = self.stack.last() {
-            top.render(frame, area, theme);
+        let Some(top) = self.stack.last() else {
+            return;
+        };
+        if area.height == 0 {
+            return;
         }
+        let border_area = Rect {
+            height: TOP_BORDER_HEIGHT.min(area.height),
+            ..area
+        };
+        let border = Line::from(Span::styled(
+            TOP_BORDER_GLYPH.to_string().repeat(usize::from(area.width)),
+            theme.dim(),
+        ));
+        frame.render_widget(Paragraph::new(border).style(theme.surface()), border_area);
+
+        let body_height = area.height.saturating_sub(TOP_BORDER_HEIGHT);
+        if body_height == 0 {
+            return;
+        }
+        let body_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(TOP_BORDER_HEIGHT),
+            width: area.width,
+            height: body_height,
+        };
+        top.render(frame, body_area, theme);
     }
 
     /// Deliver `event` to the top modal. Returns the action to dispatch
@@ -211,7 +242,8 @@ mod tests {
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         assert!(stack.is_active());
-        assert_eq!(stack.height(80), 3);
+        // Modal body (3) + one-row top separator.
+        assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT);
     }
 
     #[test]
@@ -251,6 +283,39 @@ mod tests {
     }
 
     #[test]
+    fn render_paints_top_border_then_delegates_body_below_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut stack = ModalStack::new();
+        let modal = ScriptedModal::new(ModalAction::None);
+        let body_height = modal.declared_height;
+        stack.push(Box::new(modal));
+
+        let theme = Theme::default();
+        let width: u16 = 12;
+        let total_height = stack.height(width);
+        assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
+
+        let mut terminal = Terminal::new(TestBackend::new(width, total_height)).unwrap();
+        terminal
+            .draw(|frame| {
+                stack.render(frame, Rect::new(0, 0, width, total_height), &theme);
+            })
+            .expect("render must not panic");
+
+        let buf = terminal.backend().buffer();
+        for x in 0..width {
+            let symbol = buf[(x, 0)].symbol();
+            assert_eq!(
+                symbol,
+                TOP_BORDER_GLYPH.to_string(),
+                "top row col {x} must be border glyph; got {symbol:?}",
+            );
+        }
+    }
+
+    #[test]
     fn handle_key_on_empty_stack_returns_none_without_panicking() {
         // No active modal → no key delivery, no stack mutation.
         let mut stack = ModalStack::new();
@@ -271,10 +336,18 @@ mod tests {
         top.declared_height = 5;
         stack.push(Box::new(top));
 
-        assert_eq!(stack.height(80), 5, "top modal's height wins");
+        assert_eq!(
+            stack.height(80),
+            5 + TOP_BORDER_HEIGHT,
+            "top modal's height wins (plus border)"
+        );
         let outcome = stack.handle_key(&key('s'));
         assert!(matches!(outcome, Some(ModalAction::None)));
         assert!(stack.is_active(), "inner modal still active");
-        assert_eq!(stack.height(80), 3, "inner modal's height resumes");
+        assert_eq!(
+            stack.height(80),
+            3 + TOP_BORDER_HEIGHT,
+            "inner modal's height resumes (plus border)"
+        );
     }
 }
