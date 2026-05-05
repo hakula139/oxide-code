@@ -29,6 +29,9 @@ impl SlashCommand for InitCmd {
     }
 }
 
+/// System prompt template for `/init` — instructs the model to author a fresh `AGENTS.md` (or
+/// propose a diff against an existing one) grounded in files it actually reads, with explicit
+/// exclusion rules to avoid generic / boilerplate output.
 const PROMPT: &str = indoc! {r"
     Please analyze this codebase and create an `AGENTS.md` file at the project
     root that future AI coding assistants will read when working on it.
