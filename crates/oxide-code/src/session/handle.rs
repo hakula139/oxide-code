@@ -335,6 +335,37 @@ mod tests {
     use crate::file_tracker::testing::record_tracked_file;
     use crate::message::{ContentBlock, Role};
 
+    // ── SharedState ──
+
+    #[test]
+    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let _guard = s.last_flush_failure.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // Mutex is now poisoned. record_flush_failure must recover.
+        shared.record_flush_failure("disk full");
+        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        // Poison by writing then panicking.
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let mut guard = s.last_flush_failure.lock().unwrap();
+            *guard = Some("pre-poison".to_owned());
+            panic!("deliberate poison");
+        })
+        .join();
+        // Recovery path must still return the value written pre-panic.
+        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+    }
+
     // ── record_message ──
 
     #[tokio::test]
@@ -678,6 +709,47 @@ mod tests {
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
 
+    #[tokio::test]
+    async fn finish_persists_one_file_snapshot_per_tracked_file() {
+        // Three tracked files in → three FileSnapshot lines on disk
+        // with the right paths. Counting strings would pass even if
+        // every snapshot pointed at the same file; parse and assert the path set instead.
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("trigger")).await;
+        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
+            ["a.rs", "b.rs", "c.rs"]
+                .into_iter()
+                .map(|name| {
+                    let path = files_dir.path().join(name);
+                    record_tracked_file(&tracker, &path, name.as_bytes());
+                    path
+                })
+                .collect();
+
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"file_snapshot""#))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                std::path::PathBuf::from(v["path"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            snapshot_paths, expected_paths,
+            "every tracked file lands as its own FileSnapshot",
+        );
+    }
+
     // ── finalize ──
 
     #[tokio::test]
@@ -779,6 +851,22 @@ mod tests {
         handle.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        // Poison the actor_join mutex.
+        let join_ref = Arc::clone(&handle.actor_join);
+        _ = std::thread::spawn(move || {
+            let _guard = join_ref.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // shutdown must recover (take the JoinHandle) and not panic.
+        handle.shutdown().await;
+    }
+
     // ── start ──
 
     #[tokio::test]
@@ -865,151 +953,6 @@ mod tests {
         assert!(
             old_jsonl.contains("seed.txt"),
             "snapshot survived into old JSONL: {old_jsonl}",
-        );
-    }
-
-    // ── file-snapshot persistence ──
-
-    #[tokio::test]
-    async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Three tracked files in → three FileSnapshot lines on disk
-        // with the right paths. Counting strings would pass even if
-        // every snapshot pointed at the same file; parse and assert the path set instead.
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let sid = handle.session_id().to_owned();
-
-        handle.record_message(Message::user("trigger")).await;
-        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
-            ["a.rs", "b.rs", "c.rs"]
-                .into_iter()
-                .map(|name| {
-                    let path = files_dir.path().join(name);
-                    record_tracked_file(&tracker, &path, name.as_bytes());
-                    path
-                })
-                .collect();
-
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
-            .lines()
-            .filter(|l| l.contains(r#""type":"file_snapshot""#))
-            .map(|l| {
-                let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                std::path::PathBuf::from(v["path"].as_str().unwrap())
-            })
-            .collect();
-        assert_eq!(
-            snapshot_paths, expected_paths,
-            "every tracked file lands as its own FileSnapshot",
-        );
-    }
-
-    #[tokio::test]
-    async fn resume_restores_unchanged_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
-    }
-
-    #[tokio::test]
-    async fn resume_drops_drifted_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        // Bump mtime / size before resume so the snapshot stat mismatches and the entry drops.
-        std::fs::write(&path_a, b"externally edited bytes").unwrap();
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
-                path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
-            }),
-            "drifted file must hit the must-read-first gate",
-        );
-    }
-
-    #[tokio::test]
-    async fn resume_drops_snapshots_for_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        std::fs::remove_file(&path_a).unwrap();
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        // restore_verified must drop silently; the tracker should
-        // end up empty for this path rather than panic.
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            std::time::UNIX_EPOCH,
-            0,
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
-                path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
-            }),
         );
     }
 
@@ -1159,50 +1102,105 @@ mod tests {
         );
     }
 
-    // ── SharedState poison recovery ──
+    #[tokio::test]
+    async fn resume_restores_unchanged_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
 
-    #[test]
-    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let _guard = s.last_flush_failure.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        // Mutex is now poisoned. record_flush_failure must recover.
-        shared.record_flush_failure("disk full");
-        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
-    }
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
 
-    #[test]
-    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        // Poison by writing then panicking.
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let mut guard = s.last_flush_failure.lock().unwrap();
-            *guard = Some("pre-poison".to_owned());
-            panic!("deliberate poison");
-        })
-        .join();
-        // Recovery path must still return the value written pre-panic.
-        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
     }
 
     #[tokio::test]
-    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+    async fn resume_drops_drifted_snapshots() {
         let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
-        // Poison the actor_join mutex.
-        let join_ref = Arc::clone(&handle.actor_join);
-        _ = std::thread::spawn(move || {
-            let _guard = join_ref.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        // shutdown must recover (take the JoinHandle) and not panic.
-        handle.shutdown().await;
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        // Bump mtime / size before resume so the snapshot stat mismatches and the entry drops.
+        std::fs::write(&path_a, b"externally edited bytes").unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+            "drifted file must hit the must-read-first gate",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_drops_snapshots_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        std::fs::remove_file(&path_a).unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        // restore_verified must drop silently; the tracker should
+        // end up empty for this path rather than panic.
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            std::time::UNIX_EPOCH,
+            0,
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+        );
     }
 }
