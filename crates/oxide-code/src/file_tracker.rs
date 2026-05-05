@@ -50,6 +50,9 @@ pub(crate) enum LastView {
     Partial { offset: usize, limit: usize },
 }
 
+/// Which mutating tool is asking for the gate. Carried into [`GateError`] purely so the rendered
+/// error message reads `"... before editing it"` vs `"... before writing to it"` — `verb()` is the
+/// only consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
@@ -239,6 +242,9 @@ impl FileTracker {
 
 // ── FileSnapshot ──
 
+/// JSONL-persisted record of one tracked file. Written into the session log on `finish` and read
+/// back on resume by [`FileTracker::restore_verified`], which re-stats each path before
+/// re-admitting the entry to the live tracker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -253,18 +259,31 @@ pub(crate) struct FileSnapshot {
 
 // ── Outcomes ──
 
+/// Outcome of [`FileTracker::record_read`].
+///
+/// `CacheHit` means the path was already in the tracker with identical content (full-read +
+/// matching xxh64); the caller should return [`CACHE_HIT_STUB`] instead of the real bytes to
+/// save tokens. `Inserted` is the regular path — fresh read, snapshot stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
     CacheHit,
 }
 
+/// Outcome of the cheap stat-only freshness check.
+///
+/// `Pass` — `(mtime, size)` matches the recorded snapshot; the gate is satisfied without
+/// re-reading bytes. `NeedsBytes { stored_hash }` — stat drifted; the caller must rehash the
+/// current file contents and call [`FileTracker::verify_drift_bytes`] to confirm whether the
+/// content actually changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatCheck {
     Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
+/// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
+/// message tells the model exactly how to recover (Read first / Read in full / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
     #[error("File {} has not been read in this session. Use the Read tool first before {} it.", .path.display(), .purpose.verb())]
