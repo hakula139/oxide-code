@@ -1,9 +1,4 @@
-//! `/status` overview modal — read-only single panel of session
-//! descriptors. Esc closes; no other keys do anything.
-//!
-//! Replaces the text-output `/status` block; the underlying data is
-//! the same [`SessionInfo`] / [`ConfigSnapshot`] snapshot that backed
-//! the old chat row.
+//! `/status` overview modal — read-only single panel of session descriptors. Esc / Enter close.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -12,22 +7,15 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::context::SessionInfo;
 use crate::config::display_effort;
 use crate::tui::modal::{Modal, ModalKey};
 use crate::tui::theme::Theme;
 
-use super::context::SessionInfo;
-
 // ── Constants ──
 
-/// Title rendered in bold above the rows.
 const TITLE: &str = "Status";
-
-/// Footer line rendered dim under the rows.
 const FOOTER: &str = "Esc to close";
-
-/// Padding columns between the label and value columns. Mirrors
-/// [`ListPicker`](crate::tui::modal::list_picker::ListPicker).
 const COLUMN_GAP: usize = 2;
 
 // ── StatusModal ──
@@ -44,9 +32,6 @@ impl StatusModal {
         } else {
             "off".to_owned()
         };
-        // Pin order: identity (Model / Effort) first, then session
-        // descriptors, then runtime knobs. Mirrors the routing-debug
-        // glance from the old text /status.
         let rows = vec![
             ("Model", model),
             ("Effort", display_effort(info.config.effort)),
@@ -63,7 +48,6 @@ impl StatusModal {
 
 impl Modal for StatusModal {
     fn height(&self, _width: u16) -> u16 {
-        // Title + blank + rows + blank + footer.
         let body = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
         body.saturating_add(4)
     }
@@ -100,7 +84,6 @@ impl Modal for StatusModal {
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         match event.code {
-            // Esc and Enter both dismiss — there's nothing to confirm.
             KeyCode::Esc | KeyCode::Enter => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
@@ -120,7 +103,7 @@ mod tests {
         KeyEvent::from(code)
     }
 
-    // ── Construction ──
+    // ── new ──
 
     #[test]
     fn new_produces_one_row_per_session_descriptor() {
@@ -214,7 +197,7 @@ mod tests {
         }
     }
 
-    // ── Render smoke ──
+    // ── render ──
 
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {

@@ -15,6 +15,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::context::SessionInfo;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{ResolvedModelId, capabilities_for, marketing_or_id};
@@ -22,14 +23,10 @@ use crate::tui::modal::list_picker::{ListPicker, PickerItem};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
 
-use super::context::SessionInfo;
-
 // ── Constants ──
 
-/// Curated roster shown in the picker. Manual `/model <id>` resolves
-/// against the full `MODELS` table; this slice only governs what the
-/// modal lists. Mirrors `slash::model::LISTED_MODELS` — the typed-arg
-/// path and the picker share semantics deliberately.
+/// Curated roster shown in the picker. The typed-arg `/model <id>` resolves against the full
+/// `MODELS` table; this slice governs what the modal lists.
 const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
@@ -362,7 +359,7 @@ mod tests {
         KeyEvent::from(code)
     }
 
-    // ── Initial state ──
+    // ── new ──
 
     #[test]
     fn new_positions_cursor_on_active_model() {
@@ -390,7 +387,7 @@ mod tests {
         assert!(!p.effort_dirty);
     }
 
-    // ── handle_key navigation ──
+    // ── handle_key ──
 
     #[test]
     fn down_arrow_advances_cursor_and_refreshes_effort() {
@@ -467,8 +464,6 @@ mod tests {
             "tier model must restore effort via effort_or_active fallback",
         );
     }
-
-    // ── submit ──
 
     #[test]
     fn enter_with_no_changes_returns_cancelled() {
@@ -556,7 +551,7 @@ mod tests {
         );
     }
 
-    // ── Render smoke ──
+    // ── render ──
 
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {
