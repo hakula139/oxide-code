@@ -449,6 +449,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn navigating_from_no_tier_back_to_tier_model_restores_effort() {
+        let mut p = picker(InitialFocus::Model);
+        p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
+        assert!(p.effort.is_none(), "Haiku has no effort tier");
+        p.handle_key(&key(KeyCode::Up)); // back to Sonnet 4.6 [1m] (index 3)
+        assert!(
+            p.effort.is_some(),
+            "tier model must restore effort via effort_or_active fallback",
+        );
+    }
+
     // ── submit ──
 
     #[test]
@@ -467,7 +479,10 @@ mod tests {
         let outcome = p.handle_key(&key(KeyCode::Enter));
         match outcome {
             ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
-                assert!(model.is_some(), "model must be set");
+                assert_eq!(
+                    model.map(ResolvedModelId::into_inner).as_deref(),
+                    Some("claude-opus-4-7[1m]"),
+                );
                 assert!(
                     effort.is_none(),
                     "effort must NOT be set when only the model axis moved",
@@ -479,7 +494,7 @@ mod tests {
 
     #[test]
     fn enter_after_effort_change_emits_swap_with_effort_only() {
-        // Opus 4.7 active + xhigh; cycle effort once, model unchanged.
+        // Opus 4.7 active + High; cycle effort Forward once → Xhigh.
         let mut p = picker(InitialFocus::Effort);
         p.handle_key(&key(KeyCode::Right));
         let outcome = p.handle_key(&key(KeyCode::Enter));
@@ -489,7 +504,7 @@ mod tests {
                     model.is_none(),
                     "model must NOT be set when only the effort axis moved",
                 );
-                assert!(effort.is_some(), "effort must be set");
+                assert_eq!(effort, Some(Effort::Xhigh));
             }
             other => panic!("expected Submitted with effort-only SwapConfig, got {other:?}"),
         }
