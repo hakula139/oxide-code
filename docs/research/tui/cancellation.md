@@ -1,6 +1,6 @@
 # Cancellation and Queued Input (Reference)
 
-Research on TUI cancellation, exit, and input queueing across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [opencode](https://github.com/anomalyco/opencode), and [OpenAI Codex](https://github.com/openai/codex).
+Research on TUI cancellation, exit, and input queueing across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 ## Claude Code (TypeScript)
 

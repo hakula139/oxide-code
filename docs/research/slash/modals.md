@@ -4,8 +4,6 @@ Research on the modal / picker / dialog primitives that turn slash commands into
 
 Verified against locally-mirrored sources (2026-05-05): [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex) `codex-rs/tui`, [opencode](https://github.com/anomalyco/opencode) `packages/`.
 
-> **Status:** the design synthesis from this research has been implemented. See [`docs/design/slash/modals.md`](../../design/slash/modals.md) for the shipped shape.
-
 ## Claude Code (TypeScript + Ink)
 
 Modals are React components rendered by Ink. ~50 of ~100 commands are `type: 'local-jsx'`.
