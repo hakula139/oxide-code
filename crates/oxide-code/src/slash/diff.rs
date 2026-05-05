@@ -50,7 +50,7 @@ fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, St
     } else {
         ctx.chat.push_git_diff(text);
     }
-    Ok(SlashOutcome::Local)
+    Ok(SlashOutcome::Done)
 }
 
 /// Gathers tracked + untracked diff text rooted at `cwd`. Falls back
@@ -238,7 +238,7 @@ mod tests {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info));
-        assert_eq!(result, Ok(SlashOutcome::Local));
+        assert_eq!(result, Ok(SlashOutcome::Done));
         assert_eq!(chat.entry_count(), 1);
         assert!(!chat.last_is_error());
     }

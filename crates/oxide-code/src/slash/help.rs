@@ -23,7 +23,7 @@ impl SlashCommand for HelpCmd {
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.chat.push_system_message(render_help());
-        Ok(SlashOutcome::Local)
+        Ok(SlashOutcome::Done)
     }
 }
 
@@ -153,7 +153,7 @@ mod tests {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
         let mut ctx = SlashContext::new(&mut chat, &info);
-        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Local));
+        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Done));
     }
 
     #[test]
@@ -208,7 +208,7 @@ mod tests {
             self.usage
         }
         fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Local)
+            Ok(SlashOutcome::Done)
         }
     }
 }

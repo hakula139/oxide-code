@@ -1,14 +1,8 @@
-//! `/effort` — list / swap the active effort tier mid-session.
-//!
-//! Bare lists the levels supported by the active model with the current
-//! marked. `/effort <level>` swaps to that tier. The agent loop calls
-//! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
-//! which clamps against the active model's caps.
+//! `/effort <level>` — direct effort swap. The bare form errors with a usage hint; users adjust
+//! effort interactively via the `/model` picker (Left / Right on the effort row).
 
-use std::fmt::Write as _;
-
-use super::context::{SessionInfo, SlashContext};
-use super::registry::{SlashCommand, SlashOutcome};
+use super::context::SlashContext;
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
@@ -21,22 +15,26 @@ impl SlashCommand for EffortCmd {
     }
 
     fn description(&self) -> &'static str {
-        "List effort levels or set the active one"
+        "Set the effort tier with `/effort <level>`"
     }
 
-    fn is_read_only(&self, args: &str) -> bool {
-        args.trim().is_empty()
+    fn classify(&self, _args: &str) -> SlashKind {
+        // Both bare (error response) and typed (real swap) paths reach `execute`; the typed
+        // path races the in-flight client, so gate as Mutating.
+        SlashKind::Mutating
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some("[<level>]")
+        Some("<level>")
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.chat.push_system_message(render_effort_list(ctx.info));
-            return Ok(SlashOutcome::Local);
+            return Err(format!(
+                "Usage: /effort <level>. Valid: {}. Or use /model to pick interactively.",
+                Effort::VALID_VALUES,
+            ));
         }
         let pick = parse_effort_arg(arg)?;
         // Preflight: setting an explicit level on a no-effort model is
@@ -49,7 +47,10 @@ impl SlashCommand for EffortCmd {
                 marketing_or_id(&ctx.info.config.model_id),
             ));
         }
-        Ok(SlashOutcome::Action(UserAction::SwitchEffort(pick)))
+        Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+            model: None,
+            effort: Some(pick),
+        }))
     }
 }
 
@@ -58,35 +59,6 @@ fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
     lower
         .parse()
         .map_err(|_| format!("Unknown effort: `{arg}`. Valid: {}.", Effort::VALID_VALUES))
-}
-
-/// `* level` list with the active marker, plus a header naming the
-/// active model so the user knows which caps the levels reflect.
-fn render_effort_list(info: &SessionInfo) -> String {
-    let marketing = marketing_or_id(&info.config.model_id);
-    let caps = capabilities_for(&info.config.model_id);
-    let active = info.config.effort;
-
-    let mut out = format!("Effort levels for {marketing}  (* = active)\n\n");
-
-    if !caps.effort {
-        _ = writeln!(out, "  (no effort tier — {marketing} ignores effort)");
-        out.push_str("\nSwitch models first with /model.");
-        return out;
-    }
-
-    for level in Effort::ALL
-        .iter()
-        .copied()
-        .filter(|level| caps.accepts_effort(*level))
-    {
-        let marker = if Some(level) == active { '*' } else { ' ' };
-        _ = writeln!(out, "  {marker} {level}");
-    }
-
-    out.push_str("\nSwitch with: /effort <level>\n");
-    out.push_str("Only levels supported by the active model are shown.");
-    out
 }
 
 #[cfg(test)]
@@ -103,14 +75,14 @@ mod tests {
         assert_eq!(EffortCmd.name(), "effort");
         assert!(EffortCmd.aliases().is_empty());
         assert!(!EffortCmd.description().is_empty());
-        assert_eq!(EffortCmd.usage(), Some("[<level>]"));
+        assert_eq!(EffortCmd.usage(), Some("<level>"));
     }
 
     #[test]
-    fn is_read_only_splits_on_args() {
-        assert!(EffortCmd.is_read_only(""));
-        assert!(EffortCmd.is_read_only("   "));
-        assert!(!EffortCmd.is_read_only("xhigh"));
+    fn classify_is_mutating_regardless_of_args() {
+        assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
+        assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
+        assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
     // ── EffortCmd::execute ──
@@ -134,66 +106,21 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_pushes_list_with_marker_and_swap_hint() {
+    fn execute_no_args_errors_with_usage_hint_and_model_pointer() {
+        // Bare `/effort` is invalid usage — the typed-arg form is the only direct shortcut;
+        // interactive adjustment lives in `/model`.
         let (chat, outcome) = run_execute("");
-        assert_eq!(outcome, Ok(SlashOutcome::Local));
-        let body = chat.last_system_text().expect("system block present");
-        assert!(
-            body.starts_with("Effort levels for"),
-            "header leads the output: {body}",
-        );
-        assert!(body.contains("Switch with: /effort <level>"), "{body}");
-        assert!(
-            body.contains("Only levels supported"),
-            "supported-level hint: {body}",
-        );
-        for level in [Effort::Low, Effort::Medium, Effort::High] {
-            assert!(
-                body.contains(&level.to_string()),
-                "level `{level}` listed: {body}",
-            );
+        let msg = outcome.expect_err("bare /effort must error");
+        assert!(msg.contains("Usage: /effort <level>"), "{msg}");
+        assert!(msg.contains("/model"), "must point at the picker: {msg}");
+        for valid in Effort::VALID_VALUES.split(", ") {
+            assert!(msg.contains(valid), "lists `{valid}`: {msg}");
         }
+        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 
     #[test]
-    fn execute_no_args_marks_only_the_active_level() {
-        // `test_session_info` ships effort=High; assert both the row
-        // count AND that "high" is the marked one so a misrouted
-        // marker (e.g. always-mark-low regression) fails here.
-        let (chat, _) = run_execute("");
-        let body = chat.last_system_text().unwrap();
-        let marked: Vec<&str> = body.lines().filter(|l| l.contains(" * ")).collect();
-        assert_eq!(marked.len(), 1, "exactly one marker row: {marked:?}");
-        assert!(
-            marked[0].contains("high"),
-            "active row marks `high`: {marked:?}",
-        );
-    }
-
-    #[test]
-    fn execute_no_args_hides_unsupported_levels() {
-        let (chat, _) = run_execute_with_model("claude-sonnet-4-6", "");
-        let body = chat.last_system_text().unwrap();
-        for unsupported in ["xhigh", "max"] {
-            assert!(
-                !body.contains(unsupported),
-                "unsupported level `{unsupported}` should not be listed: {body}",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_no_args_warns_when_active_model_has_no_effort_tier() {
-        let (chat, _) = run_execute_with_model("claude-haiku-4-5", "");
-        let body = chat.last_system_text().unwrap();
-        assert!(
-            body.contains("no effort tier") && body.contains("/model"),
-            "no-tier warning + recovery hint: {body}",
-        );
-    }
-
-    #[test]
-    fn execute_with_level_dispatches_switch_effort() {
+    fn execute_with_level_forwards_swap_config_with_effort_only() {
         for (arg, level) in [
             ("low", Effort::Low),
             ("medium", Effort::Medium),
@@ -204,8 +131,11 @@ mod tests {
             let (_, outcome) = run_execute(arg);
             assert_eq!(
                 outcome,
-                Ok(SlashOutcome::Action(UserAction::SwitchEffort(level))),
-                "`{arg}` should dispatch SwitchEffort({level:?})",
+                Ok(SlashOutcome::Forward(UserAction::SwapConfig {
+                    model: None,
+                    effort: Some(level),
+                })),
+                "`{arg}` should forward SwapConfig {{ effort: Some({level:?}) }}",
             );
         }
     }

@@ -1,12 +1,14 @@
 # Slash Commands (Reference)
 
-Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode). Cross-checked against locally-mirrored sources (2026-05-05).
+
+For modal-specific architecture (how `local-jsx` / `BottomPaneView` / `dialog.show()` actually work) see [modals.md](modals.md).
 
 ## Claude Code (TypeScript)
 
 Declarative registry with three execution modes; lazy-loaded implementations.
 
-- **Registry**: `COMMANDS()` returns ~24 `Command` records. Metadata: `name`, `aliases`, `description`, `type: 'local' | 'local-jsx' | 'prompt'`, `isEnabled`, `isHidden`, `immediate`, `isSensitive`, `availability`.
+- **Registry**: ~100 `Command` records under `src/commands/<name>/index.ts`, ~50 of which are `local-jsx` modals. Metadata: `name`, `aliases`, `description`, `type: 'local' | 'local-jsx' | 'prompt'`, `isEnabled`, `isHidden`, `immediate`, `isSensitive`, `availability`. Each command directory ships its own modal component (`<name>.tsx`) loaded via `load: () => import('./<name>.js')`.
 - **Parser**: `slashCommandParsing.ts` splits on whitespace. Unknown names use Fuse.js (threshold 0.3).
 - **Dispatch**: Three modes -- `local` returns `{ resultText, displayMode }`, `local-jsx` returns React JSX (modal pickers), `prompt` expands to text and submits.
 - **Output**: Display modes: `'skip'` (no transcript entry), `'system'` (synthetic local-stdout message), `'user'` (default). Meta flag (`isMeta: true`) keeps a message model-visible while hiding from UI.
@@ -39,7 +41,7 @@ Slim `CommandOption[]` from a React hook (~12 built-ins).
 
 | Repo        | Registry shape              | Variants | Parser site    | Dispatch              | Output target                       | Custom commands              |
 | ----------- | --------------------------- | -------- | -------------- | --------------------- | ----------------------------------- | ---------------------------- |
-| Claude Code | declarative `Command[]`     | ~24      | submit handler | three modes           | synthetic messages w/ display modes | yes (markdown + YAML)        |
-| Codex       | strum enum + impl methods   | ~50      | input layer    | one big `match`       | synthetic `history_cell`            | no                           |
+| Claude Code | declarative `Command[]`     | ~100     | submit handler | three modes           | synthetic messages w/ display modes | yes (markdown + YAML)        |
+| Codex       | strum enum + impl methods   | ~55      | input layer    | one big `match`       | synthetic `history_cell`            | no                           |
 | opencode    | `CommandOption[]` from hook | ~12      | input layer    | closures + server     | toast / dialog / synthetic message  | yes (server-published)       |
 | oxide-code  | trait + `&[&dyn]` slice     | 8        | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | not yet (namespace reserved) |

@@ -22,6 +22,7 @@ use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
@@ -58,6 +59,8 @@ pub(crate) struct App {
     pending_calls: PendingCalls,
     /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
+    /// Active modal overlay(s). Empty when no modal is on screen.
+    modals: ModalStack,
     should_quit: bool,
     /// Whether state has changed since the last render.
     dirty: bool,
@@ -98,6 +101,7 @@ impl App {
             tools,
             pending_calls: PendingCalls::new(),
             pending_prompts: VecDeque::new(),
+            modals: ModalStack::new(),
             should_quit: false,
             dirty: true,
         }
@@ -160,6 +164,17 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
+        // First-priority: an active modal owns keyboard focus end-to-end.
+        // Other components don't see the key until the modal closes.
+        if let Event::Key(key) = event
+            && self.modals.is_active()
+        {
+            if let Some(action) = self.modals.handle_key(key) {
+                self.apply_modal_action(action);
+            }
+            self.dirty = true;
+            return;
+        }
         match event {
             Event::Key(KeyEvent {
                 code: KeyCode::Esc, ..
@@ -184,6 +199,20 @@ impl App {
             Event::Resize(..) => {}
             _ => return,
         }
+        self.dirty = true;
+    }
+
+    /// Dispatcher for actions emitted by a closed modal.
+    fn apply_modal_action(&mut self, action: ModalAction) {
+        match action {
+            ModalAction::None => {}
+            ModalAction::User(user_action) => self.dispatch_user_action(user_action),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_modal(&mut self, modal: Box<dyn super::modal::Modal>) {
+        self.modals.push(modal);
         self.dirty = true;
     }
 
@@ -234,10 +263,14 @@ impl App {
                 if self.input.is_enabled() {
                     if let Some(parsed) = slash::parse_slash(text) {
                         self.chat.push_user_message(text.clone());
-                        let synthesized = {
+                        let (synthesized, modal) = {
                             let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                            slash::dispatch(&parsed, &mut ctx)
+                            let action = slash::dispatch(&parsed, &mut ctx);
+                            (action, ctx.take_modal())
                         };
+                        if let Some(modal) = modal {
+                            self.modals.push(modal);
+                        }
                         if let Some(action) = synthesized {
                             if matches!(action, UserAction::SubmitPrompt(_)) {
                                 self.input.set_enabled(false);
@@ -256,8 +289,15 @@ impl App {
                         self.chat.push_user_message(text.clone());
                         match slash::classify(&parsed) {
                             SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                                _ = slash::dispatch(&parsed, &mut ctx);
+                                let modal = {
+                                    let mut ctx =
+                                        SlashContext::new(&mut self.chat, &self.session_info);
+                                    _ = slash::dispatch(&parsed, &mut ctx);
+                                    ctx.take_modal()
+                                };
+                                if let Some(modal) = modal {
+                                    self.modals.push(modal);
+                                }
                             }
                             SlashKind::Mutating => {
                                 self.chat.push_system_message(format!(
@@ -292,7 +332,7 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::SwitchModel(_) | UserAction::SwitchEffort(_) => false,
+            UserAction::Clear | UserAction::SwapConfig { .. } => true,
         }
     }
 
@@ -358,20 +398,28 @@ impl App {
                 self.chat
                     .push_system_message("Conversation cleared. Next message starts fresh.");
             }
-            AgentEvent::ModelSwitched { model_id, effort } => {
+            AgentEvent::ConfigChanged {
+                model_id,
+                effort,
+                requested_effort,
+            } => {
+                let model_changed = model_id != self.session_info.config.model_id;
                 let prev_effort = self.session_info.config.effort;
                 let marketing = crate::model::marketing_or_id(&model_id);
-                let confirmation =
-                    format_swap_confirmation(&marketing, &model_id, prev_effort, effort);
-                self.status_bar.set_model(marketing.into_owned());
+                let confirmation = format_config_change(
+                    &marketing,
+                    &model_id,
+                    model_changed,
+                    prev_effort,
+                    effort,
+                    requested_effort,
+                );
+                if model_changed {
+                    self.status_bar.set_model(marketing.into_owned());
+                }
                 self.session_info.config.model_id = model_id;
                 self.session_info.config.effort = effort;
                 self.chat.push_system_message(confirmation);
-            }
-            AgentEvent::EffortSwitched { pick, effort } => {
-                self.session_info.config.effort = effort;
-                self.chat
-                    .push_system_message(format_effort_confirmation(pick, effort));
             }
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
@@ -453,10 +501,12 @@ impl App {
         let input_height = self.input.height();
         let preview_height = self.preview_height();
         let popup_height = self.input.popup_height();
+        let modal_height = self.modals.height(frame.area().width);
         let chunks = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(preview_height),
+            Constraint::Length(modal_height),
             Constraint::Length(popup_height),
             Constraint::Length(input_height),
         ])
@@ -467,10 +517,13 @@ impl App {
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
-        if popup_height > 0 {
-            self.input.render_popup(frame, chunks[3]);
+        if modal_height > 0 {
+            self.modals.render(frame, chunks[3], &self.theme);
         }
-        self.input.render(frame, chunks[4]);
+        if popup_height > 0 {
+            self.input.render_popup(frame, chunks[4]);
+        }
+        self.input.render(frame, chunks[5]);
         chunks[1]
     }
 
@@ -523,37 +576,44 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
     ])
 }
 
-/// `AgentEvent::ModelSwitched` confirmation. Surfaces silent effort
-/// changes (cleared / clamped / model-default) the user wouldn't
-/// otherwise see.
-fn format_swap_confirmation(
+/// `AgentEvent::ConfigChanged` confirmation. Surfaces silent effort
+/// shifts — model-driven (cleared / clamped / model-default) and
+/// user-driven (clamped pick / lost on no-tier model) — so the user
+/// sees the resulting state, not just a generic "OK".
+fn format_config_change(
     marketing: &str,
     model_id: &str,
+    model_changed: bool,
     prev_effort: Option<crate::config::Effort>,
     new_effort: Option<crate::config::Effort>,
+    requested_effort: Option<crate::config::Effort>,
 ) -> String {
+    if !model_changed {
+        return match (requested_effort, new_effort) {
+            (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
+            (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
+            (Some(req), None) => {
+                format!("Effort unchanged — model has no effort tier (asked for {req}).")
+            }
+            // No-op SwapConfig — slash dispatch keeps this unreachable
+            // in practice, but a clear fallback beats a panic.
+            (None, _) => "Config unchanged.".to_owned(),
+        };
+    }
     let head = format!("Switched to {marketing} ({model_id})");
-    match (prev_effort, new_effort) {
-        (None, None) => format!("{head}."),
-        (Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
-        (None, Some(new)) => format!("{head} · effort {new} (model default)."),
-        (Some(prev), Some(new)) if new < prev => {
+    match (requested_effort, prev_effort, new_effort) {
+        (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
+        (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
+        (Some(req), _, None) => {
+            format!("{head}. Effort unchanged — model has no effort tier (asked for {req}).")
+        }
+        (None, None, None) => format!("{head}."),
+        (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
+        (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
+        (None, Some(prev), Some(new)) if new < prev => {
             format!("{head} · effort {new} (clamped from {prev}).")
         }
-        (Some(_), Some(new)) => format!("{head} · effort {new}."),
-    }
-}
-
-/// `AgentEvent::EffortSwitched` confirmation. `pick` is the user's
-/// input; `effort` is the resolved value.
-fn format_effort_confirmation(
-    pick: crate::config::Effort,
-    effort: Option<crate::config::Effort>,
-) -> String {
-    match (pick, effort) {
-        (p, Some(level)) if p == level => format!("Effort set to {level}."),
-        (p, Some(level)) => format!("Effort set to {level} (clamped from {p})."),
-        (p, None) => format!("Effort unchanged — model has no effort tier (asked for {p})."),
+        (None, Some(_), Some(eff)) => format!("{head} · effort {eff}."),
     }
 }
 
@@ -937,6 +997,60 @@ mod tests {
         );
     }
 
+    // ── modal gate ──
+
+    #[tokio::test]
+    async fn modal_gate_intercepts_keys_before_input_sees_them() {
+        // While a modal is on screen, any key event lands on the modal
+        // first — the input area must NOT receive them. Pin so a
+        // regression that fans keys to both surfaces (double-handling
+        // a single keystroke) fails here.
+        use crate::tui::modal::ModalAction;
+        use crate::tui::modal::testing::ScriptedModal;
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::User(
+            UserAction::Cancel,
+        ))));
+
+        // Type a printable that the input area would otherwise capture.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(
+            app.input.lines().iter().all(String::is_empty),
+            "input must stay empty while modal is active",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no UserAction must reach user_tx for a key the modal consumed",
+        );
+
+        // Submit the modal — its action flows through the normal
+        // dispatch path, just like a keyboard-typed UserAction.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('s'), KeyModifiers::NONE));
+        let forwarded = rx.recv().await.expect("modal-submitted action forwarded");
+        assert!(matches!(forwarded, UserAction::Cancel));
+    }
+
+    #[test]
+    fn modal_gate_cancel_closes_modal_without_dispatching() {
+        // `ModalKey::Cancelled` pops the modal but does not dispatch a
+        // UserAction. The next key must reach the input area.
+        use crate::tui::modal::ModalAction;
+        use crate::tui::modal::testing::ScriptedModal;
+
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
+        app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "Cancelled must not dispatch any UserAction",
+        );
+        // Modal closed; subsequent keys reach the input.
+        app.handle_crossterm_event(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.input.lines(), vec!["y".to_owned()]);
+    }
+
     // ── handle_esc ──
 
     #[tokio::test]
@@ -1188,22 +1302,30 @@ mod tests {
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
 
-    #[test]
-    fn dispatch_local_only_actions_return_false_to_prevent_double_send() {
+    #[tokio::test]
+    async fn dispatch_swap_config_forwards_to_agent_through_user_tx() {
+        // Modal-emitted SwapConfig must reach the agent loop so it can call
+        // `apply_swap_config` and emit `ConfigChanged`. The earlier `=> false` arm in
+        // `apply_action_locally` swallowed it silently — caused empty title bar updates after
+        // picker submit. Pin both axes.
         for action in [
+            UserAction::SwapConfig {
+                model: Some(crate::model::ResolvedModelId::new(
+                    "claude-opus-4-7".to_owned(),
+                )),
+                effort: None,
+            },
+            UserAction::SwapConfig {
+                model: None,
+                effort: Some(crate::config::Effort::High),
+            },
             UserAction::Clear,
-            UserAction::SwitchModel(crate::model::ResolvedModelId::new(
-                "claude-opus-4-7".to_owned(),
-            )),
-            UserAction::SwitchEffort(crate::config::Effort::High),
         ] {
             let (mut app, mut rx, _agent_tx) = test_app(None);
             app.dispatch_user_action(action.clone());
 
-            assert!(
-                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "{action:?} must not reach user_tx via dispatch_user_action",
-            );
+            let forwarded = rx.recv().await.expect("action forwarded to agent");
+            assert_eq!(forwarded, action);
             assert!(!app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
         }
@@ -1358,22 +1480,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_bare_slash_during_busy_runs_list_view() {
-        // The bare form is read-only via `is_read_only(args)` returning
-        // true for empty args, so it dispatches immediately even
-        // mid-turn. Regressing the args-aware classification fails here.
-        for (cmd, header_prefix) in [
-            ("/model", "Available models"),
-            ("/effort", "Effort levels for"),
-        ] {
-            let (mut app, _rx, _agent_tx) = test_app(None);
-            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+    async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
+        // Bare `/model` classifies as ReadOnly so it dispatches mid-turn and opens the picker
+        // modal instead of printing a list. (`/effort` is Mutating regardless of args after the
+        // typed-arg-only refactor — its bare-form busy path is covered by
+        // `dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward`.)
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
-            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model".to_owned()));
 
-            let body = app.chat.last_system_text().expect("system block from list");
-            assert!(body.starts_with(header_prefix), "{cmd}: {body}");
-        }
+        assert!(
+            app.modals.is_active(),
+            "bare /model must push a modal mid-turn",
+        );
     }
 
     #[tokio::test]
@@ -1427,15 +1547,16 @@ mod tests {
     }
 
     #[test]
-    fn handle_model_switched_refreshes_status_bar_session_info_and_chat() {
+    fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
         // confirmation block. Marketing name is derived locally from
         // `model_id`.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::ModelSwitched {
+        app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: "claude-sonnet-4-6".to_owned(),
             effort: Some(crate::config::Effort::High),
+            requested_effort: None,
         });
 
         assert_eq!(app.session_info.config.model_id, "claude-sonnet-4-6");
@@ -1452,24 +1573,54 @@ mod tests {
         assert!(app.dirty);
     }
 
-    // ── format_swap_confirmation ──
+    #[test]
+    fn handle_config_changed_effort_only_keeps_status_bar_model_label() {
+        // Effort-only swap leaves the cached model label alone; only
+        // the snapshot effort and chat confirmation update.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_model = app.status_bar.model().to_owned();
+        app.handle_agent_event(AgentEvent::ConfigChanged {
+            model_id: app.session_info.config.model_id.clone(),
+            effort: Some(crate::config::Effort::Xhigh),
+            requested_effort: Some(crate::config::Effort::Xhigh),
+        });
+        assert_eq!(
+            app.session_info.config.effort,
+            Some(crate::config::Effort::Xhigh),
+        );
+        assert_eq!(app.status_bar.model(), original_model);
+        let body = app.chat.last_system_text().expect("confirmation block");
+        assert_eq!(body, "Effort set to xhigh.");
+        assert!(app.dirty);
+    }
+
+    // ── format_config_change ──
 
     #[test]
-    fn format_swap_confirmation_both_none_omits_effort_clause() {
+    fn format_config_change_swap_both_none_omits_effort_clause() {
         // Pin: no `effort` substring at all, never a stray "none"
         // word. Mutation that prints `effort none.` would surface here.
-        let s = format_swap_confirmation("Claude Haiku 4.5", "claude-haiku-4-5", None, None);
+        let s = format_config_change(
+            "Claude Haiku 4.5",
+            "claude-haiku-4-5",
+            true,
+            None,
+            None,
+            None,
+        );
         assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
     }
 
     #[test]
-    fn format_swap_confirmation_clears_effort_when_new_model_drops_it() {
+    fn format_config_change_swap_clears_effort_when_new_model_drops_it() {
         // User had a tier; new model has none. Surface the change so
         // the user knows their effort just disappeared.
-        let s = format_swap_confirmation(
+        let s = format_config_change(
             "Claude Haiku 4.5",
             "claude-haiku-4-5",
+            true,
             Some(crate::config::Effort::Xhigh),
+            None,
             None,
         );
         assert_eq!(
@@ -1479,15 +1630,17 @@ mod tests {
     }
 
     #[test]
-    fn format_swap_confirmation_marks_default_when_previous_was_none() {
+    fn format_config_change_swap_marks_default_when_previous_was_none() {
         // None → Some means the new model's default kicked in;
         // distinguishing this from "user's pick survived" prevents
         // the user from thinking they chose this tier.
-        let s = format_swap_confirmation(
+        let s = format_config_change(
             "Claude Opus 4.7",
             "claude-opus-4-7",
+            true,
             None,
             Some(crate::config::Effort::Xhigh),
+            None,
         );
         assert_eq!(
             s,
@@ -1496,13 +1649,15 @@ mod tests {
     }
 
     #[test]
-    fn format_swap_confirmation_marks_clamp_when_new_effort_below_previous() {
+    fn format_config_change_swap_marks_clamp_when_new_effort_below_previous() {
         // The effective tier changed; surface the temporary clamp.
-        let s = format_swap_confirmation(
+        let s = format_config_change(
             "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
+            true,
             Some(crate::config::Effort::Xhigh),
             Some(crate::config::Effort::High),
+            None,
         );
         assert_eq!(
             s,
@@ -1511,14 +1666,16 @@ mod tests {
     }
 
     #[test]
-    fn format_swap_confirmation_quiet_when_effort_unchanged() {
+    fn format_config_change_swap_quiet_when_effort_unchanged() {
         // Same tier survives — no clamp / default annotation. Pin
         // exact format so a stray suffix (`(unchanged)`) would fail.
-        let s = format_swap_confirmation(
+        let s = format_config_change(
             "Claude Opus 4.7",
             "claude-opus-4-7",
+            true,
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::High),
+            None,
         );
         assert_eq!(
             s,
@@ -1527,49 +1684,62 @@ mod tests {
     }
 
     #[test]
-    fn handle_effort_switched_refreshes_session_info_and_pushes_confirmation() {
-        // /effort updates the snapshot effort and pushes a confirmation
-        // block. Status bar caches model, not effort, so it doesn't
-        // change here.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.handle_agent_event(AgentEvent::EffortSwitched {
-            pick: crate::config::Effort::Xhigh,
-            effort: Some(crate::config::Effort::Xhigh),
-        });
-        assert_eq!(
-            app.session_info.config.effort,
+    fn format_config_change_swap_with_explicit_effort_clamped_against_new_caps() {
+        // Combined picker case: user asks for xhigh on Sonnet (caps at
+        // high). Surface that the *requested* tier was clamped — not
+        // the previous-effort delta.
+        let s = format_config_change(
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6",
+            true,
+            Some(crate::config::Effort::Medium),
+            Some(crate::config::Effort::High),
             Some(crate::config::Effort::Xhigh),
         );
-        let body = app.chat.last_system_text().expect("confirmation block");
-        assert_eq!(body, "Effort set to xhigh.");
-        assert!(app.dirty);
+        assert_eq!(
+            s,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high (clamped from xhigh)."
+        );
     }
 
-    // ── format_effort_confirmation ──
-
     #[test]
-    fn format_effort_confirmation_explicit_pick_matches_resolution() {
-        let s = format_effort_confirmation(
-            crate::config::Effort::Xhigh,
+    fn format_config_change_effort_explicit_pick_matches_resolution() {
+        let s = format_config_change(
+            "Claude Opus 4.7",
+            "claude-opus-4-7",
+            false,
+            Some(crate::config::Effort::High),
+            Some(crate::config::Effort::Xhigh),
             Some(crate::config::Effort::Xhigh),
         );
         assert_eq!(s, "Effort set to xhigh.");
     }
 
     #[test]
-    fn format_effort_confirmation_clamp_surfaces_what_user_asked_for() {
-        let s = format_effort_confirmation(
-            crate::config::Effort::Xhigh,
+    fn format_config_change_effort_clamp_surfaces_what_user_asked_for() {
+        let s = format_config_change(
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6",
+            false,
+            Some(crate::config::Effort::Medium),
             Some(crate::config::Effort::High),
+            Some(crate::config::Effort::Xhigh),
         );
         assert_eq!(s, "Effort set to high (clamped from xhigh).");
     }
 
     #[test]
-    fn format_effort_confirmation_pick_on_no_tier_model_surfaces_loss() {
-        // The slash command preflight stops this from happening through
-        // /effort, but client-driven flows could still emit it.
-        let s = format_effort_confirmation(crate::config::Effort::High, None);
+    fn format_config_change_effort_pick_on_no_tier_model_surfaces_loss() {
+        // The slash command preflight stops this through /effort, but
+        // client-driven flows could still emit it.
+        let s = format_config_change(
+            "Claude Haiku 4.5",
+            "claude-haiku-4-5",
+            false,
+            None,
+            None,
+            Some(crate::config::Effort::High),
+        );
         assert_eq!(
             s,
             "Effort unchanged — model has no effort tier (asked for high)."

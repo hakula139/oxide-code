@@ -8,7 +8,7 @@
 //! before this drain runs; isolated writes (a text-only turn, the
 //! AI title append, the final summary) flush immediately because
 //! the drain returns `Empty` after the first cmd. No interval timer
-//! — see `docs/research/design/session-persistence.md`.
+//! — see `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 

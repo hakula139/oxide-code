@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::tui::theme::{self, Theme};
 use crate::util::env;
 
-const DEFAULT_MODEL: &str = "claude-opus-4-7";
+const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 // ── Auth ──

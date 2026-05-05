@@ -12,7 +12,7 @@
 //!
 //! Persistence: commands never write user config files. Mutations are
 //! session-local; restart returns to the user-declared config (see
-//! `docs/research/design/slash-commands.md` § Design Decisions 6).
+//! `docs/design/slash/commands.md` § Design Decisions 6).
 
 mod clear;
 mod config;
@@ -25,12 +25,15 @@ mod init;
 mod matcher;
 mod model;
 mod parser;
+mod picker;
 mod registry;
 mod status;
+mod status_modal;
 
 pub(crate) use context::{SessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, parse_slash, popup_query};
+pub(crate) use registry::SlashKind;
 
 /// Filter the built-in registry against a popup query (the buffer
 /// with the leading `/` stripped). Convenience wrapper around
@@ -70,8 +73,8 @@ fn dispatch_with(
         return None;
     };
     match cmd.execute(&parsed.args, ctx) {
-        Ok(registry::SlashOutcome::Local) => None,
-        Ok(registry::SlashOutcome::Action(action)) => Some(action),
+        Ok(registry::SlashOutcome::Done) => None,
+        Ok(registry::SlashOutcome::Forward(action)) => Some(action),
         Err(msg) => {
             ctx.chat.push_error(&format!("/{}: {msg}", parsed.name));
             None
@@ -100,21 +103,8 @@ pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
 fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> SlashKind {
     match registry::lookup_in(commands, &parsed.name) {
         None => SlashKind::Unknown,
-        Some(cmd) if cmd.is_read_only(&parsed.args) => SlashKind::ReadOnly,
-        Some(_) => SlashKind::Mutating,
+        Some(cmd) => cmd.classify(&parsed.args),
     }
-}
-
-/// Whether a slash command can run while the agent is busy.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SlashKind {
-    /// Safe mid-turn — dispatch immediately.
-    ReadOnly,
-    /// State-mutating — refuse mid-turn, let the user retry when idle.
-    Mutating,
-    /// Not in the registry — dispatch anyway so the user sees the
-    /// canonical "unknown command" error block with recovery hints.
-    Unknown,
 }
 
 /// Shared test fixture — a fully-populated `SessionInfo` for the
@@ -165,7 +155,7 @@ mod tests {
             args: String::new(),
         };
         let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
-        assert!(outcome.is_none(), "/help is Local, not PromptSubmit");
+        assert!(outcome.is_none(), "/help is Done, not Forward");
         assert!(!chat.last_is_error());
         assert_eq!(chat.entry_count(), 1);
         // Pin: SystemMessageBlock inherits `error_text` default `None`

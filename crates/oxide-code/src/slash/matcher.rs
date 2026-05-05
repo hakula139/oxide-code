@@ -133,7 +133,7 @@ mod tests {
             self.description
         }
         fn execute(&self, _: &str, _: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-            Ok(SlashOutcome::Local)
+            Ok(SlashOutcome::Done)
         }
     }
 

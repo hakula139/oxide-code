@@ -2,7 +2,7 @@
 //! it to the agent loop, which rolls the session.
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashOutcome};
+use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 
 pub(super) struct ClearCmd;
@@ -20,12 +20,12 @@ impl SlashCommand for ClearCmd {
         "Reset the conversation context"
     }
 
-    fn is_read_only(&self, _args: &str) -> bool {
-        false
+    fn classify(&self, _args: &str) -> SlashKind {
+        SlashKind::Mutating
     }
 
     fn execute(&self, _args: &str, _ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        Ok(SlashOutcome::Action(UserAction::Clear))
+        Ok(SlashOutcome::Forward(UserAction::Clear))
     }
 }
 
@@ -46,10 +46,10 @@ mod tests {
     }
 
     #[test]
-    fn is_read_only_is_false() {
-        // Override to `false` — refuses mid-turn rather than racing
-        // the live `messages` / session writer.
-        assert!(!ClearCmd.is_read_only(""));
+    fn classify_is_mutating() {
+        // Refuses mid-turn rather than racing the live `messages` /
+        // session writer.
+        assert_eq!(ClearCmd.classify(""), SlashKind::Mutating);
     }
 
     // ── ClearCmd::execute ──
@@ -64,7 +64,7 @@ mod tests {
             .execute("", &mut SlashContext::new(&mut chat, &info))
             .expect("/clear must succeed");
 
-        assert_eq!(outcome, SlashOutcome::Action(UserAction::Clear));
+        assert_eq!(outcome, SlashOutcome::Forward(UserAction::Clear));
         assert_eq!(chat.entry_count(), 1, "execute must not touch the chat");
     }
 }
