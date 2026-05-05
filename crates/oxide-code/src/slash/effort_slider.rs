@@ -56,15 +56,13 @@ impl EffortSlider {
             .copied()
             .filter(|level| caps.accepts_effort(*level))
             .collect();
-        if supported.is_empty() {
-            return None;
-        }
-        // `resolve_effort` clamps a user-set value or falls back to the model default; both paths
-        // land on a tier in `supported` because the table guarantees at least one accepted level.
         let initial = caps
             .resolve_effort(info.config.effort)
-            .unwrap_or(supported[supported.len() / 2]);
-        let selected = supported.iter().position(|e| *e == initial).unwrap_or(0);
+            .expect("caps.effort implies a resolvable tier");
+        let selected = supported
+            .iter()
+            .position(|e| *e == initial)
+            .expect("resolve_effort lands inside `supported`");
         Some(Self {
             supported,
             selected,
@@ -106,10 +104,7 @@ impl EffortSlider {
 
     /// Track spans tier 0 center → tier (n-1) center, inclusive.
     fn track_width(&self) -> usize {
-        match self.supported.len() {
-            0 => 0,
-            n => (n - 1) * SLOT_WIDTH + 1,
-        }
+        (self.supported.len() - 1) * SLOT_WIDTH + 1
     }
 }
 
@@ -175,7 +170,7 @@ impl EffortSlider {
             buf.push_str(&" ".repeat(intel_start - speed_end));
             buf.push_str(INTEL_LABEL);
         }
-        let used = buf.chars().count();
+        let used = buf.len();
         if total > used {
             buf.push_str(&" ".repeat(total - used));
         }
@@ -201,9 +196,7 @@ impl EffortSlider {
         let total = self.slider_width();
         let center = Self::tier_center(self.selected);
         let mut spans = Vec::with_capacity(3);
-        if center > 0 {
-            spans.push(Span::raw(" ".repeat(center)));
-        }
+        spans.push(Span::raw(" ".repeat(center)));
         spans.push(Span::styled(
             MARKER_GLYPH.to_string(),
             theme.accent().add_modifier(Modifier::BOLD),
