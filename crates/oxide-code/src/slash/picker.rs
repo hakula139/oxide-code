@@ -116,8 +116,14 @@ pub(super) struct ModelEffortPicker {
     /// Active model captured at open — used to detect whether the user
     /// changed the model axis on submit.
     active_model: String,
-    /// Active effort captured at open. Same purpose for the effort axis.
+    /// Active effort captured at open. Used for rendering the "(default)"
+    /// suffix in the effort row.
     active_effort: Option<Effort>,
+    /// Resolved initial effort at open. Compared on submit to detect
+    /// whether the user actually changed the effort axis — prevents
+    /// spurious `SwapConfig` when the raw `active_effort` is `None` but
+    /// the model's default resolves to a concrete tier.
+    initial_effort: Option<Effort>,
     /// User's current effort pick. Tracks Left/Right navigation.
     /// `None` when the highlighted model has no effort tier.
     effort: Option<Effort>,
@@ -150,6 +156,7 @@ impl ModelEffortPicker {
             list,
             active_model,
             active_effort,
+            initial_effort: effort,
             effort,
             effort_dirty,
         }
@@ -206,7 +213,7 @@ impl ModelEffortPicker {
             .selected()
             .map_or_else(|| self.active_model.clone(), |row| row.id.to_owned());
         let model_changed = model != self.active_model;
-        let effort_changed = self.effort_dirty && self.effort != self.active_effort;
+        let effort_changed = self.effort_dirty && self.effort != self.initial_effort;
 
         if !model_changed && !effort_changed {
             return ModalKey::Cancelled;
@@ -468,6 +475,18 @@ mod tests {
         // Open + Enter without touching anything is the same shape as
         // Esc — nothing to dispatch.
         let mut p = picker(InitialFocus::Model);
+        let outcome = p.handle_key(&key(KeyCode::Enter));
+        assert!(matches!(outcome, ModalKey::Cancelled));
+    }
+
+    #[test]
+    fn enter_immediately_after_effort_focus_with_no_explicit_effort_returns_cancelled() {
+        // When `active_effort` is `None` (user config has no explicit
+        // effort), the picker resolves the model's default. Pressing
+        // Enter immediately must not emit a spurious `SwapConfig`.
+        let mut info = test_session_info();
+        info.config.effort = None;
+        let mut p = ModelEffortPicker::new(&info, InitialFocus::Effort);
         let outcome = p.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
