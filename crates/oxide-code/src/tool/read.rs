@@ -589,7 +589,7 @@ mod tests {
         );
     }
 
-    // ── result_view ──
+    // ── read_excerpt_view ──
 
     #[test]
     fn result_view_builds_read_excerpt() {
