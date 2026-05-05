@@ -228,7 +228,7 @@ mod tests {
         KeyEvent::from(KeyCode::Char(c))
     }
 
-    // ── ModalStack ──
+    // ── is_active ──
 
     #[test]
     fn empty_stack_reports_inactive_and_zero_height() {
@@ -236,6 +236,8 @@ mod tests {
         assert!(!stack.is_active());
         assert_eq!(stack.height(80), 0);
     }
+
+    // ── push ──
 
     #[test]
     fn push_activates_stack_and_height_reflects_top_modal() {
@@ -245,6 +247,73 @@ mod tests {
         // Modal body (3) + one-row top separator.
         assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT);
     }
+
+    // ── render ──
+
+    #[test]
+    fn render_paints_top_border_then_delegates_body_below_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut stack = ModalStack::new();
+        let modal = ScriptedModal::new(ModalAction::None);
+        let body_height = modal.declared_height;
+        stack.push(Box::new(modal));
+
+        let theme = Theme::default();
+        let width: u16 = 12;
+        let total_height = stack.height(width);
+        assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
+
+        let mut terminal = Terminal::new(TestBackend::new(width, total_height)).unwrap();
+        terminal
+            .draw(|frame| {
+                stack.render(frame, Rect::new(0, 0, width, total_height), &theme);
+            })
+            .expect("render must not panic");
+
+        let buf = terminal.backend().buffer();
+        for x in 0..width {
+            let symbol = buf[(x, 0)].symbol();
+            assert_eq!(
+                symbol,
+                TOP_BORDER_GLYPH.to_string(),
+                "top row col {x} must be border glyph; got {symbol:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn render_no_ops_when_stack_empty_or_area_smaller_than_body() {
+        // Three short-circuit branches in `render`: empty stack, area.height == 0, and
+        // body_height == 0 (area only big enough for the border row).
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::default();
+
+        let empty = ModalStack::new();
+        let mut t1 = Terminal::new(TestBackend::new(8, 2)).unwrap();
+        t1.draw(|frame| empty.render(frame, Rect::new(0, 0, 8, 2), &theme))
+            .expect("empty render");
+
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        let mut t2 = Terminal::new(TestBackend::new(8, 1)).unwrap();
+        t2.draw(|frame| stack.render(frame, Rect::new(0, 0, 8, 0), &theme))
+            .expect("zero-height render");
+
+        // area.height == TOP_BORDER_HEIGHT — only the border fits; body skipped.
+        let mut t3 = Terminal::new(TestBackend::new(8, TOP_BORDER_HEIGHT)).unwrap();
+        t3.draw(|frame| {
+            stack.render(frame, Rect::new(0, 0, 8, TOP_BORDER_HEIGHT), &theme);
+        })
+        .expect("border-only render");
+        let buf = t3.backend().buffer();
+        assert_eq!(buf[(0, 0)].symbol(), TOP_BORDER_GLYPH.to_string());
+    }
+
+    // ── handle_key ──
 
     #[test]
     fn handle_key_consumed_keeps_modal_active() {
@@ -283,39 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_top_border_then_delegates_body_below_it() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut stack = ModalStack::new();
-        let modal = ScriptedModal::new(ModalAction::None);
-        let body_height = modal.declared_height;
-        stack.push(Box::new(modal));
-
-        let theme = Theme::default();
-        let width: u16 = 12;
-        let total_height = stack.height(width);
-        assert_eq!(total_height, body_height + TOP_BORDER_HEIGHT);
-
-        let mut terminal = Terminal::new(TestBackend::new(width, total_height)).unwrap();
-        terminal
-            .draw(|frame| {
-                stack.render(frame, Rect::new(0, 0, width, total_height), &theme);
-            })
-            .expect("render must not panic");
-
-        let buf = terminal.backend().buffer();
-        for x in 0..width {
-            let symbol = buf[(x, 0)].symbol();
-            assert_eq!(
-                symbol,
-                TOP_BORDER_GLYPH.to_string(),
-                "top row col {x} must be border glyph; got {symbol:?}",
-            );
-        }
-    }
-
-    #[test]
     fn handle_key_on_empty_stack_returns_none_without_panicking() {
         // No active modal → no key delivery, no stack mutation.
         let mut stack = ModalStack::new();
@@ -324,10 +360,9 @@ mod tests {
     }
 
     #[test]
-    fn nested_push_routes_keys_to_top_only() {
-        // Two-deep stack: keys go to the top until it pops, then the
-        // inner one resumes. Pin so a regression that fans keys to all
-        // layers fails here.
+    fn handle_key_with_nested_stack_routes_to_top_modal_only() {
+        // Two-deep stack: keys go to the top until it pops, then the inner one resumes.
+        // Pin so a regression that fans keys to all layers fails here.
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::User(
             UserAction::Clear,
@@ -339,7 +374,7 @@ mod tests {
         assert_eq!(
             stack.height(80),
             5 + TOP_BORDER_HEIGHT,
-            "top modal's height wins (plus border)"
+            "top modal's height wins (plus border)",
         );
         let outcome = stack.handle_key(&key('s'));
         assert!(matches!(outcome, Some(ModalAction::None)));
@@ -347,7 +382,7 @@ mod tests {
         assert_eq!(
             stack.height(80),
             3 + TOP_BORDER_HEIGHT,
-            "inner modal's height resumes (plus border)"
+            "inner modal's height resumes (plus border)",
         );
     }
 }

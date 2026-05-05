@@ -419,4 +419,33 @@ mod tests {
             })
             .expect("render must not panic");
     }
+
+    #[test]
+    fn render_handles_picker_and_items_with_no_descriptions() {
+        // Drives the `PickerItem` default impls (`description` / `is_active` / `key_hint` all
+        // unset) and the render branches that skip the optional description rows. Without this
+        // the trait-default arms and the no-description render arms stay uncovered.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        struct MinimalItem(&'static str);
+        impl PickerItem for MinimalItem {
+            fn label(&self) -> &str {
+                self.0
+            }
+        }
+
+        let item = MinimalItem("solo");
+        assert!(item.description().is_none());
+        assert!(!item.is_active());
+        assert!(item.key_hint().is_none());
+
+        let p = ListPicker::new("Pick one", vec![MinimalItem("a"), MinimalItem("b")]);
+        let theme = Theme::default();
+        let h = p.height(40);
+        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
+        terminal
+            .draw(|frame| p.render(frame, Rect::new(0, 0, 40, h), &theme))
+            .expect("render must not panic without descriptions");
+    }
 }
