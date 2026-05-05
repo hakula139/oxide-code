@@ -332,7 +332,7 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::SwapConfig { .. } => false,
+            UserAction::Clear | UserAction::SwapConfig { .. } => true,
         }
     }
 
@@ -1302,10 +1302,13 @@ mod tests {
         assert!(matches!(forwarded, UserAction::SubmitPrompt(s) if s == "queued"));
     }
 
-    #[test]
-    fn dispatch_local_only_actions_return_false_to_prevent_double_send() {
+    #[tokio::test]
+    async fn dispatch_swap_config_forwards_to_agent_through_user_tx() {
+        // Modal-emitted SwapConfig must reach the agent loop so it can call
+        // `apply_swap_config` and emit `ConfigChanged`. The earlier `=> false` arm in
+        // `apply_action_locally` swallowed it silently — caused empty title bar updates after
+        // picker submit. Pin both axes.
         for action in [
-            UserAction::Clear,
             UserAction::SwapConfig {
                 model: Some(crate::model::ResolvedModelId::new(
                     "claude-opus-4-7".to_owned(),
@@ -1316,14 +1319,13 @@ mod tests {
                 model: None,
                 effort: Some(crate::config::Effort::High),
             },
+            UserAction::Clear,
         ] {
             let (mut app, mut rx, _agent_tx) = test_app(None);
             app.dispatch_user_action(action.clone());
 
-            assert!(
-                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "{action:?} must not reach user_tx via dispatch_user_action",
-            );
+            let forwarded = rx.recv().await.expect("action forwarded to agent");
+            assert_eq!(forwarded, action);
             assert!(!app.should_quit);
             assert_eq!(app.chat.entry_count(), 0);
         }
