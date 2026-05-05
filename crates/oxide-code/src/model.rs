@@ -6,6 +6,8 @@ use crate::config::Effort;
 
 // ── ModelInfo ──
 
+/// One row in the [`MODELS`] catalogue. Pure data — no methods. Looked up by substring against a
+/// caller-supplied model id (alias-resolved + `[1m]`-stripped); see [`lookup`].
 pub(crate) struct ModelInfo {
     /// First substring match in [`MODELS`] wins; ordering matters.
     pub(crate) id_substr: &'static str,
@@ -16,6 +18,10 @@ pub(crate) struct ModelInfo {
 
 // ── Capabilities ──
 
+/// Per-model gate set consumed by the wire-builder (header + body fields), the slash commands
+/// (`/effort` rejects unsupported tiers, `/model` rejects `[1m]` on non-1M models), and the
+/// effort picker (renders only the supported ladder). Every field is a Boolean because each one
+/// maps 1:1 to a distinct upstream switch — combining them would obscure the source of truth.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "seven independent capability flags — each maps 1:1 to a separate upstream `modelSupports*` predicate or a per-version allowlist; a bitflag or state-machine refactor would add indirection without any expressiveness gain"
@@ -399,6 +405,36 @@ mod tests {
         }
     }
 
+    // ── Capabilities::accepts_effort ──
+
+    #[test]
+    fn accepts_effort_matches_per_tier_capability_flag() {
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
+        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
+        let sonnet_4_5 = lookup("claude-sonnet-4-5").unwrap().capabilities;
+
+        // Opus 4.7 — full ladder.
+        assert!(opus_4_7.accepts_effort(Effort::Low));
+        assert!(opus_4_7.accepts_effort(Effort::High));
+        assert!(opus_4_7.accepts_effort(Effort::Xhigh));
+        assert!(opus_4_7.accepts_effort(Effort::Max));
+
+        // Opus 4.6 — base + max but no xhigh.
+        assert!(opus_4_6.accepts_effort(Effort::High));
+        assert!(opus_4_6.accepts_effort(Effort::Max));
+        assert!(!opus_4_6.accepts_effort(Effort::Xhigh));
+
+        // Sonnet 4.6 — base only, no max / xhigh.
+        assert!(sonnet_4_6.accepts_effort(Effort::High));
+        assert!(!sonnet_4_6.accepts_effort(Effort::Max));
+        assert!(!sonnet_4_6.accepts_effort(Effort::Xhigh));
+
+        // Sonnet 4.5 — no effort at all.
+        assert!(!sonnet_4_5.accepts_effort(Effort::Low));
+        assert!(!sonnet_4_5.accepts_effort(Effort::Max));
+    }
+
     // ── Capabilities::clamp_effort ──
 
     #[test]
@@ -427,6 +463,25 @@ mod tests {
         let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
         assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
         assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
+    }
+
+    // ── Capabilities::default_effort ──
+
+    #[test]
+    fn default_effort_picks_highest_supported_tier_when_user_has_no_pick() {
+        // Opus 4.7: full ladder → xhigh.
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        assert_eq!(opus_4_7.default_effort(), Some(Effort::Xhigh));
+
+        // Opus 4.6 / Sonnet 4.6: effort but no xhigh → high.
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            let caps = lookup(id).unwrap().capabilities;
+            assert_eq!(caps.default_effort(), Some(Effort::High), "{id}");
+        }
+
+        // No effort tier at all → None.
+        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
+        assert_eq!(haiku_4_5.default_effort(), None);
     }
 
     // ── Capabilities::resolve_effort ──
