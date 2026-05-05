@@ -192,8 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_overwrites_existing_file_uses_updated_verb() {
-        // Pins the `Updated` arm of the verb branch; the `Created`
-        // arm is covered by `run_creates_file`.
+        // Pins the `Updated` arm; `Created` is covered by `run_creates_file`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old").unwrap();
@@ -220,8 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_tool_run_dispatches_through_trait_to_inner_run() {
-        // Mirror of `edit_tool_run_dispatches_through_trait_to_inner_run`
-        // — pin the trait shim's `Arc::clone` of the tracker.
+        // Pin the trait shim's `Arc::clone` of the tracker.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
         let tracker_arc = Arc::new(FileTracker::default());
@@ -290,8 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_after_external_modification_is_rejected() {
-        // Read, then overwrite to simulate an external editor; the
-        // drift rehash surfaces "modified externally".
+        // Read, then overwrite to simulate an external editor; drift rehash surfaces the error.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "old content").unwrap();
@@ -311,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_phantom_drift_passes_via_hash_match() {
-        // Cloud-sync shape on Write: stat moved but bytes match — the rehash fallback must accept.
+        // Cloud-sync shape: stat moved but bytes match — the rehash fallback must accept.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("existing.txt");
         std::fs::write(&path, "stable content").unwrap();
@@ -350,8 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_fails_when_parent_is_a_file() {
-        // Parent is a regular file → `metadata()` returns ENOTDIR;
-        // surfaced via the same `Error reading {path}: {e}` shape as edit.rs.
+        // Regular-file parent → ENOTDIR, surfaced via the same shape as edit.rs.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "I am a file").unwrap();
@@ -372,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_unread_directory_hits_strict_gate() {
-        // No Read entry → the gate fires before the OS would reject the write on the directory.
+        // No Read entry → the gate fires before the OS would reject the write.
         let dir = tempfile::tempdir().unwrap();
         let (result, _) = write_file(
             dir.path().to_str().unwrap(),
@@ -405,17 +401,14 @@ mod tests {
             err.contains("Failed to write file"),
             "expected write-failure error, got: {err}",
         );
-        // Permission denial did not corrupt the original bytes.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn write_file_fails_when_parent_creation_is_denied() {
-        // Missing parent under a read-only ancestor: pre-stat hits
-        // ENOENT (walks into the missing component) so control
-        // reaches `create_dir_all`, which then denies. Ancestor
-        // stays empty so tempdir can rmdir it during cleanup.
+        // Missing parent under a read-only ancestor: pre-stat hits ENOENT so control reaches
+        // `create_dir_all`, which then denies. Ancestor stays empty for tempdir cleanup.
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();

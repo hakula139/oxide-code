@@ -1,16 +1,6 @@
-//! Background AI session title generator.
-//!
-//! Once a fresh session has recorded its first user prompt, spawn a
-//! detached task that asks Haiku for a concise 3-7 word sentence-case
-//! title, append it to the session file as a new
-//! [`Entry::Title`][crate::session::entry::Entry::Title] with source
-//! [`AiGenerated`][crate::session::entry::TitleSource::AiGenerated], and
-//! push an [`AgentEvent::SessionTitleUpdated`] so the TUI status bar updates live.
-//!
-//! Failure modes (Haiku timeout / malformed response / write error) all
-//! warn-log only — the first-prompt title stays on disk and in the UI.
-//! Callers wire this on fresh sessions exactly once; resumed sessions skip
-//! regeneration (the original title, if any, is already on disk).
+//! Background AI title generator. After the first user prompt, asks Haiku for a 3-7 word title,
+//! persists it as an `AiGenerated` `Entry::Title`, and emits `AgentEvent::SessionTitleUpdated`.
+//! Failures warn-log only — the first-prompt title stays on disk. Fresh sessions only.
 
 use anyhow::{Context, Result, bail};
 use indoc::indoc;

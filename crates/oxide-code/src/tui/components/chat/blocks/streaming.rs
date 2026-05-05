@@ -1,8 +1,5 @@
-//! Streaming assistant block.
-//!
-//! Holds the in-flight assistant response as tokens arrive, with a
-//! per-line rendered-prefix cache so committed text is not re-parsed on
-//! every frame. Promoted to a committed [`super::AssistantText`] block on `commit_streaming`.
+//! Streaming assistant block. Buffers tokens with a rendered-prefix cache so committed text is not
+//! re-parsed each frame; promoted to [`super::AssistantText`] on `commit_streaming`.
 
 use ratatui::text::Line;
 
@@ -65,8 +62,7 @@ impl StreamingAssistant {
             let rendered =
                 render_assistant_markdown(new_committed, ctx, !continues_turn && cache_empty);
             if !self.rendered.is_empty() {
-                // Paragraph break between successive commits — the
-                // single-pass renderer would emit this blank line.
+                // Paragraph break that the single-pass renderer would emit between commits.
                 self.rendered.push(Line::raw(""));
             }
             self.rendered.extend(rendered);

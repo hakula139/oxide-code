@@ -50,8 +50,7 @@ mod tests {
 
     #[test]
     fn truncate_to_width_accounts_for_cjk_double_width() {
-        // 测试文本 = 4 chars × 2 cols = 8 cols. With max_width = 5 the
-        // budget is 5 − 3 (ellipsis) = 2 cols, so exactly one CJK char fits before the marker.
+        // 测试文本 = 4 chars × 2 cols = 8 cols; budget = 5 − 3 (ellipsis) = 2 cols → one char fits.
         assert_eq!(truncate_to_width("测试文本", 5), "测...");
     }
 
@@ -62,8 +61,7 @@ mod tests {
 
     #[test]
     fn truncate_to_width_drops_ellipsis_when_budget_below_ellipsis_width() {
-        // Below ELLIPSIS_WIDTH the marker is dropped — emitting "..."
-        // into a 1- or 2-col slot would overflow the caller's budget.
+        // Drop the marker — emitting "..." into a 1- or 2-col slot would overflow the budget.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
     }

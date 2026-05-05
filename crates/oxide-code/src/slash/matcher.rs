@@ -22,8 +22,8 @@ enum Tier {
     AliasSubstring,
 }
 
-/// Filter and rank `commands` against `query` (leading `/` stripped). Empty `query` returns the
-/// full slice in declared order; non-empty queries match by prefix or substring, sorted by tier.
+/// Empty `query` returns the slice in declared order; non-empty matches by prefix or substring,
+/// sorted by tier.
 pub(crate) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Vec<MatchedCommand> {
     if query.is_empty() {
         return commands
@@ -44,7 +44,7 @@ pub(crate) fn filter_and_rank(query: &str, commands: &[&dyn SlashCommand]) -> Ve
     hits.into_iter().map(|(_, m)| m).collect()
 }
 
-/// Best tier the command qualifies for against `query`. `None` when neither name nor alias match.
+/// `None` when neither name nor alias match.
 fn best_match(query: &str, cmd: &dyn SlashCommand) -> Option<(Tier, MatchedCommand)> {
     let name = cmd.name();
     let name_lower = name.to_ascii_lowercase();
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn fake_execute_is_a_no_op_ok() {
-        // Pin the trait stub so registries that include Fake never trip a panic during dispatch.
+        // Stub so registries containing Fake don't panic during dispatch.
         let mut chat = crate::tui::components::chat::ChatView::new(
             &crate::tui::theme::Theme::default(),
             false,

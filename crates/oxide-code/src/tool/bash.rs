@@ -133,8 +133,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             };
         }
         Err(_) => {
-            // kill_on_drop handles bash; killpg catches any backgrounded
-            // grandchildren still in the same process group.
+            // kill_on_drop handles bash; killpg catches detached grandchildren in the same group.
             #[cfg(unix)]
             kill_process_group(pgid);
             return ToolOutput {
@@ -275,10 +274,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_timeout_kills_backgrounded_children() {
-        // A real shell command spawns a long-lived descendant and detaches.
-        // Before the process-group fix, the descendant would outlive the
-        // timeout and leak as an orphan. The test writes to a marker file
-        // after 1 second; if the group is killed first, the marker is absent.
+        // Without the process-group kill, a detached descendant outlives the timeout and touches
+        // the marker file. The marker's absence proves the whole group was killed.
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("leaked");
         let marker_str = marker.to_str().unwrap();

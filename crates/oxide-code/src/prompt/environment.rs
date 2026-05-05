@@ -90,7 +90,7 @@ fn knowledge_cutoff(model: &str) -> Option<&'static str> {
 
 // ── Platform Detection ──
 
-/// Maps Rust's `std::env::consts::OS` to Node's `process.platform` values.
+/// Rust's `std::env::consts::OS` → Node's `process.platform` values.
 fn normalize_node_platform(os: &str) -> &'static str {
     match os {
         "macos" => "darwin",
@@ -129,8 +129,7 @@ fn detect_os_version() -> String {
 // ── Date Detection ──
 
 fn current_date() -> String {
-    // now_local() fails on multi-threaded Linux (time crate safety constraint),
-    // so this effectively falls back to UTC there.
+    // now_local() fails on multi-threaded Linux (time crate safety), falling back to UTC there.
     let date = time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .date();

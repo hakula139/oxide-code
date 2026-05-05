@@ -1,8 +1,5 @@
-//! In-memory session state owned by the [`super::actor`] task.
-//!
-//! Pure data: no tokio, file I/O hidden behind [`WriterStatus`]. Split
-//! out so lifecycle transitions (first-prompt detection, uuid chain,
-//! finish idempotency) test without a runtime.
+//! In-memory session state owned by the actor. Pure data — no tokio; I/O hides behind
+//! [`WriterStatus`] so lifecycle transitions test without a runtime.
 
 use std::sync::Arc;
 
@@ -17,11 +14,8 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::{ContentBlock, Message, Role};
 use crate::util::text::{ELLIPSIS, ELLIPSIS_WIDTH};
 
-/// Maximum title length (in characters) derived from the first user prompt.
-///
-/// Sized for wide terminals: the `--list` row is `ID(10) Last Active(19)
-/// Msgs(6) Title`, so ~80 chars of title space on a 120-col terminal
-/// and still truncates cleanly (`...`) on narrower ones.
+/// Char cap for first-prompt-derived titles. Sized so a 120-col `--list` row still has room
+/// after the fixed `ID / Last Active / Msgs` prefix.
 const MAX_TITLE_LEN: usize = 80;
 
 // ── SessionState ──
@@ -157,7 +151,8 @@ impl SessionState {
             }
             writer.flush()
         })();
-        // BufWriter's buffer is undefined after a partial write — flag Broken so next batch reopens.
+        // BufWriter's buffer is undefined after a partial write — flag Broken so next batch
+        // reopens.
         self.writer_status = match result {
             Ok(()) => WriterStatus::Active(writer),
             Err(_) => WriterStatus::Broken,

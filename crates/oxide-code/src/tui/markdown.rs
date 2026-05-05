@@ -9,11 +9,8 @@ use ratatui::text::Text;
 use super::theme::Theme;
 use render::MarkdownRenderer;
 
-/// Converts a markdown string to styled ratatui [`Text`].
-///
-/// When `width` is non-zero, long lines are word-wrapped to fit within
-/// the given column budget. Continuation lines preserve the current
-/// indent level (list markers, blockquote prefixes, etc.).
+/// Renders markdown into styled ratatui [`Text`]; non-zero `width` wraps with indent-preserving
+/// continuation lines.
 pub(crate) fn render_markdown(input: &str, theme: &Theme, width: usize) -> Text<'static> {
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     let parser = Parser::new_ext(input, options);

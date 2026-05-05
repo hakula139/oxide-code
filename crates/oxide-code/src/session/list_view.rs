@@ -1,9 +1,4 @@
-//! Text rendering for `ox --list` output.
-//!
-//! Sits between [`SessionStore::list`][super::store::SessionStore::list] /
-//! [`list_all`][super::store::SessionStore::list_all] and the terminal so
-//! the rendering can be unit-tested — `main.rs` is excluded from coverage,
-//! so prior inline rendering had no automated coverage.
+//! Text rendering for `ox --list`. Split out of `main.rs` so the table layout is unit-testable.
 
 use std::io::Write;
 use std::path::Path;
@@ -17,36 +12,24 @@ use super::store::SessionStore;
 use crate::util::path::tildify;
 use crate::util::text::truncate_to_width;
 
-/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — the fixed
-/// prefix every row shares before `--all` inserts its optional Project
-/// column and the row finally reaches `Title`.
+/// `ID(10) + ' ' + LastActive(19) + ' ' + Msgs(6) + ' '` — fixed prefix before any optional
+/// `Project` column and the final `Title`.
 const FIXED_PREFIX_WIDTH: usize = 10 + 1 + 19 + 1 + 6 + 1;
 
-/// Smallest title-column width we will truncate to. Below this, the
-/// output is so narrow that truncation destroys almost all signal, so
-/// we skip it and let the terminal wrap instead.
+/// Skip title truncation under this width — wrap rather than chop everything to `F...`.
 const MIN_TITLE_BUDGET: usize = 12;
 
-/// Minimum width for the `Project` column — at least wide enough to
-/// fit the header label ("Project" = 7 chars) without truncation-by-padding.
+/// Header "Project" is 7 chars; pad to 8 so the label always fits.
 const PROJECT_COL_MIN: usize = 8;
 
-/// Upper cap on the `Project` column width. A session started from a
-/// pathologically deep path should not squeeze the `Title` column into
-/// oblivion; the value overflows its padding when a row exceeds the
-/// cap (one-off alignment hiccup rather than hiding the title column for the entire listing).
+/// Project column cap. Pathologically deep paths overflow the column rather than starve the
+/// title column for every row in the listing.
 const PROJECT_COL_MAX: usize = 40;
 
-/// Title-column fallback when a session has no recorded title yet.
 const UNTITLED_MARKER: &str = "(untitled)";
 
-/// Render `--list` output to `out`.
-///
-/// `all` selects the store scope: `false` lists only the current
-/// project; `true` spans every project the store can see.
-/// `local_offset` is applied to the displayed `Last Active` timestamp.
-/// `term_width` is the terminal width used to truncate the `Title`
-/// column; pass `None` when the output is piped or width is unknown to skip truncation.
+/// Render `--list` output to `out`. `all=true` spans every project; `term_width=None` skips
+/// title truncation (use when output is piped or width is unknown).
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
@@ -62,13 +45,8 @@ pub(crate) fn render_list(
     render_sessions(out, &sessions, all, local_offset, term_width)
 }
 
-/// Pure formatter: take an already-loaded `sessions` slice and write a
-/// table to `out`. Split from [`render_list`] so tests can exercise the
-/// formatting without constructing a real [`SessionStore`].
-///
-/// When `all` is `true`, a `Project` column is inserted so cross-project
-/// rows can be disambiguated. In single-project mode the cwd is
-/// redundant (it's always `$PWD`), so the column is omitted to keep the output narrow.
+/// Pure formatter — split from [`render_list`] so tests can skip building a real store. `all`
+/// inserts a `Project` column to disambiguate cross-project rows.
 fn render_sessions(
     out: &mut dyn Write,
     sessions: &[SessionInfo],
@@ -93,8 +71,7 @@ fn render_sessions(
         0
     };
 
-    // FIXED_PREFIX_WIDTH + (Project + 1) when --all. Title starts after
-    // this many visual columns; anything beyond that must be truncated to keep rows single-line.
+    // Title starts after this many cols; anything beyond truncates to keep rows single-line.
     let prefix_width = FIXED_PREFIX_WIDTH + if all { project_col_width + 1 } else { 0 };
     let title_budget = term_width.and_then(|w| {
         let budget = w.checked_sub(prefix_width)?;
@@ -188,7 +165,7 @@ mod tests {
 
     #[test]
     fn render_list_empty_store_shows_no_sessions_notice() {
-        // Covers the `render_list → render_sessions` glue; empty store keeps the test fixture-free.
+        // Covers the `render_list → render_sessions` glue.
         let dir = tempfile::tempdir().unwrap();
         let store = super::super::store::test_store(dir.path());
         let mut buf = Vec::new();
@@ -261,8 +238,7 @@ mod tests {
             rows[1],
         );
 
-        // All rows share the padded Project width, so the Title slot
-        // should start at the same column across rows and line up with the header.
+        // Title slot must start at the same column across rows, aligned with the header.
         let header_title_col = header.find("Title").expect("header must contain Title");
         let row_title_cols: Vec<usize> = rows
             .iter()
@@ -292,11 +268,8 @@ mod tests {
         let title_pos = row
             .rfind("(untitled)")
             .expect("row must render the default title");
-        // 10 (ID) + 1 + 19 (Last Active) + 1 + 6 (Msgs) + 1 + 40 (cap) + cwd overflow + 1
-        // The cwd length exceeds the cap, so the untruncated cwd plus
-        // one separator space should land the title past the header
-        // cap position — the key point is the cwd is rendered in full
-        // (no data loss) and columns don't collapse.
+        // cwd exceeds the 40-col cap; row should still render the full cwd (no data loss)
+        // even though the title slips past the header column.
         assert!(row.contains(&long_cwd), "cwd missing from row: {row:?}");
         assert!(title_pos > 0);
     }
@@ -346,9 +319,7 @@ mod tests {
             title: full_title.to_owned(),
             updated_at: datetime!(2026-04-18 09:05:00 UTC),
         });
-        // Prefix 38 + MIN_TITLE_BUDGET(12) = 50. term_width = 45 leaves
-        // a budget below minimum → no truncation (let the terminal
-        // wrap rather than chopping everything to `F...`).
+        // term_width 45 < prefix 38 + MIN_TITLE_BUDGET 12 → no truncation; terminal wraps.
         let out = render_with_width(&[s], false, Some(45));
         assert!(
             out.contains(full_title),

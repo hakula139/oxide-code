@@ -37,7 +37,7 @@ fn render_help() -> String {
     out
 }
 
-/// `/name (aliases) <usage>` — combines canonical name, optional alias list, and optional usage.
+/// `/name (aliases) <usage>` — alias list and usage are optional.
 fn display_label(cmd: &dyn SlashCommand) -> String {
     let mut out = format!("/{}", cmd.name());
     if !cmd.aliases().is_empty() {

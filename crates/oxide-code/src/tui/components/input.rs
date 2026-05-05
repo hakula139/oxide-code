@@ -373,9 +373,7 @@ impl InputArea {
 
 // ── Free Functions ──
 
-/// Lossy `usize → u16` cast scoped to cursor / column positions, where
-/// the source value is bounded by terminal dimensions. Centralises the
-/// `cast_possible_truncation` lint suppression so the call sites stay readable.
+/// Lossy `usize → u16` for cursor / column positions, bounded by terminal dimensions.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "cursor / column positions fit in u16 for terminal widths"

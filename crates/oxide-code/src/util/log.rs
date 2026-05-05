@@ -1,8 +1,5 @@
-//! Tracing subscriber initialization.
-//!
-//! TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log`:
-//! `EnterAlternateScreen` only swaps stdout, so stderr (the default
-//! `tracing::fmt()` writer) would paint over the frame. Other modes keep stderr.
+//! Tracing subscriber initialization. TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log`
+//! because `EnterAlternateScreen` swaps only stdout — stderr would paint over the frame.
 
 use std::path::{Path, PathBuf};
 
@@ -158,7 +155,7 @@ mod tests {
 
     #[test]
     fn log_dir_from_ignores_relative_xdg_and_uses_home_fallback() {
-        // Relative `$XDG_STATE_HOME` would resolve against the cwd; `xdg_dir` rejects it.
+        // Relative `$XDG_STATE_HOME` would resolve against cwd; `xdg_dir` rejects it.
         let resolved = log_dir_from(
             Some(PathBuf::from("relative/state")),
             Some(PathBuf::from("/home/u")),
@@ -185,8 +182,7 @@ mod tests {
 
     #[test]
     fn open_file_appender_appends_across_sessions() {
-        // `never` rotation must keep both lines — pin so a future
-        // switch to `daily` shows up as a test diff.
+        // `never` rotation must keep both lines — pin so a switch to `daily` shows up as a diff.
         let tmp = tempfile::tempdir().unwrap();
         for line in ["first\n", "second\n"] {
             let (mut writer, guard) = open_file_appender(tmp.path()).unwrap();

@@ -11,11 +11,8 @@ use syntect::parsing::SyntaxSet;
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
-/// Highlight `code` using syntect for the given language.
-///
-/// The language token is extracted from the first word of `lang` (so info
-/// strings like `rust,no_run` still work). Falls back to `fallback_style`
-/// when the language is unrecognized.
+/// Highlights `code` for the first whitespace-separated token of `lang` (handles info strings like
+/// `rust,no_run`); falls back to `fallback_style` for unknown languages.
 pub(super) fn highlight_code(lang: &str, code: &str, fallback_style: Style) -> Vec<Line<'static>> {
     let syntax = lang
         .split_ascii_whitespace()

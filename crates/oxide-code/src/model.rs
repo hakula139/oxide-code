@@ -1,7 +1,4 @@
-//! Ground-truth table of known Claude models.
-//!
-//! Each row carries marketing name, cutoff, and capability flags gating
-//! beta headers and body fields. Matching is substring-based; more-specific entries come first.
+//! Ground-truth table of known Claude models. Substring-matched, most-specific entry first.
 
 use std::borrow::Cow;
 
@@ -9,21 +6,16 @@ use crate::config::Effort;
 
 // ── ModelInfo ──
 
-/// Metadata and capability flags for a single Claude model.
 pub(crate) struct ModelInfo {
-    /// Substring that identifies this model. The first substring match in
-    /// [`MODELS`] wins, so entries are ordered most-specific first.
+    /// First substring match in [`MODELS`] wins; ordering matters.
     pub(crate) id_substr: &'static str,
-    /// User-visible product name for the TUI / prompt / session list.
     pub(crate) marketing: &'static str,
-    /// Knowledge cutoff date for the `<env>` block. `None` when not known.
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
 }
 
 // ── Capabilities ──
 
-/// Per-model feature flags gating beta headers and body fields.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "seven independent capability flags — each maps 1:1 to a separate upstream `modelSupports*` predicate or a per-version allowlist; a bitflag or state-machine refactor would add indirection without any expressiveness gain"
@@ -32,25 +24,23 @@ pub(crate) struct ModelInfo {
 pub(crate) struct Capabilities {
     pub(crate) interleaved_thinking: bool,
     pub(crate) context_management: bool,
-    /// Whether the model accepts the `context-1m-2025-08-07` beta.
+    /// `context-1m-2025-08-07` beta.
     pub(crate) context_1m: bool,
-    /// Gates `output_config.effort` at `low` / `medium` / `high`.
+    /// `output_config.effort` at low / medium / high.
     pub(crate) effort: bool,
-    /// Whether `effort = "max"` is accepted. Opus-only.
+    /// `effort = "max"`. Opus-only.
     pub(crate) effort_max: bool,
-    /// Whether `effort = "xhigh"` is accepted. Opus 4.7 only.
+    /// `effort = "xhigh"`. Opus 4.7 only.
     pub(crate) effort_xhigh: bool,
-    /// Whether the model accepts the `structured-outputs-2025-12-15` beta.
+    /// `structured-outputs-2025-12-15` beta.
     pub(crate) structured_outputs: bool,
 }
 
 // ── MODELS ──
 
-/// Ordered table: most-specific substring first. No inheritance between rows.
+/// Most-specific substring first. No inheritance between rows.
 pub(crate) const MODELS: &[ModelInfo] = &[
-    // Upstream predates 4.7; substring-derived flags inherit 4.6 as a
-    // monotonic projection, and `effort_xhigh` is the one 4.7-only
-    // addition (rejected as 400 by every other model).
+    // Inherits 4.6 as a monotonic projection; `effort_xhigh` is the 4.7-only addition.
     ModelInfo {
         id_substr: "claude-opus-4-7",
         marketing: "Claude Opus 4.7",
@@ -88,7 +78,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             context_management: true,
             context_1m: true,
             effort: true,
-            // `max` is Opus-only per the migration guide; Sonnet 4.6 400s on it.
+            // `max` is Opus-only; Sonnet 4.6 400s on it.
             effort_max: false,
             effort_xhigh: false,
             structured_outputs: true,
@@ -127,9 +117,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
         marketing: "Claude Haiku 4.5",
         cutoff: Some("February 2025"),
         capabilities: Capabilities {
-            // Haiku 4.5 doesn't match the `opus-4 || sonnet-4`
-            // substring rule that gates `interleaved-thinking`, and 3P
-            // gateways 400 on it. First-party would accept, but we target 3P throughout.
+            // 3P gateways 400 on `interleaved-thinking` for Haiku 4.5.
             interleaved_thinking: false,
             context_management: true,
             context_1m: false,
@@ -153,9 +141,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             structured_outputs: true,
         },
     },
-    // Unqualified base (`claude-opus-4`, `claude-opus-4-0`,
-    // `claude-opus-4-20250514`). Structured outputs arrived with 4.1
-    // per upstream's explicit allowlist, so the base row must not claim them.
+    // Unqualified base (`claude-opus-4`, `-4-0`, `-4-20250514`); structured outputs arrived in 4.1.
     ModelInfo {
         id_substr: "claude-opus-4",
         marketing: "Claude Opus 4",
@@ -170,9 +156,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
             structured_outputs: false,
         },
     },
-    // Sonnet 4 base: all Sonnet 4.x carry 1M per upstream's
-    // `sonnet-4` substring rule, so `context_1m` stays on here even
-    // though structured outputs don't.
+    // Sonnet 4 base: all Sonnet 4.x carry 1M per upstream's `sonnet-4` substring rule.
     ModelInfo {
         id_substr: "claude-sonnet-4",
         marketing: "Claude Sonnet 4",
@@ -212,7 +196,7 @@ impl Capabilities {
         }
     }
 
-    /// Highest level this model accepts ≤ `pick`. `None` when the model doesn't support effort.
+    /// Highest accepted level ≤ `pick`. `None` when the model doesn't support effort.
     pub(crate) fn clamp_effort(self, pick: Effort) -> Option<Effort> {
         if !self.effort {
             return None;
@@ -238,7 +222,7 @@ impl Capabilities {
         }
     }
 
-    /// Clamps `pick` if present, falls back to [`Self::default_effort`] otherwise.
+    /// Clamps `pick` when present, otherwise falls back to [`Self::default_effort`].
     pub(crate) fn resolve_effort(self, pick: Option<Effort>) -> Option<Effort> {
         match pick {
             Some(p) => self.clamp_effort(p),
@@ -299,25 +283,16 @@ mod tests {
 
     #[test]
     fn capability_flags_match_upstream_substring_predicates() {
-        // Lock every row's substring-derived capability flags to the
-        // `modelSupports*`-style rules the third-party gateway expects.
-        // A mis-bump or typo that lets the predicates below drift from
-        // the `MODELS` table will fail here instead of silently
-        // 400-ing one model family on a release day.
-        //
-        // Allowlist-shaped flags (`effort_max`, `effort_xhigh`,
-        // `structured_outputs`) don't reduce to a substring rule, so
-        // they're covered by per-flag enumeration tests below.
-        //
-        // Opus 4.7 postdates the predicate set we mirror, so we skip
-        // it here — there is no substring rule to check against.
+        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Allowlist
+        // flags have their own tests. Opus 4.7 postdates the predicate set and is skipped.
         for info in MODELS {
             if info.id_substr == "claude-opus-4-7" {
                 continue;
             }
             let m = info.id_substr;
             let is_opus_or_sonnet_4 = m.contains("opus-4") || m.contains("sonnet-4");
-            let expect_interleaved_thinking = is_opus_or_sonnet_4; // haiku-4 is not in modelSupportsISP
+            // haiku-4 is not in modelSupportsISP
+            let expect_interleaved_thinking = is_opus_or_sonnet_4;
             let expect_context_management = is_opus_or_sonnet_4 || m.contains("haiku-4");
             let expect_context_1m = m.contains("claude-sonnet-4") || m.contains("opus-4-6");
             let expect_effort = m.contains("opus-4-6") || m.contains("sonnet-4-6");
@@ -343,12 +318,7 @@ mod tests {
 
     #[test]
     fn opus_4_7_uniquely_supports_xhigh() {
-        // Upstream predates 4.7 so its predicates wouldn't claim
-        // `effort` or `1M` on this id_substr. We override to the
-        // monotonic-bump projection. Pin it so a well-meaning future
-        // edit that "aligns 4.7 with the predicates" doesn't
-        // accidentally strip the caps we rely on. `effort_xhigh` is
-        // the one 4.7-only addition — every other row must reject it.
+        // Upstream predates 4.7; pin so a future "alignment" edit doesn't strip our caps.
         let caps = lookup("claude-opus-4-7").unwrap().capabilities;
         assert!(caps.interleaved_thinking);
         assert!(caps.context_management);
@@ -375,8 +345,7 @@ mod tests {
 
     #[test]
     fn effort_max_is_opus_only() {
-        // `max` effort is Opus-only per the migration guide. Sonnet
-        // 4.6 supports base `effort` but 400s on `max`; Haiku doesn't support `effort` at all.
+        // `max` is Opus-only; Sonnet 4.6 supports base `effort` but 400s on `max`.
         for supported in ["claude-opus-4-7", "claude-opus-4-6"] {
             assert!(
                 lookup(supported).unwrap().capabilities.effort_max,
@@ -400,41 +369,9 @@ mod tests {
         }
     }
 
-    // ── Capabilities::clamp_effort ──
-
-    #[test]
-    fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
-        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
-        assert_eq!(opus_4_7.clamp_effort(Effort::Max), Some(Effort::Max));
-        assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
-        assert_eq!(opus_4_7.clamp_effort(Effort::Low), Some(Effort::Low));
-
-        // Opus 4.6: Max ✓, Xhigh ✗. `xhigh` clamps down to `high` (never sideways-up to `max`).
-        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
-        assert_eq!(opus_4_6.clamp_effort(Effort::Max), Some(Effort::Max));
-        assert_eq!(opus_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
-        assert_eq!(opus_4_6.clamp_effort(Effort::High), Some(Effort::High));
-
-        // Sonnet 4.6: Max ✗, Xhigh ✗. Both clamp to `high`.
-        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
-        assert_eq!(sonnet_4_6.clamp_effort(Effort::Max), Some(Effort::High));
-        assert_eq!(sonnet_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
-        assert_eq!(
-            sonnet_4_6.clamp_effort(Effort::Medium),
-            Some(Effort::Medium)
-        );
-
-        // No `effort` at all → None regardless of pick.
-        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
-        assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
-        assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
-    }
-
     #[test]
     fn structured_outputs_flag_tracks_upstream_allowlist() {
-        // Upstream `modelSupportsStructuredOutputs` is a per-version
-        // allowlist: Opus 4.1/4.5/4.6 (+ our 4.7 monotonic bump),
-        // Sonnet 4.5/4.6, Haiku 4.5. Everything else is out.
+        // Per-version allowlist: Opus 4.1/4.5/4.6 (+ our 4.7 bump), Sonnet 4.5/4.6, Haiku 4.5.
         for supported in [
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -457,6 +394,36 @@ mod tests {
         }
     }
 
+    // ── Capabilities::clamp_effort ──
+
+    #[test]
+    fn clamp_effort_picks_highest_supported_at_or_below_user_pick() {
+        let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
+        assert_eq!(opus_4_7.clamp_effort(Effort::Max), Some(Effort::Max));
+        assert_eq!(opus_4_7.clamp_effort(Effort::Xhigh), Some(Effort::Xhigh));
+        assert_eq!(opus_4_7.clamp_effort(Effort::Low), Some(Effort::Low));
+
+        // Opus 4.6: Max ✓, Xhigh ✗ — `xhigh` clamps down to `high`, never up to `max`.
+        let opus_4_6 = lookup("claude-opus-4-6").unwrap().capabilities;
+        assert_eq!(opus_4_6.clamp_effort(Effort::Max), Some(Effort::Max));
+        assert_eq!(opus_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
+        assert_eq!(opus_4_6.clamp_effort(Effort::High), Some(Effort::High));
+
+        // Sonnet 4.6: Max ✗, Xhigh ✗ — both clamp to `high`.
+        let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
+        assert_eq!(sonnet_4_6.clamp_effort(Effort::Max), Some(Effort::High));
+        assert_eq!(sonnet_4_6.clamp_effort(Effort::Xhigh), Some(Effort::High));
+        assert_eq!(
+            sonnet_4_6.clamp_effort(Effort::Medium),
+            Some(Effort::Medium)
+        );
+
+        // No `effort` at all → None regardless of pick.
+        let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
+        assert_eq!(haiku_4_5.clamp_effort(Effort::Max), None);
+        assert_eq!(haiku_4_5.clamp_effort(Effort::Low), None);
+    }
+
     // ── Capabilities::resolve_effort ──
 
     #[test]
@@ -470,7 +437,7 @@ mod tests {
 
     #[test]
     fn resolve_effort_clamps_pick_against_model_ceiling() {
-        // Sonnet 4.6 caps at `high`; an `xhigh` pick must clamp down.
+        // Sonnet 4.6 caps at `high`.
         let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
         assert_eq!(
             sonnet_4_6.resolve_effort(Some(Effort::Xhigh)),
@@ -480,7 +447,6 @@ mod tests {
 
     #[test]
     fn resolve_effort_falls_back_to_model_default_when_pick_is_none() {
-        // None ≡ "use the model default" — Opus 4.7 → xhigh, others → high.
         let opus_4_7 = lookup("claude-opus-4-7").unwrap().capabilities;
         assert_eq!(opus_4_7.resolve_effort(None), Some(Effort::Xhigh));
         let sonnet_4_6 = lookup("claude-sonnet-4-6").unwrap().capabilities;
@@ -489,9 +455,7 @@ mod tests {
 
     #[test]
     fn resolve_effort_is_none_on_no_tier_model() {
-        // Haiku 4.5 doesn't accept the effort field — both pick=None
-        // and pick=Some collapse to None so the request omits the
-        // field rather than 400-ing the gateway.
+        // Haiku 4.5 rejects the effort field; both pick=None and pick=Some collapse to None.
         let haiku_4_5 = lookup("claude-haiku-4-5").unwrap().capabilities;
         assert_eq!(haiku_4_5.resolve_effort(None), None);
         assert_eq!(haiku_4_5.resolve_effort(Some(Effort::High)), None);
@@ -509,26 +473,22 @@ mod tests {
 
     #[test]
     fn lookup_matches_most_specific_row_before_family_base() {
-        // `claude-opus-4-6` must hit the 4.6 row, not fall through to the `claude-opus-4` base.
         let info = lookup("claude-opus-4-6").unwrap();
         assert_eq!(info.marketing, "Claude Opus 4.6");
         assert!(info.capabilities.effort);
     }
 
     #[test]
-    fn lookup_unknown_model_family_is_absent() {
-        // A hypothetical future family with no entry should miss entirely
-        // so callers can opt into conservative defaults.
-        assert!(lookup("claude-opus-5-0").is_none());
-        assert!(lookup("gpt-4").is_none());
+    fn lookup_ignores_1m_suffix_tag_for_matching() {
+        // `[1m]` is a client-side opt-in marker; substring match still finds the base row.
+        let info = lookup("claude-opus-4-6[1m]").unwrap();
+        assert_eq!(info.marketing, "Claude Opus 4.6");
     }
 
     #[test]
-    fn lookup_ignores_1m_suffix_tag_for_matching() {
-        // `[1m]` is a client-side opt-in marker; the substring match
-        // still finds the base model row.
-        let info = lookup("claude-opus-4-6[1m]").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
+    fn lookup_unknown_model_family_is_absent() {
+        assert!(lookup("claude-opus-5-0").is_none());
+        assert!(lookup("gpt-4").is_none());
     }
 
     // ── marketing_name ──
@@ -554,17 +514,17 @@ mod tests {
     }
 
     #[test]
-    fn marketing_name_unknown_model_is_absent() {
-        assert_eq!(marketing_name("gpt-4o"), None);
-        assert_eq!(marketing_name("custom-model"), None);
-    }
-
-    #[test]
     fn marketing_name_with_dated_suffix_falls_through_to_family_row() {
         assert_eq!(
             marketing_name("claude-opus-4-6-20260401"),
             Some("Claude Opus 4.6")
         );
+    }
+
+    #[test]
+    fn marketing_name_unknown_model_is_absent() {
+        assert_eq!(marketing_name("gpt-4o"), None);
+        assert_eq!(marketing_name("custom-model"), None);
     }
 
     // ── marketing_or_id ──
@@ -576,10 +536,7 @@ mod tests {
 
     #[test]
     fn marketing_or_id_falls_back_to_raw_id_for_unknown() {
-        // Single seam for the unknown-id fallback — every UI surface
-        // (status bar, /status, /config, swap confirmation) goes
-        // through this. A regression that returned a placeholder or
-        // panicked here would show up everywhere at once.
+        // Single seam for unknown-id fallback — every UI surface goes through this.
         assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
     }
 }

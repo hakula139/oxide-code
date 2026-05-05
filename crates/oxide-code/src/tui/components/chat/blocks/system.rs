@@ -1,6 +1,5 @@
-//! Slash-command output block: a `▎` left-bar in `accent` plus body
-//! in `text`. Errors keep their own `ErrorBlock` styling so a
-//! transcript scan distinguishes informational from error output.
+//! Slash-command output block — `▎` left-bar in `accent` + body in `text`. Errors use
+//! [`super::ErrorBlock`] so info output is visually distinct from failures.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -42,7 +41,7 @@ impl ChatBlock for SystemMessageBlock {
             out.extend(wrap_line(line, width, indent, Some(&cont_prefix)));
         }
         if out.is_empty() {
-            // Empty content → single bar so the block is visible rather than silently dropped.
+            // Empty content → bare bar so the block stays visible rather than silently dropped.
             out.push(Line::from(Span::styled(
                 TOOL_BORDER_PREFIX.to_owned(),
                 bar_style,
@@ -98,8 +97,7 @@ mod tests {
 
     #[test]
     fn render_empty_text_still_emits_a_bar_line() {
-        // Empty payload still produces a visible block — silently
-        // swallowing it would hide a bug at the call site.
+        // Silently dropping empty payloads would mask call-site bugs.
         let theme = Theme::default();
         let block = SystemMessageBlock::new("");
         let lines = block.render(&ctx_at(60, &theme));
@@ -129,8 +127,8 @@ mod tests {
         let lines = block.render(&ctx_at(16, &theme));
         assert!(lines.len() >= 2, "expected wrap, got {lines:#?}");
         for (i, line) in lines.iter().enumerate() {
-            // First row: bar+space as one span. Continuation: split
-            // into [bar, space] so the bar carries `accent`.
+            // First row: bar+space as one span. Continuation splits to [bar, space] so the bar
+            // keeps the `accent` style.
             let head = &line.spans[0];
             let content = head.content.as_ref();
             assert!(
@@ -143,8 +141,7 @@ mod tests {
 
     #[test]
     fn render_per_logical_line_wraps_independently() {
-        // Two long source lines wrap separately; a body that joined
-        // them would render as one paragraph.
+        // Joining input lines would render two source lines as one paragraph.
         let theme = Theme::default();
         let block = SystemMessageBlock::new(
             "first really long line of text\nsecond really long line of text",

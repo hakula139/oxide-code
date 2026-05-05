@@ -11,7 +11,7 @@ mod loader;
 
 pub(crate) use loader::{SlotPatch, resolve_theme};
 
-/// A single theme slot — composes optional fg, bg, and modifiers into a [`Style`].
+/// One theme slot — optional fg, bg, and modifiers composed into a [`Style`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,

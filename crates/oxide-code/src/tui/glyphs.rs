@@ -1,15 +1,10 @@
-//! Visual glyphs used across the TUI — single source of truth for the
-//! UI's iconography so the visual identity is easy to scan and easy to keep consistent.
+//! Visual glyphs used across the TUI — single source of truth for iconography.
 //!
 //! Conventions:
 //!
-//! - First-line prefix glyphs end with a trailing space so callers
-//!   can concatenate without padding (`"❯ "`, `"◉ "`, `"✗ "`).
-//! - Continuation indents (`*_CONT`) match the prefix's display width
-//!   so wrapped lines align under the text, not under the icon.
-//! - Status indicators that participate in structured layouts (the
-//!   tool `✓` / `✗`) carry no trailing space; the renderer handles
-//!   the column gap explicitly.
+//! - First-line prefix glyphs end with a trailing space (`"❯ "`, `"◉ "`, `"✗ "`).
+//! - Continuation indents (`*_CONT`) match the prefix's display width.
+//! - Tool status indicators (`✓` / `✗`) carry no trailing space; renderer handles the gap.
 
 // ── User prompt ──
 
@@ -24,7 +19,7 @@ pub(crate) const USER_PROMPT_CONT: &str = "  ";
 
 // ── Assistant ──
 
-/// First-line prefix for assistant text — diamond + space.
+/// First-line prefix for assistant text.
 pub(crate) const ASSISTANT_PREFIX: &str = "◉ ";
 
 /// Continuation indent for multi-line assistant content.
@@ -32,10 +27,10 @@ pub(crate) const ASSISTANT_CONT: &str = "  ";
 
 // ── Tool / Thinking ──
 
-/// Left-bar glyph for tool and thinking blocks (single column wide).
+/// Left-bar glyph for tool and thinking blocks.
 pub(crate) const BAR: &str = "▎";
 
-/// Per-line prefix for thinking blocks — [`BAR`] + space.
+/// Per-line prefix for thinking blocks.
 pub(crate) const THINKING_PREFIX: &str = "▎ ";
 
 /// First-line prefix for tool-call and tool-result status lines.
@@ -44,15 +39,15 @@ pub(crate) const TOOL_BORDER_PREFIX: &str = "▎ ";
 /// Continuation prefix for tool-block body lines (content at col 4).
 pub(crate) const TOOL_BORDER_CONT: &str = "▎   ";
 
-/// Tool-result success indicator (no trailing space).
+/// Tool-result success indicator.
 pub(crate) const TOOL_SUCCESS: &str = "✓";
 
-/// Tool-result failure indicator (no trailing space).
+/// Tool-result failure indicator.
 pub(crate) const TOOL_ERROR: &str = "✗";
 
 // ── Error ──
 
-/// First-line prefix for error blocks — cross mark + space.
+/// First-line prefix for error blocks.
 pub(crate) const ERROR_PREFIX: &str = "✗ ";
 
 // ── Inline markers ──
@@ -62,7 +57,7 @@ pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
 // ── Status spinner ──
 
-/// 8-dot Braille spinner (counterclockwise). Cycle by modulo index.
+/// 8-dot Braille spinner (counterclockwise); cycle by modulo index.
 pub(crate) const SPINNER_FRAMES: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 
 #[cfg(test)]

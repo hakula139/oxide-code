@@ -347,8 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_partial_reread_does_not_cache_hit() {
-        // Partial reads always return the line-numbered slice so the
-        // model can re-request a different range.
+        // Partial reads always return the slice so the model can re-request a different range.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(
@@ -509,8 +508,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn read_file_rejects_non_regular_file() {
-        // A unix-domain socket is a non-regular file with `metadata.len() == 0`,
-        // which would bypass the size gate if `file_type().is_file()` were skipped.
+        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();

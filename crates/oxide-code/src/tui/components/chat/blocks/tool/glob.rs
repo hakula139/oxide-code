@@ -47,9 +47,8 @@ pub(super) fn render(
     }
 }
 
-/// Footer combining TUI-side hiding (`hidden`) with the tool's
-/// `MAX_RESULTS` cap. Header carries the actual counts; footer just
-/// flags the cap with grep's `(limit reached)` token.
+/// Footer combining TUI-side row hiding with the tool's `MAX_RESULTS` cap. Counts live in the
+/// header; the footer flags the cap with grep's `(limit reached)` token.
 fn footer_text(hidden: usize, truncated_by_tool: bool) -> Option<String> {
     let noun = |n: usize| if n == 1 { "file" } else { "files" };
     match (hidden, truncated_by_tool) {
@@ -213,8 +212,7 @@ mod tests {
 
     #[test]
     fn footer_text_tool_truncated_with_no_tui_hidden_names_limit() {
-        // Defensive arm: in practice MAX_RESULTS (100) is well above
-        // MAX_TOOL_OUTPUT_LINES (5), so this combination is unreachable.
+        // Defensive arm: MAX_RESULTS (100) far exceeds MAX_TOOL_OUTPUT_LINES (5) in practice.
         assert_eq!(footer_text(0, true), Some("... limit reached".to_owned()));
     }
 

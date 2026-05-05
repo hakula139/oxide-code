@@ -1,9 +1,5 @@
-//! CLI `--continue` argument resolution.
-//!
-//! Translates the `clap`-parsed `Option<Option<String>>` into either a
-//! freshly-started [`SessionHandle`] or a resumed one with its loaded
-//! messages, via [`resolve_session`]. Split out of `main.rs` so the
-//! resolution logic (parsing, prefix matching, ambiguity reporting) can be exercised by unit tests.
+//! CLI `--continue` argument resolution. Translates the `clap`-parsed `Option<Option<String>>`
+//! into a fresh or resumed [`SessionHandle`] via [`resolve_session`].
 
 use std::path::Path;
 
@@ -14,35 +10,20 @@ use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
 use crate::util::text::ELLIPSIS;
 
-/// Normalized form of the CLI `--continue` argument. Built by
-/// [`normalize_resume_arg`] and consumed by [`resolve_session`].
+/// Normalized form of the CLI `--continue` argument.
 pub(crate) enum ResumeMode<'a> {
-    /// No `--continue` was passed — start a brand new session.
+    /// No `--continue` flag — start a new session.
     Fresh,
     /// Bare `--continue` — resume the most recent session in scope.
     Latest,
-    /// `--continue <prefix>` — resume the single session whose ID
-    /// starts with the (trimmed, non-empty) prefix.
+    /// `--continue <prefix>` — resume the unique session whose ID starts with `prefix`.
     Prefix(&'a str),
-    /// `--continue <path.jsonl>` — resume a session file by explicit
-    /// filesystem path, bypassing the XDG project subdirectory lookup.
-    /// Selected when the argument contains a path separator or ends with
-    /// `.jsonl`; any UUID-shaped token is still classified as
-    /// [`Prefix`][Self::Prefix].
+    /// `--continue <path.jsonl>` — resume by filesystem path, bypassing the XDG lookup.
     Path(&'a Path),
 }
 
-/// Creates or resumes a session based on CLI flags.
-///
-/// `resume`:
-/// - `None`: no `--continue` flag → new session.
-/// - `Some(None)`: `--continue` without value → resume latest.
-/// - `Some(Some(id))`: `--continue <id>` → resume specific session.
-///
-/// `all` widens the search scope for `--continue` from the current
-/// project to every project. A specific session ID is always resolved
-/// across projects once matched, so `--all` mainly changes which
-/// sessions are eligible in the prefix / latest lookup.
+/// Creates or resumes a session per CLI flags. `all` widens prefix / latest lookup from the
+/// current project to every project subdir.
 pub(crate) async fn resolve_session(
     store: &SessionStore,
     model: &str,
@@ -51,8 +32,7 @@ pub(crate) async fn resolve_session(
 ) -> Result<ResumedSession> {
     let mode = normalize_resume_arg(resume)?;
 
-    // Path resumes bypass the store's project-subdir lookup entirely and
-    // can be resolved without listing anything.
+    // Path resumes bypass project-subdir listing entirely.
     if let ResumeMode::Path(path) = mode {
         let resumed = handle::resume_from_path(store, path)?;
         debug!("resuming session from {}", path.display());
@@ -115,15 +95,9 @@ pub(crate) async fn resolve_session(
     Ok(resumed)
 }
 
-/// Trims and classifies a `--continue` argument into a [`ResumeMode`].
-/// Empty / whitespace-only prefixes are rejected explicitly so they
-/// cannot silently collapse into "resume latest" — the bare
-/// `--continue` flag already expresses that intent.
-///
-/// An argument that looks like a path (contains a path separator or ends
-/// with `.jsonl`) is classified as [`ResumeMode::Path`]; otherwise it is
-/// a UUID-shaped prefix. UUIDs contain only hex + `-`, neither of which
-/// trigger the path heuristic, so prefix resume stays unchanged.
+/// Trims and classifies a `--continue` argument into a [`ResumeMode`]. Empty / whitespace
+/// prefixes are rejected explicitly to avoid silently collapsing into "resume latest" — bare
+/// `--continue` already expresses that.
 pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<ResumeMode<'_>> {
     match resume {
         None => Ok(ResumeMode::Fresh),
@@ -142,10 +116,8 @@ pub(crate) fn normalize_resume_arg(resume: Option<&Option<String>>) -> Result<Re
     }
 }
 
-/// Classify a `--continue` argument as a path when it either contains a
-/// path separator or uses the `.jsonl` extension (case-insensitive, in
-/// case a user hands us `.JSONL`). UUID v4 strings contain only hex
-/// digits and `-`, so this classifier never mis-routes a valid session-ID prefix.
+/// True if the argument contains a path separator or has a `.jsonl` extension. UUIDs contain
+/// only hex + `-`, so this never mis-routes a valid session-ID prefix.
 fn looks_like_path(arg: &str) -> bool {
     arg.contains('/')
         || arg.contains('\\')
@@ -154,10 +126,7 @@ fn looks_like_path(arg: &str) -> bool {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-/// Joins the first `MATCH_PREVIEW_LIMIT` session IDs (truncated to
-/// 8 chars each) as `aaaaaaaa, bbbbbbbb`, appending `, ...` when more
-/// matches were provided. Drives the ambiguous-prefix error in
-/// [`resolve_session`].
+/// Renders up to `MATCH_PREVIEW_LIMIT` IDs (truncated to 8 chars), with `, ...` for overflow.
 fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
     const MATCH_PREVIEW_LIMIT: usize = 5;
     let mut iter = ids.into_iter();
@@ -201,9 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_session_resumes_from_external_path() {
-        // A session file living somewhere the store wouldn't search.
-        // The path-based resume must still pick up the title, messages,
-        // and session_id recorded in the header.
+        // Path-based resume must pick up title, messages, and session_id from the header
+        // even when the file lives outside any store-searched directory.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = handle::start(&store, "m");
@@ -215,8 +183,7 @@ mod tests {
         let path = test_session_file(dir.path(), &full_id);
         drop(original);
 
-        // Copy the file outside the project directory to simulate the
-        // "imported from another machine" scenario.
+        // Imported-from-another-machine scenario.
         let external_dir = tempfile::tempdir().unwrap();
         let external_path = external_dir.path().join("copied.jsonl");
         std::fs::copy(&path, &external_path).unwrap();
@@ -253,11 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_session_all_widens_scope_to_list_all() {
-        // `--all` flips the listing from `store.list()` (current project only)
-        // to `store.list_all()` (every project subdir). The prefix match
-        // then resolves across projects and the error hint drops the
-        // "in this project" qualifier. Exercising the `all = true` branch
-        // here also covers the empty `scope_hint`.
+        // `--all` flips listing to `list_all`; the error hint also drops "in this project".
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = handle::start(&store, "m");
@@ -303,10 +266,8 @@ mod tests {
     async fn resolve_session_prefix_errors_on_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
-        // Materialize a session file so the project listing is
-        // non-empty; without `record_message` the lazy creation
-        // never touches disk and the prefix lookup would short-circuit
-        // on "no sessions" instead of testing the no-match path.
+        // Need a real file on disk so the listing is non-empty; otherwise the prefix lookup
+        // short-circuits on "no sessions" before exercising the no-match path.
         let s = handle::start(&store, "m");
         s.record_message(Message::user("noop")).await;
         s.finish(Vec::new()).await;
@@ -323,11 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_session_prefix_reports_ambiguous_matches() {
-        // Spin up 20 sessions and record a message in each so any
-        // of them is resumable. Then pick the hex char that the
-        // most session IDs start with — with 20 v4 UUIDs across 16
-        // characters, this is guaranteed ≥ 2 by pigeonhole, so the
-        // prefix lookup must bail with "ambiguous".
+        // 20 v4 UUIDs across 16 hex chars guarantees ≥ 2 collisions by pigeonhole.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
 
@@ -416,8 +373,7 @@ mod tests {
 
     #[test]
     fn normalize_resume_arg_keeps_uuid_shaped_prefix_as_prefix() {
-        // A v4 UUID prefix uses only hex + `-`; neither triggers the path
-        // heuristic, so bare prefixes still resume through the store.
+        // UUID prefix has no `/` and no `.jsonl`; must not classify as path.
         let arg = Some("a1b2c3d4-e5f6-7890".to_owned());
         let mode = normalize_resume_arg(Some(&arg)).unwrap();
         assert!(matches!(mode, ResumeMode::Prefix("a1b2c3d4-e5f6-7890")));

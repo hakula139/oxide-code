@@ -1,10 +1,5 @@
-//! Chat view — the scrollable message list.
-//!
-//! Each visible unit in the transcript (user messages, assistant
-//! replies, tool calls and results, errors) is a [`blocks::ChatBlock`]
-//! implementation. [`ChatView`] is the thin container: it appends
-//! blocks, owns the streaming buffer, handles scroll state, and stacks
-//! `render` outputs with appropriate blank-line separators.
+//! Scrollable chat view. Each visible transcript unit is a [`blocks::ChatBlock`] impl;
+//! [`ChatView`] owns the streaming buffer and stacks block renders with separator lines.
 
 mod blocks;
 
@@ -254,9 +249,7 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.system_text())
     }
 
-    /// Updates cached viewport height and syncs scroll position.
-    /// Returns `true` when auto-scroll moved `scroll_offset`, so the
-    /// caller knows to repaint with the new offset.
+    /// Updates cached viewport size and syncs scroll. `true` if auto-scroll moved the offset.
     #[must_use]
     pub(crate) fn update_layout(&mut self, area: Rect) -> bool {
         self.viewport_height = area.height;

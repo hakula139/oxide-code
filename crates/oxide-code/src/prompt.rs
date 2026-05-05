@@ -1,9 +1,4 @@
-//! System prompt assembly.
-//!
-//! Builds [`PromptParts`]: static sections (identity, guidance, tool
-//! use) that live in the API `system` parameter and cache globally,
-//! plus a `<system-reminder>`-wrapped user context (CLAUDE.md, date)
-//! prepended to the messages array so per-session content doesn't invalidate the static cache.
+//! System prompt assembly: cacheable static sections plus a per-session user-context reminder.
 
 pub(crate) mod environment;
 mod instructions;
@@ -19,17 +14,15 @@ use sections::{
     CAUTION, INTRO, OUTPUT_EFFICIENCY, STYLE, SYSTEM_SECTION, TASK_GUIDANCE, TOOL_GUIDANCE,
 };
 
-/// Marker between static (globally cacheable) and dynamic (per-session) system prompt sections.
+/// Marker between cacheable static and per-session dynamic sections.
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
-/// Static system prompt sections plus dynamic user context (CLAUDE.md, date).
 pub(crate) struct PromptParts {
     pub(crate) system_sections: Vec<String>,
     pub(crate) user_context: Option<String>,
 }
 
 impl PromptParts {
-    /// Joins all system sections into a single string for testing / display.
     #[cfg(test)]
     fn system_joined(&self) -> String {
         self.system_sections.join("\n\n")
@@ -52,7 +45,7 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
 
     let env_section = env.render();
     let system_sections: Vec<String> = [
-        // Static content (globally cacheable)
+        // Cacheable static above the boundary; per-session dynamic below.
         INTRO,
         SYSTEM_SECTION,
         TASK_GUIDANCE,
@@ -60,9 +53,7 @@ async fn assemble(model: &str, cwd: Option<&Path>, git_root: Option<&Path>) -> P
         TOOL_GUIDANCE,
         STYLE,
         OUTPUT_EFFICIENCY,
-        // Cache boundary
         SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-        // Dynamic content (per-session)
         &env_section,
     ]
     .into_iter()
@@ -157,10 +148,9 @@ mod tests {
         assert!(parts.system_joined().contains("test-model"));
     }
 
-    /// This test runs inside the oxide-code repo which has CLAUDE.md, so the
-    /// `user_context` branch should be exercised.
     #[tokio::test]
     async fn build_prompt_includes_user_context_with_claude_md() {
+        // Runs inside the oxide-code repo so CLAUDE.md exists and `user_context` is populated.
         let parts = build_prompt("test-model").await;
         let ctx = parts
             .user_context
@@ -184,8 +174,6 @@ mod tests {
     #[tokio::test]
     async fn build_prompt_sections_joined_with_double_newline() {
         let parts = build_prompt("test-model").await;
-        // Each section boundary is a double newline. Verify the intro
-        // section is separated from the next by exactly "\n\n".
         let joined = parts.system_joined();
         let system_start = joined.find("# System").expect("system section missing");
         let before = &joined[..system_start];
@@ -235,8 +223,7 @@ mod tests {
         assert!(joined.contains("Is a git repository: true"));
         assert!(joined.contains("test-model"));
 
-        // Boundary marker must be a distinct element in system_sections
-        // so the API client can split static from dynamic content.
+        // Boundary marker must be a distinct element so the API client can split it out.
         assert!(
             parts
                 .system_sections
@@ -245,7 +232,6 @@ mod tests {
             "system_sections should contain the boundary marker"
         );
 
-        // CLAUDE.md goes into user_context as <system-reminder>
         let ctx = parts
             .user_context
             .as_deref()
@@ -254,9 +240,6 @@ mod tests {
         assert!(ctx.contains("<system-reminder>"));
     }
 
-    /// Without project-level CLAUDE.md, `user_context` depends only on the
-    /// global `~/.claude/CLAUDE.md`. The system prompt must never contain
-    /// user instructions regardless.
     #[tokio::test]
     async fn assemble_without_project_claude_md_keeps_system_clean() {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
@@ -337,10 +320,9 @@ mod tests {
 
     // ── constant content ──
 
-    /// Verify the prompt constants use `indoc!` correctly — no leading
-    /// whitespace from source indentation should appear in the output.
     #[test]
     fn prompt_constants_have_no_leading_whitespace() {
+        // Catch `indoc!` regressions that would leak source indentation.
         for (name, content) in [
             ("INTRO", INTRO),
             ("SYSTEM_SECTION", SYSTEM_SECTION),

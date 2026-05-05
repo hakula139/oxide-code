@@ -140,9 +140,8 @@ mod tests {
 
     #[test]
     fn assistant_text_fenced_code_preserves_highlight_style() {
-        // Regression: `prepend_markdown_prefix` used to drop `line.style`
-        // on its output, so an unknown-lang fenced block inside an
-        // assistant reply silently lost its whole-line fg.
+        // Regression: `prepend_markdown_prefix` used to drop `line.style`, silently losing the
+        // whole-line fg of unknown-lang fence blocks inside assistant replies.
         let theme = Theme::default();
         let block = AssistantText::new(indoc! {"
             ```
@@ -174,8 +173,7 @@ mod tests {
 
     #[test]
     fn render_inserts_gutter_line_between_header_and_body() {
-        // Visual breathing room: a bar-only line separates the header
-        // from the prose so the bar stays continuous without crowding.
+        // Bar-only gutter row separates header from prose without crowding.
         let theme = Theme::default();
         let block = AssistantThinking::new("hello");
         let lines = block.render(&ctx_at(60, &theme));

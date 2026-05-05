@@ -1,35 +1,25 @@
-//! Color string parsing for theme TOML values.
-//!
-//! Supported formats (case-insensitive):
+//! Color string parsing for theme TOML values. Case-insensitive.
 //!
 //! - **6-digit hex**: `"#rrggbb"` — true color (24-bit RGB).
-//! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ...
-//!   `light_X` is accepted as an alias for `bright_X`; `grey` is an
-//!   alias for `gray`.
+//! - **ANSI 16 named**: `"red"`, `"bright_blue"`, `"dark_gray"`, ... (`light_X` aliases
+//!   `bright_X`; `grey` aliases `gray`).
 //! - **Indexed 256-color**: `"ansi:N"` where `N` is 0–255.
-//! - **Terminal default**: `"reset"` — the user's terminal palette
-//!   value; useful for slots that should follow the terminal scheme.
+//! - **Terminal default**: `"reset"` — follows the user's terminal palette.
 //!
-//! Three-digit hex shorthand (`#fff`) is intentionally rejected to keep the format unambiguous.
+//! Three-digit hex shorthand (`#fff`) is rejected to keep the format unambiguous.
 
 use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 
-/// Parse a theme color string.
-///
-/// Trims surrounding whitespace and accepts any of the formats listed
-/// in this module's docs. Errors include the offending input and a
-/// hint at supported formats so a typo in `theme.toml` is actionable.
+/// Parses a theme color string. Trims whitespace and surfaces actionable errors that name the
+/// offending input and supported formats.
 pub(super) fn parse_color(input: &str) -> Result<Color> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         bail!("empty color value");
     }
 
-    // Lowercase once so prefix matching, indexed digits, and the named
-    // table all see the same form. Hex digits and indexed digits are
-    // case-insensitive anyway; this just lets `ANSI:5` and `#FFAABB`
-    // route correctly instead of falling through to the named lookup.
+    // Lowercase once so `ANSI:5` and `#FFAABB` route to their parsers instead of the named lookup.
     let s = trimmed.to_ascii_lowercase();
 
     if let Some(hex) = s.strip_prefix('#') {
@@ -138,7 +128,6 @@ mod tests {
 
     #[test]
     fn parse_color_hex_rejects_missing_hash_prefix() {
-        // Without `#`, falls through to the named lookup and reports an unknown color.
         let err = parse_color("cdd6f4").expect_err("bare hex without # rejected");
         let msg = format!("{err:#}");
         assert!(msg.contains("cdd6f4"), "{msg}");
@@ -171,9 +160,8 @@ mod tests {
         assert!(msg.contains("ansi:abc"), "{msg}");
     }
 
-    /// Module doc claims `ansi:N` is case-insensitive like the named
-    /// formats. Without this assertion, `"ANSI:5"` falls through to the
-    /// named lookup and fails with an "unknown color" error.
+    // Module doc claims `ansi:N` is case-insensitive; pin it so a regression that drops the
+    // lowercase pass and fails on `"ANSI:5"` shows up here.
     #[test]
     fn parse_color_indexed_prefix_is_case_insensitive() {
         assert_eq!(parse_color("ANSI:5").unwrap(), Color::Indexed(5));
@@ -208,8 +196,6 @@ mod tests {
 
     #[test]
     fn parse_color_named_light_alias_matches_bright() {
-        // `light_X` is interchangeable with `bright_X` for users
-        // coming from terminal configs that prefer the `light_` form.
         assert_eq!(parse_color("light_red").unwrap(), Color::LightRed);
         assert_eq!(parse_color("light_blue").unwrap(), Color::LightBlue);
         assert_eq!(parse_color("light_white").unwrap(), Color::White);
@@ -238,8 +224,7 @@ mod tests {
         let err = parse_color("orange").expect_err("orange is not a 16-color name");
         let msg = format!("{err:#}");
         assert!(msg.contains("orange"), "{msg}");
-        // Error must hint at every supported format so the user can
-        // recover from a typo without consulting the docs.
+        // Error must hint at every supported format so a typo is recoverable without the docs.
         assert!(msg.contains("hex") || msg.contains("#rrggbb"), "{msg}");
         assert!(msg.contains("ANSI") || msg.contains("ansi:"), "{msg}");
         assert!(msg.contains("reset"), "{msg}");

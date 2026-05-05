@@ -1,15 +1,7 @@
-//! Shared row primitive for chat blocks that render a
-//! `[bar] [number] [separator] [text]` row shape. Read / grep use the
-//! default `" │ "` pipe separator with no row background; Edit-tool
-//! diff sides and the slash `/diff` `GitDiffBlock` pass the `- ` / `+ `
-//! sign as separator and a Catppuccin red / green row bg via
-//! [`Renderer::with_style`]. Visibility is widened to `pub(in
-//! super::super)` so non-tool block modules (`blocks::git_diff`) reuse
-//! the renderer without having to physically move it.
-//!
-//! The renderer captures per-call state — border style, separator,
-//! optional row bg, number column width, continuation prefix — once at
-//! construction so each row only carries its own number, text, and text style.
+//! Shared `[bar] [number] [separator] [text]` row renderer. Read / grep use the default pipe
+//! separator; Edit-tool diff sides and `/diff` pass `- ` / `+ ` plus a row bg via
+//! [`Renderer::with_style`]. Visibility widened to `pub(in super::super)` so `blocks::git_diff`
+//! can reuse it without relocating.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -35,8 +27,7 @@ pub(in super::super) struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
-    /// Default constructor for plain numbered rows — pipe separator,
-    /// no row bg. Used by read / grep.
+    /// Plain numbered rows — pipe separator, no row bg. Used by read / grep.
     pub(in super::super) fn new(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -52,12 +43,8 @@ impl<'a> Renderer<'a> {
         )
     }
 
-    /// Customized constructor — diff sides pass their `- ` / `+ ` sign
-    /// as separator and a [`Theme::diff_add_row`] / [`Theme::diff_del_row`]
-    /// bg style so the row tint extends across the full terminal width.
-    ///
-    /// [`Theme::diff_add_row`]: crate::tui::theme::Theme::diff_add_row
-    /// [`Theme::diff_del_row`]: crate::tui::theme::Theme::diff_del_row
+    /// Diff-side variant — caller passes the `- ` / `+ ` sign as separator and a row bg so the
+    /// tint extends across the full terminal width.
     pub(in super::super) fn with_style(
         ctx: &'a RenderCtx<'a>,
         border_style: Style,
@@ -201,14 +188,33 @@ mod tests {
         assert!(text_span.content.len() <= MAX_TOOL_OUTPUT_LINE_BYTES + 3);
     }
 
+    #[test]
+    fn render_wraps_with_aligned_continuation_prefix() {
+        // Continuation lines carry the bar plus padding aligned under the text column.
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            width: 14,
+            theme: &theme,
+            show_thinking: true,
+        };
+        let renderer = Renderer::new(&ctx, theme.tool_border(), 2);
+        let mut out = Vec::new();
+        renderer.render(&mut out, 1, "alpha beta gamma", theme.text());
+
+        assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
+        let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            cont_text.starts_with(TOOL_BORDER_CONT),
+            "continuation must keep tool border continuation prefix: {cont_text:?}",
+        );
+    }
+
     // ── Renderer::with_style ──
 
     #[test]
     fn with_style_render_uses_custom_separator_in_place_of_pipe() {
-        // Diff-side path: the separator slot carries the `- ` / `+ `
-        // sign instead of the dim pipe. The text is still emitted as a
-        // separate styled span so the sign can take its own (red /
-        // green) color independent of the row text.
+        // Diff path: separator carries `- ` / `+ ` instead of the pipe; text stays a separate
+        // span so the sign can take its own color.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -236,11 +242,8 @@ mod tests {
 
     #[test]
     fn with_style_patches_row_bg_onto_content_spans() {
-        // The bar prefix span must stay transparent (bg=None) while the
-        // number / separator / text spans inherit the row bg via patch.
-        // A regression here would either tint the bar (visual noise
-        // bleeding into the chrome column) or leave the number column
-        // bare (breaking the contiguous block effect).
+        // Bar prefix stays transparent; number / separator / text inherit the row bg. Regression
+        // would either tint the chrome column or leave a hole in the band.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -267,8 +270,7 @@ mod tests {
 
     #[test]
     fn with_style_pads_to_full_width_with_row_bg() {
-        // Trailing pad span fills the remaining columns so the bg tint
-        // reaches ctx.width — without it, the row would be a ragged band ending at the text width.
+        // Trailing pad fills remaining columns so the bg tint reaches `ctx.width`.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 40,
@@ -301,9 +303,8 @@ mod tests {
 
     #[test]
     fn with_style_no_bg_skips_padding() {
-        // When row_bg is None, no trailing pad is emitted — the row
-        // ends at its natural content width. Read / grep rely on this:
-        // a transparent terminal must not paint a phantom band.
+        // No row bg → no trailing pad. Read / grep rely on this so a transparent terminal
+        // does not paint a phantom band.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,
@@ -324,9 +325,8 @@ mod tests {
 
     #[test]
     fn with_style_wrapped_continuation_keeps_bg_under_text_column() {
-        // After wrap, every continuation line must also pad to ctx.width
-        // so the bg block stays contiguous across wraps. The bar prefix
-        // area on continuations stays transparent (mirrors the header line).
+        // Every wrapped line pads to `ctx.width` so the bg stays contiguous; the bar prefix
+        // on continuations stays transparent like the header line.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 20,
@@ -358,31 +358,6 @@ mod tests {
         assert_eq!(
             cont.spans[0].style.bg, None,
             "continuation bar prefix must stay clear"
-        );
-    }
-
-    // ── Renderer::render ──
-
-    #[test]
-    fn render_wraps_with_aligned_continuation_prefix() {
-        // Width forces the row to wrap. Continuation lines should
-        // carry the `▎` bar plus padding aligned under the text column
-        // (4 cols of bar prefix + 2 cols of number column + 3 cols of ` │ ` = 9 cols).
-        let theme = Theme::default();
-        let ctx = RenderCtx {
-            width: 14,
-            theme: &theme,
-            show_thinking: true,
-        };
-        let renderer = Renderer::new(&ctx, theme.tool_border(), 2);
-        let mut out = Vec::new();
-        renderer.render(&mut out, 1, "alpha beta gamma", theme.text());
-
-        assert!(out.len() >= 2, "expected wrapped output, got {out:#?}");
-        let cont_text: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            cont_text.starts_with(TOOL_BORDER_CONT),
-            "continuation must keep tool border continuation prefix: {cont_text:?}",
         );
     }
 }

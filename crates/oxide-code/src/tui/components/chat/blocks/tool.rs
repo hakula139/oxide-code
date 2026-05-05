@@ -1,19 +1,9 @@
-//! Tool call and tool result blocks.
+//! Tool call and result blocks. The left-edge bar visually couples a call to its output and
+//! color-codes success / error; this is the only chat block that keeps it, so the bar / border
+//! helpers live here rather than in the trait module.
 //!
-//! The tool group is the only chat block that keeps a left-edge bar —
-//! it visually couples a call to its output and color-codes success /
-//! error at the same time. Every other block (user, assistant, error)
-//! uses the bar-less icon-prefix helpers in [`super`] and flushes to
-//! col 0. The bar / border machinery therefore lives here, not in the
-//! trait module, so it scopes to exactly the blocks that use it.
-//!
-//! Result rendering is per-variant via [`ToolResultView`]: the default
-//! is a truncated text body; tools with structured output (Edit diffs,
-//! Read excerpts, Grep matches today; Glob later) produce richer
-//! variants via [`Tool::result_view`](crate::tool::Tool::result_view).
-//! The variant-specific bodies live in sibling modules under [`tool`];
-//! this file owns block types, central dispatch, and the shared border
-//! helpers child renderers reuse.
+//! Result rendering is per-variant via [`ToolResultView`] — default is truncated text; structured
+//! tools (Edit, Read, Grep, Glob) get richer bodies in sibling modules under [`tool`].
 
 pub(super) mod bordered_row;
 mod diff;
@@ -39,7 +29,7 @@ const MAX_TOOL_OUTPUT_LINE_BYTES: usize = 512;
 
 // ── Tool Call ──
 
-/// A running or completed tool invocation — one bordered line with the tool icon and input summary.
+/// One bordered line with the tool icon and input summary.
 pub(crate) struct ToolCallBlock {
     icon: &'static str,
     label: String,
@@ -83,8 +73,7 @@ impl ChatBlock for ToolCallBlock {
 
 // ── Tool Result ──
 
-/// The outcome of a tool call — indicator (✓ / ✗), label, and a
-/// per-view body (truncated text by default; richer shapes for tools with structured inputs).
+/// Tool-call outcome — indicator (✓ / ✗), label, and per-view body.
 pub(crate) struct ToolResultBlock {
     label: String,
     view: ToolResultView,
@@ -182,7 +171,7 @@ fn render_status_line(
     ));
 }
 
-/// Builds a continuation prefix keeping `▎` aligned under the original prefix.
+/// Continuation prefix that keeps `▎` aligned under the original prefix.
 fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
     let bar_pos = prefix.find(BAR).expect("prefix must contain ▎ bar");
     let left = &prefix[..bar_pos];
@@ -242,10 +231,8 @@ mod tests {
 
     #[test]
     fn truncate_to_bytes_respects_char_boundary() {
-        // Each `中` is 3 bytes in UTF-8. If floor_char_boundary wasn't used,
-        // cutting at byte 5 would split the second `中` mid-codepoint and
-        // produce invalid UTF-8 (panic on `&s[..5]`). Boundary fallback
-        // rounds down to byte 3, yielding one clean `中` + `...`.
+        // Each `中` is 3 bytes; cutting at byte 5 without `floor_char_boundary` would split a
+        // codepoint and panic on `&s[..5]`. Rounding down to byte 3 yields one `中` + `...`.
         let input = "中中中中";
         let result = truncate_to_bytes(input, 5);
         assert_eq!(result, "中...");
@@ -254,7 +241,6 @@ mod tests {
 
     #[test]
     fn truncate_to_bytes_exact_boundary_no_split() {
-        // 6 bytes = exactly two `中`s; result stays untouched.
         assert_eq!(truncate_to_bytes("中中", 6), "中中");
     }
 }

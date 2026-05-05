@@ -1,8 +1,4 @@
-//! Non-streaming `/v1/messages` one-shot path.
-//!
-//! Mirrors the streaming request shape (identity prefix, optional
-//! billing attestation, optional schema-constrained output) but
-//! returns flattened assistant text instead of an event stream.
+//! Non-streaming `/v1/messages` one-shot path. Returns flattened assistant text.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -18,10 +14,8 @@ use crate::message::{ContentBlock, Message};
 // ── Client::complete ──
 
 impl Client {
-    /// Non-streaming completion for one-shot utility calls. Returns concatenated assistant text.
-    ///
-    /// `output_format` constrains the reply to a JSON schema via structured outputs. On models
-    /// without the capability, both the body field and beta are silently dropped.
+    /// One-shot completion. `output_format` is silently dropped on models without the
+    /// structured-outputs capability.
     pub(crate) async fn complete(
         &self,
         model: &str,
@@ -79,8 +73,7 @@ impl Client {
 
 // ── Body Builder ──
 
-/// Serializes the JSON request body for [`Client::complete`]. System block order matches
-/// [`Client::stream_message`]: billing header (OAuth only) → identity prefix → caller system.
+/// System block order: billing (OAuth only) → identity prefix → caller system.
 #[expect(
     clippy::too_many_arguments,
     reason = "8 distinct wire fields; a wrapper struct would just rename them"
@@ -105,7 +98,6 @@ fn build_completion_body(
     let system_blocks = build_system_blocks(billing_header.as_deref(), [(system, None)]);
 
     let mut body = serde_json::to_string(&CreateMessageRequest {
-        // `[1m]` is a client-side tag; strip before the wire.
         model: api_model_id(model),
         max_tokens,
         stream: false,
@@ -114,7 +106,6 @@ fn build_completion_body(
         tools: None,
         thinking: None,
         output_config: OutputConfig::new(output_format, None),
-        // One-shot completions never opt into context management.
         context_management: None,
         messages: &messages,
     })
@@ -128,7 +119,7 @@ fn build_completion_body(
 
 // ── Response Handling ──
 
-/// Flattens a response's content array into assistant text (drops tool-use / thinking blocks).
+/// Concatenates text blocks; drops tool-use / thinking.
 fn join_text_blocks(content: Vec<ContentBlock>) -> String {
     content
         .into_iter()
@@ -139,7 +130,6 @@ fn join_text_blocks(content: Vec<ContentBlock>) -> String {
         .collect()
 }
 
-/// Subset of the non-streaming `/v1/messages` response — serde ignores all other fields.
 #[derive(Deserialize)]
 struct CompletionResponse {
     content: Vec<ContentBlock>,
@@ -166,8 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_sends_x_claude_code_session_id_header() {
-        // Pins per-request injection on the non-streaming path so
-        // `/clear` can roll the id without rebuilding the client.
+        // `/clear` rolls the id without rebuilding the client; the non-streaming path must follow.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -238,9 +227,6 @@ mod tests {
 
     #[tokio::test]
     async fn complete_429_surfaces_retry_after_header_in_error() {
-        // The `Retry-After` header from a 429 must thread into the
-        // error message so callers (and humans reading logs) know how
-        // long to back off — `format_api_error` interpolates it inline.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -270,9 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_malformed_response_body_errors_with_parse_context() {
-        // A 200 with a non-JSON body must surface the parse-failure
-        // context, not panic — the agent loop relies on a clean Err
-        // for fallback to a default title.
+        // A 200 with non-JSON must surface a parse error so the title path falls back cleanly.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -297,9 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_structured_output_gated_by_model_capability() {
-        // Supported model → body carries output_config, header carries
-        // the beta tag. Unsupported model → both are silently dropped
-        // (mirrors the `[1m]` × `context_1m` cross-check).
+        // Supported → body + beta tag ship; unsupported → both silently dropped.
         let fmt = OutputFormat::json_schema(serde_json::json!({
             "type": "object",
             "properties": {"title": {"type": "string"}},
@@ -352,9 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_oauth_haiku_carries_billing_block_but_not_gateway_tag() {
-        // Non-agentic Haiku drops the `claude-code-20250219` gateway tag
-        // (1P / 3P both tolerate its absence for Haiku one-shots) while
-        // still carrying the OAuth billing attestation.
+        // Non-agentic Haiku: drops the gateway tag, keeps the OAuth billing attestation.
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -402,9 +382,8 @@ mod tests {
 
     #[tokio::test]
     async fn complete_does_not_emit_context_management_edits() {
-        // `context_management.edits` is an agentic-path directive; it
-        // must stay off the one-shot `complete` path even on models
-        // that carry the capability flag (Haiku 4.5 here).
+        // `context_management.edits` is agentic-only; must stay off `complete` even on
+        // capability-bearing models (Haiku 4.5 here).
         let server = MockServer::start().await;
         let sink: Captured<String> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -466,9 +445,7 @@ mod tests {
 
     #[test]
     fn build_completion_body_system_blocks_match_auth_mode() {
-        // API key: identity prefix + caller's system = 2 blocks, no
-        // billing attestation. OAuth: billing + identity + system = 3
-        // blocks, `cch=00000` placeholder replaced.
+        // API key → 2 blocks (identity + system); OAuth → 3 blocks (billing + identity + system).
         let api_body = build_completion_body(
             "claude-haiku-4-5",
             "sys-prompt",
@@ -511,8 +488,7 @@ mod tests {
 
     #[test]
     fn build_completion_body_empty_system_keeps_identity_prefix_alone() {
-        // Identity prefix must survive even without a caller-supplied
-        // system prompt — non-Haiku OAuth requires it in block 0.
+        // Non-Haiku OAuth requires the identity prefix in block 0 even with no caller system.
         let body = build_completion_body(
             "claude-haiku-4-5",
             "",
@@ -582,8 +558,7 @@ mod tests {
 
     #[test]
     fn join_text_blocks_concatenates_text_and_drops_non_text_blocks() {
-        // Round-trips through the real `CompletionResponse` deserializer
-        // to pin the live-like wire shape, not just `ContentBlock` shapes.
+        // Round-trips through `CompletionResponse` to pin the live wire shape.
         let body = r#"{
             "id": "msg_1",
             "type": "message",
@@ -604,8 +579,7 @@ mod tests {
 
     #[test]
     fn join_text_blocks_is_empty_for_tool_only_response() {
-        // Defensive: a tool_use-only reply must not surface as a title —
-        // the caller treats empty as "parse failure, keep fallback".
+        // Empty signals "parse failure, keep fallback" to the title caller.
         let blocks = vec![ContentBlock::ToolUse {
             id: "t1".to_owned(),
             name: "noop".to_owned(),

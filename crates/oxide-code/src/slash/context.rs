@@ -1,5 +1,5 @@
-//! Inputs handed to [`SlashCommand::execute`]. [`SlashContext`] borrows App-owned mutable state;
-//! [`SessionInfo`] is the session-level descriptor snapshot.
+//! Inputs to [`SlashCommand::execute`]: [`SlashContext`] borrows App-owned mutable state;
+//! [`SessionInfo`] is the session-level snapshot.
 
 use std::borrow::Cow;
 
@@ -8,8 +8,7 @@ use crate::model::marketing_or_id;
 use crate::tui::components::chat::ChatView;
 use crate::tui::modal::Modal;
 
-/// Session-level descriptors surfaced by read-only slash commands. Built at TUI startup, rebound
-/// mid-session by `SessionRolled` / `ConfigChanged` events.
+/// Built at TUI startup; rebound by `SessionRolled` / `ConfigChanged`.
 pub(crate) struct SessionInfo {
     pub(crate) cwd: String,
     pub(crate) version: &'static str,
@@ -18,14 +17,13 @@ pub(crate) struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// Marketing display name derived from the live `config.model_id`.
     pub(crate) fn marketing_name(&self) -> Cow<'_, str> {
         marketing_or_id(&self.config.model_id)
     }
 }
 
-/// Borrowed App-owned state for one [`super::registry::SlashCommand::execute`] call. Commands
-/// open modals via [`SlashContext::open_modal`]; the dispatcher harvests the slot after `execute`.
+/// Borrowed App-owned state for one [`super::registry::SlashCommand::execute`] call. Open modals
+/// via [`SlashContext::open_modal`]; the dispatcher harvests the slot after `execute`.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a SessionInfo,
@@ -41,13 +39,12 @@ impl<'a> SlashContext<'a> {
         }
     }
 
-    /// Open `modal` after this command finishes. Only one modal per dispatch is meaningful.
+    /// Open `modal` after this command finishes. One modal per dispatch.
     pub(crate) fn open_modal(&mut self, modal: Box<dyn Modal>) {
         debug_assert!(self.modal.is_none(), "modal slot set twice in one dispatch");
         self.modal = Some(modal);
     }
 
-    /// Take the modal slot, if any. Called once by the dispatcher after `execute` returns.
     pub(crate) fn take_modal(&mut self) -> Option<Box<dyn Modal>> {
         self.modal.take()
     }

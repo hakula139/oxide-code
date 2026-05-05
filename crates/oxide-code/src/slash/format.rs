@@ -1,11 +1,11 @@
-//! Shared heading + key-value table renderer for `/help`, `/status`, and `/config`.
+//! Shared heading + key-value table renderer for `/help` / `/status` / `/config`.
 
 use std::fmt::Write as _;
 
 const ROW_PREFIX: &str = "  ";
 const COL_GAP: &str = "  ";
 
-/// Append heading + blank line + key-value table. Successive sections separated by a blank line.
+/// Heading + blank line + table. Successive sections are separated by a blank line.
 pub(super) fn write_kv_section<'a>(
     out: &mut String,
     heading: &str,
@@ -19,7 +19,7 @@ pub(super) fn write_kv_section<'a>(
     write_kv_table(out, rows);
 }
 
-/// Append a `key  value` table aligned to the longest key. Empty input is a no-op.
+/// `key  value` rows aligned to the longest key. Empty input is a no-op.
 pub(super) fn write_kv_table<'a>(
     out: &mut String,
     rows: impl IntoIterator<Item = (&'a str, &'a str)> + Clone,

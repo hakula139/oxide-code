@@ -37,9 +37,7 @@ impl SlashCommand for EffortCmd {
             ));
         }
         let pick = parse_effort_arg(arg)?;
-        // Preflight: setting an explicit level on a no-effort model is
-        // a clear user mistake — surface upfront instead of letting it
-        // silently resolve to None.
+        // Reject upfront — setting a level on a no-effort model would silently resolve to None.
         let caps = capabilities_for(&ctx.info.config.model_id);
         if !caps.effort {
             return Err(format!(

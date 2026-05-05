@@ -1,8 +1,5 @@
-//! Generic list-picker primitive for [`Modal`](super::Modal) impls.
-//!
-//! [`ListPicker<T>`] is the state + render surface for "select one of N items" pickers. It is
-//! **not** a [`Modal`](super::Modal) itself — concrete pickers own their submit semantics so the
-//! picker stays free of callback indirection.
+//! Generic list-picker primitive for [`Modal`](super::Modal) impls. State + render surface only;
+//! concrete pickers own their submit semantics so the picker stays callback-free.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -220,9 +217,8 @@ mod tests {
 
     // ── Test fixture ──
 
-    /// Minimal `PickerItem` impl that exposes every trait method so
-    /// the tests can pin `description` / `is_active` / `key_hint`
-    /// behavior without coupling to any concrete picker.
+    /// Minimal `PickerItem` covering all trait methods so tests can pin behavior without
+    /// coupling to any concrete picker.
     struct FakeItem {
         label: &'static str,
         description: Option<&'static str>,

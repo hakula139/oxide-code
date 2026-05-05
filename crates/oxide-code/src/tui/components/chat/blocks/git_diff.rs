@@ -1,7 +1,5 @@
-//! `GitDiffBlock` — `git diff` rendered with the Edit-tool diff
-//! aesthetic (red `-` rows, green `+` rows, dim hunk headers, line-
-//! number gutter). Reuses `numbered_row` / `bordered_row` from the tool
-//! tree. The block owns raw text and parses it lazily on `render`.
+//! `git diff` block — Edit-tool diff aesthetic with line-number gutter. Reuses `numbered_row`
+//! / `bordered_row` from the tool tree; raw text parses lazily on `render`.
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;

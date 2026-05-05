@@ -78,8 +78,8 @@ impl Tool for GrepTool {
         content: &str,
         _metadata: &ToolMetadata,
     ) -> Option<ToolResultView> {
-        // Only content mode produces line-numbered rows; other modes
-        // fall through so their summary header stays visible.
+        // Only content mode produces line-numbered rows; other modes fall through so their
+        // summary header stays visible.
         let mode = input
             .get("output_mode")
             .and_then(serde_json::Value::as_str)
@@ -177,8 +177,7 @@ fn grep_title(output: Option<&str>) -> String {
             if let Some(line) = text.lines().find(|l| l.starts_with("Found ")) {
                 return line.trim_end_matches('.').to_owned();
             }
-            // Content mode: count matches only — context lines have the
-            // same `path:NUM` prefix but `is_match == false`.
+            // Content mode: count matches only — context lines share the `path:NUM` prefix.
             let match_count = text
                 .lines()
                 .filter_map(parse_match_line)
@@ -768,9 +767,7 @@ mod tests {
         p.search_path = Some(dir.path().to_str().unwrap());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // With context=1, MATCH1 (line 3) shows lines 2-4 and MATCH2 (line 6) shows
-        // lines 5-7. Lines 4 and 5 bridge the gap, so the ranges merge into one block
-        // with no "--" separator.
+        // MATCH1 ctx → 2-4, MATCH2 ctx → 5-7; lines 4-5 bridge the gap so ranges merge.
         assert!(!result.contains("--"));
         assert!(result.contains("test.txt:2-b"));
         assert!(result.contains("test.txt:3:MATCH1"));
@@ -802,14 +799,12 @@ mod tests {
         p.search_path = Some(dir.path().to_str().unwrap());
         p.context = 1;
         let result = grep_files(&p).unwrap();
-        // MATCH1 (line 1) context=1 → lines 1-2; MATCH2 (line 8) → lines 7-8.
-        // Gap between ranges, so a "--" separator should appear.
+        // MATCH1 ctx → 1-2, MATCH2 ctx → 7-8; the gap forces a "--" separator.
         assert!(result.contains("--"));
         assert!(result.contains("test.txt:1:MATCH1"));
         assert!(result.contains("test.txt:2-a"));
         assert!(result.contains("test.txt:7-f"));
         assert!(result.contains("test.txt:8:MATCH2"));
-        // Middle lines should not appear.
         assert!(!result.contains("test.txt:3"));
         assert!(!result.contains("test.txt:4"));
         assert!(!result.contains("test.txt:5"));
@@ -1009,7 +1004,7 @@ mod tests {
 
     #[test]
     fn grep_title_with_context_counts_matches_only() {
-        // Context lines share the `path:NUM` prefix but `is_match == false`.
+        // Context lines share the `path:NUM` prefix but must not be counted.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.txt"),
@@ -1139,7 +1134,7 @@ mod tests {
 
     #[test]
     fn grep_files_count_mode_summary_first() {
-        // Summary heads the body so the renderer's title-strip removes it.
+        // Pin summary as the first line so the renderer's title-strip removes it.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "match\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "match\n").unwrap();
@@ -1234,10 +1229,8 @@ mod tests {
 
     #[test]
     fn result_view_non_content_mode_falls_back_to_text() {
-        // files_with_matches and count have a summary header line that
-        // the structured GrepMatches shape doesn't model — rendering
-        // them through the default text body keeps the "Found N files"
-        // / "Found N total occurrences" line visible to the reader.
+        // files_with_matches / count have a summary header that GrepMatches doesn't model;
+        // the text fallback keeps the "Found N ..." line visible.
         for mode in ["files_with_matches", "count"] {
             let input = serde_json::json!({"pattern": "fn", "output_mode": mode});
             let view = GrepTool.result_view(&input, "irrelevant", &ToolMetadata::default());
@@ -1260,8 +1253,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_groups_consecutive_lines_with_context_and_separator() {
-        // Groups by path, distinguishes match (`:`) from context (`-`),
-        // accepts `--` separators, chains a second file into its own group.
+        // Groups by path, splits match (`:`) from context (`-`), accepts `--`, opens a second file.
         let content = indoc! {r#"
             src/main.rs:10:fn main() {
             src/main.rs:11-    println!("hi");
@@ -1332,8 +1324,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_when_skipped_warnings_present() {
-        // Skipped-warning text isn't modelled by GrepMatches; fall back
-        // so the warning stays visible in the rendered text body.
+        // Skipped-warning text isn't in GrepMatches; fall back so it stays visible.
         let content = indoc! {"
             src/main.rs:1:hit
 
@@ -1345,8 +1336,7 @@ mod tests {
 
     #[test]
     fn parse_content_view_falls_back_on_invalid_line() {
-        // Any unrecognised row triggers full fallback rather than a
-        // partial render that silently drops information.
+        // Any unrecognised row triggers full fallback rather than silently dropping it.
         assert!(parse_content_view("src/main.rs:1:hit\nunexpected line").is_none());
     }
 
@@ -1369,8 +1359,7 @@ mod tests {
 
     #[test]
     fn parse_match_line_skips_path_internal_colons_without_digit_separator() {
-        // Path-internal `:` without digits after (e.g., Windows `C:foo`)
-        // is skipped; the scanner accepts the next valid `:NUM` boundary.
+        // Path-internal `:` without digits (e.g., Windows `C:foo`) skips to the next `:NUM`.
         let (path, m) = parse_match_line("C:foo:42:body").unwrap();
         assert_eq!(path, "C:foo");
         assert_eq!(m.number, 42);
@@ -1380,11 +1369,8 @@ mod tests {
 
     #[test]
     fn parse_match_line_is_none_when_shape_does_not_match() {
-        // No `:NUM:` / `:NUM-` pattern anywhere → fall through.
         assert!(parse_match_line("not a match line").is_none());
-        // `path:` with non-digit content after → fall through.
         assert!(parse_match_line("path:non_digits:text").is_none());
-        // `path:NUM` with no separator at all → fall through.
         assert!(parse_match_line("path:42").is_none());
     }
 }

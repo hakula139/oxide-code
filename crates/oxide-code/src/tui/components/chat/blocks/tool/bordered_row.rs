@@ -1,8 +1,6 @@
-//! Shared `[bar] [text]` row primitive for unnumbered chat-block body
-//! rows. Numbered rows use the sibling [`super::numbered_row`].
-//! Visibility is widened to `pub(in super::super)` so non-tool block
-//! modules (`blocks::git_diff` for file headers / hunk headers /
-//! truncation footers) reuse it without having to physically move the file.
+//! Shared `[bar] [text]` row primitive for unnumbered chat-block body rows. Numbered rows use the
+//! sibling [`super::numbered_row`]. Visibility is widened to `pub(in super::super)` so
+//! `blocks::git_diff` can reuse it for headers / hunk separators / truncation footers.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};

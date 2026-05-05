@@ -1,6 +1,6 @@
 //! `/diff` — show uncommitted git changes inline. Runs `git diff HEAD` (falls back to
 //! `git diff --cached` pre-first-commit) and appends untracked file names. Capped at
-//! [`MAX_BYTES`] so a runaway diff can't freeze rendering.
+//! [`MAX_BYTES`] so a runaway diff can't stall rendering.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -36,7 +36,7 @@ impl SlashCommand for DiffCmd {
 
 // ── Execution ──
 
-/// Testable core with injected cwd (avoids touching process state).
+/// Testable core; avoids mutating process cwd.
 fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
     let text = collect_diff_in(cwd).map_err(|e| format!("{e:#}"))?;
     if text.trim().is_empty() {
@@ -47,8 +47,7 @@ fn execute_in(cwd: &Path, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, St
     Ok(SlashOutcome::Done)
 }
 
-/// Gathers tracked + untracked diff text rooted at `cwd`. Falls back to `git diff --cached`
-/// when HEAD doesn't resolve (fresh repo).
+/// Tracked + untracked diff at `cwd`. Falls back to `--cached` when HEAD is absent (fresh repo).
 fn collect_diff_in(cwd: &Path) -> Result<String> {
     if !inside_git_repo(cwd)? {
         bail!("not inside a git repository");
@@ -68,7 +67,7 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
 
 fn format_diff(tracked: &str, untracked: &str) -> String {
     let mut out = String::new();
-    // Strip only git's trailing newline — keep trailing whitespace on real diff lines.
+    // Strip only git's trailing newline; keep trailing whitespace on real diff lines.
     let tracked = tracked.trim_end_matches('\n');
     if !tracked.trim().is_empty() {
         out.push_str(tracked);
@@ -88,7 +87,7 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
 
 // ── Git Helpers ──
 
-/// `Ok(false)` when outside a worktree; `Err` when git itself can't be spawned.
+/// `Ok(false)` outside a worktree; `Err` when git can't spawn.
 fn inside_git_repo(cwd: &Path) -> Result<bool> {
     let out = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -116,7 +115,7 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Trimmed stderr, or a synthetic `git <args> failed` when stderr is blank.
+/// Trimmed stderr, or `git <args> failed` when stderr is blank.
 fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
     let msg = s.trim();
@@ -129,7 +128,7 @@ fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
 
 // ── Truncation ──
 
-/// Cuts on a UTF-8 boundary (≤ [`MAX_BYTES`]) and appends a footer naming dropped size.
+/// Cut on a UTF-8 boundary (≤ [`MAX_BYTES`]); footer names dropped size.
 fn truncate(s: String) -> String {
     if s.len() <= MAX_BYTES {
         return s;
@@ -149,7 +148,7 @@ fn truncate(s: String) -> String {
     t
 }
 
-/// Render a byte count as `"N B"`, `"N.N KB"`, or `"N.N MB"` (integer-truncated decimal).
+/// `"N B"`, `"N.N KB"`, or `"N.N MB"` (integer-truncated decimal).
 fn format_size(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = KB * 1024;
@@ -459,7 +458,7 @@ mod tests {
 
     #[test]
     fn truncate_cuts_on_utf8_boundary_and_never_exceeds_max_bytes() {
-        // Final char straddles the cap — cut backs up to preceding boundary.
+        // Final char straddles the cap; cut backs up to preceding boundary.
         let prefix = "a".repeat(MAX_BYTES - 1);
         let s = format!("{prefix}€trailing"); // '€' is 3 bytes
         let got = truncate(s);

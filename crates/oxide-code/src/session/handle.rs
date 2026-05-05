@@ -1,9 +1,5 @@
-//! Public-facing session API.
-//!
-//! [`SessionHandle`] is held by the agent loop, the title generator,
-//! and the TUI shutdown path. Every write method sends a
-//! [`super::actor::SessionCmd`] and awaits the actor's oneshot ack;
-//! callers never hold a lock across `await`.
+//! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
+//! actor's ack; callers never hold a lock across `await`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -228,10 +224,8 @@ pub(crate) struct ResumedSession {
     pub(crate) messages: Vec<Message>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Persisted tracker snapshots. The caller passes these to
-    /// [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
-    /// before the agent loop runs so the gate clears for previously-
-    /// observed files that still match disk.
+    /// Persisted tracker snapshots; passed to `FileTracker::restore_verified` so the
+    /// Read-before-Edit gate clears for files that still match disk.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
@@ -242,9 +236,7 @@ pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
     spawn_actor(SessionState::fresh(store.clone(), model))
 }
 
-/// Outcome of [`roll`]: the new session id plus any flush failure
-/// from finalizing the old session. Caller decides where to surface
-/// the failure (sink for live UI, warn-log post-teardown).
+/// New id plus any flush failure from finalizing the old session.
 pub(crate) struct RollOutcome {
     pub(crate) new_id: String,
     pub(crate) finalize_failure: Option<String>,

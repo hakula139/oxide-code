@@ -1,6 +1,5 @@
-//! `/model` — open the picker, or swap directly with `/model <id>`. Resolution tiers: alias →
-//! exact / dated-id → unique suffix → unique substring. `[1m]` rejected on models without
-//! `context_1m`.
+//! `/model` — open the picker, or swap with `/model <id>`. Resolution: alias → exact / dated-id →
+//! unique suffix → unique substring. `[1m]` rejected on models lacking `context_1m`.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
@@ -278,17 +277,12 @@ mod tests {
 
     #[test]
     fn execute_unique_suffix_resolves_above_substring_ambiguity() {
-        // `opus-4` is a substring of 5 ids but a suffix of only one —
-        // the suffix tier must short-circuit before the substring ambiguity check runs.
         let (_, outcome) = run_execute("opus-4");
         assert_eq!(outcome, Ok(swap_model("claude-opus-4")));
     }
 
     #[test]
     fn execute_ambiguous_substring_lists_count_and_each_candidate() {
-        // `4-6` is neither a unique suffix nor a unique substring —
-        // both `claude-opus-4-6` and `claude-sonnet-4-6` end with it.
-        // The error must list both candidates and the alias hint.
         let (_, outcome) = run_execute("4-6");
         let msg = outcome.expect_err("ambiguous arg must error");
         assert!(
@@ -309,7 +303,6 @@ mod tests {
 
     #[test]
     fn execute_trims_whitespace_around_arg() {
-        // Padded input resolves the same as bare input.
         let (_, outcome) = run_execute("  haiku-4-5  ");
         assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
@@ -318,9 +311,6 @@ mod tests {
 
     #[test]
     fn resolve_model_arg_alias_substitution_runs_before_substring_match() {
-        // `opus` matches every Opus row as a substring (would be
-        // ambiguous), but the alias map intercepts and routes it to
-        // the canonical opus-4-7 row. Pin the precedence directly.
         assert_eq!(
             resolve_model_arg("opus")
                 .as_ref()
@@ -331,8 +321,6 @@ mod tests {
 
     #[test]
     fn resolve_model_arg_round_trips_every_models_row() {
-        // Drift in MODELS would silently shrink the manual-entry
-        // surface — every row must be exactly typeable.
         for info in MODELS {
             assert_eq!(
                 resolve_model_arg(info.id_substr)
@@ -347,9 +335,6 @@ mod tests {
 
     #[test]
     fn resolve_model_arg_passes_through_dated_id_via_lookup() {
-        // Anthropic's fully-qualified dated ids round-trip unchanged —
-        // `lookup` finds the family row for capability detection but
-        // the user's exact string is sent on the wire.
         for dated in [
             "claude-opus-4-7-20260101",
             "claude-opus-4-6-20250805",
@@ -383,8 +368,6 @@ mod tests {
 
     #[test]
     fn resolve_model_arg_lowercases_arg_before_matching() {
-        // Mirrors `/effort`'s case-insensitivity so `/model OPUS`
-        // doesn't silently fail with "Unknown model".
         assert_eq!(
             resolve_model_arg("OPUS")
                 .as_ref()
@@ -407,9 +390,6 @@ mod tests {
 
     #[test]
     fn resolve_model_arg_bare_1m_tag_errors_without_listing_models() {
-        // `/model [1m]` strips to an empty base — a substring filter
-        // would match every row. Reject up front so the user gets a
-        // clear "tag, not a model" message instead of a 10-row dump.
         let msg = resolve_model_arg("[1m]").expect_err("must error");
         assert!(msg.contains("tag, not a model"), "{msg}");
         assert!(!msg.contains("matches"), "must not list candidates: {msg}");

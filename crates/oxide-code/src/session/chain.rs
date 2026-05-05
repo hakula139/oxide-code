@@ -1,9 +1,5 @@
-//! UUID-DAG message-chain reconstruction.
-//!
-//! Concurrent resumes append in parallel and form forks in the on-disk
-//! DAG. [`ChainBuilder`] reconstructs the newest non-sidechain linear
-//! chain: feed it every `Entry::Message` tuple as the file is read,
-//! then call [`ChainBuilder::resolve`] for the chain plus its tip.
+//! UUID-DAG message chain reconstruction. Forks form when concurrent resumes append in
+//! parallel; [`ChainBuilder::resolve`] picks the newest non-sidechain linear chain.
 
 use std::collections::{HashMap, HashSet};
 

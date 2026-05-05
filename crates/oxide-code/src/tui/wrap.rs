@@ -27,8 +27,7 @@ pub(crate) fn wrap_line(
         .flat_map(|s| s.content.chars().map(move |ch| (ch, s.style)))
         .collect();
 
-    // Ensure at least 1 column for content on continuation lines so that
-    // deeply nested indents don't produce degenerate one-char-per-line output.
+    // Reserve >=1 column on continuations so deep indents don't produce one char per line.
     let cont_content_width = max_width.saturating_sub(continuation_indent).max(1);
     let wrapped = greedy_word_wrap(&styled, max_width, cont_content_width);
 
@@ -51,18 +50,14 @@ pub(crate) fn wrap_line(
         .collect()
 }
 
-/// Measure the display width of a line's spans.
 fn line_width(line: &Line<'_>) -> usize {
     line.spans.iter().map(|s| s.content.width()).sum()
 }
 
 // ── Word Wrap Algorithm ──
 
-/// Greedy word-wrap over styled characters.
-///
-/// The first line wraps at `first_width`. Subsequent lines wrap at
-/// `subsequent_width` (the caller has already subtracted the
-/// continuation indent from the total budget).
+/// Greedy word-wrap over styled characters; first line wraps at `first_width`, the rest at
+/// `subsequent_width` (caller pre-subtracts the continuation indent).
 fn greedy_word_wrap(
     chars: &[(char, Style)],
     first_width: usize,
@@ -91,9 +86,7 @@ fn greedy_word_wrap(
     lines
 }
 
-/// Consumes one visual line's worth of characters starting at `start`.
-///
-/// Returns the characters for this line and the index of the first character of the next line.
+/// Consumes one visual line starting at `start`; returns the line and the next start index.
 fn take_one_line(
     chars: &[(char, Style)],
     start: usize,
@@ -107,16 +100,14 @@ fn take_one_line(
 
         if width + ch_width > max_width {
             if let Some(bp) = last_break {
-                // Break at the last whitespace.
                 let line = chars[start..=bp].to_vec();
                 let mut next = bp + 1;
-                // Skip leading whitespace on the new line.
                 while next < chars.len() && chars[next].0.is_whitespace() {
                     next += 1;
                 }
                 return (line, next);
             }
-            // No whitespace break point — force break at the current position.
+            // No whitespace break point — force break at current position.
             let end = if i == start { i + 1 } else { i };
             return (chars[start..end].to_vec(), end);
         }
@@ -128,13 +119,11 @@ fn take_one_line(
         }
     }
 
-    // Everything from `start` fits on one line.
     (chars[start..].to_vec(), chars.len())
 }
 
 // ── Span Reconstruction ──
 
-/// Group consecutive characters with the same style back into `Span`s.
 fn chars_to_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
     if chars.is_empty() {
         return Vec::new();
@@ -161,10 +150,9 @@ fn chars_to_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
 
 // ── Tab Expansion ──
 
-/// Tab stop width for expanding `\t` in tool output.
 const TAB_WIDTH: usize = 4;
 
-/// Expand tab characters to spaces, aligning to [`TAB_WIDTH`]-column stops.
+/// Expands `\t` to spaces, aligning to [`TAB_WIDTH`]-column stops.
 pub(crate) fn expand_tabs(s: &str) -> String {
     if !s.contains('\t') {
         return s.to_owned();
@@ -225,9 +213,7 @@ mod tests {
 
     #[test]
     fn continuation_indent_applied() {
-        // "    Hello world foo bar" (23 chars), width 16, indent 4.
-        // First line fits "    Hello world "; the break lands there and
-        // the continuation carries the 4-space indent plus "foo bar".
+        // 23 chars at width 16 indent 4 → first "    Hello world ", second "    foo bar".
         let line = Line::from(vec![Span::raw("    "), Span::raw("Hello world foo bar")]);
         let result = wrap_line(line, 16, 4, None);
         assert_eq!(
@@ -250,8 +236,7 @@ mod tests {
             Span::raw("normal text that is long enough to wrap"),
         ]);
         let result = wrap_line(line, 20, 0, None);
-        // 44 chars at width 20 wraps at the two word boundaries:
-        // "Bold normal text " | "that is long enough " | "to wrap".
+        // 44 chars / width 20 → "Bold normal text " | "that is long enough " | "to wrap".
         assert_eq!(
             result.len(),
             3,
@@ -268,7 +253,7 @@ mod tests {
     fn force_break_on_long_word() {
         let input = "abcdefghijklmnopqrstuvwxyz";
         let result = wrap_line(Line::from(input), 10, 0, None);
-        // 26 chars at width 10 must produce three segments: 10 + 10 + 6.
+        // 26 chars / width 10 → 10 + 10 + 6.
         assert_eq!(
             result.len(),
             3,
@@ -287,14 +272,12 @@ mod tests {
         ]);
         let result = wrap_line(line, 14, 2, None);
         assert!(result.len() >= 2, "should wrap: {result:?}");
-        // Check that continuation has 2-space prefix.
         let cont = &result[1];
         assert_eq!(
             cont.spans[0].content.as_ref(),
             "  ",
             "2-space continuation indent"
         );
-        // The remaining spans should still have green color.
         let has_green = cont.spans.iter().any(|s| s.style.fg == Some(Color::Green));
         assert!(has_green, "style should be preserved on continuation");
     }

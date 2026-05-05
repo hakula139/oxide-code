@@ -16,9 +16,8 @@ use ratatui::prelude::CrosstermBackend;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Initializes the terminal for TUI mode (raw mode, alt screen, mouse, Kitty keyboard).
-///
-/// The caller must ensure [`restore`] is called on exit (including panics).
+/// Enters raw mode + alt screen + mouse + Kitty keyboard. Caller must invoke [`restore`] on exit
+/// (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -152,9 +151,8 @@ mod tests {
     fn draw_sync_brackets_the_render_with_sync_update_bytes() {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
-        // `Terminal::new` queries stdout for the window size which fails
-        // on CI without a TTY. `Viewport::Fixed` skips that query so the
-        // test runs the same whether stdout is a pty or a pipe.
+        // `Terminal::new` queries stdout size and fails on CI without a TTY; `Viewport::Fixed`
+        // skips that query.
         let opts = TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
         };

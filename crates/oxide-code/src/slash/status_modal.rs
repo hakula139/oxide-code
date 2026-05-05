@@ -107,16 +107,12 @@ mod tests {
 
     #[test]
     fn new_produces_one_row_per_session_descriptor() {
-        // Pin row count so a dropped descriptor (e.g. forgotten Auth)
-        // surfaces here. Independent of label / value contents.
         let m = modal();
         assert_eq!(m.rows.len(), 8);
     }
 
     #[test]
     fn new_collects_every_session_field_value() {
-        // Pin the actual data flow — every value the user expects to
-        // see in the modal must come straight from the snapshot.
         let info = test_session_info();
         let m = StatusModal::new(&info);
         let body: String = m
@@ -145,14 +141,11 @@ mod tests {
             .iter()
             .find(|(k, _)| *k == "Show Thinking")
             .expect("show-thinking row");
-        // Default fixture has `show_thinking: false`.
         assert_eq!(thinking_row.1, "off");
     }
 
     #[test]
     fn new_renders_thinking_on_when_snapshot_says_true() {
-        // Pin the on-branch so a regression that always renders "off"
-        // fails here. The off-branch test alone can't catch that.
         let mut info = test_session_info();
         info.config.show_thinking = true;
         let m = StatusModal::new(&info);
@@ -168,7 +161,6 @@ mod tests {
 
     #[test]
     fn esc_closes_modal_silently() {
-        // Status is read-only; closing it must NOT dispatch an action.
         let mut m = modal();
         let outcome = m.handle_key(&key(KeyCode::Esc));
         assert!(matches!(outcome, ModalKey::Cancelled));
@@ -176,8 +168,6 @@ mod tests {
 
     #[test]
     fn enter_also_closes_modal_silently() {
-        // Enter on a no-op view feels natural; pin both code paths so
-        // a regression that special-cases Esc only fails here.
         let mut m = modal();
         let outcome = m.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
@@ -185,8 +175,6 @@ mod tests {
 
     #[test]
     fn other_keys_are_consumed_and_modal_stays_open() {
-        // Arrow / printable / Tab — all must stay locally consumed
-        // so the input area never sees them while status is on screen.
         let mut m = modal();
         for code in [KeyCode::Up, KeyCode::Down, KeyCode::Char('x'), KeyCode::Tab] {
             let outcome = m.handle_key(&key(code));

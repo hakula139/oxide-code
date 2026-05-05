@@ -1,12 +1,5 @@
-//! Combined `/model + /effort` picker modal.
-//!
-//! Bare `/model` and bare `/effort` both open this surface — the only
-//! difference is initial focus (model axis vs effort axis). The two
-//! axes commit through a single [`UserAction::SwapConfig`] event, so
-//! the agent loop sees one atomic config swap.
-//!
-//! Companion design: `docs/design/slash/modals.md` (added with the
-//! design-notes commit at the end of this PR).
+//! Combined model + effort picker, opened by bare `/model`. Both axes commit through one
+//! [`UserAction::SwapConfig`].
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -25,8 +18,7 @@ use crate::tui::theme::Theme;
 
 // ── Constants ──
 
-/// Curated roster shown in the picker. The typed-arg `/model <id>` resolves against the full
-/// `MODELS` table; this slice governs what the modal lists.
+/// Curated roster shown in the picker; `/model <id>` resolves against the full `MODELS` table.
 const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
@@ -37,8 +29,6 @@ const LISTED_MODELS: &[&str] = &[
 
 // ── PickerItem ──
 
-/// One model row in the picker. Holds the canonical id plus the active
-/// flag; `key_hint` derives from the row's position in the list.
 struct ModelRow {
     id: &'static str,
     is_active: bool,
@@ -71,8 +61,7 @@ fn describe(id: &str) -> String {
     }
 }
 
-/// `'1'`–`'9'` for the first nine rows; `None` after that. Numeric
-/// shortcuts are muscle-memory aids, not addressability for every row.
+/// `'1'`–`'9'` for the first nine rows; `None` after that.
 fn numeric_hint(idx: usize) -> Option<char> {
     let digit = u32::try_from(idx).ok()?.checked_add(1)?;
     if (1..=9).contains(&digit) {
@@ -101,18 +90,17 @@ impl PickerItem for ModelRow {
 
 pub(super) struct ModelEffortPicker {
     list: ListPicker<ModelRow>,
-    /// Active model captured at open — used to detect whether the user changed the model axis
-    /// on submit.
+    /// Active model at open — compared on submit to detect a model-axis change.
     active_model: String,
-    /// Active effort captured at open. Used for rendering the "(default)" suffix in the effort row.
+    /// Active effort at open — drives the "(default)" suffix when the user hasn't picked.
     active_effort: Option<Effort>,
-    /// Resolved initial effort. Compared on submit to detect a real effort change — prevents
-    /// spurious `SwapConfig` when `active_effort` is `None` but the model resolves a default.
+    /// Resolved initial effort. Guards against spurious `SwapConfig` when `active_effort` is
+    /// `None` but the model's default resolves to a concrete tier.
     initial_effort: Option<Effort>,
-    /// Current effort pick. Tracks Left / Right navigation. `None` when the highlighted model
-    /// has no effort tier.
+    /// Current pick; `None` when the highlighted model lacks an effort tier.
     effort: Option<Effort>,
-    /// Whether the user touched the effort axis. False on open; only Left / Right cycling sets it.
+    /// Set by Left / Right navigation; lets submit distinguish a real pick from the resolved
+    /// default.
     effort_dirty: bool,
 }
 

@@ -15,7 +15,6 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Agent Events ──
 
-/// Events emitted by the agent loop for display.
 #[derive(Debug, Clone)]
 pub(crate) enum AgentEvent {
     StreamToken(String),
@@ -41,10 +40,8 @@ pub(crate) enum AgentEvent {
     SessionRolled {
         id: String,
     },
-    /// Live config after a [`UserAction::SwapConfig`] applied. `effort`
-    /// is the resolved value (post-clamp); `requested_effort` is the
-    /// user's pick if they explicitly chose one — used to surface
-    /// `(clamped from X)` in the confirmation message.
+    /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
+    /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
         model_id: String,
         effort: Option<Effort>,
@@ -59,9 +56,8 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
-    /// Symmetric model + effort swap. At least one field must be `Some`;
-    /// `None` means "leave that axis as-is". Modal pickers and the
-    /// typed-arg `/model <id>` / `/effort <tier>` paths both flow through here.
+    /// Symmetric model + effort swap. At least one field must be `Some`; `None` leaves that axis
+    /// as-is. Modal pickers and typed-arg `/model <id>` / `/effort <tier>` both flow through here.
     SwapConfig {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
@@ -72,7 +68,7 @@ pub(crate) enum UserAction {
     Quit,
 }
 
-/// Channel pair whose `recv()` stays pending forever (no in-process sender).
+/// Channel pair whose `recv()` stays pending forever.
 pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Receiver<UserAction>)
 {
     mpsc::channel(1)
@@ -82,7 +78,6 @@ pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Re
 
 pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
-/// Abstraction over where agent events are sent (TUI channel / stdio).
 pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;
 

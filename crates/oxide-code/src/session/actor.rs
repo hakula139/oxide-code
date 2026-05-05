@@ -1,14 +1,6 @@
-//! Session actor — owns [`SessionState`] + the writer, drains
-//! [`SessionCmd`]s, and writes one batch per `recv()` wakeup.
-//!
-//! Receive-and-drain (`recv().await` then `try_recv()` until empty)
-//! coalesces whatever cmds land in the channel before the actor
-//! processes the first one. `agent_turn` deliberately queues a tool
-//! round's three cmds through one `tokio::join!` so they pile up
-//! before this drain runs; isolated writes (a text-only turn, the
-//! AI title append, the final summary) flush immediately because
-//! the drain returns `Empty` after the first cmd. No interval timer
-//! — see `docs/design/session/persistence.md`.
+//! Session actor — owns [`SessionState`] + writer, drains [`SessionCmd`]s, batches one flush
+//! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush;
+//! isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 
@@ -40,9 +32,7 @@ pub(super) enum SessionCmd {
         ack: oneshot::Sender<Outcome>,
     },
     Finish {
-        /// Snapshots drained from the shared file tracker just before
-        /// the cmd was sent; written as one `Entry::FileSnapshot` per
-        /// snapshot followed by the `Entry::Summary` marker.
+        /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },

@@ -1,36 +1,12 @@
-//! Display-oriented reshaping of a loaded session transcript.
-//!
-//! The JSONL layer stores assistant turns as `Message { content: [ToolUse,
-//! ToolUse, ...] }` followed by a single user turn with the matching
-//! `ToolResult` blocks batched together. Live rendering, by contrast, emits
-//! each `ToolCall` immediately followed by its `ToolResult`. Without some
-//! rearrangement, a resumed session would scroll through all the calls and
-//! then all the results — visually different from how the same conversation
-//! rendered while streaming.
-//!
-//! [`walk_transcript`] produces an [`Interaction`] sequence that matches the
-//! live layout: calls paired with their results inline, orphan results
-//! preserved at their original position with an explicit
-//! [`Interaction::OrphanToolResult`] marker, and adjacent text blocks within
-//! the same message merged into a single entry. Any content that is not
-//! surfaced (whitespace-only text, `RedactedThinking`) is dropped here so
-//! renderers do not need to repeat the filtering.
-//!
-//! The transform is pure and owns no dependencies beyond [`Message`]. Tool
-//! label resolution is left to the caller, which usually needs a
-//! [`ToolRegistry`](crate::tool::ToolRegistry) that the session layer should not depend on.
+//! Display-oriented reshaping of a loaded transcript. JSONL batches all `ToolUse` blocks then
+//! all `ToolResult` blocks per turn; live rendering pairs each call with its result inline.
+//! [`walk_transcript`] reorders into the live shape and merges adjacent text blocks.
 
 use std::collections::HashMap;
 
 use crate::message::{ContentBlock, Message, Role};
 
-/// A logical interaction derived from a session transcript.
-///
-/// Emitted in display order: text and thinking appear in the order they
-/// occurred inside a message; tool calls are followed immediately by their
-/// paired [`ToolResult`][Self::ToolResult] (consumed from wherever it appears
-/// in the transcript); unpaired results surface as
-/// [`OrphanToolResult`][Self::OrphanToolResult] at their original position.
+/// A logical interaction derived from a transcript, in display order.
 #[derive(Debug)]
 pub(crate) enum Interaction<'a> {
     UserText(String),
@@ -46,21 +22,16 @@ pub(crate) enum Interaction<'a> {
         content: &'a str,
         is_error: bool,
     },
-    /// A tool result whose `tool_use_id` has no matching call in the same
-    /// transcript — typically a leftover after crash-recovery sanitization
-    /// trimmed the call. Callers render with a fallback label.
+    /// Tool result whose call is missing from the transcript — typically a sanitization
+    /// leftover. Renders with a fallback label.
     OrphanToolResult {
         content: &'a str,
         is_error: bool,
     },
 }
 
-/// Walks a resumed transcript and emits interactions in display order.
-///
-/// Text blocks inside a single message are merged into one entry; whitespace
-/// only entries are dropped. Tool calls are paired inline with their matching
-/// results via the `tool_use_id` index, so the output mirrors the
-/// live-streaming layout regardless of how the JSONL batched them.
+/// Walks a resumed transcript and emits interactions in display order. Tool calls are paired
+/// inline with their `tool_use_id` results; whitespace-only text is dropped.
 pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
     let mut pairs: HashMap<&str, (&str, bool)> = messages
         .iter()
@@ -98,8 +69,7 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
                         });
                     }
                 }
-                // Paired results were already emitted inline; only orphans
-                // reach this arm (the pending-map guard ensures that).
+                // Paired results were already emitted inline; only orphans reach here.
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
@@ -123,8 +93,7 @@ pub(crate) fn walk_transcript(messages: &[Message]) -> Vec<Interaction<'_>> {
     out
 }
 
-/// Emits any accumulated `text_buf` as a role-tagged text interaction and
-/// reset the buffer. No-op when the buffer is empty.
+/// Flushes `text_buf` as a role-tagged text interaction. No-op on empty.
 fn flush_text(out: &mut Vec<Interaction<'_>>, text_buf: &mut String, role: Role) {
     if text_buf.is_empty() {
         return;

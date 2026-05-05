@@ -1,8 +1,5 @@
-//! Agent turn loop.
-//!
-//! Drives one user → assistant round: streams the model response,
-//! dispatches any tool calls it emits, records each turn to the
-//! session, and stops when the model returns text only or the safety cap [`MAX_TOOL_ROUNDS`] trips.
+//! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
+//! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
 
 pub(crate) mod event;
 
@@ -25,7 +22,6 @@ const MAX_TOOL_ROUNDS: usize = 25;
 
 // ── Turn Abort ──
 
-/// Reasons a turn ends before normal completion.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
     #[error("turn cancelled")]
@@ -65,7 +61,6 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
-/// Drives one user→assistant turn until text-only response or safety cap.
 /// Long-running awaits race `user_rx` for cancel / quit / mid-turn submit.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
@@ -142,7 +137,6 @@ fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json
         .collect()
 }
 
-/// Dispatches tool calls, racing each against `user_rx` for abort signals.
 async fn run_tool_round(
     tools: &ToolRegistry,
     tool_uses: Vec<(String, String, serde_json::Value)>,
@@ -181,7 +175,6 @@ async fn run_tool_round(
     Ok((results, sidecars))
 }
 
-/// Persists the round's messages + metadata in one coalesced flush.
 async fn commit_round_writes(
     session: &SessionHandle,
     sink: &dyn AgentSink,
@@ -199,7 +192,6 @@ async fn commit_round_writes(
     sink.session_write_error(metadata_outcome.failure.as_deref());
 }
 
-/// Dispatches one tool call; short-circuits to error result on malformed input.
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     name: &str,
@@ -218,7 +210,6 @@ async fn dispatch_tool_call(
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
-/// Splices queued prompts into the conversation and emits `PromptDrained` per item.
 async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
@@ -264,7 +255,6 @@ where
     }
 }
 
-/// Surfaces the first I/O failure on `sink`.
 async fn record_message(session: &SessionHandle, msg: Message, sink: &dyn AgentSink) {
     let outcome: RecordOutcome = session.record_message(msg).await;
     sink.session_write_error(outcome.failure.as_deref());
@@ -292,12 +282,12 @@ enum BlockAccumulator {
     RedactedThinking {
         data: String,
     },
-    /// Absorbs deltas silently and produces no [`ContentBlock`] at the end.
+    /// Absorbs deltas; produces no [`ContentBlock`].
     Skipped,
 }
 
 impl BlockAccumulator {
-    /// Converts to a [`ContentBlock`], surfacing any tool-input parse error.
+    /// Surfaces any tool-input parse error alongside the produced block.
     fn into_content_block(self) -> (Option<ContentBlock>, Option<(String, String)>) {
         match self {
             Self::Text(text) => (Some(ContentBlock::Text { text }), None),
@@ -332,7 +322,7 @@ impl BlockAccumulator {
     }
 }
 
-/// Parses tool JSON; returns empty object + error string on failure.
+/// Returns empty object + error string on failure.
 fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
     match serde_json::from_str(json_buf) {
         Ok(value) => (value, None),
@@ -503,10 +493,8 @@ mod tests {
 
     #[test]
     fn turn_abort_display_alternate_propagates_anyhow_cause_chain() {
-        // {abort:#} must delegate to the inner anyhow Error's alternate
-        // form so the full cause chain reaches the user (e.g., when a
-        // bare-REPL or headless run prints "Error: {e:#}"); plain {abort}
-        // surfaces only the outermost context (anyhow's default Display).
+        // {abort:#} must delegate to the inner anyhow Error's alternate form so the full cause
+        // chain reaches the user. Plain {abort} surfaces only the outermost context.
         let inner = anyhow!("HTTP 503 from upstream");
         let chained = inner.context("stream error");
         let abort = TurnAbort::Failed(chained);
@@ -529,8 +517,7 @@ mod tests {
 
     // ── agent_turn ──
 
-    /// In-process fake that hands the agent loop a scripted sequence of
-    /// [`StreamEvent`]s per turn.
+    /// In-process fake that scripts a [`StreamEvent`] sequence per turn.
     struct FakeClient {
         turns: StdMutex<VecDeque<Vec<StreamEvent>>>,
     }
@@ -628,8 +615,7 @@ mod tests {
         ]
     }
 
-    /// Tool that echoes its input. Exercises the agent's tool-dispatch
-    /// and result-plumbing path without any subprocess machinery.
+    /// Echoes its input; exercises the tool-dispatch path without subprocess machinery.
     struct EchoTool;
 
     impl Tool for EchoTool {
@@ -662,10 +648,8 @@ mod tests {
         }
     }
 
-    /// Tool that signals when invoked then blocks forever. Lets cancel
-    /// tests reliably wait until the agent is parked inside the tool
-    /// future before sending the interrupt — without it `tokio::join!`
-    /// races the cancel against the prior stream phase.
+    /// Signals on entry then blocks forever, so cancel tests can synchronize on the agent being
+    /// parked inside the tool future before sending the interrupt.
     struct GateTool {
         started: Arc<Notify>,
     }
@@ -695,11 +679,8 @@ mod tests {
         }
     }
 
-    /// Inert `UserAction` receiver for `agent_turn` tests that don't
-    /// drive cancel / quit / submit signals. The sender is leaked so
-    /// `recv()` stays pending for the test's lifetime; a tracked-leak
-    /// alternative (returning the pair) costs every call site a `let`
-    /// binding for no test-correctness benefit.
+    /// Inert receiver whose `recv()` stays pending — sender is leaked deliberately so call sites
+    /// don't need to bind it for the test's lifetime.
     fn inert_user_rx() -> mpsc::Receiver<UserAction> {
         let (tx, rx) = crate::agent::event::inert_user_action_channel();
         std::mem::forget(tx);
@@ -718,15 +699,14 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
-    /// Handle whose actor channel is already closed; every write returns the actor-gone failure.
+    /// Handle whose actor channel is closed; every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
     }
 
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
-        // Write errors must not abort the turn — agent_turn returns Ok
-        // and emits exactly one Error event for the user.
+        // Write errors must not abort the turn; one Error event surfaces and the turn returns Ok.
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);
@@ -759,12 +739,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
-        // The assistant + tool-result messages succeed; the sidecar
-        // batch is the first failing cmd, so the batch's failure
-        // handler (not the message handler) is what fires the Error
-        // event. Programmable handle: ack the first 2 cmds healthily
-        // then drop every cmd without acking — the 3rd cmd
-        // (ToolMetadata) hits dispatch_outcome's rx-await fallback.
+        // First 2 cmds (assistant + tool_result messages) ack healthily; the 3rd (metadata batch)
+        // is dropped without ack so the batch's failure handler fires the Error event.
         let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
         let client = FakeClient::new(vec![
             tool_use_turn("tool_1", "echo", r#"{"v":1}"#),
@@ -932,12 +908,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Round 1 emits a tool_use; we pre-load the user channel with a
-        // SubmitPrompt so `await_unless_aborted` consumes it during the
-        // round (either while the SSE stream produces frames or while
-        // the tool runs). At the round boundary the agent must splice
-        // the queued text into `messages` as a trailing user message
-        // and emit a `PromptDrained` event, then proceed to round 2 which is text-only.
+        // Pre-loaded SubmitPrompt is consumed during the round; at the boundary the agent splices
+        // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -948,8 +920,7 @@ mod tests {
         let sink = CapturingSink::new();
         let mut messages = vec![Message::user("kick off")];
         let (tx, mut rx) = mpsc::channel::<UserAction>(4);
-        // Hold the sender until the test ends so `recv()` after the
-        // queued submit stays pending instead of resolving to `None`.
+        // Hold the sender so `recv()` stays pending after the queued submit.
         tx.send(UserAction::SubmitPrompt("follow up".into()))
             .await
             .unwrap();
@@ -996,9 +967,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_multiple_mid_round_submits_in_order() {
-        // Two SubmitPrompts arrive during the same tool's await; both must
-        // land as separate trailing User messages in dispatch order, and
-        // the agent must emit one PromptDrained event per item.
+        // Two SubmitPrompts during one await must land as separate User messages in dispatch order
+        // with one PromptDrained event each.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1054,10 +1024,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_cancel_during_stream_is_cancelled_abort() {
-        // Biased select picks the queued Cancel before the synchronous
-        // stream future, so the turn never produces an assistant
-        // message. The session must stay at its pre-turn tail and the
-        // abort must be Cancelled (not a `Failed` error).
+        // Biased select picks the queued Cancel before the stream future, so the session stays at
+        // its pre-turn tail and the abort is Cancelled.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1086,9 +1054,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_quit_during_stream_is_quit_abort() {
-        // `Quit` is the explicit teardown signal; the agent loop relies
-        // on it to break out of its outer driver. Pre-queueing it must
-        // surface as Err(Quit) so callers don't conflate it with cancel.
+        // Quit is the teardown signal; it must stay distinct from Cancel for the outer driver.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1116,9 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_sender_drop_during_turn_collapses_to_quit_abort() {
-        // When every `UserAction` sender drops, `recv()` resolves to
-        // `None`. The agent treats it as Quit so the outer loop can
-        // exit cleanly instead of looping on a dead channel.
+        // Closed channel resolves `recv()` to None; treated as Quit so the outer loop exits.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1145,10 +1109,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_absorbs_stragglers_without_killing_turn() {
-        // Every variant in the catch-all arm of `await_unless_aborted`
-        // must let an in-flight turn complete. A future change that
-        // returns `TurnAbort::Cancelled` for any of these (because they
-        // "feel" mutating) would kill the turn from a buffered no-op.
+        // Every catch-all variant in `await_unless_aborted` must let the turn complete; returning
+        // Cancelled for any of these would kill the turn from a buffered no-op.
         for action in [
             UserAction::ConfirmExit,
             UserAction::Clear,
@@ -1193,11 +1155,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_cancel_during_tool_round_is_cancelled_outcome() {
-        // Drives the tool-round path of `await_unless_aborted`: the
-        // stream completes synchronously, then `dispatch_tool_call`
-        // parks on `GateTool`'s pending future. Sending Cancel after
-        // the gate fires the started signal guarantees the cancel
-        // races the tool future, not the prior stream phase.
+        // Synchronizes on `GateTool`'s started signal so Cancel races the tool future, not the
+        // prior stream phase.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![tool_use_turn("tool_1", "gate", r"{}")]);
@@ -1228,15 +1187,11 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        // Tool-round cancel happens before the assistant tool_use and
-        // tool_result messages are appended, so the conversation must
-        // stay at the pre-turn tail. Iteration-atomic: the next turn
-        // sees the same shape it would after a clean abort.
+        // Cancel here happens before the round's messages are appended; iteration-atomic so the
+        // next turn sees the pre-turn tail.
         assert_eq!(messages.len(), 1, "{messages:#?}");
-        // The agent did emit ToolCallStart for the gated call (the
-        // start event fires before `dispatch_tool_call` parks). The
-        // matching End event must NOT fire because the tool's future
-        // was dropped — assert on that to pin the cancel boundary.
+        // ToolCallStart fires before `dispatch_tool_call` parks; the matching End must not fire
+        // because the tool future was dropped.
         let events = sink.events();
         assert!(
             events
@@ -1292,10 +1247,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
-        // The model sometimes emits truncated / invalid JSON in
-        // `input_json_delta`. The tool MUST NOT run with empty input —
-        // instead the agent synthesizes an `is_error: true` tool result
-        // that names the parse failure so the model can self-correct.
+        // Truncated `input_json_delta` must not run the tool with empty input; the agent
+        // synthesizes an `is_error: true` result naming the parse failure for self-correction.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1326,8 +1279,7 @@ mod tests {
                 if id == "tool_1" && *input == json!({}),
         ));
 
-        // Tool was NOT dispatched: result content is the synthetic
-        // parse-error message, not EchoTool's `{}` echo.
+        // Tool not dispatched: result is the synthetic parse-error, not EchoTool's `{}` echo.
         assert!(matches!(
             &messages[2].content[0],
             ContentBlock::ToolResult {
@@ -1339,8 +1291,7 @@ mod tests {
                 && content.contains("retry with a valid object"),
         ));
 
-        // Sink saw a ToolCallEnd with is_error so the UI also reflects
-        // the failure (instead of rendering an unparsed input label).
+        // Sink also reflects the failure via ToolCallEnd { is_error: true }.
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
@@ -1415,8 +1366,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_strips_trailing_thinking_before_next_round() {
-        // A trailing thinking block is legal on the first round but
-        // rejected by the API on the second — agent_turn must strip it before the follow-up turn.
+        // The API rejects a trailing thinking block on follow-up rounds.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("done")]);
@@ -1455,8 +1405,7 @@ mod tests {
         assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
     }
 
-    /// Covers `<Client as AgentClient>::stream_message` on the real
-    /// production path; the `FakeClient` tests above stub the trait.
+    /// Covers the real `<Client as AgentClient>` path; `FakeClient` tests above stub the trait.
     #[tokio::test]
     async fn agent_turn_drives_real_client_over_wiremock() {
         let server = MockServer::start().await;

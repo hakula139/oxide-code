@@ -1,5 +1,5 @@
-//! Environment-variable readers with empty-is-absent semantics — a
-//! stray empty shell value must never shadow a config-file default.
+//! Env-var readers with empty-is-absent semantics — a stray empty shell value must never
+//! shadow a config-file default.
 
 // ── Readers ──
 
@@ -8,9 +8,8 @@ pub(crate) fn string(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// `Some(true)` for `"1"` / `"true"`, `Some(false)` for any other set value,
-/// `None` when unset or empty. The `Some(false)` case is deliberate: any
-/// non-`"1"`/`"true"` value is an explicit "off" override against config.
+/// `Some(true)` for `"1"` / `"true"`, `Some(false)` for any other set value, `None` when
+/// unset or empty. The `Some(false)` arm lets any non-truthy value act as an explicit "off".
 pub(crate) fn bool(key: &str) -> Option<bool> {
     string(key).map(|v| v == "1" || v == "true")
 }

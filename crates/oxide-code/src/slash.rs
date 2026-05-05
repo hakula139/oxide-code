@@ -1,17 +1,11 @@
 //! Slash-command surface.
 //!
-//! [`parse_slash`] decides whether a submitted prompt is a slash
-//! command; [`dispatch`] resolves it against the registry and runs it.
-//! Each command is a [`registry::SlashCommand`] impl in its own
-//! submodule — adding one is one file plus one entry in
-//! [`registry::BUILT_INS`].
+//! [`parse_slash`] detects commands; [`dispatch`] resolves them via the registry. Each command is
+//! a [`registry::SlashCommand`] impl in its own submodule — adding one is one file plus an entry
+//! in [`registry::BUILT_INS`].
 //!
-//! Output: every command pushes a `SystemMessageBlock` (info / results)
-//! or an `ErrorBlock` (unknown command, bad args) to the chat. No modal overlays.
-//!
-//! Persistence: commands never write user config files. Mutations are
-//! session-local; restart returns to the user-declared config (see
-//! `docs/design/slash/commands.md` § Design Decisions 6).
+//! Persistence: commands never write config. Mutations are session-local; restart returns to the
+//! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
 
 mod clear;
 mod config;
@@ -39,7 +33,7 @@ pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
 }
 
-/// Resolves and runs a parsed slash command against the built-in registry.
+/// Resolves and runs `parsed` against the built-in registry.
 pub(crate) fn dispatch(
     parsed: &Parsed,
     ctx: &mut SlashContext<'_>,
@@ -47,9 +41,8 @@ pub(crate) fn dispatch(
     dispatch_with(registry::BUILT_INS, parsed, ctx)
 }
 
-/// Resolves `parsed` against `commands` and runs the matching impl. Returns `Some(action)` for
-/// state-mutating commands; `None` for local / unknown / errored paths (which already pushed the
-/// appropriate chat block). Extracted so tests can drive a synthetic registry.
+/// `Some(action)` for state-mutating commands; `None` when the command handled its own output.
+/// Extracted so tests can drive a synthetic registry.
 fn dispatch_with(
     commands: &[&dyn registry::SlashCommand],
     parsed: &Parsed,
@@ -74,7 +67,6 @@ fn dispatch_with(
     }
 }
 
-/// Comma-separated `/name` list for the unknown-command hint.
 fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -87,7 +79,7 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     out
 }
 
-/// Classify whether `parsed` is safe to dispatch mid-turn.
+/// Whether `parsed` is safe to dispatch mid-turn.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }
@@ -99,12 +91,12 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     }
 }
 
-/// Shared test fixture — a fully-populated `SessionInfo` for per-command test modules.
+/// Fully-populated `SessionInfo` for per-command tests.
 #[cfg(test)]
 pub(crate) fn test_session_info() -> SessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
-    // model_id resolves to a real MODELS row so marketing_name() produces a known name in tests.
+    // Real MODELS row so `marketing_name()` produces a known name.
     SessionInfo {
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
@@ -208,7 +200,7 @@ mod tests {
 
     // ── dispatch_with ──
 
-    /// Always-erroring command with aliases — drives dispatch error-wrapping and alias resolution.
+    /// Always-erroring; exercises error-wrapping and alias resolution.
     struct Failing;
     impl registry::SlashCommand for Failing {
         fn name(&self) -> &'static str {
@@ -247,7 +239,7 @@ mod tests {
 
     #[test]
     fn dispatch_with_alias_routes_to_canonical_impl() {
-        // Error wrapping must echo the typed alias, not the canonical name.
+        // Error must echo the typed alias, not the canonical name.
         let mut chat = fresh_chat();
         let info = test_session_info();
         let parsed = Parsed {

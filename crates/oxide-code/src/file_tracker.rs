@@ -1,4 +1,4 @@
-//! Per-session file-change tracker: Read-before-Edit gate with mtime + xxh64 staleness detection.
+//! Per-session Read-before-Edit gate with mtime + xxh64 staleness detection.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

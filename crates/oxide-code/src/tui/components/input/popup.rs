@@ -1,16 +1,6 @@
-//! Slash-command autocomplete popup.
-//!
-//! Rendered as a band of rows above the [`InputArea`](super::InputArea)
-//! whenever the textarea buffer reads as a slash query (see
-//! [`SlashPopup::set_query`]). Pure render + selection state — the
-//! filtering happens in [`crate::slash::filter_built_ins`] and the
-//! component owns no registry handle.
-//!
-//! Style follows Claude Code's popup: the selected row paints in the
-//! normal `text` palette while the rest of the rows render dim, so
-//! the active suggestion stands out by contrast rather than by a
-//! prefix glyph or background fill. Aliases parenthesize only the
-//! alias the user typed (`/clear (new)`); the popup never paints a full alias list.
+//! Slash-command autocomplete popup. Selected row paints in `text`, others dim — contrast
+//! stands in for a prefix glyph or fill. Aliases parenthesize only the typed alias
+//! (`/clear (new)`); never the full list.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -136,9 +126,7 @@ impl SlashPopup {
         Line::from(spans)
     }
 
-    /// `... (N more)` footer when matches exceed `MAX_VISIBLE_ROWS`.
-    /// Returned as an iterator so the caller can chain it onto the
-    /// row list without an `if`-shaped branch.
+    /// `... (N more)` overflow footer; iterator form keeps the caller branch-free.
     fn render_footer(&self, width: usize) -> impl Iterator<Item = Line<'static>> {
         let hidden = self.matches.len().saturating_sub(MAX_VISIBLE_ROWS);
         let style = self.theme.dim();
@@ -152,9 +140,8 @@ impl SlashPopup {
     }
 }
 
-/// Display label for a matched row: `/name` plus the typed alias when
-/// the match landed on an alias (`/clear (new)`). Used for both
-/// rendering and column-width computation, so it must match exactly.
+/// `/name` plus the typed alias when matched via alias (`/clear (new)`). Used for both
+/// rendering and column-width computation, so the two must agree exactly.
 fn label(m: &MatchedCommand) -> String {
     match m.matched_alias {
         Some(alias) => format!("/{} ({alias})", m.name),
@@ -162,9 +149,7 @@ fn label(m: &MatchedCommand) -> String {
     }
 }
 
-/// Row palette: selected rows paint in the normal `text` slot with a
-/// `BOLD` modifier so they stand out against the surrounding `dim`
-/// non-selected rows. Mirrors Claude Code's selected-row contrast.
+/// Selected → `text` + BOLD; non-selected → dim. Contrast mirrors Claude Code's popup.
 fn row_style(theme: &Theme, selected: bool) -> Style {
     if selected {
         theme.text().add_modifier(Modifier::BOLD)

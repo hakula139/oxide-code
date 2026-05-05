@@ -1,38 +1,23 @@
-//! Filesystem-safe project directory derivation from an absolute path.
-//!
-//! Sessions live under `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/` so
-//! listings stay scoped to the project the user is working in. The
-//! sanitization here turns an arbitrary path into a single directory
-//! name: path separators and other reserved characters become `-`, and
-//! very long paths fall back to a truncation + hash fingerprint so
-//! distinct paths cannot collide after truncation.
+//! Filesystem-safe project subdir derivation. Sessions live under
+//! `$XDG_DATA_HOME/ox/sessions/{sanitized-cwd}/`; reserved chars become `-` and long names get
+//! a hash suffix to prevent post-truncation collisions.
 
 use std::path::Path;
 
 use xxhash_rust::xxh64::xxh64;
 
-/// Maximum character length of a project subdirectory name before we
-/// truncate and append a hash. 80 keeps names readable while staying
-/// well below filesystem `NAME_MAX` limits (255 on ext4 / APFS).
+/// Char-length cap before truncate + hash. 80 stays well under filesystem `NAME_MAX` (255).
 const MAX_PROJECT_DIR_LEN: usize = 80;
 
-/// Width of the hash suffix (in hex chars) appended to truncated names.
+/// Hex chars in the truncation hash suffix.
 const HASH_SUFFIX_HEX_LEN: usize = 16;
 
-/// Fallback subdirectory when the current working directory cannot be
-/// resolved. Rare in practice — the process would be running from a deleted directory.
+/// Fallback when the cwd cannot be resolved (e.g. running from a deleted directory).
 pub(crate) const UNKNOWN_PROJECT_DIR: &str = "_unknown_";
 
-/// Derive a filesystem-safe subdirectory name from a working-directory
-/// path. Reserved characters (`/`, `\`, `:`, and anything not
-/// `[A-Za-z0-9._-]`) become `-`. Leading and trailing `-` characters
-/// are trimmed. Names longer than [`MAX_PROJECT_DIR_LEN`] are
-/// truncated and suffixed with a 16-char xxh64 hash of the original
-/// path bytes so distinct long paths never collide after truncation.
-///
-/// Hashing uses `OsStr::as_encoded_bytes` (stable since Rust 1.74)
-/// rather than the UTF-8-lossy string representation, so two non-UTF8
-/// paths whose lossy form coincides still hash apart.
+/// Derives a filesystem-safe subdir name. Non-`[A-Za-z0-9._-]` chars become `-`; long names get
+/// a 16-char xxh64 suffix over the raw path bytes (so non-UTF8 paths whose lossy forms collide
+/// still hash apart).
 pub(crate) fn sanitize_cwd(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let sanitized: String = raw
@@ -114,8 +99,7 @@ mod tests {
 
     #[test]
     fn sanitize_cwd_truncation_distinguishes_similar_long_paths() {
-        // Two paths that share the same prefix beyond the truncation
-        // point must still yield different subdir names.
+        // Paths sharing a prefix beyond the truncation point must still hash apart.
         let base = "/".to_string() + &"a".repeat(200);
         let a = sanitize_cwd(Path::new(&(base.clone() + "/alpha")));
         let b = sanitize_cwd(Path::new(&(base + "/beta")));
@@ -131,10 +115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sanitize_cwd_distinguishes_non_utf8_paths_with_same_lossy_form() {
-        // Two paths that differ only in their invalid-UTF8 bytes
-        // render the same as String (both produce U+FFFD REPLACEMENT
-        // CHARACTER for the bad byte). The hash suffix must still
-        // separate them so sessions do not collide.
+        // Different invalid bytes both lossy-render as U+FFFD; raw-byte hash must disambiguate.
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         use std::path::PathBuf;

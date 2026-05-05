@@ -1,6 +1,5 @@
-//! `/config` — read-only view of the resolved effective config plus the layered TOML paths it was
-//! assembled from. Path discovery is per-invocation so the user sees fresh state if they edited a
-//! file mid-session.
+//! `/config` — read-only view of resolved config plus its layered TOML source paths. Path
+//! discovery is per-invocation so mid-session file edits surface immediately.
 
 use std::path::Path;
 
@@ -61,7 +60,7 @@ fn render_config(
     out
 }
 
-/// `(not configured)` when unresolved; tildified path with `(not found)` suffix if missing.
+/// `(not configured)` when unresolved; `~/...` plus ` (not found)` when missing.
 fn display_path(path: Option<&Path>) -> String {
     let Some(path) = path else {
         return "(not configured)".to_owned();

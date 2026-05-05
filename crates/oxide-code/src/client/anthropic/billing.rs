@@ -4,22 +4,16 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64;
 
-/// Salt for the version fingerprint (hardcoded in Claude Code JS source).
+/// Salt hardcoded in the Claude Code JS source.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
-
-/// Character indices extracted from the first user message for fingerprinting.
 const FINGERPRINT_INDICES: [usize; 3] = [4, 7, 20];
-
 /// xxHash64 seed for the cch body hash (extracted from the Bun binary).
 const CCH_SEED: u64 = 0x6E52_736A_C806_831E;
-
-/// Placeholder written into the billing header before the real hash is computed.
 const CCH_PLACEHOLDER: &str = "cch=00000";
 
 // ── Public API ──
 
-/// Computes the 3-character hex fingerprint suffix for `cc_version`.
-/// `SHA-256(salt + chars_at_indices + version)`, take first 3 hex chars.
+/// 3-char hex suffix for `cc_version`: first 3 hex of `SHA-256(salt + chars_at_indices + version)`.
 pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> String {
     let chars: String = FINGERPRINT_INDICES
         .iter()
@@ -31,9 +25,7 @@ pub(super) fn compute_fingerprint(first_user_message: &str, version: &str) -> St
     format!("{:02x}{:02x}", hash[0], hash[1])[..3].to_string()
 }
 
-/// Builds the billing attribution header with a `cch=00000` placeholder.
-///
-/// The placeholder is later replaced by [`inject_cch`] with the computed hash.
+/// Builds the billing attribution header; [`inject_cch`] replaces the `cch=00000` placeholder.
 pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
     format!(
         "x-anthropic-billing-header: \
@@ -43,8 +35,7 @@ pub(super) fn build_billing_header(version: &str, fingerprint: &str) -> String {
     )
 }
 
-/// Computes xxHash64 of the request body (with placeholder in place) and replaces the first
-/// `cch=00000` occurrence with the 5-char hex result. Errors if the placeholder is missing.
+/// Replaces the first `cch=00000` with `cch={5-hex of xxHash64(body)}`. Errors if absent.
 pub(super) fn inject_cch(body: &str) -> Result<String> {
     if !body.contains(CCH_PLACEHOLDER) {
         bail!("billing header placeholder `{CCH_PLACEHOLDER}` missing from request body");
@@ -61,8 +52,8 @@ mod tests {
 
     // ── compute_fingerprint ──
 
-    /// Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
-    /// Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
+    // Verified via `echo -n "59cf53e54c78'li2.1.37" | shasum -a 256` → "9e71...".
+    // Chars at indices [4, 7, 20] of "Say 'hello'..." are `'`, `l`, `i`.
     #[test]
     fn compute_fingerprint_known_vector() {
         let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
@@ -81,8 +72,7 @@ mod tests {
 
     #[test]
     fn compute_fingerprint_short_message_pads_with_zero() {
-        // "Hi" (len 2): all fingerprint indices (4, 7, 20) are out of bounds,
-        // so chars default to '0'. Same result as an empty message.
+        // "Hi" (len 2): all fingerprint indices are out of bounds; chars default to '0'.
         let short = compute_fingerprint("Hi", "2.1.87");
         let empty = compute_fingerprint("", "2.1.87");
         assert_eq!(short, empty, "both should pad all positions with '0'");
@@ -90,7 +80,7 @@ mod tests {
 
     #[test]
     fn compute_fingerprint_partial_bounds() {
-        // "Hello" (len 5): index 4 = 'o', indices 7 and 20 out of bounds.
+        // "Hello" (len 5): index 4 = 'o'; 7 and 20 are out of bounds.
         let fp = compute_fingerprint("Hello", "2.1.87");
         let fp_all_zero = compute_fingerprint("", "2.1.87");
         assert_eq!(fp.len(), 3);
@@ -153,7 +143,7 @@ mod tests {
 
     #[test]
     fn inject_cch_replaces_only_first_occurrence() {
-        // system (with placeholder) is before messages — matches our struct field order.
+        // `system` precedes `messages` — matches our struct field order.
         let body = r#"{"system":[{"type":"text","text":"cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"cch=00000"}]}]}"#;
         let result = inject_cch(body).unwrap();
 

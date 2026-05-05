@@ -1,9 +1,7 @@
 //! Configuration loading.
 //!
-//! Layered precedence (highest wins): env vars > project `ox.toml` >
-//! user `~/.config/ox/config.toml` > built-in defaults. Auth follows
-//! the same precedence but terminates at the first source that
-//! resolves (API key env > API key in file > OAuth credentials).
+//! Precedence (highest wins): env > project `ox.toml` > user `~/.config/ox/config.toml` > defaults.
+//! Auth stops at the first source that resolves (API key env > API key in file > OAuth).
 
 pub(crate) mod file;
 mod oauth;
@@ -24,14 +22,11 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, Clone)]
 pub(crate) enum Auth {
-    /// Explicit API key (`x-api-key` header).
     ApiKey(String),
-    /// OAuth access token from Claude Code (`Authorization: Bearer` header).
     OAuth(String),
 }
 
 impl Auth {
-    /// Label for the credential type, surfaced by `/status` and `/config`.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::ApiKey(_) => "API key",
@@ -42,8 +37,7 @@ impl Auth {
 
 // ── ConfigSnapshot ──
 
-/// Resolved-config view minus the secret. Survives the move when
-/// [`Config`] is consumed by the API client; rebound by runtime swaps.
+/// Resolved-config view minus the secret. Survives [`Config`] being consumed by the client.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) model_id: String,
@@ -60,14 +54,14 @@ pub(crate) struct ConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget (Claude 4.6+).
+    /// Model decides the thinking budget (4.6+).
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ThinkingDisplay>,
     },
 }
 
-/// `thinking.display` values accepted by the API on 4.7+.
+/// `thinking.display` values accepted on 4.7+.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ThinkingDisplay {
@@ -128,7 +122,7 @@ impl FromStr for Effort {
 
 // ── PromptCacheTtl ──
 
-/// Prompt-cache TTL sent as `cache_control.ttl`.
+/// Sent as `cache_control.ttl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PromptCacheTtl {
     #[serde(rename = "5m")]
@@ -138,7 +132,7 @@ pub(crate) enum PromptCacheTtl {
 }
 
 impl PromptCacheTtl {
-    /// Wire value; `None` when the TTL is the server default (5 m).
+    /// `None` for the server default (5 m).
     pub(crate) const fn wire(self) -> Option<&'static str> {
         match self {
             Self::FiveMin => None,
@@ -178,7 +172,7 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: String,
-    /// `None` when the model doesn't accept the parameter.
+    /// `None` when the model doesn't accept it.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
@@ -190,13 +184,7 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// Loads configuration from files and environment variables.
-    ///
-    /// Precedence (highest wins): env vars > project `ox.toml` > user
-    /// `~/.config/ox/config.toml` > built-in defaults.
-    ///
-    /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
-    /// file > Claude Code OAuth credentials.
+    /// Loads from files + env.
     pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
@@ -239,9 +227,8 @@ impl Config {
             .or(tui.show_thinking)
             .unwrap_or(false);
 
-        // Adaptive thinking is always enabled — the model decides the
-        // budget. `display` opts 4.7 into streaming summarized thinking
-        // text (its default changed to `omitted` silently); 4.6 and older ignore the field.
+        // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
+        // ignore the field.
         let thinking = Some(ThinkingConfig::Adaptive {
             display: show_thinking.then_some(ThinkingDisplay::Summarized),
         });
@@ -271,7 +258,7 @@ impl Config {
         })
     }
 
-    /// Captures descriptors for `/config` and `/status`, minus the auth secret.
+    /// Descriptors for `/config` and `/status`, minus the auth secret.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
             model_id: self.model.clone(),
@@ -312,9 +299,7 @@ mod tests {
 
     #[test]
     fn label_distinguishes_api_key_from_oauth() {
-        // Both branches reach `/status` and `/config` rows. Pin the
-        // exact strings — a regression that swapped them would mislabel
-        // every user's auth source without otherwise tripping a test.
+        // Swap would mislabel every user's auth source.
         assert_eq!(Auth::ApiKey("secret".to_owned()).label(), "API key");
         assert_eq!(Auth::OAuth("token".to_owned()).label(), "OAuth");
     }
@@ -323,7 +308,6 @@ mod tests {
 
     #[test]
     fn thinking_config_adaptive_without_display_serializes_bare() {
-        // Older models ignore `display`; absence keeps the wire as pre-4.7 clients expect.
         let json = serde_json::to_value(&ThinkingConfig::Adaptive { display: None }).unwrap();
         assert_eq!(json["type"], "adaptive");
         assert!(json.get("display").is_none(), "display omitted: {json}");
@@ -377,7 +361,6 @@ mod tests {
 
     #[test]
     fn prompt_cache_ttl_wire_shape() {
-        // 5m is the server default → field omitted. 1h opts in → "1h".
         assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
         assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
     }
@@ -405,10 +388,8 @@ mod tests {
 
     // ── Config::load ──
 
-    /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
-    /// nothing bleeds in from the caller's environment; `ANTHROPIC_API_KEY`
-    /// ships with a non-empty default so tests land on the `ApiKey` arm
-    /// and never consult the real OAuth credential sources.
+    /// Env keys `Config::load` reads. `ANTHROPIC_API_KEY` defaults non-empty in [`env_vars`] so
+    /// tests land on `ApiKey` without consulting OAuth.
     const ENV_KEYS: &[&str] = &[
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
@@ -426,8 +407,7 @@ mod tests {
         std::fs::write(config_dir.join("config.toml"), body).unwrap();
     }
 
-    /// Baseline env (all [`ENV_KEYS`] unset, `ANTHROPIC_API_KEY` = `"sk-default"`) with overrides.
-    /// Panics on unknown keys so misspellings surface immediately.
+    /// Baseline env (all unset, `ANTHROPIC_API_KEY` = `"sk-default"`) plus overrides.
     fn env_vars(
         overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
     ) -> Vec<(&'static str, Option<String>)> {
@@ -464,8 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Opus 4.7 supports `xhigh`, so both `effort` and `max_tokens`
-        // derive from that ceiling. Prompt cache defaults to 1h.
+        // Opus 4.7 supports `xhigh`; `effort` / `max_tokens` derive from that ceiling.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -616,11 +595,8 @@ mod tests {
         );
     }
 
-    /// Regression: a misplaced field used to drop the entire config
-    /// silently (parse error logged at `warn`, invisible without
-    /// `RUST_LOG`), which then surfaced as a confusing
-    /// "no credentials" error when the dropped config also held the
-    /// API key. The parse error must propagate instead.
+    /// Regression: misplaced fields used to drop the whole config silently and surface as
+    /// "no credentials". Parse errors must propagate.
     #[tokio::test]
     async fn load_propagates_invalid_config_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -641,10 +617,6 @@ mod tests {
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
-    /// Theme-resolution failures from `[tui.theme]` must propagate
-    /// out of `Config::load` instead of getting swallowed — the user
-    /// needs to see *which* theme name is broken, not a downstream
-    /// "no credentials"-style misdirection.
     #[tokio::test]
     async fn load_propagates_theme_resolution_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -702,8 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
-        // Sonnet 4.6 supports `effort` but not `xhigh` / `max` — the
-        // user's pick must clamp rather than 400 the gateway.
+        // Sonnet 4.6 has effort but not `xhigh` / `max`; must clamp, not 400 the gateway.
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
@@ -789,10 +760,7 @@ mod tests {
 
     #[test]
     fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        // The snapshot is what `/config` prints; pin every field so a
-        // regression that forgot to copy one (or that swapped two
-        // names) shows up here, not silently in the rendered table.
-        // The auth secret never reaches the snapshot — only the `label()` projection does.
+        // `/config` prints from the snapshot; secret must reduce to `label()`.
         let cfg = Config {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),
