@@ -14,7 +14,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 
 ## Design Decisions
 
-1. **Trait registry, not enum.** `trait SlashCommand` mirrors `tool::Tool`; one file per command. Codex's giant `match` is rejected -- adding `/foo` should mean editing only the new file.
+1. **Trait registry, not enum.** `trait SlashCommand` mirrors `tool::Tool`; one file per command. Codex's giant `match` is rejected — adding `/foo` should mean editing only the new file.
 2. **Parse at submit, not in `InputArea`.** `App::dispatch_user_action` runs `parse_slash` first, then dispatches locally or forwards.
 3. **One synthetic block kind: `SystemMessageBlock`.** Left-bar in `accent`. Errors reuse `ErrorBlock`.
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.` for future `/plugin:cmd` namespace.
@@ -32,9 +32,9 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 
 ### /clear
 
-Rolls the session UUID, finalizes the old JSONL (still resumable via `ox -c`), drops in-memory messages, clears file tracker, clears AI title. Aliases: `/new`, `/reset`. No confirmation prompt -- the cleared session is resumable.
+Rolls the session UUID, finalizes the old JSONL (still resumable via `ox -c`), drops in-memory messages, clears file tracker, clears AI title. Aliases: `/new`, `/reset`. No confirmation prompt — the cleared session is resumable.
 
-Key design: send-first ordering in `execute` -- forward `UserAction::Clear` to `user_tx` first; only on success drop the chat history. `SessionHandle::roll` is the testable extraction point (snapshot-before-clear, replace-before-finalize). `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't paint the old title onto the fresh session.
+Key design: send-first ordering in `execute` — forward `UserAction::Clear` to `user_tx` first; only on success drop the chat history. `SessionHandle::roll` is the testable extraction point (snapshot-before-clear, replace-before-finalize). `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't paint the old title onto the fresh session.
 
 ### /init
 
@@ -42,7 +42,7 @@ Returns `SlashOutcome::Forward(UserAction::SubmitPrompt(PROMPT))` with a static 
 
 ### /model
 
-Bare `/model` opens the combined model + effort picker modal ([modals.md](modals.md)) — both axes commit through one atomic `UserAction::SwapConfig`. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy -- re-clamps current effort against the new model. Both forms emit the same `UserAction::SwapConfig`.
+Bare `/model` opens the combined model + effort picker modal ([modals.md](modals.md)) — both axes commit through one atomic `UserAction::SwapConfig`. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy — re-clamps current effort against the new model. Both forms emit the same `UserAction::SwapConfig`.
 
 ### /effort
 
@@ -50,20 +50,20 @@ Bare `/model` opens the combined model + effort picker modal ([modals.md](modals
 
 ### /status
 
-Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No args, no chat output -- the modal is the surface. Esc / Enter close.
+Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No args, no chat output — the modal is the surface. Esc / Enter close.
 
 ## Sources
 
-- `crates/oxide-code/src/slash.rs` -- dispatch, `SlashOutcome`.
-- `crates/oxide-code/src/slash/registry.rs` -- `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
-- `crates/oxide-code/src/slash/context.rs` -- `SlashContext`, `open_modal` / `take_modal`.
-- `crates/oxide-code/src/slash/clear.rs` -- `ClearCmd`, send-first ordering.
-- `crates/oxide-code/src/slash/init.rs` -- `InitCmd`, `PROMPT`.
-- `crates/oxide-code/src/slash/model.rs` -- `ModelCmd`, resolver.
-- `crates/oxide-code/src/slash/effort.rs` -- `EffortCmd`, level parser.
-- `crates/oxide-code/src/slash/picker.rs` -- combined model + effort picker modal.
-- `crates/oxide-code/src/slash/status_modal.rs` -- `/status` overview modal.
-- `crates/oxide-code/src/tui/app.rs` -- `dispatch_user_action`, `apply_action_locally`, modal gate.
-- `crates/oxide-code/src/tui/modal.rs` -- `Modal` trait, `ModalStack`, key routing.
-- `crates/oxide-code/src/tui/modal/list_picker.rs` -- generic `ListPicker` primitive.
-- `crates/oxide-code/src/agent.rs` -- `agent_turn` Clear and SwapConfig arms.
+- `crates/oxide-code/src/slash.rs` — dispatch, `SlashOutcome`.
+- `crates/oxide-code/src/slash/registry.rs` — `SlashCommand` trait, `BUILT_INS`, `SlashOutcome`.
+- `crates/oxide-code/src/slash/context.rs` — `SlashContext`, `open_modal` / `take_modal`.
+- `crates/oxide-code/src/slash/clear.rs` — `ClearCmd`, send-first ordering.
+- `crates/oxide-code/src/slash/init.rs` — `InitCmd`, `PROMPT`.
+- `crates/oxide-code/src/slash/model.rs` — `ModelCmd`, resolver.
+- `crates/oxide-code/src/slash/effort.rs` — `EffortCmd`, level parser.
+- `crates/oxide-code/src/slash/picker.rs` — combined model + effort picker modal.
+- `crates/oxide-code/src/slash/status_modal.rs` — `/status` overview modal.
+- `crates/oxide-code/src/tui/app.rs` — `dispatch_user_action`, `apply_action_locally`, modal gate.
+- `crates/oxide-code/src/tui/modal.rs` — `Modal` trait, `ModalStack`, key routing.
+- `crates/oxide-code/src/tui/modal/list_picker.rs` — generic `ListPicker` primitive.
+- `crates/oxide-code/src/agent.rs` — `agent_turn` Clear and SwapConfig arms.

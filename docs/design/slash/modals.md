@@ -2,7 +2,7 @@
 
 Focus-grabbing UI overlays that any slash command can open. Lives in the band between the chat scroll and the input area, the same row range the slash autocomplete popup uses, but wider.
 
-Companion: [commands.md](commands.md) — slash-command surface that opens modals. Research: [`docs/research/slash/modals.md`](../../research/slash/modals.md).
+Companion: [commands.md](commands.md) — slash-command surface that opens modals.
 
 ## Goals
 
@@ -84,9 +84,9 @@ Submit emits a single `UserAction::SwapConfig { model, effort }`. Both axes are 
 
 ## Sources
 
-- [`crates/oxide-code/src/tui/modal.rs`](../../../crates/oxide-code/src/tui/modal.rs) — `Modal`, `ModalKey`, `ModalAction`, `ModalStack`.
-- [`crates/oxide-code/src/tui/modal/list_picker.rs`](../../../crates/oxide-code/src/tui/modal/list_picker.rs) — generic `ListPicker<T: PickerItem>`.
-- [`crates/oxide-code/src/slash/picker.rs`](../../../crates/oxide-code/src/slash/picker.rs) — model + effort picker.
-- [`crates/oxide-code/src/slash/status_modal.rs`](../../../crates/oxide-code/src/slash/status_modal.rs) — status overview.
-- [`crates/oxide-code/src/slash/context.rs`](../../../crates/oxide-code/src/slash/context.rs) — `SlashContext::open_modal` / `take_modal`.
-- [`crates/oxide-code/src/tui/app.rs`](../../../crates/oxide-code/src/tui/app.rs) — `App::handle_crossterm_event` modal gate, `apply_modal_action`, layout band.
+- `crates/oxide-code/src/tui/modal.rs` — `Modal`, `ModalKey`, `ModalAction`, `ModalStack`.
+- `crates/oxide-code/src/tui/modal/list_picker.rs` — generic `ListPicker<T: PickerItem>`.
+- `crates/oxide-code/src/slash/picker.rs` — model + effort picker.
+- `crates/oxide-code/src/slash/status_modal.rs` — status overview.
+- `crates/oxide-code/src/slash/context.rs` — `SlashContext::open_modal` / `take_modal`.
+- `crates/oxide-code/src/tui/app.rs` — `App::handle_crossterm_event` modal gate, `apply_modal_action`, layout band.
