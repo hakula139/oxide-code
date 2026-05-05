@@ -156,7 +156,7 @@ impl<T: PickerItem> ListPicker<T> {
     fn header_height(&self) -> u16 {
         let mut h = TITLE_ROW_HEIGHT + TITLE_BLANK_ROW;
         if self.description.is_some() {
-            h += 2; // description row + blank
+            h += 1; // description row (blank is already TITLE_BLANK_ROW)
         }
         h
     }
@@ -383,11 +383,10 @@ mod tests {
     }
 
     #[test]
-    fn height_with_description_adds_two_more_rows() {
-        // Title (1) + description (1) + blank (1) + 1 spacer between
-        // header sections totals 4 header rows + items.
+    fn height_with_description_adds_one_more_row() {
+        // Title (1) + description (1) + blank (1) = 3 header rows + items.
         let p = picker(vec![FakeItem::new("a")]).with_description("a small picker");
-        assert_eq!(p.height(80), 5);
+        assert_eq!(p.height(80), 4);
     }
 
     #[test]
