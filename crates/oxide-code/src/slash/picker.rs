@@ -99,54 +99,34 @@ impl PickerItem for ModelRow {
 
 // ── ModelEffortPicker ──
 
-/// Initial focus. `/model` opens with the model list active;
-/// `/effort` opens with the effort axis pre-armed so Enter submits
-/// just-the-effort change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum InitialFocus {
-    Model,
-    Effort,
-}
-
 pub(super) struct ModelEffortPicker {
     list: ListPicker<ModelRow>,
-    /// Active model captured at open — used to detect whether the user
-    /// changed the model axis on submit.
+    /// Active model captured at open — used to detect whether the user changed the model axis
+    /// on submit.
     active_model: String,
-    /// Active effort captured at open. Used for rendering the "(default)"
-    /// suffix in the effort row.
+    /// Active effort captured at open. Used for rendering the "(default)" suffix in the effort row.
     active_effort: Option<Effort>,
-    /// Resolved initial effort at open. Compared on submit to detect
-    /// whether the user actually changed the effort axis — prevents
-    /// spurious `SwapConfig` when the raw `active_effort` is `None` but
-    /// the model's default resolves to a concrete tier.
+    /// Resolved initial effort. Compared on submit to detect a real effort change — prevents
+    /// spurious `SwapConfig` when `active_effort` is `None` but the model resolves a default.
     initial_effort: Option<Effort>,
-    /// User's current effort pick. Tracks Left/Right navigation.
-    /// `None` when the highlighted model has no effort tier.
+    /// Current effort pick. Tracks Left / Right navigation. `None` when the highlighted model
+    /// has no effort tier.
     effort: Option<Effort>,
-    /// Whether the user touched the effort axis after open. When false
-    /// and the model didn't change either, Enter is a no-op.
+    /// Whether the user touched the effort axis. False on open; only Left / Right cycling sets it.
     effort_dirty: bool,
 }
 
 impl ModelEffortPicker {
-    pub(super) fn new(info: &SessionInfo, focus: InitialFocus) -> Self {
+    pub(super) fn new(info: &SessionInfo) -> Self {
         let active_model = info.config.model_id.clone();
         let active_effort = info.config.effort;
         let rows = ModelRow::build(&active_model);
 
-        let mut list = ListPicker::new(
-            "Select model",
-            rows,
-        )
-        .with_description(
+        let mut list = ListPicker::new("Select model", rows).with_description(
             "Switch the active model. Applies to this session only — restart returns to your config.",
         );
         list.select_initial(|row| row.is_active);
 
-        // Bare `/effort` arms the effort axis so Left/Right is the
-        // first navigation; bare `/model` leaves both axes pristine.
-        let effort_dirty = matches!(focus, InitialFocus::Effort);
         let effort = effort_for_highlighted(&list, active_effort);
 
         Self {
@@ -155,7 +135,7 @@ impl ModelEffortPicker {
             active_effort,
             initial_effort: effort,
             effort,
-            effort_dirty,
+            effort_dirty: false,
         }
     }
 
@@ -351,8 +331,8 @@ mod tests {
     use super::*;
     use crate::slash::test_session_info;
 
-    fn picker(focus: InitialFocus) -> ModelEffortPicker {
-        ModelEffortPicker::new(&test_session_info(), focus)
+    fn picker() -> ModelEffortPicker {
+        ModelEffortPicker::new(&test_session_info())
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -364,26 +344,18 @@ mod tests {
     #[test]
     fn new_positions_cursor_on_active_model() {
         // `test_session_info` ships claude-opus-4-7 active.
-        let p = picker(InitialFocus::Model);
+        let p = picker();
         let row = p.list.selected().expect("active row");
         assert_eq!(row.id, "claude-opus-4-7");
         assert!(row.is_active);
     }
 
     #[test]
-    fn new_with_effort_focus_marks_effort_dirty() {
-        // Bare /effort opens the picker with the effort axis already
-        // armed, so a single Enter submits the current pick.
-        let p = picker(InitialFocus::Effort);
-        assert!(
-            p.effort_dirty,
-            "InitialFocus::Effort must arm the effort axis",
-        );
-    }
-
-    #[test]
-    fn new_with_model_focus_keeps_effort_clean() {
-        let p = picker(InitialFocus::Model);
+    fn new_opens_with_clean_effort_axis() {
+        // Effort dirty must start false so a no-touch Enter cancels rather than firing a
+        // spurious SwapConfig (matters when the model resolves a default effort but the user
+        // hasn't expressed a pick).
+        let p = picker();
         assert!(!p.effort_dirty);
     }
 
@@ -391,7 +363,7 @@ mod tests {
 
     #[test]
     fn down_arrow_advances_cursor_and_refreshes_effort() {
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         let before = p.list.selected_index();
         p.handle_key(&key(KeyCode::Down));
         assert_eq!(p.list.selected_index(), before + 1);
@@ -400,7 +372,7 @@ mod tests {
     #[test]
     fn numeric_jump_routes_cursor_to_matching_row() {
         // `5` jumps to the fifth listed model — Haiku 4.5.
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Char('5')));
         let row = p.list.selected().expect("selected row");
         assert_eq!(row.id, "claude-haiku-4-5");
@@ -410,7 +382,7 @@ mod tests {
     fn right_arrow_cycles_effort_within_supported_levels() {
         // Opus 4.7 supports the full ladder. Pressing Right walks
         // through it; Left walks back.
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         let initial = p.effort;
         p.handle_key(&key(KeyCode::Right));
         assert_ne!(p.effort, initial, "Right must change effort");
@@ -419,9 +391,8 @@ mod tests {
 
     #[test]
     fn right_arrow_on_no_tier_model_is_a_noop() {
-        // Haiku 4.5 has no effort tier — Left/Right must not mutate
-        // the (None) effort state.
-        let mut p = picker(InitialFocus::Model);
+        // Haiku 4.5 has no effort tier — Left/Right must not mutate the (None) effort state.
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
         assert!(p.effort.is_none());
         assert!(!p.effort_dirty);
@@ -435,16 +406,15 @@ mod tests {
 
     #[test]
     fn left_arrow_walks_effort_backward_with_wrap() {
-        // Backward branch in `cycle_effort` has different arithmetic
-        // from the forward branch — pin it independently. Cycle Left
-        // until the effort returns to the initial pick, asserting it
-        // wraps past the first tier (ladder length is finite).
-        let mut p = picker(InitialFocus::Effort);
+        // Backward branch in `cycle_effort` has different arithmetic from the forward branch
+        // — pin it independently. Cycle Left until the effort returns to the initial pick.
+        let mut p = picker();
+        p.handle_key(&key(KeyCode::Right)); // arm the axis with a known starting tier
         let initial = p.effort.expect("Opus 4.7 has an effort axis");
         for _ in 0..16 {
             p.handle_key(&key(KeyCode::Left));
             if p.effort == Some(initial) {
-                return; // wrapped back to the starting tier
+                return;
             }
         }
         panic!(
@@ -455,7 +425,7 @@ mod tests {
 
     #[test]
     fn navigating_from_no_tier_back_to_tier_model_restores_effort() {
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
         assert!(p.effort.is_none(), "Haiku has no effort tier");
         p.handle_key(&key(KeyCode::Up)); // back to Sonnet 4.6 [1m] (index 3)
@@ -469,26 +439,14 @@ mod tests {
     fn enter_with_no_changes_returns_cancelled() {
         // Open + Enter without touching anything is the same shape as
         // Esc — nothing to dispatch.
-        let mut p = picker(InitialFocus::Model);
-        let outcome = p.handle_key(&key(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn enter_immediately_after_effort_focus_with_no_explicit_effort_returns_cancelled() {
-        // When `active_effort` is `None` (user config has no explicit
-        // effort), the picker resolves the model's default. Pressing
-        // Enter immediately must not emit a spurious `SwapConfig`.
-        let mut info = test_session_info();
-        info.config.effort = None;
-        let mut p = ModelEffortPicker::new(&info, InitialFocus::Effort);
+        let mut p = picker();
         let outcome = p.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     #[test]
     fn enter_after_model_change_emits_swap_with_model_only() {
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Down));
         let outcome = p.handle_key(&key(KeyCode::Enter));
         match outcome {
@@ -509,7 +467,7 @@ mod tests {
     #[test]
     fn enter_after_effort_change_emits_swap_with_effort_only() {
         // Opus 4.7 active + High; cycle effort Forward once → Xhigh.
-        let mut p = picker(InitialFocus::Effort);
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Right));
         let outcome = p.handle_key(&key(KeyCode::Enter));
         match outcome {
@@ -526,7 +484,7 @@ mod tests {
 
     #[test]
     fn esc_returns_cancelled_regardless_of_axis_state() {
-        let mut p = picker(InitialFocus::Model);
+        let mut p = picker();
         p.handle_key(&key(KeyCode::Down));
         p.handle_key(&key(KeyCode::Right));
         let outcome = p.handle_key(&key(KeyCode::Esc));
@@ -537,10 +495,10 @@ mod tests {
 
     #[test]
     fn height_drops_when_highlighted_model_lacks_effort_tier() {
-        // The effort row + spacer (2 rows) only render when the
-        // highlighted model has an effort tier. Pin the no-tier path
-        // so a regression that always reserves the row fails here.
-        let mut p = picker(InitialFocus::Model);
+        // The effort row + spacer (2 rows) only render when the highlighted model has an
+        // effort tier. Pin the no-tier path so a regression that always reserves the row
+        // fails here.
+        let mut p = picker();
         let with_tier = p.height(80);
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku 4.5
         let no_tier = p.height(80);
@@ -559,15 +517,13 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let theme = Theme::default();
-        // Two cursor positions: an effort-tier model (Opus 4.7) so the
-        // effort row renders, and a no-tier model (Haiku 4.5) so the
-        // hide branch executes. Without the second case the hide path
-        // is reachable only via mutation tests.
+        // Two cursor positions: an effort-tier model (Opus 4.7) so the effort row renders, and
+        // a no-tier model (Haiku 4.5) so the hide branch executes.
         for setup in [
             None,                     // Opus 4.7 — has effort tier
             Some(KeyCode::Char('5')), // Haiku 4.5 — no effort tier
         ] {
-            let mut p = picker(InitialFocus::Model);
+            let mut p = picker();
             if let Some(jump) = setup {
                 p.handle_key(&key(jump));
             }

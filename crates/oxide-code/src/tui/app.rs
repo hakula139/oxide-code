@@ -1481,20 +1481,19 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
-        // Bare form classifies as ReadOnly so it dispatches mid-turn —
-        // and now opens the picker modal instead of printing a list.
-        // The arg-bearing form continues to refuse mid-turn.
-        for cmd in ["/model", "/effort"] {
-            let (mut app, _rx, _agent_tx) = test_app(None);
-            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+        // Bare `/model` classifies as ReadOnly so it dispatches mid-turn and opens the picker
+        // modal instead of printing a list. (`/effort` is Mutating regardless of args after the
+        // typed-arg-only refactor — its bare-form busy path is covered by
+        // `dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward`.)
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
-            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model".to_owned()));
 
-            assert!(
-                app.modals.is_active(),
-                "{cmd}: bare form must push a modal mid-turn",
-            );
-        }
+        assert!(
+            app.modals.is_active(),
+            "bare /model must push a modal mid-turn",
+        );
     }
 
     #[tokio::test]

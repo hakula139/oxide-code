@@ -53,10 +53,7 @@ impl SlashCommand for ModelCmd {
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(
-                ctx.info,
-                super::picker::InitialFocus::Model,
-            )));
+            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(ctx.info)));
             return Ok(SlashOutcome::Done);
         }
         let id = resolve_model_arg(arg)?;

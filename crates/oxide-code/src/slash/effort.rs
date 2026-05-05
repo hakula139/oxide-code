@@ -1,9 +1,5 @@
-//! `/effort` — open the model+effort picker focused on the effort
-//! axis, or `/effort <level>` to swap directly. The agent loop calls
-//! [`Client::set_effort`](crate::client::anthropic::Client::set_effort)
-//! on the typed-arg path; the picker emits a single
-//! [`UserAction::SwapConfig`] which routes through the same client
-//! resolver.
+//! `/effort <level>` — direct effort swap. The bare form errors with a usage hint; users adjust
+//! effort interactively via the `/model` picker (Left / Right on the effort row).
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
@@ -19,31 +15,26 @@ impl SlashCommand for EffortCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Open the picker focused on effort, or set a level with `/effort <level>`"
+        "Set the effort tier with `/effort <level>`"
     }
 
-    fn classify(&self, args: &str) -> SlashKind {
-        // Bare opens the picker (UI-local; safe mid-turn). The
-        // typed-arg form races the in-flight `Client` and must wait.
-        if args.trim().is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Mutating
-        }
+    fn classify(&self, _args: &str) -> SlashKind {
+        // Both bare (error response) and typed (real swap) paths reach `execute`; the typed
+        // path races the in-flight client, so gate as Mutating.
+        SlashKind::Mutating
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some("[<level>]")
+        Some("<level>")
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            ctx.open_modal(Box::new(super::picker::ModelEffortPicker::new(
-                ctx.info,
-                super::picker::InitialFocus::Effort,
-            )));
-            return Ok(SlashOutcome::Done);
+            return Err(format!(
+                "Usage: /effort <level>. Valid: {}. Or use /model to pick interactively.",
+                Effort::VALID_VALUES,
+            ));
         }
         let pick = parse_effort_arg(arg)?;
         // Preflight: setting an explicit level on a no-effort model is
@@ -84,13 +75,13 @@ mod tests {
         assert_eq!(EffortCmd.name(), "effort");
         assert!(EffortCmd.aliases().is_empty());
         assert!(!EffortCmd.description().is_empty());
-        assert_eq!(EffortCmd.usage(), Some("[<level>]"));
+        assert_eq!(EffortCmd.usage(), Some("<level>"));
     }
 
     #[test]
-    fn classify_splits_on_args() {
-        assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
+    fn classify_is_mutating_regardless_of_args() {
+        assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
+        assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
@@ -115,20 +106,17 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_opens_picker_focused_on_effort() {
-        // Bare `/effort` opens the same picker as `/model`, but pre-armed
-        // on the effort axis so a single Enter submits the active level.
-        // Picker behavior is covered in `slash::picker` tests.
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        let outcome = EffortCmd.execute("", &mut ctx);
-        assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert!(
-            ctx.take_modal().is_some(),
-            "bare /effort must populate the modal slot",
-        );
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+    fn execute_no_args_errors_with_usage_hint_and_model_pointer() {
+        // Bare `/effort` is invalid usage — the typed-arg form is the only direct shortcut;
+        // interactive adjustment lives in `/model`.
+        let (chat, outcome) = run_execute("");
+        let msg = outcome.expect_err("bare /effort must error");
+        assert!(msg.contains("Usage: /effort <level>"), "{msg}");
+        assert!(msg.contains("/model"), "must point at the picker: {msg}");
+        for valid in Effort::VALID_VALUES.split(", ") {
+            assert!(msg.contains(valid), "lists `{valid}`: {msg}");
+        }
+        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 
     #[test]
