@@ -1,8 +1,5 @@
-//! Built-in theme catalogue.
-//!
-//! Each TOML body is embedded at compile time via `include_str!` so
-//! the binary stays self-contained and the vendored files in
-//! `crates/oxide-code/themes/` double as user-facing examples.
+//! Built-in theme catalogue. TOML bodies are embedded via `include_str!` so the binary stays
+//! self-contained and the vendored files in `crates/oxide-code/themes/` double as user examples.
 
 pub(super) const MOCHA: &str = include_str!("../../../themes/mocha.toml");
 pub(super) const MACCHIATO: &str = include_str!("../../../themes/macchiato.toml");
@@ -10,8 +7,7 @@ pub(super) const FRAPPE: &str = include_str!("../../../themes/frappe.toml");
 pub(super) const LATTE: &str = include_str!("../../../themes/latte.toml");
 pub(super) const MATERIAL: &str = include_str!("../../../themes/material.toml");
 
-/// Name → embedded body lookup table. Catppuccin variants are listed
-/// dark→light first, with non-Catppuccin palettes grouped after.
+/// Name → embedded body. Catppuccin variants listed dark→light, then non-Catppuccin palettes.
 pub(super) const BUILT_IN: &[(&str, &str)] = &[
     ("mocha", MOCHA),
     ("macchiato", MACCHIATO),
@@ -20,7 +16,6 @@ pub(super) const BUILT_IN: &[(&str, &str)] = &[
     ("material", MATERIAL),
 ];
 
-/// Look up a built-in theme's TOML body by name.
 pub(super) fn lookup(name: &str) -> Option<&'static str> {
     BUILT_IN
         .iter()

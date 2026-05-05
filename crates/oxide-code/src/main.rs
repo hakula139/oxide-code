@@ -33,14 +33,14 @@ use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
-use slash::SessionInfo;
+use slash::LiveSessionInfo;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
 };
 use util::path::tildify;
 
-/// Computed before the tokio runtime starts (unsound under multi-threaded).
+// Captured before the tokio runtime starts — `now_local()` is unsound under multi-threaded.
 static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
 
 #[derive(Parser)]
@@ -59,8 +59,7 @@ struct Cli {
     #[arg(short, long, value_name = "PROMPT")]
     prompt: Option<String>,
 
-    /// Resume a session. Without a value, resumes the most recent session.
-    /// With a session ID prefix, resumes that specific session.
+    /// Resume a session: bare flag picks the most recent, an ID prefix picks a specific one.
     #[expect(
         clippy::option_option,
         reason = "encodes three CLI states: absent (None), flag only (Some(None)), flag with value (Some(Some))"
@@ -77,10 +76,7 @@ struct Cli {
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
-    /// Operate across every project. Widens the scope of `--list` /
-    /// `--continue` from the current working directory to every
-    /// project. Must be combined with `--list` or `--continue`; on its
-    /// own (or with `--prompt`) it would have no effect.
+    /// Widen `--list` / `--continue` from the current cwd to every project.
     #[arg(short, long, requires = "scope")]
     all: bool,
 }
@@ -195,7 +191,7 @@ fn create_tool_registry(tracker: &Arc<FileTracker>) -> ToolRegistry {
     ])
 }
 
-/// Waits for SIGINT, SIGTERM, or SIGHUP (Unix). Returns on first arrival.
+/// Resolves on the first SIGINT / SIGTERM / SIGHUP.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -255,7 +251,7 @@ async fn run_tui(
         .map(tildify)
         .unwrap_or_default();
 
-    let session_info = SessionInfo {
+    let session_info = LiveSessionInfo {
         cwd,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),
@@ -319,8 +315,7 @@ async fn run_tui(
     result
 }
 
-/// Each `TurnAbort` arm emits exactly one terminal event (`Error` and
-/// `TurnComplete` are mutually exclusive).
+/// Each `TurnAbort` arm emits exactly one terminal event (`Error` xor `TurnComplete`).
 #[expect(
     clippy::too_many_arguments,
     reason = "session lifecycle (store, handle, file tracker) lives here for /clear; bundling into a struct would just rename the dependencies"
@@ -399,11 +394,7 @@ async fn agent_loop_task(
     Ok(())
 }
 
-/// Apply a [`UserAction::SwapConfig`] to the live `Client` and emit
-/// [`AgentEvent::ConfigChanged`]. Order is load-bearing: the model
-/// swap re-clamps existing effort first, then the explicit effort
-/// pick (if any) clamps against the new model's caps. `requested_effort`
-/// echoes the user's pick so the UI can surface clamping.
+/// Order matters: model swap re-clamps effort before the explicit pick is applied.
 fn apply_swap_config(
     client: &mut Client,
     sink: &dyn AgentSink,
@@ -501,7 +492,7 @@ async fn bare_repl(
     let failure = session.finalize(file_tracker.snapshot_all()).await;
     sink.session_write_error(failure.as_deref());
 
-    // tokio::io::stdin's blocking thread hangs runtime Drop on signal exit.
+    // tokio::io::stdin's blocking thread hangs runtime Drop on signal; force-exit instead.
     if shutdown_fired {
         std::process::exit(0);
     }

@@ -1,16 +1,9 @@
-//! Anthropic Messages API streaming client.
+//! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop;
+//! [`Client::complete`] handles one-shots (title generation, structured-output probes).
 //!
-//! [`Client::stream_message`] drives the main agent loop: assembles
-//! the request (identity prefix, billing attestation for OAuth,
-//! static / dynamic system-block split for cache reuse), POSTs
-//! `/v1/messages` with SSE streaming, and forwards parsed
-//! [`StreamEvent`]s on an mpsc channel. [`Client::complete`] (in
-//! [`completion`]) covers non-streaming one-shots.
-//!
-//! Per-request `anthropic-beta` headers are computed from the model's
-//! [`crate::model::Capabilities`] via [`betas::compute_betas`], so
-//! gateways that reject unsupported betas don't 400 on spurious
-//! feature flags.
+//! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
+//! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
+//! auth-mode capabilities. Deviating from any of these trips 3P gateway fingerprinting.
 
 mod betas;
 mod billing;
@@ -46,30 +39,27 @@ use wire::{
 
 const API_VERSION: &str = "2023-06-01";
 
-/// Pinned to the latest packaged claude-code release; gateways
-/// reject pre-allowlist versions.
+/// Pinned to the latest claude-code release; gateways reject pre-allowlist versions.
 const CLAUDE_CLI_VERSION: &str = "2.1.121";
-/// `@anthropic-ai/sdk` version shipped by the pinned claude-code release.
 const STAINLESS_PACKAGE_VERSION: &str = "0.81.0";
-/// Node.js version the Stainless SDK reports as `process.version`.
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
-/// Stainless per-request timeout matching the SDK default.
 const STAINLESS_TIMEOUT_SECS: &str = "600";
 
-/// OAuth-required identity prefix. The Anthropic API returns 429 for non-Haiku
-/// models with OAuth tokens unless the system prompt starts with this exact
-/// string in its own text block.
+/// Required as its own text block; non-Haiku OAuth requests 429 without it.
 const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // ── Client ──
 
+/// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap — `reqwest::Client`
+/// shares its connection pool across clones, so callers may stash one per session and roll
+/// `session_id` / `model` / `effort` in place via the `set_*` methods.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
     device_id: String,
-    /// Cached 1P check — gates `scope: "global"` in `cache_control`.
+    /// Gates `scope: "global"` in `cache_control` (1P-only — 3P gateways reject it).
     is_first_party: bool,
 }
 
@@ -131,9 +121,8 @@ impl Client {
         );
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
-        // No whole-request timeout — assistant responses can legitimately
-        // run for minutes. The 60 s read timeout catches slowloris dribble;
-        // Anthropic sends keepalives every ~15 s on healthy streams.
+        // No whole-request timeout — responses can run for minutes. The 60 s read timeout
+        // catches slowloris dribble; Anthropic sends keepalives every ~15 s on healthy streams.
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
@@ -150,27 +139,20 @@ impl Client {
         })
     }
 
-    /// Returns the model name for use in the system prompt.
     pub(crate) fn model(&self) -> &str {
         &self.config.model
     }
 
-    /// Returns the effort tier the next request will be issued at.
     pub(crate) fn effort(&self) -> Option<Effort> {
         self.config.effort
     }
 
-    /// Client-side session id carried in `x-claude-code-session-id` and
-    /// billing metadata. Caller-supplied or auto-generated UUID v4.
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// Replaces the id used for `x-claude-code-session-id` and
-    /// `metadata.user_id`. Debug-asserts header-value validity;
-    /// callers feed UUID v4s from `SessionHandle`, so failure is a
-    /// programmer error.
+    /// Replaces the id used for `x-claude-code-session-id` and `metadata.user_id`.
     pub(crate) fn set_session_id(&mut self, id: String) {
         debug_assert!(
             HeaderValue::from_str(&id).is_ok(),
@@ -179,8 +161,7 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-clamps `config.effort` against
-    /// the new caps. Returns the effective effort for display.
+    /// Swaps the active model and re-clamps `config.effort` against the new caps.
     pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&model);
         let effort = caps.resolve_effort(self.config.effort);
@@ -189,8 +170,7 @@ impl Client {
         effort
     }
 
-    /// Swaps the active effort, clamped against the current model's
-    /// caps. Returns the resolved effort.
+    /// Swaps the active effort, clamped against the current model's caps.
     pub(crate) fn set_effort(&mut self, pick: Effort) -> Option<Effort> {
         let caps = crate::model::capabilities_for(&self.config.model);
         let effort = caps.clamp_effort(pick);
@@ -198,18 +178,18 @@ impl Client {
         effort
     }
 
-    /// Stream a message response from the Anthropic API.
+    /// Streams an agentic turn. The returned receiver delivers parsed [`StreamEvent`]s; the
+    /// background task ends when the stream completes, the receiver is dropped, or an unrecoverable
+    /// transport error is forwarded as a final `Err`.
     ///
-    /// `system_sections` ship as individual `system` text blocks so
-    /// `cache_control` can apply to the static prefix only. `user_context`
-    /// is prepended as a synthetic user message (keeping dynamic content
-    /// like CLAUDE.md out of the cacheable `system` parameter).
+    /// Wire shape:
     ///
-    /// System-block ordering is delegated to [`build_system_blocks`].
-    /// The static section is the only block carrying `cache_control` —
-    /// `scope=global` on 1P, default org-scoped on 3P.
-    ///
-    /// Returns an mpsc receiver of [`StreamEvent`]s.
+    /// - `system_sections` ship as individual `system` text blocks so `cache_control` covers the
+    ///   static prefix only — anything after [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is left uncached.
+    /// - `user_context` rides as a synthetic user message so dynamic content (CLAUDE.md and
+    ///   friends) does not invalidate the cached `system` parameter on every turn.
+    /// - The billing attestation block is injected unconditionally; 3P gateways reject API-key
+    ///   traffic without it.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
@@ -224,8 +204,7 @@ impl Client {
             None => messages.to_vec(),
         };
 
-        // 3P gateways reject API-key traffic without the cch
-        // attestation, so the billing block ships under both auth modes.
+        // 3P gateways reject API-key traffic without the cch attestation.
         let billing_header = {
             let fingerprint = billing::compute_fingerprint(
                 first_user_text(&effective_messages),
@@ -252,7 +231,6 @@ impl Client {
 
         let url = format!("{}/v1/messages?beta=true", self.config.base_url);
         let mut body = serde_json::to_string(&CreateMessageRequest {
-            // `[1m]` is a client-side tag; strip before the wire.
             model: betas::api_model_id(&self.config.model),
             max_tokens: self.config.max_tokens,
             stream: true,
@@ -261,8 +239,7 @@ impl Client {
             tools: (!tools.is_empty()).then_some(tools),
             thinking: self.config.thinking.as_ref(),
             output_config: OutputConfig::new(None, self.config.effort),
-            // Body and header stay in sync — claude-code 2.1.119 ships
-            // both on every 4.6+ agentic request.
+            // Body must accompany the beta header; claude-code 2.1.119 ships both on every 4.6+.
             context_management: caps
                 .context_management
                 .then(ContextManagement::clear_thinking_keep_all),
@@ -292,7 +269,7 @@ impl Client {
 
 // ── Request Building ──
 
-/// Stringified `metadata.user_id`. Field order is load-bearing (gateway check).
+/// Field order is load-bearing — gateways validate the JSON shape of `metadata.user_id`.
 fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     #[derive(serde::Serialize)]
     struct UserId<'a> {
@@ -310,7 +287,7 @@ fn build_metadata(device_id: &str, session_id: &str) -> RequestMetadata {
     RequestMetadata { user_id }
 }
 
-/// System blocks in wire order. Order is load-bearing for billing injection.
+/// Wire order is load-bearing for billing injection.
 fn build_system_blocks<'a, const N: usize>(
     billing_header: Option<&'a str>,
     extras: [(&'a str, Option<CacheControl>); N],
@@ -369,11 +346,7 @@ fn normalize_arch(arch: &str) -> &'static str {
 
 // ── System Prompt Helpers ──
 
-/// Splits system sections at the boundary marker into static and dynamic parts.
-///
-/// Returns `(static_sections, dynamic_sections)`. The boundary marker itself
-/// is excluded from both. Sections before the boundary are static (globally
-/// cacheable); sections after are dynamic (per-session).
+/// Splits at the boundary marker; marker itself is dropped.
 fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
     let boundary_pos = sections
         .iter()
@@ -392,13 +365,11 @@ fn split_at_boundary<'a>(sections: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
             .collect();
         (static_part, dynamic_part)
     } else {
-        // No boundary — treat everything as static.
         let all = sections.iter().filter(|s| !s.is_empty()).copied().collect();
         (all, Vec::new())
     }
 }
 
-/// Extracts the text of the first user message for fingerprint computation.
 fn first_user_text(messages: &[Message]) -> &str {
     messages
         .iter()
@@ -428,10 +399,7 @@ mod tests {
     const OFFLINE_URL: &str = "https://example.invalid";
     const TEST_MODEL: &str = "claude-sonnet-4-6";
 
-    /// Builds an SSE response body from `(event, data)` pairs. Each
-    /// frame is emitted as `event: <name>\ndata: <json>\n\n`, encoding
-    /// the frame-separator invariant in one place so call sites don't
-    /// hand-roll it (and can't silently omit the `\n\n`).
+    /// Builds an SSE response body from `(event, data)` pairs.
     fn sse_body(frames: &[(&str, &str)]) -> String {
         use std::fmt::Write;
         let mut body = String::new();
@@ -532,14 +500,12 @@ mod tests {
 
     #[test]
     fn new_rejects_auth_values_containing_invalid_header_bytes() {
-        // `HeaderValue::from_str` rejects control chars (\n, \r); both
-        // auth arms must propagate the error instead of panicking.
+        // `HeaderValue::from_str` rejects control chars (\n, \r); both auth arms must propagate.
         for auth in [
             Auth::ApiKey("bad\nkey".to_owned()),
             Auth::OAuth("bad\rtoken".to_owned()),
         ] {
-            // `Client` has no Debug derive, so .unwrap_err() doesn't
-            // compile — use .err().unwrap() on the Option instead.
+            // `Client` has no Debug, so .unwrap_err() doesn't compile — use .err().unwrap().
             let err = Client::new(
                 test_config(OFFLINE_URL, auth, TEST_MODEL),
                 Some("sid".to_owned()),
@@ -557,9 +523,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_session_id_propagates_to_header_and_metadata_user_id() {
-        // Pins both wire surfaces — the mock matches the rolled id in
-        // the header (wrong value 404s) and the assertion below pins
-        // the embedded JSON in `metadata.user_id`.
+        // Pins both wire surfaces: the mock matches the rolled id in the header (wrong value 404s)
+        // and the assertion below pins the embedded JSON in `metadata.user_id`.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -613,10 +578,9 @@ mod tests {
 
     #[test]
     fn set_model_resolves_effort_and_persists_full_state() {
-        // Each row pins one resolution arm: clamp-down, pass-through,
-        // no-tier clear, model-default fallback, and unknown-id (all
-        // caps false). Asserting both returned + stored effort catches
-        // the "returned but not persisted" mutation.
+        // Rows pin each resolution arm: clamp-down, pass-through, no-tier clear, model-default
+        // fallback, unknown-id. Asserting both returned + stored effort catches the
+        // "returned but not persisted" mutation.
         for (from_model, from_effort, swap_to, expect) in [
             (
                 "claude-opus-4-7",
@@ -662,9 +626,8 @@ mod tests {
 
     #[test]
     fn set_model_preserves_1m_tag_round_trip() {
-        // `[1m]` is a client-side opt-in; the swap must store it
-        // verbatim so per-request `compute_betas` keeps sending the
-        // 1M context beta. Regressing this drops 1M context silently.
+        // `[1m]` is a client-side opt-in; the swap must store it verbatim so `compute_betas` keeps
+        // sending the 1M context beta. Regressing this drops 1M context silently.
         let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
         client.set_model("claude-opus-4-7[1m]".to_owned());
         assert_eq!(client.model(), "claude-opus-4-7[1m]");
@@ -674,9 +637,7 @@ mod tests {
 
     #[test]
     fn set_effort_resolves_pick_against_active_model_caps() {
-        // Each row is one resolution arm: pass-through, clamp-down,
-        // and explicit-on-no-tier collapses to None. Tested through
-        // `&mut self` to cover both returned and stored effort.
+        // Rows: pass-through, clamp-down, explicit-on-no-tier → None.
         for (model, initial, pick, expect) in [
             (
                 "claude-opus-4-7",
@@ -750,8 +711,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_preserves_multibyte_codepoints_in_deltas() {
-        // Pins the byte-level SSE buffer: a chunk decoded as lossy UTF-8
-        // would mangle a 4-byte emoji split across TCP chunk boundaries.
+        // Pins the byte-level SSE buffer: lossy UTF-8 would mangle a 4-byte emoji split across
+        // TCP chunk boundaries.
         let server = MockServer::start().await;
         let body = sse_body(&[
             (
@@ -798,8 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_malformed_frame_is_skipped_without_poisoning_stream() {
-        // The valid delta after a malformed frame must still deliver —
-        // one bad frame cannot poison the whole turn.
+        // One bad frame must not poison the rest of the turn.
         let server = MockServer::start().await;
         let body = sse_body(&[
             (
@@ -847,8 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_mid_stream_error_event_is_delivered_with_api_payload() {
-        // `StreamEvent::Error` flows as `Ok(Error { .. })` on the channel;
-        // the caller (`agent.rs`) converts it to a bail!.
+        // `StreamEvent::Error` flows as `Ok(Error { .. })`; `agent.rs` converts to bail!.
         let server = MockServer::start().await;
         let body = sse_body(&[(
             "error",
@@ -920,9 +879,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_429_threads_retry_after_header_into_error() {
-        // The streaming path's retry-after extraction lives in stream_sse,
-        // not format_api_error — pin that the header is read off the
-        // response *before* the body is consumed.
+        // Retry-after extraction lives in stream_sse (not format_api_error); pin that the
+        // header is read off the response *before* the body is consumed.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
@@ -973,8 +931,7 @@ mod tests {
             .unwrap();
         _ = rx.recv().await;
         drop(rx);
-        // Lets the background task observe the closed channel and exit;
-        // any panic would surface in test output.
+        // Lets the background task observe the closed channel; any panic surfaces in test output.
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
 
@@ -1047,9 +1004,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_billing_block_ships_under_both_auth_modes_with_cch_populated() {
-        // 3P gateways reject API-key requests without the cch
-        // attestation, so the billing block must ship under both
-        // auth modes with the placeholder replaced by xxHash64.
+        // 3P gateways reject API-key requests without the cch attestation, so the billing block
+        // must ship under both auth modes with the placeholder replaced by xxHash64.
         for auth in [api_key(), oauth()] {
             let server = MockServer::start().await;
             let body_sink: Captured<String> = captured();
@@ -1138,9 +1094,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_third_party_base_url_drops_global_scope_keeps_its_beta() {
-        // On 3P, the `prompt-caching-scope` beta still ships (gateway
-        // fingerprints absence) but the body-side `scope: "global"`
-        // is dropped (gateway rejects the scope downstream of tools).
+        // On 3P, the `prompt-caching-scope` beta still ships (gateway fingerprints absence) but
+        // the body-side `scope: "global"` is dropped (gateway rejects it downstream of tools).
         let server = MockServer::start().await;
         let sink: Captured<(String, String)> = captured();
         let sink_clone = std::sync::Arc::clone(&sink);
@@ -1181,7 +1136,7 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let system = v["system"].as_array().expect("system array");
-        // [0] billing header, [1] identity prefix, [2] static joined.
+        // [0] billing, [1] identity prefix, [2] static joined.
         assert!(
             system[0]["text"]
                 .as_str()
@@ -1203,9 +1158,6 @@ mod tests {
     // ── Client::stream_message / agentic body fields ──
 
     /// Captures the serialized body of a single streaming request.
-    /// Most agentic-body tests only care about what oxide-code sends,
-    /// not the response — this collapses the ceremony to two lines
-    /// per test.
     async fn capture_stream_body(config: Config) -> serde_json::Value {
         let server = MockServer::start().await;
         let sink: Captured<String> = captured();
@@ -1245,8 +1197,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_omits_output_config_when_effort_is_none() {
-        // Non-effort-capable model → `Config.effort == None` → the
-        // whole `output_config` block is absent (not `{}`).
+        // Non-effort-capable model → `Config.effort == None` → `output_config` absent (not `{}`).
         let cfg = test_config(
             "https://placeholder.invalid",
             api_key(),
@@ -1262,9 +1213,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_context_management_body_present_on_4_6_plus() {
-        // Every model whose `context_management` capability flag is
-        // set must also ship the body directive alongside the beta
-        // header.
+        // Every model with the `context_management` capability must ship the body directive
+        // alongside the beta header.
         for model in [
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -1284,9 +1234,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_context_management_absent_on_unknown_model() {
-        // Unknown model ids (no `MODELS` row matches) fall back to
-        // the all-false `Capabilities::default()` — no beta, no body
-        // directive. Keeps "beta sent ⇒ body populated" an invariant.
+        // Unknown ids fall back to all-false `Capabilities::default()` — no beta, no body. Keeps
+        // "beta sent ⇒ body populated" an invariant.
         let cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-5-0");
         let body = capture_stream_body(cfg).await;
         assert!(
@@ -1308,8 +1257,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_message_show_thinking_false_omits_display_field() {
-        // `Adaptive { display: None }` must serialize without a
-        // `display` key — `skip_serializing_if` on the wire.
+        // `Adaptive { display: None }` must serialize without a `display` key.
         let mut cfg = test_config("https://placeholder.invalid", api_key(), "claude-opus-4-7");
         cfg.thinking = Some(ThinkingConfig::Adaptive { display: None });
         let body = capture_stream_body(cfg).await;
@@ -1324,8 +1272,8 @@ mod tests {
 
     #[test]
     fn build_metadata_wraps_ids_in_stringified_json_with_canonical_field_order() {
-        // Field order must be `device_id, account_uuid, session_id` —
-        // `serde_json::json!` would alphabetize and trip 3P validation.
+        // Field order is `device_id, account_uuid, session_id` — `serde_json::json!` would
+        // alphabetize and trip 3P validation.
         let meta = build_metadata("dev-1", "abc-123");
         assert_eq!(
             meta.user_id,

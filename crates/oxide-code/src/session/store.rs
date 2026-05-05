@@ -186,8 +186,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let mut buf = Vec::new();
     let mut line_no: u32 = 0;
 
-    // Manual byte-by-line read so truncated UTF-8 at EOF is warn-skipped
-    // instead of propagating `InvalidData` from `BufReader::lines()`.
+    // Byte-by-line so truncated UTF-8 at EOF is warn-skipped (not `InvalidData` from `lines()`).
     loop {
         buf.clear();
         let read = reader

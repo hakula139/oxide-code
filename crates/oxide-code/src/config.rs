@@ -1,9 +1,7 @@
 //! Configuration loading.
 //!
-//! Layered precedence (highest wins): env vars > project `ox.toml` >
-//! user `~/.config/ox/config.toml` > built-in defaults. Auth follows
-//! the same precedence but terminates at the first source that
-//! resolves (API key env > API key in file > OAuth credentials).
+//! Precedence (highest wins): env > project `ox.toml` > user `~/.config/ox/config.toml` > defaults.
+//! Auth stops at the first source that resolves (API key env > API key in file > OAuth).
 
 pub(crate) mod file;
 mod oauth;
@@ -22,18 +20,15 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 // ── Auth ──
 
+/// Resolved credential. First source wins, in order: `ANTHROPIC_API_KEY` env, `client.api_key`
+/// in the config file, then OAuth (macOS Keychain → `~/.claude/.credentials.json`).
 #[derive(Debug, Clone)]
 pub(crate) enum Auth {
-    /// Explicit API key (`x-api-key` header).
     ApiKey(String),
-    /// OAuth access token from Claude Code (`Authorization: Bearer` header).
     OAuth(String),
 }
 
 impl Auth {
-    /// Short label naming the credential type (`"API key"` /
-    /// `"OAuth"`). Surfaced by `/status` and `/config` so the user
-    /// knows which auth source is live without dumping the secret.
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::ApiKey(_) => "API key",
@@ -44,11 +39,7 @@ impl Auth {
 
 // ── ConfigSnapshot ──
 
-/// Resolved-config view — every field [`Config`] holds except the
-/// secret. Built at startup from [`Config::snapshot`] and handed into
-/// the slash dispatcher; survives the move when [`Config`] itself is
-/// consumed by the API client. `model_id` and `effort` are rebound by
-/// runtime slash-command swaps so the snapshot reflects live values.
+/// Resolved-config view minus the secret. Survives [`Config`] being consumed by the client.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSnapshot {
     pub(crate) model_id: String,
@@ -65,19 +56,14 @@ pub(crate) struct ConfigSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ThinkingConfig {
-    /// Model decides the thinking budget (Claude 4.6+). `display`
-    /// controls what the API streams back: `Omitted` (4.7 default,
-    /// empty `thinking` field) or `Summarized` (the 4.6 default, and
-    /// what oxide-code enables whenever `show_thinking=true`).
+    /// Model decides the thinking budget (4.6+).
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<ThinkingDisplay>,
     },
 }
 
-/// `thinking.display` values accepted by the API on 4.7+. Only
-/// `Summarized` is ever emitted — omitting the field entirely (via
-/// `display: None`) already yields the `omitted` default on 4.7.
+/// `thinking.display` values accepted on 4.7+.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ThinkingDisplay {
@@ -86,9 +72,7 @@ pub(crate) enum ThinkingDisplay {
 
 // ── Effort ──
 
-/// Intelligence-vs-latency tier sent as `output_config.effort` on
-/// effort-capable models. The per-model ceiling lives in
-/// [`crate::model::Capabilities`].
+/// Intelligence-vs-latency tier sent as `output_config.effort`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Effort {
@@ -140,9 +124,7 @@ impl FromStr for Effort {
 
 // ── PromptCacheTtl ──
 
-/// Prompt-cache TTL sent as `cache_control.ttl`. Anthropic silently
-/// dropped the default from 1h to 5m on 2026-03-06, so `OneHour` is
-/// explicit opt-in. oxide-code defaults to `OneHour`.
+/// Sent as `cache_control.ttl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PromptCacheTtl {
     #[serde(rename = "5m")]
@@ -152,8 +134,7 @@ pub(crate) enum PromptCacheTtl {
 }
 
 impl PromptCacheTtl {
-    /// Wire value for `cache_control.ttl`. `None` when the TTL is
-    /// the server default (5 m) so the JSON omits the field entirely.
+    /// `None` for the server default (5 m).
     pub(crate) const fn wire(self) -> Option<&'static str> {
         match self {
             Self::FiveMin => None,
@@ -193,35 +174,22 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) model: String,
-    /// `output_config.effort` for the streaming path. `None` means
-    /// the model doesn't accept the parameter and the field is
-    /// omitted. Resolved once at [`Config::load`]; mutated mid-session
-    /// by `/effort` and re-clamped on `/model` swaps.
+    /// `None` when the model doesn't accept it.
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
-    /// `cache_control.ttl` for every cacheable block. Default is
-    /// [`PromptCacheTtl::OneHour`] since Anthropic's 2026-03 TTL
-    /// drop made the server default (5 m) a silent cost regression
-    /// on long sessions.
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
-    /// Resolved TUI theme — base + per-slot overrides applied at
-    /// load time. Theme-selection errors hard-fail; per-slot value
-    /// errors warn and fall back to the base value.
     pub(crate) theme: Theme,
 }
 
 impl Config {
-    /// Loads configuration from files and environment variables.
-    ///
-    /// Precedence (highest wins): env vars > project `ox.toml` > user
-    /// `~/.config/ox/config.toml` > built-in defaults.
-    ///
-    /// Auth priority: `ANTHROPIC_API_KEY` env var > `api_key` in config
-    /// file > Claude Code OAuth credentials.
+    /// Resolves config from layered sources. Per-field precedence is env > project `ox.toml` >
+    /// user `~/.config/ox/config.toml` > built-in default; see the module docs for the auth
+    /// chain. Parse errors (TOML, env, theme) propagate so a typo doesn't degrade silently into
+    /// "no credentials".
     pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();
@@ -264,10 +232,8 @@ impl Config {
             .or(tui.show_thinking)
             .unwrap_or(false);
 
-        // Adaptive thinking is always enabled — the model decides the
-        // budget. `display` opts 4.7 into streaming summarized thinking
-        // text (its default changed to `omitted` silently); 4.6 and
-        // older ignore the field.
+        // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
+        // ignore the field.
         let thinking = Some(ThinkingConfig::Adaptive {
             display: show_thinking.then_some(ThinkingDisplay::Summarized),
         });
@@ -297,9 +263,7 @@ impl Config {
         })
     }
 
-    /// Captures the resolved descriptors `/config` (and friends)
-    /// print, minus the auth secret. Called before `self` is moved
-    /// into the API client so the snapshot survives the move.
+    /// Descriptors for `/config` and `/status`, minus the auth secret.
     pub(crate) fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
             model_id: self.model.clone(),
@@ -319,8 +283,6 @@ pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
 
-/// Per-effort `max_tokens` default; overridden by
-/// `ANTHROPIC_MAX_TOKENS` / `[client].max_tokens`.
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
     match effort {
         Some(Effort::Xhigh | Effort::Max) => 64_000,
@@ -342,9 +304,7 @@ mod tests {
 
     #[test]
     fn label_distinguishes_api_key_from_oauth() {
-        // Both branches reach `/status` and `/config` rows. Pin the
-        // exact strings — a regression that swapped them would mislabel
-        // every user's auth source without otherwise tripping a test.
+        // Swap would mislabel every user's auth source.
         assert_eq!(Auth::ApiKey("secret".to_owned()).label(), "API key");
         assert_eq!(Auth::OAuth("token".to_owned()).label(), "OAuth");
     }
@@ -353,8 +313,6 @@ mod tests {
 
     #[test]
     fn thinking_config_adaptive_without_display_serializes_bare() {
-        // Older models ignore `display`; absence keeps the wire as
-        // pre-4.7 clients expect.
         let json = serde_json::to_value(&ThinkingConfig::Adaptive { display: None }).unwrap();
         assert_eq!(json["type"], "adaptive");
         assert!(json.get("display").is_none(), "display omitted: {json}");
@@ -408,7 +366,6 @@ mod tests {
 
     #[test]
     fn prompt_cache_ttl_wire_shape() {
-        // 5m is the server default → field omitted. 1h opts in → "1h".
         assert_eq!(PromptCacheTtl::FiveMin.wire(), None);
         assert_eq!(PromptCacheTtl::OneHour.wire(), Some("1h"));
     }
@@ -436,10 +393,8 @@ mod tests {
 
     // ── Config::load ──
 
-    /// Env keys `Config::load` reads. Baseline for [`env_vars`] so
-    /// nothing bleeds in from the caller's environment; `ANTHROPIC_API_KEY`
-    /// ships with a non-empty default so tests land on the `ApiKey` arm
-    /// and never consult the real OAuth credential sources.
+    /// Env keys `Config::load` reads. `ANTHROPIC_API_KEY` defaults non-empty in [`env_vars`] so
+    /// tests land on `ApiKey` without consulting OAuth.
     const ENV_KEYS: &[&str] = &[
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
@@ -457,11 +412,7 @@ mod tests {
         std::fs::write(config_dir.join("config.toml"), body).unwrap();
     }
 
-    /// Baseline env list (every [`ENV_KEYS`] entry unset, `ANTHROPIC_API_KEY`
-    /// set to `"sk-default"`) with `overrides` applied on top. Panics if
-    /// an override key is not in [`ENV_KEYS`] so a misspelling surfaces
-    /// immediately. Returns a `Vec` because `temp_env::async_with_vars`
-    /// takes `AsRef<[(K, Option<V>)]>`.
+    /// Baseline env (all unset, `ANTHROPIC_API_KEY` = `"sk-default"`) plus overrides.
     fn env_vars(
         overrides: impl IntoIterator<Item = (&'static str, Option<String>)>,
     ) -> Vec<(&'static str, Option<String>)> {
@@ -498,8 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_defaults_apply_when_no_config_and_no_env() {
-        // Opus 4.7 supports `xhigh`, so both `effort` and `max_tokens`
-        // derive from that ceiling. Prompt cache defaults to 1h.
+        // Opus 4.7 supports `xhigh`; `effort` / `max_tokens` derive from that ceiling.
         let dir = tempfile::tempdir().unwrap();
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -650,11 +600,8 @@ mod tests {
         );
     }
 
-    /// Regression: a misplaced field used to drop the entire config
-    /// silently (parse error logged at `warn`, invisible without
-    /// `RUST_LOG`), which then surfaced as a confusing
-    /// "no credentials" error when the dropped config also held the
-    /// API key. The parse error must propagate instead.
+    /// Regression: misplaced fields used to drop the whole config silently and surface as
+    /// "no credentials". Parse errors must propagate.
     #[tokio::test]
     async fn load_propagates_invalid_config_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -675,10 +622,6 @@ mod tests {
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
     }
 
-    /// Theme-resolution failures from `[tui.theme]` must propagate
-    /// out of `Config::load` instead of getting swallowed — the user
-    /// needs to see *which* theme name is broken, not a downstream
-    /// "no credentials"-style misdirection.
     #[tokio::test]
     async fn load_propagates_theme_resolution_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -736,8 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
-        // Sonnet 4.6 supports `effort` but not `xhigh` / `max` — the
-        // user's pick must clamp rather than 400 the gateway.
+        // Sonnet 4.6 has effort but not `xhigh` / `max`; must clamp, not 400 the gateway.
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),
@@ -811,56 +753,6 @@ mod tests {
         assert!(msg.contains("insane"), "{msg}");
     }
 
-    // ── display_effort ──
-
-    #[test]
-    fn display_effort_names_effective_tier_or_no_tier() {
-        assert_eq!(display_effort(Some(Effort::High)), "high");
-        assert_eq!(display_effort(None), "(no effort tier)");
-    }
-
-    // ── Config::snapshot ──
-
-    #[test]
-    fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        // The snapshot is what `/config` prints; pin every field so a
-        // regression that forgot to copy one (or that swapped two
-        // names) shows up here, not silently in the rendered table.
-        // The auth secret never reaches the snapshot — only the
-        // `label()` projection does.
-        let cfg = Config {
-            auth: Auth::OAuth("token-must-not-leak".to_owned()),
-            base_url: "https://api.example.test".to_owned(),
-            model: "claude-test-1-0".to_owned(),
-            effort: Some(Effort::Xhigh),
-            max_tokens: 64_000,
-            prompt_cache_ttl: PromptCacheTtl::FiveMin,
-            thinking: None,
-            show_thinking: true,
-            theme: Theme::default(),
-        };
-        let snap = cfg.snapshot();
-        assert_eq!(snap.auth_label, "OAuth");
-        assert_eq!(snap.base_url, "https://api.example.test");
-        assert_eq!(snap.model_id, "claude-test-1-0");
-        assert_eq!(snap.effort, Some(Effort::Xhigh));
-        assert_eq!(snap.max_tokens, 64_000);
-        assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
-        assert!(snap.show_thinking);
-    }
-
-    // ── default_max_tokens ──
-
-    #[test]
-    fn default_max_tokens_scales_with_effort() {
-        assert_eq!(default_max_tokens(Some(Effort::Max)), 64_000);
-        assert_eq!(default_max_tokens(Some(Effort::Xhigh)), 64_000);
-        assert_eq!(default_max_tokens(Some(Effort::High)), 32_000);
-        assert_eq!(default_max_tokens(Some(Effort::Medium)), 16_000);
-        assert_eq!(default_max_tokens(Some(Effort::Low)), 16_000);
-        assert_eq!(default_max_tokens(None), 16_000);
-    }
-
     // ── Config::load / prompt_cache_ttl ──
 
     #[tokio::test]
@@ -916,5 +808,51 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("OX_PROMPT_CACHE_TTL"), "{msg}");
         assert!(msg.contains("forever"), "{msg}");
+    }
+
+    // ── Config::snapshot ──
+
+    #[test]
+    fn snapshot_copies_every_user_facing_field_and_drops_secret() {
+        // `/config` prints from the snapshot; secret must reduce to `label()`.
+        let cfg = Config {
+            auth: Auth::OAuth("token-must-not-leak".to_owned()),
+            base_url: "https://api.example.test".to_owned(),
+            model: "claude-test-1-0".to_owned(),
+            effort: Some(Effort::Xhigh),
+            max_tokens: 64_000,
+            prompt_cache_ttl: PromptCacheTtl::FiveMin,
+            thinking: None,
+            show_thinking: true,
+            theme: Theme::default(),
+        };
+        let snap = cfg.snapshot();
+        assert_eq!(snap.auth_label, "OAuth");
+        assert_eq!(snap.base_url, "https://api.example.test");
+        assert_eq!(snap.model_id, "claude-test-1-0");
+        assert_eq!(snap.effort, Some(Effort::Xhigh));
+        assert_eq!(snap.max_tokens, 64_000);
+        assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+        assert!(snap.show_thinking);
+    }
+
+    // ── display_effort ──
+
+    #[test]
+    fn display_effort_names_effective_tier_or_no_tier() {
+        assert_eq!(display_effort(Some(Effort::High)), "high");
+        assert_eq!(display_effort(None), "(no effort tier)");
+    }
+
+    // ── default_max_tokens ──
+
+    #[test]
+    fn default_max_tokens_scales_with_effort() {
+        assert_eq!(default_max_tokens(Some(Effort::Max)), 64_000);
+        assert_eq!(default_max_tokens(Some(Effort::Xhigh)), 64_000);
+        assert_eq!(default_max_tokens(Some(Effort::High)), 32_000);
+        assert_eq!(default_max_tokens(Some(Effort::Medium)), 16_000);
+        assert_eq!(default_max_tokens(Some(Effort::Low)), 16_000);
+        assert_eq!(default_max_tokens(None), 16_000);
     }
 }

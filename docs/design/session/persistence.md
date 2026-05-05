@@ -4,7 +4,7 @@ JSONL append-only storage, actor-owned writes, resume semantics.
 
 ## Storage Format
 
-Every session is a single `.jsonl` file -- one JSON object per line, append-only (crash-safe with write-then-flush).
+Every session is a single `.jsonl` file — one JSON object per line, append-only (crash-safe with write-then-flush).
 
 ### Entry Types
 
@@ -18,9 +18,9 @@ Every session is a single `.jsonl` file -- one JSON object per line, append-only
 
 ### Forward Compatibility
 
-1. **`Entry::Unknown` catch-all** -- unrecognized `type` discriminators parse silently. New entry types land additively.
-2. **`parent_uuid` chain** -- each message links to its predecessor. Future fork feature branches from an arbitrary message without rewriting.
-3. **`version` field** -- bumped on incompatible changes; readers refuse newer versions.
+1. **`Entry::Unknown` catch-all** — unrecognized `type` discriminators parse silently. New entry types land additively.
+2. **`parent_uuid` chain** — each message links to its predecessor. Future fork feature branches from an arbitrary message without rewriting.
+3. **`version` field** — bumped on incompatible changes; readers refuse newer versions.
 
 ## Storage Layout
 
@@ -36,11 +36,11 @@ On Unix, session files are created with mode `0o600`.
 
 The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel. Each cmd carries a oneshot ack. The actor's loop: `recv().await` for the first cmd, then `try_recv()` until empty, then one buffered flush over the batch.
 
-`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush. The text-only branch records its single assistant message via the sequential path. Side effect of joining: the on-disk file is iteration-atomic -- a crash mid-tool leaves the file at the previous turn's tail.
+`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush. The text-only branch records its single assistant message via the sequential path. Side effect of joining: the on-disk file is iteration-atomic — a crash mid-tool leaves the file at the previous turn's tail.
 
 ### Writer recovery on flush error
 
-`WriterStatus` is three variants: `Pending { header }` (file not yet on disk), `Active(SessionWriter)` (steady state), `Broken` (last batch errored -- next batch reopens via `SessionStore::open_append`).
+`WriterStatus` is three variants: `Pending { header }` (file not yet on disk), `Active(SessionWriter)` (steady state), `Broken` (last batch errored — next batch reopens via `SessionStore::open_append`).
 
 ### Lazy materialization
 
@@ -74,14 +74,14 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 
 ## Design Decisions
 
-1. **JSONL, append-only, one file per session** -- crash-safe, streamable, universal.
-2. **Per-project subdirectory** -- listings stay scoped; `--all` opts into cross-project view.
-3. **`{epoch}-{uuid}.jsonl` naming** -- timestamp prefix for `ls` order; UUID suffix for lookup.
-4. **Forward-compat entry schema** -- tagged union + `#[serde(other)]` + `parent_uuid` DAG + `version` field.
-5. **Lazy file creation** -- empty sessions leave no artifact.
-6. **Resume + symmetric sanitization** -- reopen, walk DAG, sanitize, keep every transcript API-valid.
-7. **Fork-on-conflict concurrency, no file lock** -- newest-leaf rule resolves forks; large interleaved writes are warn-skipped.
-8. **Fire-and-forget AI titles** -- one-shot Haiku call, warn-log on failure, tail-scan's `updated_at` auto-supersedes.
-9. **First-failure-only write-error surfacing** -- visibility without spam via single `AgentEvent::Error` + warn-logs.
-10. **Head + tail listing scan, mtime sort** -- head catches first-prompt title; tail picks up later titles and summary.
-11. **Actor-owned writes, receive-and-drain batching** -- one task owns the writer; `tokio::join!` coalesces a tool round's writes into one flush.
+1. **JSONL, append-only, one file per session** — crash-safe, streamable, universal.
+2. **Per-project subdirectory** — listings stay scoped; `--all` opts into cross-project view.
+3. **`{epoch}-{uuid}.jsonl` naming** — timestamp prefix for `ls` order; UUID suffix for lookup.
+4. **Forward-compat entry schema** — tagged union + `#[serde(other)]` + `parent_uuid` DAG + `version` field.
+5. **Lazy file creation** — empty sessions leave no artifact.
+6. **Resume + symmetric sanitization** — reopen, walk DAG, sanitize, keep every transcript API-valid.
+7. **Fork-on-conflict concurrency, no file lock** — newest-leaf rule resolves forks; large interleaved writes are warn-skipped.
+8. **Fire-and-forget AI titles** — one-shot Haiku call, warn-log on failure, tail-scan's `updated_at` auto-supersedes.
+9. **First-failure-only write-error surfacing** — visibility without spam via single `AgentEvent::Error` + warn-logs.
+10. **Head + tail listing scan, mtime sort** — head catches first-prompt title; tail picks up later titles and summary.
+11. **Actor-owned writes, receive-and-drain batching** — one task owns the writer; `tokio::join!` coalesces a tool round's writes into one flush.

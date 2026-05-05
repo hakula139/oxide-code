@@ -1,6 +1,6 @@
 # System Prompt Architecture
 
-Research notes on how Claude Code constructs its system prompt. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.101).
+Research notes on how Claude Code constructs its system prompt. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87).
 
 ## Section-Based Assembly
 

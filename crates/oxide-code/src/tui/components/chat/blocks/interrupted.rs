@@ -7,9 +7,8 @@ use ratatui::text::{Line, Span};
 use super::{ChatBlock, RenderCtx};
 use crate::agent::event::INTERRUPTED_MARKER;
 
-/// Trailing marker placed after the partial assistant block when a
-/// turn is cancelled mid-flight, so the rendered transcript shows
-/// where the cancel landed without a separate error treatment.
+/// Trails a cancelled turn's partial assistant block so the transcript shows where the cancel
+/// landed.
 pub(crate) struct InterruptedMarker;
 
 impl ChatBlock for InterruptedMarker {

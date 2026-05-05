@@ -1,9 +1,5 @@
-//! Public-facing session API.
-//!
-//! [`SessionHandle`] is held by the agent loop, the title generator,
-//! and the TUI shutdown path. Every write method sends a
-//! [`super::actor::SessionCmd`] and awaits the actor's oneshot ack;
-//! callers never hold a lock across `await`.
+//! Public session API. Every write method sends a [`super::actor::SessionCmd`] and awaits the
+//! actor's ack; callers never hold a lock across `await`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,14 +43,9 @@ pub(crate) struct SessionHandle {
 /// Sticky-once failure flags shared between actor and handle clones.
 #[derive(Default)]
 pub(super) struct SharedState {
-    /// First batch-flush failure has surfaced through a caller's ack.
     flush_failure_surfaced: AtomicBool,
-    /// First actor-gone surface has fired; subsequent send/recv errors
-    /// stay silent.
     actor_gone_surfaced: AtomicBool,
-    /// Most recent flush error message. `actor_gone_failure` reads this
-    /// so the user sees the underlying I/O cause when the actor died on
-    /// a real disk error, not just the generic "session actor is gone".
+    /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
 }
 
@@ -69,10 +60,7 @@ impl SharedState {
         }
     }
 
-    /// `true` on the first call after [`Self::record_flush_failure`];
-    /// sticky `false` afterwards. Surfaces a flush error to the user
-    /// once and stays silent on every subsequent failure so a
-    /// disk-full mid-conversation doesn't drown the UI.
+    /// `true` on the first call after [`Self::record_flush_failure`]; sticky `false` afterwards.
     pub(super) fn surface_first_flush_failure(&self) -> bool {
         !self.flush_failure_surfaced.swap(true, Ordering::AcqRel)
     }
@@ -94,9 +82,7 @@ impl SharedState {
     }
 }
 
-/// Combines the AI-title seed and the first-failure surface into one
-/// ack so callers don't have to make a second channel round-trip after
-/// `record_message`.
+/// Combined ack from `record_message`: AI-title seed + first-failure surface in one round-trip.
 pub(crate) struct RecordOutcome {
     /// `Some` only on the first user-text message of a fresh session.
     pub(crate) ai_title_seed: Option<String>,
@@ -105,6 +91,7 @@ pub(crate) struct RecordOutcome {
     pub(crate) failure: Option<String>,
 }
 
+/// Plain ack from non-record cmds; carries the same first-failure surface as [`RecordOutcome`].
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
@@ -114,8 +101,7 @@ impl SessionHandle {
         &self.session_id
     }
 
-    /// Record a conversation message. Returns after the batch flush
-    /// containing this cmd completes.
+    /// Record a conversation message. Returns after the batch flush completes.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
         if self
@@ -135,11 +121,7 @@ impl SessionHandle {
         })
     }
 
-    /// Record sidecar metadata for every tool result from one agent
-    /// turn in one shot — one cmd, one ack, one flush — realising the
-    /// plan's "a turn's worth of cmds collapse into one flush" intent
-    /// for the hot path. Items whose `metadata == ToolMetadata::default()`
-    /// add no display fields and are skipped at absorb.
+    /// Record sidecar metadata for a tool round in one cmd. Default-metadata items are skipped.
     pub(crate) async fn record_tool_metadata_batch(
         &self,
         items: Vec<(String, ToolMetadata)>,
@@ -149,48 +131,31 @@ impl SessionHandle {
             .await
     }
 
-    /// Append an AI-generated session title. Tail-scan picks the
-    /// latest title (max `updated_at`), so this supersedes the
-    /// first-prompt title on listings and resumes.
+    /// Append an AI-generated session title (supersedes the first-prompt title).
     pub(crate) async fn append_ai_title(&self, title: String) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
     }
 
-    /// Write the session summary and finalize. Idempotent; no-op on
-    /// fresh sessions that never recorded anything.
-    ///
-    /// `snapshots` is drained from the shared
-    /// [`FileTracker`][crate::file_tracker::FileTracker] just before
-    /// the call — one `Entry::FileSnapshot` lands per snapshot, ahead
-    /// of the `Entry::Summary`. An empty `Vec` finalizes with no
-    /// tracker entries.
+    /// Write the session summary and finalize. Idempotent; no-op on fresh sessions that never
+    /// recorded anything. `snapshots` are written as `Entry::FileSnapshot` ahead of the summary.
     pub(crate) async fn finish(&self, snapshots: Vec<FileSnapshot>) -> Outcome {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::Finish { snapshots, ack }, rx)
             .await
     }
 
-    /// Finalize and tear down: writes the summary, surfaces a flush
-    /// error (if any), and shuts the actor down. Returns the failure
-    /// message so callers can route it as fits their context (warn-log
-    /// after the TUI has torn down, [`AgentSink::session_write_error`]
-    /// while the sink is still live).
+    /// Finalize and tear down: writes the summary, surfaces a flush error (if any), and shuts
+    /// the actor down. Returns the failure message for the caller to route.
     pub(crate) async fn finalize(self, snapshots: Vec<FileSnapshot>) -> Option<String> {
         let outcome = self.finish(snapshots).await;
         self.shutdown().await;
         outcome.failure
     }
 
-    /// Sends [`SessionCmd::Shutdown`] so the actor breaks its loop
-    /// after the current batch flushes, then awaits the join handle.
-    /// Cmd-driven exit (rather than waiting for every clone's
-    /// [`mpsc::Sender`] to drop) keeps process-exit fast even when an
-    /// orphaned clone — most importantly the detached title-generator
-    /// task — is mid-HTTP and far from dropping its handle.
-    /// Subsequent calls (on other clones) drain the join slot and
-    /// return immediately.
+    /// Sends [`SessionCmd::Shutdown`] so the actor breaks after the current batch, then awaits
+    /// the join handle. Cmd-driven exit keeps process-exit fast when orphaned clones are mid-HTTP.
     pub(crate) async fn shutdown(self) {
         let Self {
             cmd_tx, actor_join, ..
@@ -254,44 +219,32 @@ impl SessionHandle {
 
 // ── ResumedSession ──
 
-/// Live handle plus display-only extras the TUI uses to reconstruct
-/// what the user saw live.
+/// Live handle plus display-only extras the TUI uses to reconstruct what the user saw live.
 pub(crate) struct ResumedSession {
     pub(crate) handle: SessionHandle,
     pub(crate) messages: Vec<Message>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
-    /// Persisted tracker snapshots. The caller passes these to
-    /// [`FileTracker::restore_verified`][crate::file_tracker::FileTracker::restore_verified]
-    /// before the agent loop runs so the gate clears for previously-
-    /// observed files that still match disk.
+    /// Persisted tracker snapshots; passed to `FileTracker::restore_verified` so the
+    /// Read-before-Edit gate clears for files that still match disk.
     pub(crate) file_snapshots: Vec<FileSnapshot>,
 }
 
 // ── Constructors ──
 
-/// Start a fresh session and spawn its actor. The file materializes
-/// lazily on the first record cmd.
+/// Start a fresh session and spawn its actor. The file materializes lazily on the first record cmd.
 pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
     spawn_actor(SessionState::fresh(store.clone(), model))
 }
 
-/// Outcome of [`roll`]: the new session id plus any flush failure
-/// from finalizing the old session. Caller decides where to surface
-/// the failure (sink for live UI, warn-log post-teardown).
+/// New id plus any flush failure from finalizing the old session.
 pub(crate) struct RollOutcome {
     pub(crate) new_id: String,
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Rolls `session` to a fresh handle and finalizes the old one. Two
-/// orderings matter: snapshot **before** clear (so the snapshots
-/// survive into the old JSONL via `finalize`), and replace **before**
-/// finalize (so the new session is in place before the old handle is
-/// consumed).
-///
-/// Caller must update any state derived from the session id (HTTP
-/// client header, in-memory message log) — this helper does not.
+/// Rolls `session` to a fresh handle and finalizes the old one. Snapshot before clear (so they
+/// survive into the old JSONL), replace before finalize (so the new session is already in place).
 pub(crate) async fn roll(
     session: &mut SessionHandle,
     store: &SessionStore,
@@ -310,8 +263,7 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resume by session ID — loads, sanitizes, opens for append, spawns
-/// the actor.
+/// Resume by session ID — loads, sanitizes, opens for append, spawns the actor.
 pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
     let data = store.load_session_data(session_id)?;
     let writer = store.open_append(session_id)?;
@@ -334,8 +286,7 @@ fn from_resumed_data(
     writer: super::store::SessionWriter,
 ) -> Result<ResumedSession> {
     sanitize_resumed_messages(&mut data.messages);
-    // Bail rather than chain the next record onto a `last_message_uuid`
-    // that sanitize just dropped.
+    // Bail rather than chain the next record onto a `last_message_uuid` that sanitize just dropped.
     if data.messages.is_empty() {
         bail!("session {session_id} has no messages to resume");
     }
@@ -383,6 +334,37 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::file_tracker::testing::record_tracked_file;
     use crate::message::{ContentBlock, Role};
+
+    // ── SharedState ──
+
+    #[test]
+    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let _guard = s.last_flush_failure.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // Mutex is now poisoned. record_flush_failure must recover.
+        shared.record_flush_failure("disk full");
+        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
+        let shared = Arc::new(SharedState::default());
+        // Poison by writing then panicking.
+        let s = Arc::clone(&shared);
+        _ = std::thread::spawn(move || {
+            let mut guard = s.last_flush_failure.lock().unwrap();
+            *guard = Some("pre-poison".to_owned());
+            panic!("deliberate poison");
+        })
+        .join();
+        // Recovery path must still return the value written pre-panic.
+        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+    }
 
     // ── record_message ──
 
@@ -485,8 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_writes_all_non_default_in_one_cmd() {
-        // Default-metadata items are skipped at absorb; non-defaults
-        // each produce one line.
+        // Default-metadata items are skipped at absorb; non-defaults each produce one line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -728,12 +709,52 @@ mod tests {
         assert!(second.failure.is_none(), "subsequent calls must be silent");
     }
 
+    #[tokio::test]
+    async fn finish_persists_one_file_snapshot_per_tracked_file() {
+        // Three tracked files in → three FileSnapshot lines on disk
+        // with the right paths. Counting strings would pass even if
+        // every snapshot pointed at the same file; parse and assert the path set instead.
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("trigger")).await;
+        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
+            ["a.rs", "b.rs", "c.rs"]
+                .into_iter()
+                .map(|name| {
+                    let path = files_dir.path().join(name);
+                    record_tracked_file(&tracker, &path, name.as_bytes());
+                    path
+                })
+                .collect();
+
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"file_snapshot""#))
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                std::path::PathBuf::from(v["path"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            snapshot_paths, expected_paths,
+            "every tracked file lands as its own FileSnapshot",
+        );
+    }
+
     // ── finalize ──
 
     #[tokio::test]
     async fn finalize_writes_summary_then_succeeds() {
-        // Pins the success contract: summary lands on disk and the
-        // returned failure is `None`.
+        // Pins the success contract: summary lands on disk and the returned failure is `None`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -763,8 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_after_record_completes_after_actor_exits() {
-        // shutdown's contract: the recorded message must be on disk by
-        // the time the await returns.
+        // shutdown's contract: the recorded message must be on disk by the time the await returns.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");
@@ -828,6 +848,22 @@ mod tests {
         if let Some(j) = handle.actor_join.lock().unwrap().as_ref() {
             j.abort();
         }
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        // Poison the actor_join mutex.
+        let join_ref = Arc::clone(&handle.actor_join);
+        _ = std::thread::spawn(move || {
+            let _guard = join_ref.lock().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        // shutdown must recover (take the JoinHandle) and not panic.
         handle.shutdown().await;
     }
 
@@ -920,153 +956,6 @@ mod tests {
         );
     }
 
-    // ── file-snapshot persistence ──
-
-    #[tokio::test]
-    async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Three tracked files in → three FileSnapshot lines on disk
-        // with the right paths. Counting strings would pass even if
-        // every snapshot pointed at the same file; parse and assert
-        // the path set instead.
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let sid = handle.session_id().to_owned();
-
-        handle.record_message(Message::user("trigger")).await;
-        let expected_paths: std::collections::HashSet<std::path::PathBuf> =
-            ["a.rs", "b.rs", "c.rs"]
-                .into_iter()
-                .map(|name| {
-                    let path = files_dir.path().join(name);
-                    record_tracked_file(&tracker, &path, name.as_bytes());
-                    path
-                })
-                .collect();
-
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
-        let snapshot_paths: std::collections::HashSet<std::path::PathBuf> = content
-            .lines()
-            .filter(|l| l.contains(r#""type":"file_snapshot""#))
-            .map(|l| {
-                let v: serde_json::Value = serde_json::from_str(l).unwrap();
-                std::path::PathBuf::from(v["path"].as_str().unwrap())
-            })
-            .collect();
-        assert_eq!(
-            snapshot_paths, expected_paths,
-            "every tracked file lands as its own FileSnapshot",
-        );
-    }
-
-    #[tokio::test]
-    async fn resume_restores_unchanged_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
-    }
-
-    #[tokio::test]
-    async fn resume_drops_drifted_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        // Bump mtime / size before resume so the snapshot stat
-        // mismatches and the entry drops.
-        std::fs::write(&path_a, b"externally edited bytes").unwrap();
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
-                path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
-            }),
-            "drifted file must hit the must-read-first gate",
-        );
-    }
-
-    #[tokio::test]
-    async fn resume_drops_snapshots_for_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let files_dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let tracker = FileTracker::default();
-        let handle = start(&store, "m");
-        let session_id = handle.session_id().to_owned();
-        handle.record_message(Message::user("hi")).await;
-        let path_a = files_dir.path().join("a.rs");
-        record_tracked_file(&tracker, &path_a, b"alpha");
-        handle.finish(tracker.snapshot_all()).await;
-        drop(handle);
-
-        std::fs::remove_file(&path_a).unwrap();
-
-        let resumed_tracker = FileTracker::default();
-        let resumed = resume(&store, &session_id).unwrap();
-        // restore_verified must drop silently; the tracker should
-        // end up empty for this path rather than panic.
-        resumed_tracker.restore_verified(resumed.file_snapshots);
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            std::time::UNIX_EPOCH,
-            0,
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
-                path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
-            }),
-        );
-    }
-
     // ── resume ──
 
     #[tokio::test]
@@ -1117,8 +1006,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_all_messages_sanitized_errors() {
-        // Sanitize drops the lone unresolved tool_use, leaving an
-        // empty chain — resume must bail.
+        // Sanitize drops the lone unresolved tool_use, leaving an empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let original = start(&store, "m");
@@ -1214,50 +1102,105 @@ mod tests {
         );
     }
 
-    // ── SharedState poison recovery ──
+    #[tokio::test]
+    async fn resume_restores_unchanged_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
 
-    #[test]
-    fn shared_state_record_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let _guard = s.last_flush_failure.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        // Mutex is now poisoned. record_flush_failure must recover.
-        shared.record_flush_failure("disk full");
-        assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
-    }
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
 
-    #[test]
-    fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
-        let shared = Arc::new(SharedState::default());
-        // Poison by writing then panicking.
-        let s = Arc::clone(&shared);
-        _ = std::thread::spawn(move || {
-            let mut guard = s.last_flush_failure.lock().unwrap();
-            *guard = Some("pre-poison".to_owned());
-            panic!("deliberate poison");
-        })
-        .join();
-        // Recovery path must still return the value written pre-panic.
-        assert_eq!(shared.last_flush_failure(), Some("pre-poison".to_owned()),);
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
     }
 
     #[tokio::test]
-    async fn shutdown_recovers_from_poisoned_actor_join_mutex() {
+    async fn resume_drops_drifted_snapshots() {
         let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
+        let tracker = FileTracker::default();
         let handle = start(&store, "m");
-        // Poison the actor_join mutex.
-        let join_ref = Arc::clone(&handle.actor_join);
-        _ = std::thread::spawn(move || {
-            let _guard = join_ref.lock().unwrap();
-            panic!("deliberate poison");
-        })
-        .join();
-        // shutdown must recover (take the JoinHandle) and not panic.
-        handle.shutdown().await;
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        // Bump mtime / size before resume so the snapshot stat mismatches and the entry drops.
+        std::fs::write(&path_a, b"externally edited bytes").unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+
+        let meta = std::fs::metadata(&path_a).unwrap();
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            meta.modified().unwrap(),
+            meta.len(),
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+            "drifted file must hit the must-read-first gate",
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_drops_snapshots_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files_dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let handle = start(&store, "m");
+        let session_id = handle.session_id().to_owned();
+        handle.record_message(Message::user("hi")).await;
+        let path_a = files_dir.path().join("a.rs");
+        record_tracked_file(&tracker, &path_a, b"alpha");
+        handle.finish(tracker.snapshot_all()).await;
+        drop(handle);
+
+        std::fs::remove_file(&path_a).unwrap();
+
+        let resumed_tracker = FileTracker::default();
+        let resumed = resume(&store, &session_id).unwrap();
+        // restore_verified must drop silently; the tracker should
+        // end up empty for this path rather than panic.
+        resumed_tracker.restore_verified(resumed.file_snapshots);
+        let check = resumed_tracker.check_stat(
+            &path_a,
+            std::time::UNIX_EPOCH,
+            0,
+            crate::file_tracker::GatePurpose::Edit,
+        );
+        assert_eq!(
+            check,
+            Err(crate::file_tracker::GateError::NeverRead {
+                path: path_a.clone(),
+                purpose: crate::file_tracker::GatePurpose::Edit,
+            }),
+        );
     }
 }

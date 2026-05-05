@@ -1,15 +1,8 @@
-//! Conversation message types.
-//!
-//! [`Message`] plus the [`ContentBlock`] variants that make up its
-//! body. Shared between the Anthropic API's wire-level message array,
-//! the JSONL session transcript, and the TUI renderer — a single
-//! `Message` representation the whole agent pipeline agrees on.
+//! Conversation message types shared by the API client, session transcript, and TUI renderer.
 
 use serde::{Deserialize, Serialize};
 
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
-    *v == T::default()
-}
+// ── Role ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,11 +11,11 @@ pub(crate) enum Role {
     Assistant,
 }
 
-/// A content block within a message.
-///
-/// User messages contain `Text` or `ToolResult` blocks. Assistant messages
-/// contain `Text`, `ToolUse`, `ServerToolUse`, `Thinking`, and / or
-/// `RedactedThinking` blocks.
+// ── ContentBlock ──
+
+/// One entry in a [`Message::content`] vector. Variants mirror the Anthropic Messages API
+/// content-block taxonomy verbatim so the same struct serves the wire format, the JSONL
+/// session transcript, and the TUI renderer without lossy conversions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {
@@ -49,12 +42,17 @@ pub(crate) enum ContentBlock {
         thinking: String,
         signature: String,
     },
-    /// Opaque safety-redacted thinking block. Must be preserved verbatim for
-    /// round-tripping — the API validates its contents.
+    /// Opaque safety-redacted block; must round-trip verbatim or the API rejects it.
     RedactedThinking {
         data: String,
     },
 }
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+// ── Message ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Message {
@@ -80,14 +78,8 @@ impl Message {
 
 // ── Message normalization ──
 
-/// Strips trailing thinking / `redacted_thinking` blocks from the last assistant
-/// message. The API rejects assistant messages that end with thinking blocks.
-///
-/// If stripping removes all content (thinking-only response), a placeholder text
-/// block is inserted to preserve user / assistant alternation.
-///
-/// Only the most recent assistant message can have un-stripped trailing thinking
-/// — earlier ones were already processed in prior iterations.
+/// Drops trailing thinking blocks from the last assistant message (the API rejects them);
+/// inserts a placeholder if stripping empties the content.
 pub(crate) fn strip_trailing_thinking(messages: &mut [Message]) {
     let Some(msg) = messages.iter_mut().rfind(|m| m.role == Role::Assistant) else {
         return;
@@ -358,7 +350,6 @@ mod tests {
             },
         ];
         strip_trailing_thinking(&mut messages);
-        // Only the last assistant message is stripped.
         assert_eq!(messages[0].content.len(), 2);
         assert!(matches!(
             &messages[0].content[1],

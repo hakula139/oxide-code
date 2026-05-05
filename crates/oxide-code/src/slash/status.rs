@@ -1,7 +1,5 @@
-//! `/status` — open the read-only [`StatusModal`](super::status_modal::StatusModal)
-//! overview of the live session.
-//!
-//! No args, no chat output — the modal is the surface. Esc closes.
+//! `/status` — open the read-only [`StatusModal`](super::status_modal::StatusModal). No args,
+//! no chat output — the modal is the surface.
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashOutcome};
@@ -43,9 +41,6 @@ mod tests {
 
     #[test]
     fn execute_opens_the_status_modal_via_ctx_and_pushes_no_chat_block() {
-        // The modal is the UI; chat must stay clean. Behavioural tests
-        // for the modal's content + key handling live in
-        // `slash::status_modal`.
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let mut ctx = SlashContext::new(&mut chat, &info);

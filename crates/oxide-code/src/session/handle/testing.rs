@@ -1,9 +1,5 @@
-//! Test-only [`SessionHandle`] constructors for sibling modules
-//! (`agent`, `session::title_generator`) that need a stand-in handle
-//! without poking at private fields.
-//!
-//! Lives as a child of `handle` so it can read those private fields;
-//! every item is `#[cfg(test)] pub(crate)`.
+//! Test-only [`SessionHandle`] constructors. Child of `handle` so it can build the private
+//! fields directly; every item is `#[cfg(test)] pub(crate)`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,10 +9,8 @@ use tokio::sync::mpsc;
 use super::super::actor::SessionCmd;
 use super::{Outcome, RecordOutcome, SessionHandle, SharedState};
 
-/// Returns a handle whose actor channel is already closed, so every
-/// write call immediately surfaces the actor-gone failure on the
-/// first attempt. Useful for asserting the once-per-session
-/// failure-surfacing behaviour without spinning up a real actor.
+/// Handle whose actor channel is already closed — every write surfaces actor-gone immediately,
+/// so failure surfacing can be asserted without a real actor.
 pub(crate) fn dead(session_id: &str) -> SessionHandle {
     let (cmd_tx, _) = mpsc::channel(1);
     SessionHandle {
@@ -27,14 +21,9 @@ pub(crate) fn dead(session_id: &str) -> SessionHandle {
     }
 }
 
-/// Returns a handle whose stand-in actor acks the first `succeed`
-/// non-Shutdown cmds with a healthy outcome, then drops every
-/// subsequent cmd without acking — the receiver's rx-await fallback
-/// fires. Exercises the cross-task path where the actor task panics
-/// or stalls between receiving a cmd and sending its ack.
-///
-/// Shutdown is honoured unconditionally so `handle.shutdown().await`
-/// returns on the stand-in.
+/// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
+/// acking — exercises the rx-await fallback when the actor stalls between receive and ack.
+/// Shutdown is always honoured so `handle.shutdown()` still returns.
 pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
     let count = Arc::new(AtomicUsize::new(0));

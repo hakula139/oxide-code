@@ -1,8 +1,5 @@
-//! Per-machine `device_id` sent in `metadata.user_id.device_id`.
-//!
-//! 64 lowercase hex chars persisted at `$XDG_DATA_HOME/ox/user-id`,
-//! lazily minted on first use. Filesystem failure degrades to an
-//! in-memory id rather than blocking client construction.
+//! Per-machine `device_id` (64 lowercase hex chars) at `$XDG_DATA_HOME/ox/user-id`. Lazily minted;
+//! filesystem failure falls back to an ephemeral id rather than blocking client construction.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -20,8 +17,7 @@ const DATA_DIR: &str = "ox";
 const FILE_NAME: &str = "user-id";
 const ID_LEN: usize = 64;
 
-/// Loads the persisted device id, minting and writing one if absent.
-/// Filesystem failures fall back to an ephemeral id with a `warn!`.
+/// Loads the persisted id, minting one if absent; falls back to ephemeral on filesystem failure.
 pub(super) fn load_or_create_device_id() -> String {
     fallback_to_ephemeral(try_load_or_create())
 }
@@ -61,9 +57,6 @@ fn device_id_path() -> Option<PathBuf> {
     )
 }
 
-/// `Some(id)` only when `path` exists and parses as 64-char lowercase
-/// hex; missing, malformed, or non-UTF-8 content returns `None` so
-/// the caller mints fresh.
 fn read_existing(path: &Path) -> Result<Option<String>> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -105,8 +98,7 @@ mod tests {
 
     #[test]
     fn load_or_create_device_id_produces_valid_id_under_normal_env() {
-        // Doesn't override XDG_DATA_HOME because parallel `Client::new()`
-        // calls in other tests would race on the same tempdir.
+        // Don't override XDG_DATA_HOME — parallel Client::new() calls would race the tempdir.
         let id = load_or_create_device_id();
         assert!(is_valid_id(&id), "{id}");
     }
@@ -160,7 +152,7 @@ mod tests {
 
     #[test]
     fn try_load_or_create_at_propagates_unwritable_parent_as_error() {
-        // `/dev/null/user-id` — parent is a regular file, can't `mkdir`.
+        // Parent is a regular file (`/dev/null`), so `mkdir` fails.
         let path = Path::new("/dev/null/ox/user-id");
         let err = try_load_or_create_at(path).unwrap_err();
         let chain = format!("{err:#}");
@@ -172,8 +164,7 @@ mod tests {
 
     #[test]
     fn try_load_or_create_at_errors_on_path_without_parent() {
-        // Empty path: read_existing returns None (NotFound), then
-        // `.parent()` is None, exercising the "no parent" branch.
+        // Empty path: NotFound from read_existing, then `.parent()` is None.
         let err = try_load_or_create_at(Path::new("")).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
@@ -194,7 +185,7 @@ mod tests {
 
     #[test]
     fn read_existing_propagates_io_error_other_than_not_found() {
-        // Reading a directory as a file errors with IsADirectory (not NotFound).
+        // Reading a directory as a file errors with IsADirectory.
         let dir = tempdir().unwrap();
         let err = read_existing(dir.path()).unwrap_err();
         let chain = format!("{err:#}");

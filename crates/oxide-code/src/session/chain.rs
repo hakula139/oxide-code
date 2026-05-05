@@ -1,9 +1,5 @@
-//! UUID-DAG message-chain reconstruction.
-//!
-//! Concurrent resumes append in parallel and form forks in the on-disk
-//! DAG. [`ChainBuilder`] reconstructs the newest non-sidechain linear
-//! chain: feed it every `Entry::Message` tuple as the file is read,
-//! then call [`ChainBuilder::resolve`] for the chain plus its tip.
+//! UUID-DAG message chain reconstruction. Forks form when concurrent resumes append in
+//! parallel; [`ChainBuilder::resolve`] picks the newest non-sidechain linear chain.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,10 +9,15 @@ use uuid::Uuid;
 
 use crate::message::Message;
 
+/// Accumulator for messages read off disk. Loader calls [`Self::insert`] per `Entry::Message`,
+/// then [`Self::resolve`] once to flatten the recorded UUID DAG into a linear chain.
+///
+/// The DAG can fork when concurrent resumes (e.g. two `ox -c` processes pointed at the same
+/// session) each append their own follow-ups onto the same parent. `resolve` picks one tip
+/// deterministically rather than returning every branch.
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
-    /// UUIDs claimed as some other message's `parent_uuid`. The DAG
-    /// leaves are `nodes.keys() - referenced`.
+    /// UUIDs claimed as some other message's `parent_uuid`. Leaves = keys − referenced.
     referenced: HashSet<Uuid>,
 }
 
@@ -34,8 +35,7 @@ impl ChainBuilder {
         }
     }
 
-    /// Last-append-wins on duplicate UUIDs so a retry / partial-write
-    /// replay collapses to the most recent representation.
+    /// Last-append-wins on duplicate UUIDs (retry / partial-write replay).
     pub(super) fn insert(
         &mut self,
         uuid: Uuid,
@@ -56,10 +56,13 @@ impl ChainBuilder {
         );
     }
 
-    /// Picks the newest leaf and walks back via `parent_uuid`. Cycles
-    /// and orphan parents act as chain terminators (preserve the
-    /// prefix collected so far) so corrupted on-disk state cannot hang
-    /// the walker.
+    /// Returns `(messages root → tip, tip uuid)`.
+    ///
+    /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
+    /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
+    /// file always pick the same branch. Walks back via `parent_uuid`; cycles trip the seen-set
+    /// and orphan parents terminate the walk, so corrupted on-disk state cannot hang the loader.
+    /// Returns `(vec![], None)` when no leaf exists (every node referenced — pure cycle).
     pub(super) fn resolve(mut self) -> (Vec<Message>, Option<Uuid>) {
         let tip = self
             .nodes

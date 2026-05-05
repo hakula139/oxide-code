@@ -1,14 +1,6 @@
-//! Session actor — owns [`SessionState`] + the writer, drains
-//! [`SessionCmd`]s, and writes one batch per `recv()` wakeup.
-//!
-//! Receive-and-drain (`recv().await` then `try_recv()` until empty)
-//! coalesces whatever cmds land in the channel before the actor
-//! processes the first one. `agent_turn` deliberately queues a tool
-//! round's three cmds through one `tokio::join!` so they pile up
-//! before this drain runs; isolated writes (a text-only turn, the
-//! AI title append, the final summary) flush immediately because
-//! the drain returns `Empty` after the first cmd. No interval timer
-//! — see `docs/design/session/persistence.md`.
+//! Session actor — owns [`SessionState`] + writer, drains [`SessionCmd`]s, batches one flush
+//! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush;
+//! isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 
@@ -23,19 +15,14 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
-/// Cross-task protocol for [`super::handle::SessionHandle`]. Each ack
-/// fires after the batch flush, so a returned ack implies the entry is
-/// in at least the OS write cache.
+/// Cross-task protocol for [`super::handle::SessionHandle`]. Acks fire after the batch flush.
 pub(super) enum SessionCmd {
     Record {
         msg: Message,
         ack: oneshot::Sender<RecordOutcome>,
     },
-    /// One or more tool-result sidecars from a single agent turn. The
-    /// batch shape lets the agent loop emit all sidecars for a tool
-    /// round in one cmd → one ack → one flush, instead of N awaits in
-    /// a row. Items whose `metadata == ToolMetadata::default()` add no
-    /// display fields and are skipped at absorb time.
+    /// One or more tool-result sidecars from a single agent turn. Default-metadata items are
+    /// skipped at absorb time.
     ToolMetadata {
         items: Vec<(String, ToolMetadata)>,
         ack: oneshot::Sender<Outcome>,
@@ -45,17 +32,12 @@ pub(super) enum SessionCmd {
         ack: oneshot::Sender<Outcome>,
     },
     Finish {
-        /// Snapshots drained from the shared file tracker just before
-        /// the cmd was sent; written as one `Entry::FileSnapshot` per
-        /// snapshot followed by the `Entry::Summary` marker.
+        /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
-    /// Drains pending writes, acks, then exits the actor loop. Lets
-    /// [`super::handle::SessionHandle::shutdown`] return even when
-    /// orphaned clones (e.g., the detached title-generator task) still
-    /// hold a sender — a bare clone-drop wait would block on whichever
-    /// HTTP timeout the orphan is racing.
+    /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
+    /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
     /// Test-only: panics inside the actor task so callers can exercise
     /// the `JoinError::is_panic()` path in `shutdown`.
@@ -63,9 +45,7 @@ pub(super) enum SessionCmd {
     Panic,
 }
 
-/// One absorbed cmd whose ack fires once the batch flush returns. Held
-/// per-batch so the same flush result reaches every caller in the
-/// batch.
+/// Pending ack for one absorbed cmd; fires once the batch flush returns.
 enum PendingAck {
     Record {
         ack: oneshot::Sender<RecordOutcome>,
@@ -75,6 +55,9 @@ enum PendingAck {
     Shutdown(oneshot::Sender<()>),
 }
 
+/// Actor task body. Owns [`SessionState`] (which owns the writer); absorbs each `recv`-and-drain
+/// batch into one buffered flush, then fires acks. Exits when the channel closes or a
+/// [`SessionCmd::Shutdown`] is absorbed.
 pub(super) async fn run(
     mut state: SessionState,
     mut rx: mpsc::Receiver<SessionCmd>,
@@ -85,8 +68,8 @@ pub(super) async fn run(
         let mut acks: Vec<PendingAck> = Vec::new();
         let mut should_exit = false;
         absorb(first, &mut entries, &mut acks, &mut state, &mut should_exit);
-        // Drain whatever is already queued — cmds sent after this point
-        // wait for the next outer `recv().await`.
+        // try_recv only drains what is already queued; cmds arriving after this loop wait for
+        // the next `recv().await` (and form a new batch). Coalescing without an interval timer.
         while let Ok(next) = rx.try_recv() {
             absorb(next, &mut entries, &mut acks, &mut state, &mut should_exit);
         }
@@ -121,8 +104,7 @@ fn absorb(
             acks.push(PendingAck::Record { ack, ai_title_seed });
         }
         SessionCmd::ToolMetadata { items, ack } => {
-            // Default metadata adds no display fields; emitting it would
-            // bloat the transcript with empty sidecar lines.
+            // Default metadata adds no display fields; skip to avoid bloating the transcript.
             let mut wrote_any = false;
             for (tool_use_id, metadata) in items {
                 if metadata == ToolMetadata::default() {
@@ -138,8 +120,7 @@ fn absorb(
             if wrote_any {
                 acks.push(PendingAck::Outcome(ack));
             } else {
-                // Empty / all-default batch — nothing to flush, no
-                // batch result to await.
+                // Empty / all-default batch — nothing to flush.
                 _ = ack.send(Outcome { failure: None });
             }
         }
@@ -186,10 +167,7 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
     }
 }
 
-/// At-most-once flush-failure surfacing: the first failure carries
-/// through to the caller, subsequent ones go to the warn-log only so a
-/// disk-full mid-conversation doesn't drown the user. Independent of
-/// the actor-gone surface flag — see [`SharedState`].
+/// At-most-once: the first failure carries through; subsequent ones stay in the warn-log.
 fn surface_failure(failure: Option<&str>, shared: &SharedState) -> Option<String> {
     let msg = failure?;
     if shared.surface_first_flush_failure() {
@@ -212,8 +190,7 @@ mod tests {
     use crate::session::state::SessionState;
 
     /// Run the actor against an in-memory state until the receiver
-    /// closes (caller drops `tx`), then return the final state for
-    /// assertions on file contents.
+    /// closes (caller drops `tx`), then return the final state for assertions on file contents.
     async fn drive(state: SessionState, cmds: Vec<SessionCmd>) -> Arc<SharedState> {
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel(cmds.len().max(1));
@@ -310,8 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_metadata_with_default_short_circuits_without_writing() {
-        // Default metadata has no display fields, so emitting an entry
-        // would be noise.
+        // Default metadata has no display fields, so emitting an entry would be noise.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -367,8 +343,7 @@ mod tests {
     async fn run_shutdown_exits_loop_even_with_live_sender_clones() {
         // The point of `SessionCmd::Shutdown` is to break out without
         // waiting for every clone to drop — otherwise an orphaned
-        // title-generator's mid-HTTP clone keeps the actor alive
-        // through the whole HTTP timeout.
+        // title-generator's mid-HTTP clone keeps the actor alive through the whole HTTP timeout.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store, "m");

@@ -14,16 +14,10 @@ use super::{
 };
 use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
 
-/// Default line cap when the caller doesn't pass `limit`.
 const DEFAULT_LINE_LIMIT: usize = 2000;
 
-/// Per-file size cap (10 MB). Fits typical large config / log
-/// files; rejects accidental binary dumps.
 const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-/// Stand-in content for a zero-byte file. The producer writes it; the
-/// `read_excerpt_view` consumer compares against it to render an empty
-/// excerpt — the two paths must agree on the exact string.
 const EMPTY_FILE_MARKER: &str = "(empty file)";
 
 pub(crate) struct ReadTool {
@@ -121,6 +115,15 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
         .with_title(format!("Read {name}"))
 }
 
+/// Reads `path` as text and returns a tab-separated `LINENO\tTEXT` excerpt.
+///
+/// Refuses directories, non-regular files (FIFO / socket / device — these can report `len() == 0`
+/// and would otherwise bypass the size gate), files larger than `MAX_READ_FILE_SIZE`, and files
+/// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
+///
+/// Records the read with the [`FileTracker`] so a follow-up Edit / Write can clear the
+/// Read-before-Edit gate. A no-arg read records [`LastView::Full`]; any `offset` or `limit`
+/// records [`LastView::Partial`] so partial views never satisfy the full-read precondition.
 async fn read_file(
     path: &str,
     offset: Option<usize>,
@@ -131,9 +134,7 @@ async fn read_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    // Reject non-regular files: pseudo-files like /dev/urandom report
-    // len() == 0, bypassing the size gate below, and would stream without
-    // bound through tokio::fs::read.
+    // Pseudo-files report len() == 0, bypassing the size gate.
     let file_type = metadata.file_type();
     if file_type.is_dir() {
         return Err(format!(
@@ -163,8 +164,6 @@ async fn read_file(
         return Err("File appears to be binary. Use the bash tool to inspect binary files.".into());
     }
 
-    // Capture mtime / size before formatting so the tracker entry
-    // matches the bytes the model is about to see.
     let mtime = metadata
         .modified()
         .map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -191,8 +190,6 @@ async fn read_file(
         ));
     }
 
-    // Per-line cap (truncate_line) and the row cap (limit) keep this
-    // bounded; the byte safety net lives in ToolRegistry::run.
     let mut output = String::new();
     let mut num_shown: usize = 0;
     for (i, line) in lines[start_idx..].iter().enumerate().take(limit_n) {
@@ -216,8 +213,6 @@ async fn read_file(
     Ok(stub_or(outcome, &output).into_owned())
 }
 
-/// Substitutes [`CACHE_HIT_STUB`] for the rendered excerpt when the
-/// Read was a redundant full re-read, otherwise returns the excerpt.
 fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
     match outcome {
         RecordRead::CacheHit => std::borrow::Cow::Borrowed(CACHE_HIT_STUB),
@@ -225,10 +220,6 @@ fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Maps Read inputs to the recorded view. Default `(None, None)` is
-/// `Full` so no-args re-Reads cache-hit; any explicit slice is
-/// `Partial` even if it covers the whole file (the model asked for
-/// a range, so a different range is a different question).
 fn view_for(offset: Option<usize>, limit: Option<usize>) -> LastView {
     match (offset, limit) {
         (None, None) => LastView::Full,
@@ -266,13 +257,6 @@ fn read_excerpt_view(path: String, content: &str) -> Option<ToolResultView> {
     })
 }
 
-/// Splits the read tool's output on its `(Showing lines N–M of TOTAL total)`
-/// view-shape footer. The footer is parsed here rather than carried in
-/// metadata because the totals are a read-specific signal (line counts,
-/// not byte counts); the byte safety net in [`crate::tool::ToolRegistry::run`]
-/// uses a different metadata field. When the byte cap fires, the footer
-/// is replaced by the truncation separator and this function returns
-/// `None` for the footer — the caller falls through to the raw text view.
 fn split_read_footer(content: &str) -> (&str, Option<&str>) {
     match content.split_once("\n\n") {
         Some((body, footer)) if footer.starts_with("(Showing lines ") => (body, Some(footer)),
@@ -324,8 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_records_full_read_in_tracker() {
-        // A no-args read populates the tracker as Full so a follow-up
-        // Edit clears the gate.
+        // A no-args read populates the tracker as Full so a follow-up Edit clears the gate.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello\n").unwrap();
@@ -373,8 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_partial_reread_does_not_cache_hit() {
-        // Partial reads always return the line-numbered slice so the
-        // model can re-request a different range.
+        // Partial reads always return the slice so the model can re-request a different range.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(
@@ -535,8 +517,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn read_file_rejects_non_regular_file() {
-        // A unix-domain socket is a non-regular file with `metadata.len() == 0`,
-        // which would bypass the size gate if `file_type().is_file()` were skipped.
+        // A unix-domain socket has `len() == 0` and would bypass the size gate without is_file().
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sock");
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -608,7 +589,7 @@ mod tests {
         );
     }
 
-    // ── result_view ──
+    // ── read_excerpt_view ──
 
     #[test]
     fn result_view_builds_read_excerpt() {

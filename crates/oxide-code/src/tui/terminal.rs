@@ -16,17 +16,8 @@ use ratatui::prelude::CrosstermBackend;
 
 pub(crate) type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Initializes the terminal for TUI mode.
-///
-/// - Enters raw mode (no line buffering, no echo).
-/// - Switches to the alternate screen buffer (preserves the user's scrollback).
-/// - Enables mouse capture for scroll and click events.
-/// - Pushes `DISAMBIGUATE_ESCAPE_CODES` (Kitty keyboard protocol) so
-///   Shift+Enter is distinguishable from Enter on supporting terminals.
-/// - Clears the screen.
-///
-/// Returns a [`Terminal`] ready for rendering. The caller must ensure
-/// [`restore`] is called on exit (including panics — see [`install_panic_hook`]).
+/// Enters raw mode + alt screen + mouse + Kitty keyboard. Caller must invoke [`restore`] on exit
+/// (including panics).
 pub(crate) fn init() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -48,14 +39,11 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Restores the terminal to its original state.
+/// Restores the terminal to its original state. Safe to call multiple times.
 ///
-/// - Disables mouse capture.
-/// - Leaves the alternate screen buffer.
-/// - Disables raw mode.
-/// - Shows the cursor (in case it was hidden).
-///
-/// Safe to call multiple times — each operation is idempotent.
+/// Errors from each step are intentionally swallowed — restore runs on the panic path and during
+/// normal shutdown, where surfacing an `io::Error` would either mask the original panic or
+/// abort cleanup midway and leave the terminal in raw mode.
 pub(crate) fn restore() {
     let mut stdout = io::stdout();
     _ = leave_tui_mode(&mut stdout);
@@ -73,18 +61,9 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Wraps a render closure with synchronized output sequences.
-///
-/// Sends `BeginSynchronizedUpdate` before rendering and
-/// `EndSynchronizedUpdate` after, telling the terminal emulator to buffer
-/// the entire frame and paint it atomically. This eliminates tearing on
-/// terminals that support DEC private mode 2026 (Alacritty, kitty, iTerm2,
-/// `WezTerm`, Windows Terminal, tmux).
-///
-/// Terminals that don't recognize the sequence silently ignore it.
-///
-/// Generic over the backend writer so tests can drive it with an
-/// in-memory `Vec<u8>`; production callers pass the [`Tui`] alias.
+/// Brackets a render closure with DEC synchronized-update (mode 2026) sequences so the terminal
+/// presents the new frame atomically; without this, fast successive renders can show partial
+/// frames with mid-line tearing.
 pub(crate) fn draw_sync<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     f: impl FnOnce(&mut ratatui::Frame),
@@ -96,9 +75,11 @@ pub(crate) fn draw_sync<W: Write>(
     Ok(())
 }
 
-/// Installs a panic hook that restores the terminal before printing the
-/// panic message. Without this, a panic leaves the terminal in raw mode
-/// with the alternate screen active, making the error unreadable.
+/// Installs a panic hook that restores the terminal before delegating to the previous hook.
+///
+/// Without this, a panic inside the TUI loop would leave the terminal in raw mode + alternate
+/// screen, hiding the panic message and forcing the user to reset their shell. The original hook
+/// is preserved so any custom panic handler (test harness, backtrace printer, etc.) still runs.
 pub(crate) fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -116,10 +97,6 @@ mod tests {
     use super::*;
 
     // ── enter_tui_mode ──
-    //
-    // `init` needs a real TTY for raw mode and terminal construction.
-    // The extracted command-emission helpers are testable with an
-    // in-memory writer, which pins the parts we own.
 
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
     const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
@@ -139,9 +116,6 @@ mod tests {
     }
 
     // ── leave_tui_mode ──
-    //
-    // `restore` also touches raw mode, so the byte-emission helper is
-    // the deterministic piece we can cover in-process.
 
     const LEAVE_ALT_SCREEN: &[u8] = b"\x1b[?1049l";
     const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
@@ -161,19 +135,10 @@ mod tests {
     }
 
     // ── draw_sync ──
-    //
-    // `install_panic_hook` clobbers process-global panic state and
-    // cannot run cleanly under parallel tests. `draw_sync` is the
-    // remaining function whose behavior we can pin in-process by
-    // swapping `Stdout` for an in-memory writer.
 
-    // DEC private mode 2026 on/off escape sequences emitted by
-    // `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`.
     const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
     const END_SYNC: &[u8] = b"\x1b[?2026l";
 
-    /// `Write` sink that mirrors every byte into a shared buffer the
-    /// test can inspect after the terminal has borrowed the backend.
     #[derive(Clone)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -196,9 +161,8 @@ mod tests {
     fn draw_sync_brackets_the_render_with_sync_update_bytes() {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let backend = CrosstermBackend::new(SharedWriter(buf.clone()));
-        // `Terminal::new` queries stdout for the window size which fails
-        // on CI without a TTY. `Viewport::Fixed` skips that query so the
-        // test runs the same whether stdout is a pty or a pipe.
+        // `Terminal::new` queries stdout size and fails on CI without a TTY; `Viewport::Fixed`
+        // skips that query.
         let opts = TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
         };

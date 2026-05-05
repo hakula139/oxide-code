@@ -8,14 +8,18 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
+// Loaded once on first highlight (a few hundred ms of grammar / theme parsing) and reused for
+// the rest of the process. Keeping them lazy avoids paying that cost when no fenced block is
+// rendered.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
-/// Highlight `code` using syntect for the given language.
+/// Highlights `code` using syntect, returning one [`Line`] per source line.
 ///
-/// The language token is extracted from the first word of `lang` (so info
-/// strings like `rust,no_run` still work). Falls back to `fallback_style`
-/// when the language is unrecognized.
+/// `lang` is parsed as a fenced-block info string: only the first whitespace-separated token is
+/// used (so `rust,no_run` and `rust ignore` both resolve to `rust`). Unknown or empty languages
+/// fall back to `fallback_style` with no per-token coloring so plain fenced blocks render
+/// uniformly without ragged background fills.
 pub(super) fn highlight_code(lang: &str, code: &str, fallback_style: Style) -> Vec<Line<'static>> {
     let syntax = lang
         .split_ascii_whitespace()

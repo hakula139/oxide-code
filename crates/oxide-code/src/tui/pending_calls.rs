@@ -4,10 +4,13 @@ use std::collections::HashMap;
 
 use crate::tool::ToolMetadata;
 
-/// Sentinel for orphan results whose start event is missing.
+/// Generic header used when neither tool metadata nor a pending-call label is available — the
+/// orphan case where a `ToolCallEnd` arrives without its matching `ToolCallStart` (e.g. during
+/// resume from a transcript that lost the start event).
 pub(crate) const FALLBACK_RESULT_HEADER: &str = "(result)";
 
-/// Resolves the header: metadata title > pending-call label > fallback.
+/// Picks the best display header for a tool result, preferring (in order) the tool's own
+/// post-execution title, the label captured at call-start, then the generic fallback.
 pub(crate) fn result_header(metadata: &ToolMetadata, pending_label: Option<&str>) -> String {
     metadata
         .title
@@ -16,15 +19,17 @@ pub(crate) fn result_header(metadata: &ToolMetadata, pending_label: Option<&str>
         .unwrap_or_else(|| FALLBACK_RESULT_HEADER.to_owned())
 }
 
+/// Snapshot of a `ToolCallStart` retained until the matching `ToolCallEnd` so the renderer can
+/// pair the result with the call's display label, tool name, and original input.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
     pub(crate) label: String,
     pub(crate) name: String,
-    /// Retained so structured result views can access original arguments
-    /// without re-parsing the transcript.
     pub(crate) input: serde_json::Value,
 }
 
+/// In-flight tool calls keyed by their stream id. Cleared at turn boundaries so orphan starts
+/// from a cancelled or errored turn don't leak across turns.
 #[derive(Debug, Default)]
 pub(crate) struct PendingCalls {
     map: HashMap<String, PendingCall>,
@@ -43,7 +48,6 @@ impl PendingCalls {
         self.map.remove(id)
     }
 
-    /// Evicts stale entries at turn boundaries.
     pub(crate) fn clear(&mut self) {
         self.map.clear();
     }

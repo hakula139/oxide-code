@@ -4,37 +4,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-/// Retry budget for advisory locks in this crate. Currently used by
-/// the OAuth credential lock ([`crate::config::oauth`]); session files
-/// no longer take a flock (concurrent resume is supported via the UUID
-/// DAG instead, see [`crate::session::store::SessionStore::open_append`]).
-/// Kept here so future lock-acquisition call sites stay uniform.
+/// Total attempts = `1 + MAX_RETRIES`; budget bounds the worst-case stall when another oxide
+/// process holds the credentials lock.
 pub(crate) const MAX_RETRIES: u32 = 5;
 
-/// Sleep duration between successive lock-acquisition attempts.
-/// Shortened under `cfg(test)` so contention tests do not block CI
-/// for seconds per run.
 #[cfg(not(test))]
 pub(crate) const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 pub(crate) const RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Retries an advisory-lock acquisition with fixed-interval backoff.
-///
-/// `try_once` must return:
-/// - `Ok(Some(value))` when the lock was acquired (returned to the
-///   caller verbatim),
-/// - `Ok(None)` when the lock is contended (the helper sleeps for
-///   `interval` and tries again while the budget allows), or
-/// - `Err(_)` for a genuine I/O failure that is not contention
-///   (propagated immediately).
-///
-/// After `max_retries` contended attempts, `contention_err` is
-/// invoked to produce the "all attempts exhausted" error.
-///
-/// Sleeps are `tokio::time::sleep`, so this must be called from an
-/// async context. Matching the executor's clock (not `std::thread::sleep`)
-/// keeps worker threads free to service other tasks during contention.
+/// Retries `try_once` with fixed-interval backoff. `Ok(Some)` = acquired,
+/// `Ok(None)` = contended (retries), `Err` = fatal (propagated immediately).
 pub(crate) async fn retry_acquire<T, F, E>(
     mut try_once: F,
     max_retries: u32,

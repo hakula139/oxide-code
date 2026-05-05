@@ -1,15 +1,9 @@
-//! `/config` — read-only view of the resolved effective config plus
-//! the layered TOML paths it was assembled from
-//! (`$XDG_CONFIG_HOME/ox/config.toml`, `./ox.toml`).
-//!
-//! Path discovery is per-invocation so the user sees fresh state if
-//! they edited a file mid-session. `(not found)` flags a path that
-//! resolved but isn't on disk; `(not configured)` flags an unresolved
-//! path. The command never writes.
+//! `/config` — read-only view of resolved config plus its layered TOML source paths. Path
+//! discovery is per-invocation so mid-session file edits surface immediately.
 
 use std::path::Path;
 
-use super::context::{SessionInfo, SlashContext};
+use super::context::{LiveSessionInfo, SlashContext};
 use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::{display_effort, file};
@@ -35,10 +29,8 @@ impl SlashCommand for ConfigCmd {
     }
 }
 
-/// Two key-value tables: resolved values (overlapping with `/status`)
-/// and the on-disk paths they came from.
 fn render_config(
-    info: &SessionInfo,
+    info: &LiveSessionInfo,
     user_path: Option<&Path>,
     project_path: Option<&Path>,
 ) -> String {
@@ -68,10 +60,7 @@ fn render_config(
     out
 }
 
-/// `(not configured)` when the path didn't resolve, otherwise the
-/// tildified path with `(not found)` appended if it doesn't exist on
-/// disk. The path itself is always shown so the user sees *where* we
-/// looked.
+/// `(not configured)` when unresolved; `~/...` plus ` (not found)` when missing.
 fn display_path(path: Option<&Path>) -> String {
     let Some(path) = path else {
         return "(not configured)".to_owned();
@@ -104,8 +93,6 @@ mod tests {
 
     #[test]
     fn config_execute_pushes_a_non_error_block() {
-        // Trait-method end-to-end. Path discovery may or may not
-        // resolve in the test env; either way `execute` is `Ok`.
         use crate::tui::components::chat::ChatView;
         use crate::tui::theme::Theme;
 
@@ -129,9 +116,6 @@ mod tests {
 
     #[test]
     fn render_config_includes_every_resolved_field_value() {
-        // Pin every `ConfigSnapshot` field reaches the user; this also
-        // covers the happy-path `Some(effort)` + `show_thinking=false`
-        // combination the dedicated branch tests below skip.
         let info = test_session_info();
         let cfg = &info.config;
         let model = info.marketing_name();
@@ -170,7 +154,6 @@ mod tests {
 
     #[test]
     fn render_config_thinking_renders_yes_or_no_per_flag() {
-        // Pin `yes`/`no` instead of `true`/`false`, both branches.
         let mut info = test_session_info();
         info.config.show_thinking = false;
         let body = render_config(&info, None, None);
@@ -186,8 +169,6 @@ mod tests {
         let info = test_session_info();
         let path = PathBuf::from("/nonexistent/dir/config.toml");
         let body = render_config(&info, Some(&path), None);
-        // Missing files render the path with `(not found)` so the
-        // user sees *where* we looked.
         assert!(body.contains("(not found)"), "{body}");
         assert!(
             body.contains("/nonexistent/dir/config.toml"),
@@ -197,7 +178,6 @@ mod tests {
 
     #[test]
     fn render_config_paths_none_marks_each_section_explicitly() {
-        // Both rows render `(not configured)`, never blank.
         let info = test_session_info();
         let body = render_config(&info, None, None);
         assert_eq!(body.matches("(not configured)").count(), 2, "{body}");
@@ -220,7 +200,6 @@ mod tests {
 
     #[test]
     fn display_path_existing_file_is_tildified_value_only() {
-        // Workspace `Cargo.toml` is guaranteed to exist at test time.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(here.exists(), "test fixture missing");
         let got = display_path(Some(&here));

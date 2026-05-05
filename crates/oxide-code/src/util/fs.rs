@@ -1,7 +1,4 @@
-//! Filesystem helpers shared across modules that persist private state.
-//!
-//! Permissions are tightened in the create syscall, not via post-create
-//! `chmod`, so no temp window with a wider mode is observable.
+//! Filesystem helpers for persisting private state (0o700 dirs, 0o600 files).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -11,8 +8,7 @@ use anyhow::{Context, Result};
 use tracing::debug;
 use uuid::Uuid;
 
-/// Creates `path` (and parents) with owner-only (`0o700`) perms on Unix.
-/// Existing directories are tightened best-effort.
+/// Creates `path` (and parents) with `0o700` perms on Unix.
 pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -35,8 +31,11 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes `bytes` to `path` atomically with owner-only (`0o600`) perms
-/// on Unix via sibling `.tmp.<uuid>` + POSIX rename.
+/// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
+///
+/// Writes to a sibling temp file (same parent so `rename` stays a directory-internal atomic op),
+/// flushes contents to disk, then renames over the destination. On any failure the temp file is
+/// removed instead of being leaked.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

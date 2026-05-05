@@ -1,6 +1,5 @@
-//! `grep` tool body (content mode) — per-file groups of line-numbered
-//! match rows. Context lines (`-` separator in grep output) render dim
-//! to keep matches visually distinct.
+//! `grep` tool body (content mode) — per-file groups of line-numbered match rows; non-match
+//! context lines render dim.
 
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
@@ -69,8 +68,7 @@ pub(super) fn render(
     }
 }
 
-/// Footer combining TUI-side row hiding (`hidden`) and grep's
-/// server-side `head_limit` (`truncated`). `None` when neither applies.
+/// Footer combining TUI-side row hiding and grep's `head_limit` cap; `None` when neither applies.
 fn footer_text(hidden: usize, truncated: bool) -> Option<String> {
     match (hidden, truncated) {
         (0, false) => None,
@@ -110,17 +108,15 @@ mod tests {
             show_thinking: true,
         };
         let mut out = Vec::new();
-        // truncated=true is intentional: empty groups short-circuit
-        // before the footer, so even a `truncated` flag emits no body.
+        // truncated=true is intentional: empty groups short-circuit before the footer.
         render(&mut out, &ctx, &[], true, false);
         assert!(out.is_empty());
     }
 
     #[test]
     fn render_stops_when_budget_fills_at_path_boundary() {
-        // Six 0-line groups overflow the 5-row budget on path headers
-        // alone, exercising the outer-loop budget guard that the inner
-        // `break 'outer` doesn't reach when groups have no match rows.
+        // Six 0-line groups overflow the 5-row budget on path headers alone, hitting the outer
+        // guard that `break 'outer` does not reach when groups have no match rows.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,

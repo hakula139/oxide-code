@@ -1,14 +1,5 @@
-//! Resume-time transcript repair.
-//!
-//! Turns a crash- / partial-write-damaged loaded conversation into a
-//! shape the Anthropic API will accept as the prefix of a new turn:
-//! drop unresolved `tool_use` and orphan `tool_result` blocks, collapse
-//! same-role neighbors emptied by the filters, and patch leading-assistant
-//! / trailing-tool-result-only edges with synthetic sentinels.
-//!
-//! [`sanitize_resumed_messages`] sequences four named passes; the
-//! `strip_trailing_thinking` brackets cover both the loaded tail and a
-//! sentinel we may have just appended.
+//! Resume-time transcript repair. Drops unresolved `tool_use` / orphan `tool_result` blocks,
+//! collapses same-role neighbors, and patches head / tail edges the API would reject.
 
 use std::collections::HashSet;
 
@@ -16,17 +7,24 @@ use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 
 // ── Constants ──
 
-/// Stub appended after a trailing tool-result-only user turn so the
-/// next API call has a valid assistant follow-up.
+/// Stub appended after a trailing tool-result-only user turn so the next API call has a
+/// valid assistant follow-up.
 pub(super) const RESUME_CONTINUATION_SENTINEL: &str =
     "[Previous turn was interrupted; continuing.]";
 
-/// Stub prepended when sanitization leaves an assistant as the first
-/// message. The API rejects transcripts that start with assistant.
+/// Stub prepended when sanitization leaves an assistant as the first message — the API rejects
+/// transcripts that start with assistant.
 pub(super) const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in recovery.]";
 
 // ── Entry Point ──
 
+/// Repairs a transcript loaded from JSONL so the next API call won't 400. Pass order matters:
+/// drop unresolved `tool_use` first so any `tool_result` paired only with a dropped call is
+/// orphaned in the next pass; collapse roles after both filter passes so emptied messages
+/// can't desync the alternation; sentinels run last because head / tail shape only stabilizes
+/// post-collapse. The trailing thinking strip runs twice — once before, once after — so a
+/// thinking block at the end of a now-removed assistant turn doesn't survive into the next API
+/// call.
 pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     strip_trailing_thinking(messages);
     drop_unresolved_tool_uses(messages);
@@ -38,9 +36,8 @@ pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
 
 // ── Passes ──
 
-/// Drops assistant `tool_use` blocks whose id has no matching
-/// `tool_result` anywhere in the transcript. Cloned ids: a borrowed
-/// `HashSet<&str>` would conflict with the mutable iteration below.
+/// Drops assistant `tool_use` blocks whose id has no matching `tool_result`. Ids are owned
+/// because the `HashSet` is built from a shared borrow before mutating below.
 fn drop_unresolved_tool_uses(messages: &mut [Message]) {
     let resolved: HashSet<String> = messages
         .iter()
@@ -64,9 +61,8 @@ fn drop_unresolved_tool_uses(messages: &mut [Message]) {
     }
 }
 
-/// Drops user `tool_result` blocks whose `tool_use_id` does not match
-/// any surviving assistant `tool_use`, then strips messages that the
-/// preceding two filters emptied so role-collapse sees no stubs.
+/// Drops user `tool_result` blocks with no surviving assistant `tool_use`, then strips
+/// messages that prior passes emptied so role-collapse sees no stubs.
 fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
     let surviving: HashSet<String> = messages
         .iter()
@@ -92,8 +88,7 @@ fn drop_orphan_tool_results(messages: &mut Vec<Message>) {
     messages.retain(|m| !m.content.is_empty());
 }
 
-/// Merges adjacent same-role runs into one message so role alternation
-/// holds after the filter passes drop messages whole.
+/// Merges adjacent same-role runs so role alternation holds after the filter passes.
 fn collapse_consecutive_roles(messages: &mut Vec<Message>) {
     messages.dedup_by(|next, prev| {
         if prev.role == next.role {
@@ -105,9 +100,8 @@ fn collapse_consecutive_roles(messages: &mut Vec<Message>) {
     });
 }
 
-/// Patches head / tail edges that the API rejects: prepends a user
-/// stub when the chain starts with assistant, appends an assistant
-/// stub when the last user turn is tool-results only.
+/// Patches head / tail edges the API rejects: prepends a user stub on leading-assistant,
+/// appends an assistant stub on trailing tool-results-only user.
 fn insert_resume_sentinels(messages: &mut Vec<Message>) {
     if messages
         .first()
@@ -358,8 +352,7 @@ mod tests {
 
     #[test]
     fn drop_unresolved_tool_uses_treats_server_tool_use_like_tool_use() {
-        // ServerToolUse shares the resolved-id contract with ToolUse —
-        // both arms of the OR pattern in the filter must match here.
+        // Both `ToolUse` and `ServerToolUse` arms must match — covers the OR in the filter.
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
@@ -420,8 +413,7 @@ mod tests {
 
     #[test]
     fn drop_orphan_tool_results_keeps_results_paired_to_server_tool_use() {
-        // The surviving-id set must include ServerToolUse, otherwise
-        // its paired tool_result would be dropped as orphan.
+        // Surviving-id set must include `ServerToolUse` ids, else its result would be orphaned.
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
@@ -518,8 +510,7 @@ mod tests {
 
     #[test]
     fn insert_resume_sentinels_skips_append_when_trailing_user_has_text() {
-        // Mixed text + tool_result is a normal follow-up, not the
-        // post-crash shape — no sentinel.
+        // Mixed text + tool_result is a normal follow-up, not the post-crash shape — no sentinel.
         let mut messages = vec![
             Message::user("do X"),
             Message {

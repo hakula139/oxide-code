@@ -117,6 +117,13 @@ struct GlobOutput {
     truncated_total: Option<usize>,
 }
 
+/// Walks `search_path` (defaulting to the current working directory), filters entries against
+/// `pattern`, and returns up to `MAX_RESULTS` matches sorted newest-first by mtime.
+///
+/// `walk_files` already enforces the ignore-list precedence (`.gitignore` and global ignore
+/// files first, then hidden-entry rules), so the glob only ever sees tracked files. Truncation
+/// past `MAX_RESULTS` is announced inline and surfaced separately on `truncated_total` for the
+/// structured view.
 fn glob_files(pattern: &str, search_path: Option<&str>) -> Result<GlobOutput, String> {
     let base = super::resolve_base_dir(search_path)?;
     if !base.is_dir() {

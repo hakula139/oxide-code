@@ -7,15 +7,18 @@ use tracing::debug;
 
 use super::wire::StreamEvent;
 
-/// Hard cap on the unterminated SSE frame buffer. A misbehaving upstream that
-/// never emits `\n\n` would otherwise let `buf` grow without bound until OOM.
+/// Hard cap — a misbehaving upstream that never emits `\n\n` would otherwise grow until OOM.
 #[cfg(not(test))]
 const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
-/// Tests use a smaller cap so the overflow path is exercised in
-/// milliseconds without allocating 8 MiB of mock body per run.
+/// Tests use a smaller cap so the overflow path exercises without allocating 8 MiB per run.
 #[cfg(test)]
 const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
+/// Drives the streaming `/v1/messages` request and forwards parsed [`StreamEvent`]s on `tx`.
+///
+/// Returns `Ok(())` on graceful end-of-stream **or** receiver drop (consumer cancellation is not
+/// an error). Returns `Err` only for transport / HTTP failures and the SSE-buffer overflow guard.
+/// Single malformed frames are logged and skipped — they must not poison the rest of the turn.
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
@@ -47,8 +50,7 @@ pub(super) async fn stream_sse(
     }
 
     let mut stream = response.bytes_stream();
-    // Byte buffer: reassembles UTF-8 sequences split across chunk boundaries
-    // intact (`from_utf8_lossy` would inject U+FFFD at the boundary).
+    // Byte buffer reassembles UTF-8 split across chunks; lossy would inject U+FFFD.
     let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
@@ -91,9 +93,9 @@ pub(super) async fn stream_sse(
     Ok(())
 }
 
-/// Builds an actionable error message for a non-2xx Anthropic API
-/// response. The raw body is always appended as `details: {body}` so
-/// debug context is preserved on every branch.
+/// Renders a user-facing diagnostic for a non-2xx Anthropic response. Per-status branches surface
+/// actionable hints (auth recovery, retry-after, transient overload); the body is appended for
+/// debuggability.
 pub(super) fn format_api_error(
     status: reqwest::StatusCode,
     retry_after: Option<&str>,
@@ -114,12 +116,10 @@ pub(super) fn format_api_error(
     format!("{prefix} details: {body}")
 }
 
-/// Parses a single SSE frame into a [`StreamEvent`].
-///
-/// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
-/// Anthropic currently emits single-line data, but we follow the spec
-/// so a future multi-line payload doesn't silently lose everything
-/// but the last line.
+/// Parses one SSE frame (lines up to a blank-line separator). Returns `Ok(None)` for frames with
+/// no `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate
+/// with `\n`; both `data: payload` and `data:payload` (no leading space) are accepted because some
+/// gateways drop the space.
 pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 
@@ -155,9 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sse_buffer_overflow_bails_when_frame_lacks_terminator() {
-        // An upstream that emits a long byte string with no `\n\n`
-        // separator would let the buffer grow unbounded; the cap turns
-        // it into an actionable error instead of an OOM.
+        // No `\n\n` separator would grow the buffer unbounded; the cap turns this into an error.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -196,9 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sse_skips_invalid_utf8_frame_then_keeps_streaming() {
-        // A chunk with non-UTF-8 bytes between SSE separators must be
-        // skipped (not surfaced) so a single corrupted frame can't poison
-        // the stream — every other frame after it must still deliver.
+        // A non-UTF-8 frame must be skipped silently so it doesn't poison the rest of the stream.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -249,9 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sse_handles_data_less_frames_without_emitting_event() {
-        // A frame with only an `event:` (or comment) line and no `data:`
-        // line parses to `Ok(None)`; the loop must consume it silently
-        // and continue — Anthropic occasionally emits comment heartbeats.
+        // Frames with no `data:` (e.g., comment heartbeats) parse to Ok(None) and are skipped.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -298,9 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_sse_succeeds_when_receiver_drops_before_send() {
-        // Consumer cancellation closes the channel; the next tx.send
-        // call surfaces an Err which stream_sse must treat as graceful
-        // shutdown (Ok(())), not propagate as a stream failure.
+        // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -502,8 +494,7 @@ mod tests {
 
     #[test]
     fn parse_sse_frame_concatenates_multiple_data_lines_with_newline() {
-        // Per the SSE spec, multiple data: lines join with \n. JSON
-        // treats \n as token whitespace, so this round-trips cleanly.
+        // Multiple `data:` lines join with `\n`; JSON treats it as whitespace, so this round-trips.
         let frame = indoc! {r#"
             event: ping
             data: {"type":

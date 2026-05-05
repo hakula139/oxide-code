@@ -16,25 +16,7 @@ const PROJECT_CONFIG_FILENAME: &str = "ox.toml";
 
 // ── Config Structs ──
 
-/// Top-level configuration loaded from a TOML file.
-///
-/// All sections and fields are optional — each source contributes only the
-/// values it sets. Higher-priority sources override lower-priority ones
-/// field by field via [`FileConfig::merge`].
-///
-/// ```toml
-/// [client]
-/// model = "claude-sonnet-4-6"
-///
-/// [tui]
-/// show_thinking = true
-///
-/// [tui.theme]
-/// base = "latte"
-///
-/// [tui.theme.overrides]
-/// error = "#ff0000"
-/// ```
+/// All fields optional; merge via [`FileConfig::merge`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileConfig {
@@ -42,11 +24,6 @@ pub(super) struct FileConfig {
     pub(super) tui: Option<TuiConfig>,
 }
 
-/// API client settings (`[client]` section).
-///
-/// Fields are grouped by concern so adjacent lines stay related:
-/// connection (`api_key`, `base_url`), model selection (`model`,
-/// `effort`), then request tuning (`max_tokens`, `prompt_cache_ttl`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
@@ -58,7 +35,6 @@ pub(super) struct ClientConfig {
     pub(super) prompt_cache_ttl: Option<super::PromptCacheTtl>,
 }
 
-/// Terminal UI settings (`[tui]` section).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
@@ -66,12 +42,6 @@ pub(super) struct TuiConfig {
     pub(super) theme: Option<ThemeFileConfig>,
 }
 
-/// Theme settings (`[tui.theme]` section).
-///
-/// `base` selects a built-in name (`mocha`, `macchiato`, `frappe`,
-/// `latte`) or a filesystem path (`~/.config/ox/themes/dark.toml`)
-/// to a TOML body. The `[tui.theme.overrides]` table patches
-/// individual slots on top of the resolved base.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ThemeFileConfig {
@@ -82,7 +52,7 @@ pub(super) struct ThemeFileConfig {
 // ── Merge ──
 
 impl FileConfig {
-    /// Merges two configs. Fields in `other` take precedence over `self`.
+    /// Fields in `other` take precedence over `self`.
     fn merge(self, other: Self) -> Self {
         Self {
             client: merge_section(self.client, other.client, ClientConfig::merge),
@@ -114,11 +84,7 @@ impl TuiConfig {
 }
 
 impl ThemeFileConfig {
-    /// Merge two theme configs. `base` follows the standard "other
-    /// wins" rule. `overrides` are merged key-by-key — each side
-    /// contributes its slot patches; on key collision, `other` wins
-    /// so a project-level patch overrides a user-level patch for
-    /// the same slot.
+    /// `base`: other wins. `overrides`: merged key-by-key, `other` wins collisions.
     fn merge(self, other: Self) -> Self {
         let overrides = match (self.overrides, other.overrides) {
             (Some(mut s), Some(o)) => {
@@ -134,8 +100,6 @@ impl ThemeFileConfig {
     }
 }
 
-/// Merges two optional config sections. When both are present, merges their
-/// fields. When only one is present, use it as-is.
 fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> Option<T> {
     match (base, other) {
         (Some(b), Some(o)) => Some(merge(b, o)),
@@ -145,16 +109,8 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 
 // ── Loading ──
 
-/// Loads and merges configuration from user and project TOML files.
-///
-/// Precedence (highest wins): project config > user config.
-/// Environment variable overrides are applied later in [`super::Config::load`].
-///
-/// Returns an error if any discovered file is unreadable or malformed —
-/// silent fallthrough would otherwise hide typos (e.g. a misplaced
-/// `show_thinking` under `[client]`) and surface as a confusing
-/// downstream "no credentials" error after the dropped config takes
-/// the API key with it.
+/// Loads + merges user and project TOML; project wins. Errors propagate so typos don't surface as
+/// downstream "no credentials" errors.
 pub(super) fn load() -> Result<FileConfig> {
     let user = user_config_path()
         .map(|p| load_file(&p))
@@ -172,9 +128,7 @@ pub(super) fn load() -> Result<FileConfig> {
     })
 }
 
-/// Reads a single config file. `Ok(None)` when the file does not
-/// exist; `Err` when it exists but cannot be read or parsed (so the
-/// caller can surface the path and underlying TOML diagnostic).
+/// `Ok(None)` when missing; `Err` when present but unreadable or malformed.
 fn load_file(path: &Path) -> Result<Option<FileConfig>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -191,8 +145,6 @@ fn load_file(path: &Path) -> Result<Option<FileConfig>> {
 
 // ── Path Discovery ──
 
-/// User config: `$XDG_CONFIG_HOME/ox/config.toml`, falling back to
-/// `~/.config/ox/config.toml`.
 pub(crate) fn user_config_path() -> Option<PathBuf> {
     xdg_dir(
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
@@ -207,10 +159,6 @@ pub(crate) fn find_project_config() -> Option<PathBuf> {
     find_project_config_from(std::env::current_dir().ok()?)
 }
 
-/// Walks from `start` upward to find the nearest `ox.toml`.
-///
-/// Separated from [`find_project_config`] for testability (avoids changing
-/// the process CWD).
 fn find_project_config_from(mut dir: PathBuf) -> Option<PathBuf> {
     loop {
         let candidate = dir.join(PROJECT_CONFIG_FILENAME);
@@ -370,8 +318,6 @@ mod tests {
 
     #[test]
     fn theme_merge_overrides_extend_when_both_set() {
-        // Project (other) extends user (self) — disjoint slots
-        // contribute from both layers.
         let base = theme_with(None, &[("error", "#aaaaaa")]);
         let other = theme_with(None, &[("accent", "#bbbbbb")]);
         let merged = base.merge(other);
@@ -383,8 +329,6 @@ mod tests {
 
     #[test]
     fn theme_merge_other_override_wins_on_slot_collision() {
-        // Same slot patched in both layers — `other` (higher priority,
-        // typically the project file) wins for that slot.
         let base = theme_with(None, &[("error", "#aaaaaa")]);
         let other = theme_with(None, &[("error", "#bbbbbb")]);
         let merged = base.merge(other);
@@ -500,11 +444,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Read errors other than `NotFound` (here: pointing at a
-    /// directory raises `IsADirectory`) must surface with the
-    /// offending path so the user can act on it. Splitting this from
-    /// the missing-file branch is the whole point of distinguishing
-    /// `NotFound` from other IO errors in `load_file`.
+    /// Non-`NotFound` IO errors (e.g. directory → `IsADirectory`) must surface with the path.
     #[test]
     fn load_file_unreadable_path_propagates_io_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -530,10 +470,7 @@ mod tests {
         assert!(msg.contains("invalid config at"), "{msg}");
     }
 
-    /// Surfaced as a hard error so the user sees the offending path
-    /// and the TOML diagnostic instead of a silent fallthrough.
-    /// Covers `FileConfig`'s `deny_unknown_fields` (top-level keys);
-    /// the section-level analog is [`load_file_rejects_misplaced_field`].
+    /// Covers top-level `deny_unknown_fields`. Section-level: `load_file_rejects_misplaced_field`.
     #[test]
     fn load_file_rejects_unknown_top_level_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -546,11 +483,8 @@ mod tests {
         assert!(msg.contains("unknown field `model`"), "{msg}");
     }
 
-    /// Catches the original bug report shape: `show_thinking` belongs
-    /// in `[tui]`, not `[client]`. Without `deny_unknown_fields` +
-    /// hard-fail, the whole file used to be dropped silently and the
-    /// user got an unrelated "no credentials" error instead. Also
-    /// covers a generic typo within a section (same code path).
+    /// Regression: `show_thinking` in `[client]` used to drop the whole file silently and surface
+    /// as "no credentials". Also covers section-level typos (same code path).
     #[test]
     fn load_file_rejects_misplaced_field() {
         let dir = tempfile::tempdir().unwrap();

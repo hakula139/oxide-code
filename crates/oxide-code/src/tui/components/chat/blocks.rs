@@ -27,12 +27,20 @@ use crate::tui::wrap::wrap_line;
 
 // ── Trait ──
 
+/// Per-render snapshot threaded through every [`ChatBlock::render`] call.
+///
+/// `width` is the inner content width (already stripped of any chrome). `show_thinking` lets
+/// thinking blocks elide their content without removing themselves from the block list.
 pub(super) struct RenderCtx<'a> {
     pub(super) width: u16,
     pub(super) theme: &'a Theme,
     pub(super) show_thinking: bool,
 }
 
+/// Categorizes a block for inter-block spacing decisions.
+///
+/// Adjacent `Call` + `Result` pairs render flush against each other so a tool call and its
+/// result read as a single unit; `Other` blocks always get a blank-line separator.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlockKind {
     Call,
@@ -40,10 +48,14 @@ pub(super) enum BlockKind {
     Other,
 }
 
+/// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
+///
+/// Implementations are pure functions of their state plus the [`RenderCtx`]; the chat view caches
+/// nothing and may re-render any block on every frame.
 pub(super) trait ChatBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>;
 
-    /// Standalone blocks get blank-line separators; tool blocks hug.
+    /// Standalone blocks get blank-line separators; tool call/result pairs hug.
     fn standalone(&self) -> bool {
         true
     }
@@ -56,7 +68,8 @@ pub(super) trait ChatBlock {
         true
     }
 
-    /// Whether this block is committed assistant prose (for streaming continuation).
+    /// True when this block is committed assistant prose, so a fresh streaming buffer can
+    /// continue its turn without inserting a separator.
     fn continues_assistant_turn(&self) -> bool {
         false
     }

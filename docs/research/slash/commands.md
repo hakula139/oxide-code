@@ -1,6 +1,6 @@
 # Slash Commands (Reference)
 
-Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode). Cross-checked against locally-mirrored sources (2026-05-05).
+Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 For modal-specific architecture (how `local-jsx` / `BottomPaneView` / `dialog.show()` actually work) see [modals.md](modals.md).
 
@@ -10,7 +10,7 @@ Declarative registry with three execution modes; lazy-loaded implementations.
 
 - **Registry**: ~100 `Command` records under `src/commands/<name>/index.ts`, ~50 of which are `local-jsx` modals. Metadata: `name`, `aliases`, `description`, `type: 'local' | 'local-jsx' | 'prompt'`, `isEnabled`, `isHidden`, `immediate`, `isSensitive`, `availability`. Each command directory ships its own modal component (`<name>.tsx`) loaded via `load: () => import('./<name>.js')`.
 - **Parser**: `slashCommandParsing.ts` splits on whitespace. Unknown names use Fuse.js (threshold 0.3).
-- **Dispatch**: Three modes -- `local` returns `{ resultText, displayMode }`, `local-jsx` returns React JSX (modal pickers), `prompt` expands to text and submits.
+- **Dispatch**: Three modes — `local` returns `{ resultText, displayMode }`, `local-jsx` returns React JSX (modal pickers), `prompt` expands to text and submits.
 - **Output**: Display modes: `'skip'` (no transcript entry), `'system'` (synthetic local-stdout message), `'user'` (default). Meta flag (`isMeta: true`) keeps a message model-visible while hiding from UI.
 - **Autocomplete**: Fuse.js across name, aliases, name parts, descriptions (weights: name 3, alias/part 2, description 0.5). Max 5 items. Re-sorts by tier: exact-name -> exact-alias -> prefix-name -> prefix-alias -> fuzzy.
 - **Custom**: Markdown files in `~/.claude/skills/`, `~/.claude/commands/`, `./.claude/skills/`, `./.claude/commands/` with YAML frontmatter.

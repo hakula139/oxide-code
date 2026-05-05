@@ -1,10 +1,5 @@
-//! Chat view — the scrollable message list.
-//!
-//! Each visible unit in the transcript (user messages, assistant
-//! replies, tool calls and results, errors) is a [`blocks::ChatBlock`]
-//! implementation. [`ChatView`] is the thin container: it appends
-//! blocks, owns the streaming buffer, handles scroll state, and stacks
-//! `render` outputs with appropriate blank-line separators.
+//! Scrollable chat view. Each visible transcript unit is a [`blocks::ChatBlock`] impl;
+//! [`ChatView`] owns the streaming buffer and stacks block renders with separator lines.
 
 mod blocks;
 
@@ -30,23 +25,15 @@ use crate::tui::theme::Theme;
 
 /// Scrollable chat message list with auto-scroll.
 pub(crate) struct ChatView {
-    // Config
     theme: Theme,
     show_thinking: bool,
 
-    // Committed blocks
     blocks: Vec<Box<dyn ChatBlock>>,
 
-    // Transient state (cleared per turn)
-    /// In-flight assistant tokens with a rendered-prefix cache.
     streaming: Option<StreamingAssistant>,
-    /// Live thinking tokens for the current block; flushed into a
-    /// committed [`AssistantThinking`] block on stream start or turn end.
     thinking_buffer: String,
 
-    // View state
     scroll_offset: u16,
-    /// Updated during render to avoid a redundant `build_text` call.
     content_height: Cell<u16>,
     viewport_height: u16,
     viewport_width: u16,
@@ -141,7 +128,9 @@ impl ChatView {
     }
 
     /// Appends a streamed token to the current assistant response.
-    /// Any pending thinking is committed first.
+    ///
+    /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a
+    /// block split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.commit_thinking_buffer();
         self.streaming
@@ -161,8 +150,10 @@ impl ChatView {
         }
     }
 
-    /// Finalize the streaming buffer into a committed block. Flushes
-    /// pending thinking first so thinking-only turns still leave a block.
+    /// Finalizes the streaming buffer into a committed block.
+    ///
+    /// Pending thinking is flushed first so a turn that produced only thinking still leaves an
+    /// `AssistantThinking` block in the transcript.
     pub(crate) fn commit_streaming(&mut self) {
         self.commit_thinking_buffer();
         if let Some(mut s) = self.streaming.take() {
@@ -222,8 +213,7 @@ impl ChatView {
         self.blocks.push(Box::new(GitDiffBlock::new(text)));
     }
 
-    /// Appends an interrupted marker. Flushes any in-flight streaming
-    /// buffer first.
+    /// Appends an interrupted marker. Flushes any in-flight streaming buffer first.
     pub(crate) fn push_interrupted_marker(&mut self) {
         self.commit_streaming();
         self.blocks.push(Box::new(InterruptedMarker));
@@ -263,9 +253,7 @@ impl ChatView {
         self.blocks.last().and_then(|b| b.system_text())
     }
 
-    /// Updates cached viewport height and syncs scroll position.
-    /// Returns `true` when auto-scroll moved `scroll_offset`, so the
-    /// caller knows to repaint with the new offset.
+    /// Updates cached viewport size and syncs scroll. `true` if auto-scroll moved the offset.
     #[must_use]
     pub(crate) fn update_layout(&mut self, area: Rect) -> bool {
         self.viewport_height = area.height;
@@ -392,6 +380,8 @@ impl ChatView {
                 continue;
             }
             let kind = block.block_kind();
+            // Standalone blocks always take a separator; tool `Call` blocks hug their preceding
+            // `Result` (`Result → Call` opens a new tool group, but `Call → Result` stays flush).
             let needs_blank_before = !lines.is_empty()
                 && last_has_width(&lines)
                 && (block.standalone() || prev_kind == Some(BlockKind::Result));

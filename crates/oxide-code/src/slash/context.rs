@@ -1,7 +1,5 @@
-//! Inputs handed to [`SlashCommand::execute`]. [`SlashContext`] holds
-//! borrowed handles to App-owned mutable state; [`SessionInfo`] is the
-//! session-level descriptor snapshot. Splitting the two keeps the
-//! borrow story clean.
+//! Inputs to [`SlashCommand::execute`]: [`SlashContext`] borrows App-owned mutable state;
+//! [`LiveSessionInfo`] is the session-level snapshot.
 
 use std::borrow::Cow;
 
@@ -10,50 +8,33 @@ use crate::model::marketing_or_id;
 use crate::tui::components::chat::ChatView;
 use crate::tui::modal::Modal;
 
-/// Session-level descriptors surfaced by read-only slash commands.
-/// Built at TUI startup, then rebound mid-session by
-/// [`AgentEvent::SessionRolled`](crate::agent::event::AgentEvent::SessionRolled)
-/// (`/clear`) and
-/// [`AgentEvent::ConfigChanged`](crate::agent::event::AgentEvent::ConfigChanged)
-/// (`/model`, `/effort`). Embeds [`ConfigSnapshot`] so `/config` reads
-/// from a single source.
-pub(crate) struct SessionInfo {
-    /// Tildified working directory (`$HOME` rewritten as `~`).
+/// Live snapshot of the running session handed to every slash command. Built at TUI startup and
+/// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
+/// session id, and theme. Distinct from [`crate::session::entry::SessionInfo`], which is the
+/// persisted JSONL record consumed by `--list`.
+pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
-    /// Crate version (`env!("CARGO_PKG_VERSION")`).
     pub(crate) version: &'static str,
-    /// Active session UUID — useful for `--continue` lookups.
     pub(crate) session_id: String,
-    /// Resolved-config view (auth method, model id, effort, ...).
     pub(crate) config: ConfigSnapshot,
 }
 
-impl SessionInfo {
-    /// Marketing display name derived from the live `config.model_id`
-    /// (e.g. `"Claude Sonnet 4.6"`). Single seam — caching the name
-    /// alongside `model_id` would just be a stale-state risk.
+impl LiveSessionInfo {
     pub(crate) fn marketing_name(&self) -> Cow<'_, str> {
         marketing_or_id(&self.config.model_id)
     }
 }
 
-/// Borrowed view of App-owned state for one
-/// [`super::registry::SlashCommand::execute`] call. Never stored.
-/// State-mutating commands return [`super::registry::SlashOutcome::Forward`];
-/// the dispatcher owns forwarding to the agent loop. Commands open
-/// modals via [`SlashContext::open_modal`] — the dispatcher harvests
-/// the slot after `execute` returns and pushes onto the App's modal
-/// stack.
+/// Borrowed App-owned state for one [`super::registry::SlashCommand::execute`] call. Open modals
+/// via [`SlashContext::open_modal`]; the dispatcher harvests the slot after `execute`.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
-    pub(crate) info: &'a SessionInfo,
-    /// Out-parameter for modals opened by `execute`. `None` until set.
-    /// One slot per dispatch — only one modal can open per command.
+    pub(crate) info: &'a LiveSessionInfo,
     modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
-    pub(crate) fn new(chat: &'a mut ChatView, info: &'a SessionInfo) -> Self {
+    pub(crate) fn new(chat: &'a mut ChatView, info: &'a LiveSessionInfo) -> Self {
         Self {
             chat,
             info,
@@ -61,16 +42,12 @@ impl<'a> SlashContext<'a> {
         }
     }
 
-    /// Open `modal` after this command finishes. Overwriting an
-    /// existing slot is a programmer error — only one modal per
-    /// dispatch is meaningful.
+    /// Open `modal` after this command finishes. One modal per dispatch.
     pub(crate) fn open_modal(&mut self, modal: Box<dyn Modal>) {
         debug_assert!(self.modal.is_none(), "modal slot set twice in one dispatch");
         self.modal = Some(modal);
     }
 
-    /// Take the modal slot, if any. The dispatcher calls this once
-    /// after `execute` returns.
     pub(crate) fn take_modal(&mut self) -> Option<Box<dyn Modal>> {
         self.modal.take()
     }

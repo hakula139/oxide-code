@@ -1,4 +1,4 @@
-//! Per-session file-change tracker: Read-before-Edit gate with mtime + xxh64 staleness detection.
+//! Per-session Read-before-Edit gate with mtime + xxh64 staleness detection.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,20 @@ const HASH_SEED: u64 = 0;
 
 // ── FileTracker ──
 
+/// Per-session record of files the agent has read, gating subsequent Edit / Write tool calls.
+///
+/// The gate enforces three invariants before mutation:
+///
+/// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path within the
+///   session.
+/// - **Full read required**: a partial (offset / limit) Read does not satisfy the gate; the agent
+///   must Read the file in full before mutating it.
+/// - **Freshness**: if (mtime, size) drifted since the recorded Read, the caller must rehash the
+///   current bytes via [`Self::verify_drift_bytes`]; only matching xxh64 content qualifies as an
+///   unchanged file.
+///
+/// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
+/// resume — see [`Self::restore_verified`].
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
@@ -27,6 +41,8 @@ struct FileState {
     recorded_at: OffsetDateTime,
 }
 
+/// Extent of the most recent Read. Only `Full` satisfies the Edit / Write gate; `Partial` requires
+/// the agent to re-Read the file in full before mutating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
@@ -34,6 +50,9 @@ pub(crate) enum LastView {
     Partial { offset: usize, limit: usize },
 }
 
+/// Which mutating tool is asking for the gate. Carried into [`GateError`] purely so the rendered
+/// error message reads `"... before editing it"` vs `"... before writing to it"` — `verb()` is the
+/// only consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
@@ -132,6 +151,8 @@ impl FileTracker {
         }
     }
 
+    /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
+    /// passes the gate without requiring a fresh Read.
     pub(crate) fn record_modify(&self, path: &Path, bytes: &[u8], mtime: SystemTime, size: u64) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let now = OffsetDateTime::now_utc();
@@ -174,7 +195,9 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Rehydrates from session JSONL; drops entries whose stat no longer matches.
+    /// Rehydrates from session JSONL on resume. Each snapshot must still match disk on (mtime,
+    /// size) — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
+    /// duplicate paths the entry with the newer `recorded_at` wins.
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) {
         let mut by_path = self.lock();
         for snap in snapshots {
@@ -219,6 +242,9 @@ impl FileTracker {
 
 // ── FileSnapshot ──
 
+/// JSONL-persisted record of one tracked file. Written into the session log on `finish` and read
+/// back on resume by [`FileTracker::restore_verified`], which re-stats each path before
+/// re-admitting the entry to the live tracker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -233,18 +259,31 @@ pub(crate) struct FileSnapshot {
 
 // ── Outcomes ──
 
+/// Outcome of [`FileTracker::record_read`].
+///
+/// `CacheHit` means the path was already in the tracker with identical content (full-read +
+/// matching xxh64); the caller should return [`CACHE_HIT_STUB`] instead of the real bytes to
+/// save tokens. `Inserted` is the regular path — fresh read, snapshot stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordRead {
     Inserted,
     CacheHit,
 }
 
+/// Outcome of the cheap stat-only freshness check.
+///
+/// `Pass` — `(mtime, size)` matches the recorded snapshot; the gate is satisfied without
+/// re-reading bytes. `NeedsBytes { stored_hash }` — stat drifted; the caller must rehash the
+/// current file contents and call [`FileTracker::verify_drift_bytes`] to confirm whether the
+/// content actually changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatCheck {
     Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
+/// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
+/// message tells the model exactly how to recover (Read first / Read in full / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
     #[error("File {} has not been read in this session. Use the Read tool first before {} it.", .path.display(), .purpose.verb())]
@@ -255,16 +294,13 @@ pub(crate) enum GateError {
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 
-/// Stub returned in place of file bytes on a full re-Read of an
-/// unchanged file. Signals that the prior Read is still authoritative.
+/// Returned in place of file bytes when the agent re-Reads a full, unchanged file. Saves tokens
+/// without giving up the Read-before-Edit invariant — the gate already saw the original content.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
 
 // ── Testing ──
 
-/// Shared test fixtures. Centralized so the five callers don't each
-/// grow near-duplicates that subtly disagree on what a "seeded
-/// tracker" means.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::path::Path;
@@ -273,15 +309,10 @@ pub(crate) mod testing {
 
     use super::{FileTracker, LastView};
 
-    /// Fresh `Arc<FileTracker>` for callers that need ownership
-    /// (`ReadTool::new`, `EditTool::new`, `WriteTool::new`); plain
-    /// callers use `FileTracker::default()`.
     pub(crate) fn tracker() -> Arc<FileTracker> {
         Arc::new(FileTracker::default())
     }
 
-    /// Seeds `tracker` with a full Read of `path` from disk, mirroring
-    /// a real Read turn.
     pub(crate) fn seed_full_read(tracker: &FileTracker, path: &Path) {
         let bytes = std::fs::read(path).unwrap();
         let meta = std::fs::metadata(path).unwrap();
@@ -294,17 +325,12 @@ pub(crate) mod testing {
         );
     }
 
-    /// Fresh tracker pre-seeded with a full Read of `path` — the
-    /// shape most edit-tool tests want.
     pub(crate) fn tracker_seeded(path: &Path) -> FileTracker {
         let tracker = FileTracker::default();
         seed_full_read(&tracker, path);
         tracker
     }
 
-    /// Writes `bytes` to `path`, records the resulting state as a
-    /// successful Edit / Write, and returns the captured
-    /// `(mtime, size)` for assertions.
     pub(crate) fn record_tracked_file(
         tracker: &FileTracker,
         path: &Path,

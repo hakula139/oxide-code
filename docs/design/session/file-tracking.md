@@ -19,8 +19,8 @@ The `FileTracker` (`crates/oxide-code/src/file_tracker.rs`) is a per-session `Ar
 
 ## Sources
 
-- `crates/oxide-code/src/file_tracker.rs` -- `FileTracker`, `LastView`, `FileSnapshot`, staleness checks, persist / restore.
-- `crates/oxide-code/src/session/entry.rs` -- JSONL forward-compat (`Entry::Unknown`, `Entry::FileSnapshot`).
-- `crates/oxide-code/src/tool/edit.rs` -- Read-before-Edit gate, staleness check.
-- `crates/oxide-code/src/tool/read.rs` -- `FileTracker::record_read`, cache-hit stub.
-- `crates/oxide-code/src/tool/write.rs` -- Read-before-Write gate.
+- `crates/oxide-code/src/file_tracker.rs` — `FileTracker`, `LastView`, `FileSnapshot`, staleness checks, persist / restore.
+- `crates/oxide-code/src/session/entry.rs` — JSONL forward-compat (`Entry::Unknown`, `Entry::FileSnapshot`).
+- `crates/oxide-code/src/tool/edit.rs` — Read-before-Edit gate, staleness check.
+- `crates/oxide-code/src/tool/read.rs` — `FileTracker::record_read`, cache-hit stub.
+- `crates/oxide-code/src/tool/write.rs` — Read-before-Write gate.

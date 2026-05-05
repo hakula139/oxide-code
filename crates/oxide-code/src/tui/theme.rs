@@ -11,7 +11,11 @@ mod loader;
 
 pub(crate) use loader::{SlotPatch, resolve_theme};
 
-/// A single theme slot — composes optional fg, bg, and modifiers into a [`Style`].
+/// One theme slot — optional fg, bg, and modifiers composed into a [`Style`].
+///
+/// Each component is independently optional so an override can patch one axis (e.g., bg only)
+/// without forcing callers to also restate the other two. [`Slot::style`] folds the three into
+/// a ratatui `Style`, leaving unset axes as the terminal's default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Slot {
     pub(crate) fg: Option<Color>,
@@ -115,6 +119,8 @@ for_each_slot!(define_theme_struct);
 
 impl Default for Theme {
     fn default() -> Self {
+        // Cache the parsed Mocha palette in a `LazyLock` so the TOML parse runs at most once per
+        // process; clones are cheap (every `Slot` is `Copy`).
         static MOCHA: LazyLock<Theme> = LazyLock::new(|| {
             loader::parse_theme(builtin::MOCHA).expect("vendored mocha.toml must parse")
         });
@@ -137,7 +143,6 @@ impl Theme {
         self.dim.style()
     }
 
-    /// Bg-only; `Color::Reset` keeps the terminal background transparent.
     pub(crate) fn surface(&self) -> Style {
         self.surface.style()
     }
@@ -174,12 +179,10 @@ impl Theme {
         self.error.style()
     }
 
-    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_add_row(&self) -> Style {
         Style::default().bg(self.diff_add.bg.unwrap_or(Color::Reset))
     }
 
-    /// Bg-only so it doesn't override per-span fg on diff rows.
     pub(crate) fn diff_del_row(&self) -> Style {
         Style::default().bg(self.diff_del.bg.unwrap_or(Color::Reset))
     }

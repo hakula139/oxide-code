@@ -1,23 +1,17 @@
 //! Theme TOML parsing and resolution.
 //!
-//! A theme document is a flat TOML body with one entry per slot.
-//! Each slot value is either:
+//! A theme document is a flat TOML body, one entry per slot. Each value is either:
 //!
-//! - a **bare color string** (`text = "#cdd6f4"`) — interpreted as
-//!   the slot's `fg` with no `bg` and no modifiers; or
-//! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`)
-//!   — explicit `fg` / `bg` / modifier flags. Recognized modifier
-//!   keys: `bold`, `italic`, `underlined`, `dim`, `reversed`.
+//! - a **bare color string** (`text = "#cdd6f4"`) — sets `fg` only; or
+//! - an **inline table** (`accent = { fg = "#89b4fa", bold = true }`) — explicit `fg` / `bg` plus
+//!   modifiers (`bold`, `italic`, `underlined`, `dim`, `reversed`).
 //!
-//! Every slot must be present; `deny_unknown_fields` catches typos.
-//! Per-slot color parse errors are wrapped with the slot name so a
-//! bad value in `theme.toml` points at the offending entry.
+//! Every slot must be present; `deny_unknown_fields` catches typos. Per-slot parse errors are
+//! wrapped with the slot name.
 //!
-//! [`resolve_theme`] applies a base + per-slot overrides from
-//! `[tui.theme]` config to produce a final [`Theme`]. Theme-selection
-//! errors (unknown name, missing file) hard-fail; per-slot value
-//! errors warn and fall back to the base value so the TUI still
-//! launches.
+//! [`resolve_theme`] applies a base + per-slot overrides from `[tui.theme]` config. Selection
+//! errors (unknown name, missing file) hard-fail; per-slot value errors warn and fall back to base
+//! so the TUI still launches.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,14 +25,8 @@ use super::{Slot, Theme, builtin, color::parse_color};
 
 // ── Resolution ──
 
-/// Resolve a theme from an optional base + per-slot overrides.
-///
-/// Errors:
-///
-/// - Unknown built-in name with no matching file path → `Err`.
-/// - File path that fails to read or parse → `Err`.
-/// - Per-slot override with bad color or unknown slot name → warn
-///   to stderr (via `tracing`), keep the base slot's value.
+/// Resolves a theme from an optional base + per-slot overrides. Unknown / unreadable base errors
+/// hard-fail; per-slot override errors warn via `tracing` and keep the base value.
 pub(crate) fn resolve_theme(
     base: Option<&str>,
     overrides: &HashMap<String, SlotPatch>,
@@ -60,8 +48,8 @@ pub(crate) fn resolve_theme(
     Ok(theme)
 }
 
-/// Resolve a `base` value to a TOML body. Tries the built-in catalogue
-/// first, then a filesystem path (with `~/` expanded to `$HOME`).
+/// Resolves a `base` to a TOML body — built-in catalogue first, then a filesystem path with
+/// `~/` expanded to `$HOME`.
 fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {
         return Ok(body.to_owned());
@@ -75,8 +63,7 @@ fn load_base_body(name: &str) -> Result<String> {
     })
 }
 
-/// Expand a leading `~/` to `$HOME` for theme file paths. Other path
-/// prefixes are returned as-is.
+/// Expands a leading `~/` to `$HOME`; other paths pass through.
 fn expand_tilde(s: &str) -> PathBuf {
     if let Some(rest) = s.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -86,8 +73,7 @@ fn expand_tilde(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Apply one override patch to the named slot. Returns `Err` for
-/// an unknown slot name or a bad color value in the patch.
+/// Applies one override patch; errors on unknown slot name or bad color value.
 fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<()> {
     let slot = slot_for_name(theme, slot_name)
         .ok_or_else(|| anyhow::anyhow!("unknown slot {slot_name:?}"))?;
@@ -95,8 +81,7 @@ fn patch_slot(theme: &mut Theme, slot_name: &str, patch: &SlotPatch) -> Result<(
     Ok(())
 }
 
-/// Mutable slot lookup by name. Generated so the mapping can't drift
-/// from [`Theme`]'s fields.
+/// Generated mutable slot lookup; the mapping can't drift from [`Theme`]'s fields.
 macro_rules! define_slot_for_name {
     ( $( ($name:ident, $doc:literal), )* ) => {
         fn slot_for_name<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Slot> {
@@ -112,15 +97,9 @@ super::for_each_slot!(define_slot_for_name);
 
 // ── SlotPatch ──
 
-/// Per-slot override from `[tui.theme.overrides]` in user config.
-///
-/// Patches are *additive* on top of the base slot:
-///
-/// - bare-string `error = "#hex"` overwrites the slot's `fg` only;
-///   `bg` and modifiers are preserved from the base.
-/// - inline-table overrides patch only the fields that appear, so
-///   `accent = { bold = false }` removes bold from the base accent
-///   without touching its `fg`.
+/// Per-slot override from `[tui.theme.overrides]`. Patches are additive: bare-string overwrites
+/// `fg` only, inline-table patches only the fields that appear (so `accent = { bold = false }`
+/// clears bold without touching `fg`).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum SlotPatch {
@@ -128,20 +107,10 @@ pub(crate) enum SlotPatch {
     Inline(InlinePatch),
 }
 
-/// Inline TOML patch — every field optional. `Option<bool>` modifier
-/// flags distinguish "no change" (`None`), "set" (`Some(true)`), and
-/// "clear" (`Some(false)`).
-///
-/// An entirely empty patch (`error = {}`) would silently re-write the
-/// base value with itself — almost certainly a config bug. [`apply`]
-/// rejects it so the slot warns and falls back to the base value
-/// instead. Per-slot warnings are the right severity for a per-slot
-/// config mistake; a `SlotPatch`-level custom `Deserialize` would
-/// catch it at parse time, but serde's untagged enum dispatcher
-/// swallows inner messages, so the warn path produces a clearer
-/// diagnostic.
-///
-/// [`apply`]: Self::apply
+/// Inline TOML patch — every field optional. `Option<bool>` distinguishes "no change" / "set" /
+/// "clear". Empty patches (`error = {}`) are rejected by [`apply`](Self::apply) so the slot warns
+/// and falls back rather than silently re-writing the base with itself; serde's untagged enum
+/// dispatcher would swallow a `Deserialize`-time message, so the warn path is clearer.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InlinePatch {
@@ -219,15 +188,13 @@ impl InlinePatch {
 
 // ── Parsing ──
 
-/// Parse a theme TOML document into a [`Theme`].
 pub(super) fn parse_theme(content: &str) -> Result<Theme> {
     let file: ThemeFile = toml::from_str(content).context("invalid theme TOML")?;
     file.into_theme()
 }
 
-/// `ThemeFile` deserialization shape + `into_theme` converter.
-/// `deny_unknown_fields` catches typos; `into_theme` wraps each
-/// slot's parse error with its name.
+/// `ThemeFile` deserialization + `into_theme` converter. `deny_unknown_fields` catches typos;
+/// `into_theme` wraps each slot's parse error with its name.
 macro_rules! define_theme_file {
     ( $( ($name:ident, $doc:literal), )* ) => {
         #[derive(Deserialize)]
@@ -251,9 +218,7 @@ macro_rules! define_theme_file {
 
 super::for_each_slot!(define_theme_file);
 
-/// One slot's TOML representation. The `untagged` enum lets serde
-/// accept either form transparently — a bare string or an inline
-/// table.
+/// One slot's TOML representation; `untagged` accepts either bare string or inline table.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SlotDef {
@@ -261,8 +226,7 @@ enum SlotDef {
     Inline(InlineSlot),
 }
 
-/// Inline TOML form of a slot — flat struct of `fg` / `bg` / one
-/// boolean per recognized text modifier.
+/// Inline TOML form of a slot — `fg` / `bg` plus one bool per recognized modifier.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "modifiers are independent flags by design (matches ratatui::style::Modifier)"
@@ -351,7 +315,6 @@ mod tests {
     #[test]
     fn resolve_theme_named_builtin_loads_that_palette() {
         let t = resolve_theme(Some("latte"), &HashMap::new()).unwrap();
-        // Latte's text is dark (#4c4f69), unlike Mocha's light text.
         assert_eq!(t.text.fg, Some(Color::Rgb(0x4c, 0x4f, 0x69)));
     }
 
@@ -369,10 +332,6 @@ mod tests {
 
     #[test]
     fn resolve_theme_loads_from_file_path() {
-        // Write a minimal theme file (modify mocha) and resolve via
-        // its absolute path. Confirms the file-path branch works
-        // end-to-end and that the override pathway can hand a file
-        // through.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("custom.toml");
         let body = builtin::MOCHA.replace(r##"error = "#f38ba8""##, r##"error = "#ff0000""##);
@@ -382,9 +341,8 @@ mod tests {
         assert_eq!(t.error.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
     }
 
-    /// File loaded successfully but its body fails to parse — the
-    /// error must be wrapped with the base name so the user sees
-    /// which theme is broken (not just an opaque slot diagnostic).
+    // Pin: file loads but body fails to parse — error must name the base so the user sees which
+    // theme is broken instead of an opaque slot diagnostic.
     #[test]
     fn resolve_theme_file_path_with_bad_body_wraps_with_base_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -405,8 +363,7 @@ mod tests {
 
     #[test]
     fn resolve_theme_bare_string_override_patches_only_fg() {
-        // accent in mocha is bold blue. A bare-string override should
-        // replace fg only, leaving bold intact.
+        // mocha's accent is bold blue; bare-string override replaces fg, keeps bold.
         let mut overrides = HashMap::new();
         overrides.insert("accent".to_owned(), SlotPatch::Bare("#ff0000".to_owned()));
         let t = resolve_theme(None, &overrides).unwrap();
@@ -420,7 +377,6 @@ mod tests {
 
     #[test]
     fn resolve_theme_inline_override_clears_modifier_with_false() {
-        // Explicit `bold = false` removes BOLD from the base slot.
         let mut overrides = HashMap::new();
         overrides.insert(
             "accent".to_owned(),
@@ -430,14 +386,12 @@ mod tests {
             }),
         );
         let t = resolve_theme(None, &overrides).unwrap();
-        // fg from base stays.
         assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)));
         assert!(!t.accent.modifiers.contains(Modifier::BOLD));
     }
 
     #[test]
     fn resolve_theme_inline_override_can_add_a_modifier() {
-        // success in mocha has no modifiers; add ITALIC via override.
         let mut overrides = HashMap::new();
         overrides.insert(
             "success".to_owned(),
@@ -448,31 +402,24 @@ mod tests {
         );
         let t = resolve_theme(None, &overrides).unwrap();
         assert!(t.success.modifiers.contains(Modifier::ITALIC));
-        // fg from base unchanged.
         assert_eq!(t.success.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
     }
 
     #[test]
     fn resolve_theme_unknown_slot_in_override_warns_and_resolves() {
         install_permissive_global_subscriber();
-        // Unknown slot name in overrides must NOT fail the resolve;
-        // it warns to stderr and the rest of the theme loads cleanly.
         let mut overrides = HashMap::new();
         overrides.insert(
             "purple_thing".to_owned(),
             SlotPatch::Bare("#ff0000".to_owned()),
         );
         let t = resolve_theme(None, &overrides).expect("unknown slot should warn, not error");
-        // The base mocha values must come through unchanged.
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
     }
 
-    /// Verify the warn-and-fallback path actually emits a
-    /// `tracing::warn!` event naming the offending slot. Without this
-    /// assertion, a regression to `if let Err(_) = ... {}` would
-    /// silently restore the silent-failure pattern the contract was
-    /// designed to prevent — and every other warn-path test would
-    /// still pass because they only check that resolution succeeds.
+    // Pin the warn-and-fallback path actually emits a `tracing::warn!` naming the slot. A
+    // regression to `if let Err(_) = ... {}` would silently restore the silent-failure mode and
+    // every other warn-path test would still pass.
     #[test]
     fn resolve_theme_unknown_slot_emits_tracing_warn_with_slot_name() {
         use std::io;
@@ -531,21 +478,16 @@ mod tests {
     #[test]
     fn resolve_theme_invalid_color_in_override_warns_and_keeps_base() {
         install_permissive_global_subscriber();
-        // Bad color string in an override must NOT fail the resolve;
-        // the slot's base value must be preserved.
         let mut overrides = HashMap::new();
         overrides.insert(
             "error".to_owned(),
             SlotPatch::Bare("not-a-color".to_owned()),
         );
         let t = resolve_theme(None, &overrides).expect("bad color should warn, not error");
-        // error stays at the mocha base.
         assert_eq!(t.error.fg, Some(Color::Rgb(0xf3, 0x8b, 0xa8)));
     }
 
-    /// Inline-form override with a bad `fg` color exercises the
-    /// `InlinePatch::apply` fg parse path that the bare-string sibling
-    /// can't reach.
+    // Exercises the `InlinePatch::apply` fg parse path that the bare-string sibling can't reach.
     #[test]
     fn resolve_theme_inline_override_with_bad_fg_warns_and_keeps_base() {
         install_permissive_global_subscriber();
@@ -691,8 +633,7 @@ mod tests {
         // modifier fields (all `None`) must leave every base modifier
         // untouched. Catches the regression where the loop is
         // refactored to `flag.unwrap_or(false)` and silently clears
-        // every base modifier whenever an unrelated patch field is
-        // set.
+        // every base modifier whenever an unrelated patch field is set.
         let base = Slot {
             fg: Some(Color::Red),
             bg: None,
@@ -840,8 +781,7 @@ mod tests {
 
     /// Default modifier semantics: `accent` is bold, `thinking` is
     /// italic, `heading_h1` is bold + underlined, `link` is
-    /// underlined. Pinned so a vendored TOML edit can't silently
-    /// demote them.
+    /// underlined. Pinned so a vendored TOML edit can't silently demote them.
     #[test]
     fn parse_theme_mocha_modifiers_match_default() {
         let t = parse_theme(builtin::MOCHA).unwrap();

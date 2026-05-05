@@ -1,11 +1,6 @@
-//! Markdown → [`ratatui::text::Text`] renderer.
-//!
-//! Walks the pulldown-cmark event stream and produces styled lines
-//! sized to a fixed terminal width. Supports inline formatting, code
-//! blocks (syntect-highlighted via [`super::highlight`]), lists,
-//! blockquotes, tables (box-drawing borders with column alignment),
-//! and horizontal rules. Wrapping is block-aware so word breaks
-//! respect the enclosing block's continuation indent.
+//! Markdown → [`ratatui::text::Text`] renderer. Walks the pulldown-cmark stream into styled
+//! lines wrapped to terminal width; wrapping is block-aware so it respects the enclosing
+//! block's continuation indent.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
@@ -19,38 +14,42 @@ use crate::tui::wrap::wrap_line;
 
 // ── Renderer ──
 
+/// Stateful walker over a `pulldown-cmark` event stream that materializes each block as one or
+/// more styled [`Line`]s.
+///
+/// The renderer is single-pass: every `Event::Start` pushes onto the relevant stack
+/// (`indent_stack` for blockquote / list nesting, `inline_styles` for emphasis / strong / heading
+/// modifiers), every `Event::End` pops, and inline events append spans to `lines.last_mut()`.
+/// Block boundaries set `needs_newline = true` so the next block opener emits a separator
+/// without producing trailing blanks.
 pub(super) struct MarkdownRenderer<I> {
     // Core
     iter: I,
     theme: Theme,
-    /// Max line width for word-wrapping (0 = no wrapping).
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
-    // Block-level spacing
-    /// Whether to insert a blank line before the next block element.
+    /// Set after a block ends; the next block opener emits a blank separator before its content.
     needs_newline: bool,
 
-    // Block nesting (lists + blockquotes)
-    /// Indent prefix per nesting level (list continuation or blockquote)
+    /// Block-prefix stack — each entry is the spans prepended to every line inside that block
+    /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
+    /// as the continuation prefix so deep nesting stays visually aligned.
     indent_stack: Vec<Vec<Span<'static>>>,
-    /// Ordered (`Some(index)`) or unordered (`None`) per nesting level
+    /// One entry per nested list; `Some(n)` for ordered (next marker = `n. `), `None` for
+    /// unordered (`- `).
     list_stack: Vec<Option<u64>>,
-    /// Deferred list marker spans, emitted on the next `push_line`
+    /// List-item marker queued by `start_item`. The next `push_line` consumes it for the deepest
+    /// indent slot so the marker prints in place of that level's continuation indent.
     pending_marker: Option<Vec<Span<'static>>>,
 
-    // Inline state
-    /// Nested inline style stack (bold, italic, strikethrough)
     inline_styles: Vec<Style>,
-    /// Stored link destination, appended at `End(Link)`
     link_url: Option<String>,
 
-    // Buffered blocks
     code_block: CodeBlockState,
     table: TableState,
 }
 
-/// Buffered state for a fenced / indented code block
 #[derive(Default)]
 struct CodeBlockState {
     active: bool,
@@ -58,18 +57,14 @@ struct CodeBlockState {
     buf: String,
 }
 
-/// Buffered state for a table (header + body rows)
 #[derive(Default)]
 struct TableState {
     active: bool,
     in_head: bool,
     alignments: Vec<Alignment>,
     head_rows: usize,
-    /// Completed rows (each row is a vec of cells; each cell is a vec of spans)
     rows: Vec<Vec<Vec<Span<'static>>>>,
-    /// Row being accumulated (cells pushed on `End(TableCell)`)
     current_row: Vec<Vec<Span<'static>>>,
-    /// Spans accumulated for the current cell
     cell_buf: Vec<Span<'static>>,
 }
 
@@ -164,9 +159,7 @@ where
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => {
-                // Tight list items emit `Text` directly without paragraph
-                // wrappers, so `end_paragraph` never runs — wrap here to
-                // respect the width budget before the indent is popped.
+                // Tight list items bypass `end_paragraph`, so wrap here.
                 self.wrap_last_line();
                 self.indent_stack.pop();
                 self.pending_marker = None;
@@ -177,8 +170,7 @@ where
             TagEnd::Link => self.pop_link(),
             TagEnd::Table => self.end_table(),
             TagEnd::TableHead => {
-                // pulldown-cmark 0.13 puts header cells directly inside
-                // TableHead without a wrapping TableRow, so flush here.
+                // pulldown-cmark 0.13: header cells sit inside TableHead without a TableRow.
                 if !self.table.current_row.is_empty() {
                     let row = std::mem::take(&mut self.table.current_row);
                     self.table.rows.push(row);
@@ -360,7 +352,6 @@ where
         let border_style = self.theme.table_border();
         let header_style = self.theme.table_header();
 
-        // Top border: ┌─┬─┐
         self.lines.push(build_horizontal_rule(
             &col_widths,
             border_style,
@@ -386,7 +377,6 @@ where
                 self.lines.push(line);
             }
 
-            // Separator after header: ├─┼─┤
             if row_idx + 1 == head_rows && head_rows < rows.len() {
                 self.lines.push(build_horizontal_rule(
                     &col_widths,
@@ -398,7 +388,6 @@ where
             }
         }
 
-        // Bottom border: └─┴─┘
         self.lines.push(build_horizontal_rule(
             &col_widths,
             border_style,
@@ -444,9 +433,8 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
-        // Propagate the surrounding inline style (bold, italic, heading
-        // modifiers) onto the code span; `inline_code()` supplies the
-        // distinctive fg + bg, enclosing modifiers apply on top.
+        // Surrounding inline modifiers (bold / italic / heading) compose with the inline-code
+        // palette: theme supplies the distinctive fg, enclosing style adds modifiers on top.
         let style = self.current_inline_style().patch(self.theme.inline_code());
         if self.table.active {
             self.table
@@ -516,16 +504,11 @@ where
     // ── Line Building ──
 
     /// Starts a new output line with indent prefixes and any pending list marker.
-    ///
-    /// When `self.width` is set, lines that exceed the width budget are
-    /// word-wrapped with continuation lines prefixed by the current
-    /// `indent_stack` (using continuation forms, not markers — so
-    /// blockquote `> ` repeats while list `- ` becomes spaces).
     fn push_line(&mut self, line: Line<'static>) {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
-        // Emit indent prefixes. If a pending marker exists, use it for the
-        // deepest list level instead of the continuation indent.
+        // The pending list marker (if any) replaces the continuation indent at the deepest
+        // indent level so the bullet / number lands at the correct column for that nesting depth.
         let marker = self.pending_marker.take();
         let marker_depth = if marker.is_some() {
             self.indent_stack.len().saturating_sub(1)
@@ -548,8 +531,6 @@ where
         self.wrap_and_push(Line::from(spans));
     }
 
-    /// Wraps `line` against the current width budget (using the indent
-    /// stack as the continuation prefix) and append the results.
     fn wrap_and_push(&mut self, line: Line<'static>) {
         if self.width == 0 {
             self.lines.push(line);
@@ -570,10 +551,6 @@ where
         }
     }
 
-    /// Flattens the `indent_stack` into a single span vector, used as the
-    /// continuation prefix when wrapping. Entries store the continuation
-    /// form (spaces for lists, `> ` for blockquotes) so that wrapped
-    /// lines repeat blockquote markers without duplicating list markers.
     fn continuation_indent_spans(&self) -> Vec<Span<'static>> {
         self.indent_stack
             .iter()
@@ -581,7 +558,6 @@ where
             .collect()
     }
 
-    /// Appends a span to the last line, creating one if needed.
     fn push_span(&mut self, span: Span<'static>) {
         if let Some(line) = self.lines.last_mut() {
             line.push_span(span);
@@ -590,13 +566,7 @@ where
         }
     }
 
-    /// Word-wrap the last accumulated line in place.
-    ///
-    /// Inline content (paragraphs, headings, tight list items) is built
-    /// by appending spans to the last line via
-    /// [`push_span`](Self::push_span), bypassing the wrapping in
-    /// [`push_line`](Self::push_line). This method retroactively wraps
-    /// the completed line so it respects the width budget.
+    /// Word-wrap the last accumulated line in place (retroactive wrap after span accumulation).
     fn wrap_last_line(&mut self) {
         if self.width == 0 {
             return;
@@ -626,11 +596,6 @@ fn compute_column_widths(rows: &[Vec<Vec<Span<'_>>>], col_count: usize) -> Vec<u
 }
 
 /// Shrink column widths so the rendered table fits within `width_budget`.
-///
-/// Table overhead per row is `1 + 3 * n` columns (left border + 2 padding
-/// spaces and 1 separator per column). Non-empty columns are floored at 1
-/// so cell wrapping stays viable on narrow terminals, even if that causes
-/// marginal overflow — preferable to dropping content.
 fn fit_column_widths(natural: &[usize], width_budget: usize) -> Vec<usize> {
     let n = natural.len();
     if n == 0 {
@@ -672,7 +637,6 @@ fn build_horizontal_rule(
     let mut buf = String::with_capacity(col_widths.len() * 6);
     buf.push(left);
     for (i, &w) in col_widths.iter().enumerate() {
-        // +2 for the padding spaces around cell content
         for _ in 0..w + 2 {
             buf.push('─');
         }
@@ -681,8 +645,7 @@ fn build_horizontal_rule(
     Line::from(Span::styled(buf, style))
 }
 
-/// Word-wraps a cell's spans into sub-lines of at most `target_width` columns.
-/// Always returns at least one sub-line so every row has a visual line.
+/// Word-wraps a cell's spans; always returns at least one sub-line.
 fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'static>>> {
     if cell.is_empty() || target_width == 0 {
         return vec![cell.to_vec()];
@@ -694,8 +657,6 @@ fn wrap_cell(cell: &[Span<'static>], target_width: usize) -> Vec<Vec<Span<'stati
 }
 
 /// Builds the visual lines for a data row, wrapping cells to column widths.
-/// A wrapping cell produces multiple lines; other columns pad out on
-/// trailing sub-lines so column separators stay aligned.
 fn build_data_rows(
     row: &[Vec<Span<'static>>],
     col_widths: &[usize],
@@ -773,8 +734,7 @@ mod tests {
     }
 
     /// Render `input` at the given width budget and flatten each line
-    /// into a concatenated string (spans joined in order). `width == 0`
-    /// disables word-wrapping.
+    /// into a concatenated string (spans joined in order). `width == 0` disables word-wrapping.
     fn rendered_text_at_width(input: &str, width: usize) -> Vec<String> {
         render_markdown(input, &theme(), width)
             .lines

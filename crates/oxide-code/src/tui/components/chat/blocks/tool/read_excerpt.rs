@@ -1,5 +1,4 @@
-//! `read` tool body — line-numbered excerpt with a path / range header
-//! that summarizes which slice of the file the model just looked at.
+//! `read` tool body — line-numbered excerpt with a path / range header.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;

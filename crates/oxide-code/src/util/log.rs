@@ -1,9 +1,5 @@
-//! Tracing subscriber initialization.
-//!
-//! TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log`:
-//! `EnterAlternateScreen` only swaps stdout, so stderr (the default
-//! `tracing::fmt()` writer) would paint over the frame. Other modes
-//! keep stderr.
+//! Tracing subscriber initialization. TUI mode routes to `$XDG_STATE_HOME/ox/log/oxide-code.log`
+//! because `EnterAlternateScreen` swaps only stdout — stderr would paint over the frame.
 
 use std::path::{Path, PathBuf};
 
@@ -17,11 +13,10 @@ const APP_DIR: &str = "ox";
 const LOG_SUBDIR: &str = "log";
 const LOG_FILE: &str = "oxide-code.log";
 
-/// Initializes the global `tracing` subscriber.
+/// Initializes the global tracing subscriber.
 ///
-/// Bind the returned `WorkerGuard` (TUI mode only) for the program
-/// lifetime — its `Drop` flushes the non-blocking appender. Honors
-/// `RUST_LOG` with a `warn` floor.
+/// The returned `WorkerGuard` (TUI mode only) flushes the non-blocking appender on drop and must
+/// be held for the program lifetime; dropping it early truncates buffered log lines.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     Ok(if let Some((writer, guard)) = build_log_target(tui_mode)? {
@@ -52,7 +47,6 @@ fn build_log_target(tui_mode: bool) -> Result<Option<(NonBlocking, WorkerGuard)>
     Ok(Some(open_file_appender(&dir)?))
 }
 
-/// `$XDG_STATE_HOME/ox/log`, falling back to `$HOME/.local/state/ox/log`.
 fn resolve_log_dir() -> Option<PathBuf> {
     log_dir_from(
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
@@ -60,7 +54,6 @@ fn resolve_log_dir() -> Option<PathBuf> {
     )
 }
 
-/// Pure form of [`resolve_log_dir`] with explicit inputs.
 fn log_dir_from(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     xdg_dir(
         xdg,
@@ -70,9 +63,6 @@ fn log_dir_from(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> 
     )
 }
 
-/// `never` keeps a single unrotated file — the crate emits a handful
-/// of warns per session. Switch to `daily` if `RUST_LOG=debug`
-/// dogfooding shows growth.
 fn open_file_appender(dir: &Path) -> Result<(NonBlocking, WorkerGuard)> {
     std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let appender = tracing_appender::rolling::never(dir, LOG_FILE);
@@ -168,7 +158,7 @@ mod tests {
 
     #[test]
     fn log_dir_from_ignores_relative_xdg_and_uses_home_fallback() {
-        // Relative `$XDG_STATE_HOME` would resolve against the cwd; `xdg_dir` rejects it.
+        // Relative `$XDG_STATE_HOME` would resolve against cwd; `xdg_dir` rejects it.
         let resolved = log_dir_from(
             Some(PathBuf::from("relative/state")),
             Some(PathBuf::from("/home/u")),
@@ -195,8 +185,7 @@ mod tests {
 
     #[test]
     fn open_file_appender_appends_across_sessions() {
-        // `never` rotation must keep both lines — pin so a future
-        // switch to `daily` shows up as a test diff.
+        // `never` rotation must keep both lines — pin so a switch to `daily` shows up as a diff.
         let tmp = tempfile::tempdir().unwrap();
         for line in ["first\n", "second\n"] {
             let (mut writer, guard) = open_file_appender(tmp.path()).unwrap();

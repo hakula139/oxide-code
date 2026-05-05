@@ -24,17 +24,12 @@ use crate::tui::theme::Theme;
 /// Maximum number of visible content lines before the input stops growing.
 const MAX_VISIBLE_LINES: u16 = 6;
 
-/// Outcome of routing a keystroke through the slash popup. The three
-/// variants encode "consumed with action", "consumed silently", and
-/// "popup let it pass through to the textarea path".
 enum PopupKey {
     Action(UserAction),
     Consumed,
     Pass,
 }
 
-/// Placeholder copy keyed off `(enabled, has_queued)`. Visible only
-/// while the buffer is empty.
 const PLACEHOLDER_IDLE: &str = "Ask anything...";
 const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
 const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds another";
@@ -45,23 +40,11 @@ const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds anoth
 pub(crate) struct InputArea {
     theme: Theme,
     textarea: TextArea<'static>,
-    /// Slash-command autocomplete overlay. Visible iff the buffer
-    /// reads as a slash query (see [`popup_query`]); App reads
-    /// height through [`Self::popup_height`].
     popup: SlashPopup,
     enabled: bool,
-    /// Whether the surrounding [`App`](super::super::app::App) has any
-    /// queued prompts pending dispatch — drives the idle placeholder
-    /// copy. Set explicitly because the input has no view of
-    /// app-level queue state.
     has_queued: bool,
-    /// Last render width for visual line count estimation. Updated each
-    /// frame by `render()`, used by `height()` on the *next* frame.
     /// `Cell` because `render(&self)` is immutable.
     last_width: Cell<u16>,
-    /// Tracked viewport scroll offset (screen line index of the topmost
-    /// visible row). Mirrors ratatui-textarea's internal `viewport` which
-    /// is not publicly accessible.
     scroll_top: Cell<u16>,
 }
 
@@ -89,8 +72,6 @@ impl InputArea {
         input
     }
 
-    /// Mirrors the parent's queue non-emptiness onto the placeholder
-    /// so an empty buffer shows the queue hint instead of the default.
     pub(crate) fn set_has_queued(&mut self, has_queued: bool) {
         if self.has_queued == has_queued {
             return;
@@ -104,10 +85,6 @@ impl InputArea {
             return;
         }
         self.enabled = enabled;
-        // Visual styling stays put — the user can keep composing while
-        // a turn streams (typed prompts queue), so the input never
-        // looks "switched off". Only the placeholder copy reflects the
-        // run-state. Mid-turn cues live on the status bar.
         self.refresh_placeholder();
     }
 
@@ -115,17 +92,12 @@ impl InputArea {
         self.enabled
     }
 
-    /// Current buffer as logical lines. Exposed for cross-module tests
-    /// (`tui::app`) so they can pin queue pop-back / `set_text` behavior
-    /// without reaching through the private textarea.
     #[cfg(test)]
     pub(crate) fn lines(&self) -> Vec<String> {
         self.textarea.lines().to_vec()
     }
 
-    /// Replaces the current buffer with `text` and parks the cursor at
-    /// its end. Used by the queue pop-back path to surface a queued
-    /// prompt for editing.
+    /// Replaces the buffer with `text` and parks the cursor at its end.
     pub(crate) fn set_text(&mut self, text: &str) {
         self.textarea.select_all();
         self.textarea.cut();
@@ -133,27 +105,19 @@ impl InputArea {
         self.scroll_top.set(0);
     }
 
-    /// Returns the height this component needs (content lines + top +
-    /// bottom borders).
     pub(crate) fn height(&self) -> u16 {
         let content_lines = self.visual_line_count();
         content_lines.min(MAX_VISIBLE_LINES) + 2
     }
 
-    /// Whether the popup has rows to draw. App reads this to gate
-    /// Esc routing so popup-dismiss wins over queue / cancel.
     pub(crate) fn popup_visible(&self) -> bool {
         self.popup.is_visible()
     }
 
-    /// Rows the popup needs in the surrounding layout. Zero when
-    /// hidden so the input keeps its natural height.
     pub(crate) fn popup_height(&self) -> u16 {
         self.popup.height()
     }
 
-    /// Render the popup band into `area`. Caller is responsible for
-    /// reserving `popup_height()` rows above the input.
     pub(crate) fn render_popup(&self, frame: &mut Frame, area: Rect) {
         self.popup.render(frame, area);
     }
@@ -163,7 +127,6 @@ impl InputArea {
 
 impl InputArea {
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<UserAction> {
-        // Ctrl+D: quit only when idle + empty (POSIX EOF idiom).
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('d'),
             modifiers: KeyModifiers::CONTROL,
@@ -177,9 +140,6 @@ impl InputArea {
             };
         }
 
-        // Ctrl+C: cancel mid-turn; arm exit when idle. The arm-vs-exit
-        // decision lives in `App::dispatch_user_action` since it owns
-        // the [`Status::ExitArmed`] window.
         if let Event::Key(KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
@@ -193,9 +153,6 @@ impl InputArea {
             });
         }
 
-        // Popup-routed nav keys take priority over plain typing while
-        // the popup is visible. App-level Esc is gated by
-        // `popup_visible` so it routes here when the popup owns the key.
         if self.popup.is_visible() {
             match self.handle_popup_key(event) {
                 PopupKey::Action(action) => return Some(action),
@@ -221,25 +178,17 @@ impl InputArea {
             return self.submit();
         }
 
-        // Scroll keys while busy belong to the chat view; the textarea
-        // would otherwise swallow them for cursor movement and the
-        // user would lose the ability to scroll history mid-turn.
+        // Scroll keys while busy belong to the chat view.
         if !self.enabled && Self::is_scroll_key(event) {
             return None;
         }
 
-        // Typing flows through in both states so the user can compose
-        // a follow-up that the queue will fire after the current turn.
         self.textarea.input(event.clone());
         self.refresh_popup();
         None
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
-        // Border, marker, and textarea styling don't react to the
-        // run-state — users compose mid-turn for the queue, so the
-        // input always reads as live. The status bar carries the
-        // streaming / running-tool cue.
         let block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(self.theme.border_focused())
@@ -247,10 +196,6 @@ impl InputArea {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Reserve the leftmost columns for the prompt marker so the
-        // textarea content aligns with chat-history user blocks. The
-        // marker only paints the first visible row; subsequent wrapped
-        // rows leave the prompt gutter blank (hanging indent).
         let [prompt_area, textarea_area] = Layout::horizontal([
             Constraint::Length(USER_PROMPT_PREFIX_WIDTH),
             Constraint::Min(0),
@@ -267,15 +212,8 @@ impl InputArea {
 
         frame.render_widget(&self.textarea, textarea_area);
 
-        // Store width for visual line count estimation on the next frame.
         self.last_width.set(textarea_area.width);
 
-        // screen_cursor().row is an absolute screen-line index across
-        // all wrapped lines, not viewport-relative. Replicate the
-        // scroll logic from ratatui-textarea's `next_scroll_top` to
-        // convert to a position within the rendered area. Cursor
-        // tracking runs in both run-states so typing into the queue
-        // mid-turn updates the visible caret.
         let sc = self.textarea.screen_cursor();
         let cursor_row = to_u16(sc.row);
         let height = textarea_area.height;
@@ -303,8 +241,6 @@ impl InputArea {
 impl InputArea {
     // ── Render Helpers ──
 
-    /// Picks the placeholder copy for the current `(enabled, has_queued)`
-    /// combo. Visible only while the buffer is empty.
     fn refresh_placeholder(&mut self) {
         let text = if !self.enabled {
             PLACEHOLDER_BUSY
@@ -318,9 +254,6 @@ impl InputArea {
 
     // ── Popup & State ──
 
-    /// Route a key through the slash popup when it owns focus. Tab
-    /// and Enter only route here under no modifiers so Shift+Enter
-    /// keeps inserting newlines.
     fn handle_popup_key(&mut self, event: &Event) -> PopupKey {
         let Event::Key(KeyEvent {
             code, modifiers, ..
@@ -353,8 +286,6 @@ impl InputArea {
         }
     }
 
-    /// Tab handler: replace the buffer with `/{canonical} ` so the
-    /// user can type args next, and hide the popup (now in args mode).
     fn popup_complete_to_buffer(&mut self) {
         let Some(name) = self.popup.selected().map(|m| m.name) else {
             return;
@@ -363,9 +294,6 @@ impl InputArea {
         self.popup.set_query(None);
     }
 
-    /// Enter handler: submit `/{canonical}` and clear the buffer.
-    /// Routes through `UserAction::SubmitPrompt` so the existing
-    /// dispatch path runs the slash command.
     fn popup_submit_selected(&mut self) -> Option<UserAction> {
         let name = self.popup.selected()?.name;
         self.textarea.select_all();
@@ -375,10 +303,10 @@ impl InputArea {
         Some(UserAction::SubmitPrompt(format!("/{name}")))
     }
 
-    /// Recompute the popup query from the current buffer. Called after
-    /// any keystroke that mutates the textarea. Multi-line content
-    /// hides the popup — slash commands are single-line.
     fn refresh_popup(&mut self) {
+        // Popup wiring: only the single-line case can be a slash command, and `popup_query`
+        // returns `None` for non-`/`-prefixed text — so a multi-line buffer or a typed-over slash
+        // both close the popup.
         let query = match self.textarea.lines() {
             [single] => popup_query(single),
             _ => None,
@@ -386,8 +314,6 @@ impl InputArea {
         self.popup.set_query(query);
     }
 
-    /// Whether `event` is one of the chat-scroll keys reserved for the
-    /// surrounding `ChatView` while the input is busy.
     fn is_scroll_key(event: &Event) -> bool {
         matches!(
             event,
@@ -403,10 +329,6 @@ impl InputArea {
         )
     }
 
-    /// Estimate the number of visual (screen) lines after word-wrap.
-    ///
-    /// Uses `last_width` from the previous render frame. Falls back to
-    /// logical line count when no width is known yet (first frame).
     #[expect(
         clippy::cast_possible_truncation,
         reason = "line count fits in u16 for any practical input"
@@ -431,9 +353,6 @@ impl InputArea {
             .max(1)
     }
 
-    /// Whether the buffer contains only whitespace. Drives the
-    /// POSIX-style Ctrl+D EOF gate, short-circuits empty submits,
-    /// and gates the Esc-pop refusal in `App::handle_esc`.
     pub(crate) fn is_empty(&self) -> bool {
         self.textarea
             .lines()
@@ -447,7 +366,6 @@ impl InputArea {
         }
         let trimmed = self.textarea.lines().join("\n").trim().to_owned();
 
-        // Clear the textarea and reset scroll state.
         self.textarea.select_all();
         self.textarea.cut();
         self.scroll_top.set(0);
@@ -458,10 +376,7 @@ impl InputArea {
 
 // ── Free Functions ──
 
-/// Lossy `usize → u16` cast scoped to cursor / column positions, where
-/// the source value is bounded by terminal dimensions. Centralises the
-/// `cast_possible_truncation` lint suppression so the call sites stay
-/// readable.
+/// Lossy `usize → u16` for cursor / column positions, bounded by terminal dimensions.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "cursor / column positions fit in u16 for terminal widths"
@@ -581,8 +496,7 @@ mod tests {
     #[test]
     fn handle_event_disabled_empty_enter_is_silent() {
         // Submit's empty-buffer guard short-circuits, so a stray Enter
-        // mid-turn produces no action even though the textarea now
-        // accepts typing during busy.
+        // mid-turn produces no action even though the textarea now accepts typing during busy.
         let mut input = test_input();
         input.set_enabled(false);
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
@@ -591,8 +505,7 @@ mod tests {
 
     #[test]
     fn handle_event_disabled_typing_lands_in_textarea() {
-        // Enables the queue UX: the user composes a follow-up while
-        // the spinner is still spinning.
+        // Enables the queue UX: the user composes a follow-up while the spinner is still spinning.
         let mut input = test_input();
         input.set_enabled(false);
         input.handle_event(&key(KeyCode::Char('h'), KeyModifiers::NONE));
@@ -733,8 +646,7 @@ mod tests {
     #[test]
     fn render_prompt_marker_always_uses_user_color() {
         // The chevron stays the user accent across run-states because
-        // composing mid-turn is allowed — same intent as the typed
-        // text styling above.
+        // composing mid-turn is allowed — same intent as the typed text styling above.
         let theme = Theme::default();
         let mut input = InputArea::new(&theme);
 

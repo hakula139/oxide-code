@@ -38,7 +38,7 @@ pub(crate) struct ToolOutput {
     pub(crate) metadata: ToolMetadata,
 }
 
-/// Structured data for UI display and logging, not sent to the model.
+/// Structured data for UI display and logging; not sent to the model.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,6 @@ pub(crate) struct ToolMetadata {
 }
 
 impl ToolOutput {
-    /// Converts `Ok` / `Err` into a `ToolOutput` with default metadata.
     pub(crate) fn from_result(result: Result<String, String>) -> Self {
         match result {
             Ok(content) => Self {
@@ -72,19 +71,16 @@ impl ToolOutput {
         }
     }
 
-    /// Attaches a display title.
     pub(crate) fn with_title(mut self, title: impl Into<String>) -> Self {
         self.metadata.title = Some(title.into());
         self
     }
 
-    /// Records a replacement count (edit tool).
     pub(crate) fn with_replacements(mut self, count: usize) -> Self {
         self.metadata.replacements = Some(count);
         self
     }
 
-    /// Attaches per-match diff hunks (edit tool).
     pub(crate) fn with_diff_chunks(mut self, chunks: Vec<DiffChunk>) -> Self {
         self.metadata.diff_chunks = Some(chunks);
         self
@@ -165,6 +161,9 @@ pub(crate) struct GrepMatchLine {
 // ── Tool Trait ──
 
 /// A tool that the agent can invoke.
+///
+/// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
+/// new tool requires editing only its module — the registry never matches on `name`.
 pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -174,6 +173,8 @@ pub(crate) trait Tool: Send + Sync {
         "⟡"
     }
 
+    /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
+    /// Returning `None` falls back to the bare name.
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         _ = input;
         None
@@ -187,7 +188,8 @@ pub(crate) trait Tool: Send + Sync {
         }
     }
 
-    /// Returns `None` to fall back to [`ToolResultView::Text`].
+    /// Returns the structured shape of a successful tool result for richer UI rendering, or `None`
+    /// to fall back to [`ToolResultView::Text`]. Errors short-circuit to text in the registry.
     fn result_view(
         &self,
         _input: &serde_json::Value,
@@ -211,15 +213,12 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
-/// Fallback icon for unknown tool names.
 pub(crate) const DEFAULT_TOOL_ICON: &str = "⟡";
 
-/// Extracts a string field from a tool input object.
 pub(crate) fn extract_input_field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// Capitalizes the first character of a tool name for display.
 pub(crate) fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -230,6 +229,10 @@ pub(crate) fn title_case(s: &str) -> String {
 
 // ── Tool Registry ──
 
+/// Owns the set of [`Tool`]s available to the agent and dispatches calls by name.
+///
+/// The registry is built once at session start with the tools the model is allowed to invoke.
+/// Lookups are linear over a small `Vec` (registry size is fixed at < 10), so no map is needed.
 pub(crate) struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
@@ -259,6 +262,10 @@ impl ToolRegistry {
             .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 
+    /// Dispatches to the named tool and enforces the `MAX_OUTPUT_BYTES` byte safety net on the
+    /// returned content, recording the pre-cap length on `metadata.truncated_bytes` if trimming
+    /// fired. Per-tool row caps run inside the tool itself; this is the last-line defense against
+    /// pathological output sizes.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
             return ToolOutput {
@@ -276,6 +283,9 @@ impl ToolRegistry {
         output
     }
 
+    /// Resolves the structured result view for a tool call. Errors short-circuit to
+    /// [`ToolResultView::Text`] regardless of the tool's preference, so failure messages render
+    /// consistently across the chat. Unknown tool names also fall back to text.
     pub(crate) fn result_view(
         &self,
         name: &str,
@@ -303,7 +313,14 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
-/// Caps `content` at [`MAX_OUTPUT_BYTES`], keeping head and tail halves.
+/// Trims `content` to fit under [`MAX_OUTPUT_BYTES`], keeping the head and tail and replacing the
+/// middle with a `[N bytes truncated]` marker.
+///
+/// Returns `(content, original_len)` — `original_len` is `Some` only when truncation actually
+/// fired, so the caller can record the pre-cap size. Skips truncation when the omitted slice is
+/// smaller than the marker itself (truncating would grow the output rather than shrink it).
+/// Char-boundary floors keep the returned `String` valid UTF-8 even when the cap lands inside a
+/// multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -332,7 +349,11 @@ fn cap_output(content: String) -> (String, Option<usize>) {
 
 // ── Input Parsing ──
 
-/// Deserializes raw JSON into a tool's input struct.
+/// Deserializes a tool's typed input from the raw JSON the agent loop hands us.
+///
+/// On failure returns a fully-formed [`ToolOutput`] with `is_error: true` (not a normal
+/// `serde_json::Error`) so the caller can short-circuit straight back to the model with a
+/// user-visible "Invalid input: ..." message — no extra mapping needed at every call site.
 #[expect(
     clippy::result_large_err,
     reason = "ToolOutput carries the full tool result; the Err here is the cold input-validation path constructed at most once per tool call"
@@ -347,7 +368,6 @@ pub(crate) fn parse_input<T: DeserializeOwned>(raw: serde_json::Value) -> Result
 
 // ── Path Utilities ──
 
-/// Resolves `search_path` or falls back to the current working directory.
 pub(crate) fn resolve_base_dir(search_path: Option<&str>) -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("Failed to get working directory: {e}"))?;
@@ -366,7 +386,11 @@ fn display_cwd_path_from(path: &str, cwd: Option<&Path>) -> String {
     }
 }
 
-/// Returns a tool-call label with a cwd-relative path argument.
+/// Renders a `Name(path)` summary for a tool call whose primary argument is a filesystem path.
+///
+/// `path_key` names the JSON field to extract from `input` (e.g. `"file_path"`, `"path"`).
+/// Falls back to the bare title-cased tool name when the field is absent or non-string. Path
+/// is rendered through [`display_cwd_path`] so it appears relative to cwd.
 pub(crate) fn summarize_path_call(
     tool_name: &str,
     input: &serde_json::Value,
@@ -379,7 +403,11 @@ pub(crate) fn summarize_path_call(
     }
 }
 
-/// Returns a cwd-relative path, or absolute if outside `base`.
+/// Renders `path` for chat display.
+///
+/// Strips `base` if it's a prefix; when `path == base` (relative path is empty) returns the file
+/// name so the chat row says `foo.rs` rather than `.`. Paths outside `base` render as their full
+/// string. Lossy UTF-8 conversion is acceptable here because the result is for display only.
 pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(base) {
         if rel.as_os_str().is_empty() {
@@ -393,7 +421,9 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Extracts the filename component, falling back to the full path.
+/// Returns the trailing filename component, falling back to the input string when no component
+/// can be extracted (root path, non-UTF-8 component). The fallback is what makes this safe to
+/// call on user-supplied path strings.
 pub(crate) fn file_name(path: &str) -> &str {
     Path::new(path)
         .file_name()
@@ -405,7 +435,8 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
-/// Detects binary files by scanning for null bytes in the first 8 KB.
+/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Same rule git uses; cheap
+/// enough to run before every text-mode read.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -414,7 +445,10 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 const MAX_WALK_DEPTH: usize = 64;
 
-/// Returns a gitignore-aware iterator over regular files under `base`.
+/// Recursively walks `base`, yielding regular files only.
+///
+/// Honors `.gitignore`, global ignore files, and hidden-entry rules via the `ignore` crate's
+/// defaults, and pins the walk to the starting filesystem so symlinked mounts don't escape.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)
@@ -424,7 +458,11 @@ pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> 
         .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
 }
 
-/// Extracts the modification time, falling back to `UNIX_EPOCH`.
+/// Reads the entry's modification time for sorting / display.
+///
+/// Falls back to [`SystemTime::UNIX_EPOCH`] when stat fails (entry vanished, permission denied,
+/// platform without mtime). Callers use the result for ordering only — a synthetic epoch
+/// timestamp sorts oldest, which is a sane default for unreadable entries.
 pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
     entry
         .metadata()
@@ -435,7 +473,6 @@ pub(crate) fn entry_mtime(entry: &ignore::DirEntry) -> SystemTime {
 
 // ── Formatting ──
 
-/// Converts a byte count to megabytes for display.
 #[expect(
     clippy::cast_precision_loss,
     reason = "MB display tolerates minor precision loss at > 2^53 bytes; file size caps are nowhere near that"
@@ -446,7 +483,12 @@ pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
 
 pub(crate) const MAX_LINE_LENGTH: usize = 500;
 
-/// Truncates a line beyond [`MAX_LINE_LENGTH`] characters.
+/// Caps a line at [`MAX_LINE_LENGTH`] characters and appends `... [N chars]` when truncation
+/// fires.
+///
+/// Returns `Cow::Borrowed` (no allocation) when the line already fits — both the byte fast-path
+/// and the char-count fallback short-circuit. The `[N chars]` footer surfaces the original length
+/// so the model can decide whether to read more.
 pub(crate) fn truncate_line(line: &str) -> Cow<'_, str> {
     if line.len() <= MAX_LINE_LENGTH {
         return Cow::Borrowed(line);
@@ -644,14 +686,6 @@ mod tests {
             let got = t.summarize_call(&serde_json::json!({}));
             assert_eq!(got, title_case(t.name()), "tool {}", t.name());
         }
-    }
-
-    #[test]
-    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
-        assert_eq!(
-            display_cwd_path_from("/tmp/example.rs", None),
-            "/tmp/example.rs"
-        );
     }
 
     #[test]
@@ -1057,6 +1091,16 @@ mod tests {
     fn resolve_base_dir_none_uses_cwd() {
         let result = resolve_base_dir(None).unwrap();
         assert_eq!(result, std::env::current_dir().unwrap());
+    }
+
+    // ── display_cwd_path_from ──
+
+    #[test]
+    fn display_cwd_path_from_without_cwd_falls_back_to_original_path() {
+        assert_eq!(
+            display_cwd_path_from("/tmp/example.rs", None),
+            "/tmp/example.rs"
+        );
     }
 
     // ── display_path ──

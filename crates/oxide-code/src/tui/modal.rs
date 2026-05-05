@@ -1,20 +1,8 @@
-//! Modal overlay primitive.
+//! Modal overlay primitive — intercepts keys while active and emits a typed result on submission.
+//! Renders between chat scroll and input. [`ModalStack`] is `Vec`-backed so a future overlay
+//! (e.g. "confirm leave?") can `push` over an existing picker without ownership churn.
 //!
-//! A modal is a focus-grabbing UI surface that intercepts keyboard
-//! events while active and produces a typed result on submission.
-//! Lives in the band between the chat scroll and the input area —
-//! the same row range the slash autocomplete popup uses, but wider.
-//!
-//! [`Modal`] is the trait every concrete modal implements.
-//! [`ModalStack`] owns the active modal(s) and is held by
-//! [`crate::tui::app::App`]. The stack is `Vec`-backed so a future
-//! "confirm leave?" overlay can `push` over an existing picker
-//! without redesigning ownership.
-//!
-//! Companion design: `docs/design/slash/modals.md` (added with the
-//! first concrete modal).
-//!
-//! Related research: `docs/research/slash/modals.md`.
+//! Companion design: `docs/design/slash/modals.md`.
 
 pub(crate) mod list_picker;
 
@@ -33,60 +21,42 @@ const TOP_BORDER_GLYPH: char = '─';
 
 // ── Modal Trait ──
 
-/// A focus-grabbing UI overlay. While active, the modal owns keyboard
-/// focus end-to-end — App routes keys to it before any other component
-/// sees them. A modal renders into a band the manager allocates above
-/// the input area.
-///
-/// `Send` because App lives on the tokio runtime; never `Sync` —
-/// modals own mutable state and are not shared across threads.
+/// Focus-grabbing UI overlay. `Send` because App lives on tokio; not `Sync` — modals own mutable
+/// state and are exclusively driven from the App task.
 pub(crate) trait Modal: Send {
-    /// Visible height in rows for the given width. The manager
-    /// allocates exactly this much vertical space; the modal must
-    /// render fully within it. May vary with `width` (wrap-aware
-    /// modals) or stay constant (fixed-height pickers).
+    /// Total rows the modal needs at the given terminal width, before the wrapping separator.
     fn height(&self, width: u16) -> u16;
 
-    /// Render into `area`. Width and height match what `height` last
-    /// returned for `area.width`.
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
-    /// Process a key. The return value drives manager behavior:
-    /// stay open, dismiss, or submit a typed action.
+    /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted
+    /// a typed action; the stack pops on cancel / submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
 }
 
 // ── Outcomes ──
 
-/// Outcome of a single key event delivered to a modal.
 #[derive(Debug)]
 pub(crate) enum ModalKey {
-    /// Stay open. Key was consumed.
     Consumed,
-    /// Close without dispatching anything.
     Cancelled,
-    /// Close and apply this action.
     Submitted(ModalAction),
 }
 
-/// What a submitted modal asks the manager to do.
 #[derive(Debug)]
 pub(crate) enum ModalAction {
-    /// Modal already applied its effect locally — no dispatch needed.
-    /// Reserved for future live-preview modals (e.g. `/theme`) where
-    /// arrowing through the list already mutated UI state.
+    /// No dispatch needed (live-preview modals that already mutated UI state).
     None,
-    /// Forward a [`UserAction`] to the agent loop. Same channel as a
-    /// keyboard-typed action, so `/model` swaps and friends share one
-    /// path.
+    /// Forward a [`UserAction`] to the agent loop — shares the keyboard-typed dispatch path.
     User(UserAction),
 }
 
 // ── ModalStack ──
 
-/// Owns the active modal(s). Single-modal-at-a-time today; the `Vec`
-/// is there so a "confirm leave?" overlay inside a picker can `push`
-/// without ownership rework.
+/// LIFO stack of modal overlays. Only the top modal renders and receives keys; nested entries
+/// resume in reverse `push` order on cancel / submit. Single-modal-at-a-time today; the `Vec`
+/// is there so a future "confirm leave?" overlay inside a picker can `push` without ownership
+/// rework.
 #[derive(Default)]
 pub(crate) struct ModalStack {
     stack: Vec<Box<dyn Modal>>,
@@ -107,7 +77,7 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
-    /// Total height the stack needs above the input — top modal's body plus a one-row separator.
+    /// Height above the input — top modal's body plus a one-row separator.
     pub(crate) fn height(&self, width: u16) -> u16 {
         self.stack
             .last()
@@ -146,9 +116,8 @@ impl ModalStack {
         top.render(frame, body_area, theme);
     }
 
-    /// Deliver `event` to the top modal. Returns the action to dispatch
-    /// (or `ModalAction::None` to indicate a silent close), or `None`
-    /// if the modal stayed open (key consumed) or the stack is empty.
+    /// Routes `event` to the top modal. `None` = key consumed or stack empty;
+    /// `Some(ModalAction::None)` = silent close.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
         let outcome = self.stack.last_mut()?.handle_key(event);
         match outcome {
@@ -174,9 +143,7 @@ pub(crate) mod testing {
 
     use super::*;
 
-    /// Modal with scripted key handling — emits a fixed action on a
-    /// sentinel key. Used to drive `ModalStack` tests and the App-side
-    /// gate before any concrete modal exists.
+    /// Emits a fixed action on a sentinel key for exercising `ModalStack`.
     pub(crate) struct ScriptedModal {
         pub(crate) on_submit_key: char,
         pub(crate) on_cancel_key: char,
@@ -319,8 +286,7 @@ mod tests {
     fn handle_key_consumed_keeps_modal_active() {
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
-        // Any key that's neither submit-sentinel nor cancel-sentinel
-        // is consumed — stack stays active and returns None.
+        // Non-sentinel keys are consumed; stack stays active.
         assert!(stack.handle_key(&key('x')).is_none());
         assert!(stack.is_active());
     }
@@ -329,8 +295,8 @@ mod tests {
     fn handle_key_cancel_pops_and_yields_modal_action_none() {
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
-        // Cancel must surface a `Some(ModalAction::None)` so App can
-        // distinguish "modal closed silently" from "key consumed".
+        // Cancel surfaces `Some(ModalAction::None)` so App can distinguish "closed silently" from
+        // "key consumed".
         let outcome = stack.handle_key(&key('c'));
         assert!(matches!(outcome, Some(ModalAction::None)));
         assert!(!stack.is_active());
@@ -361,8 +327,7 @@ mod tests {
 
     #[test]
     fn handle_key_with_nested_stack_routes_to_top_modal_only() {
-        // Two-deep stack: keys go to the top until it pops, then the inner one resumes.
-        // Pin so a regression that fans keys to all layers fails here.
+        // Pin: a regression that fans keys to every layer must fail here.
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::User(
             UserAction::Clear,

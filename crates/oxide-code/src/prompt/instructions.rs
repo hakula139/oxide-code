@@ -5,51 +5,25 @@ use std::path::{Path, PathBuf};
 use indoc::indoc;
 use tokio::fs;
 
-/// Instruction filenames to check at each project location, in priority order.
-/// At each location, the first file found is used.
+/// First file found per location wins.
 const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
-/// Tool-agnostic instruction subdirectories. Each slot pair walks both the
-/// directory itself (e.g. `<dir>/CLAUDE.md`) and one-level-down under each
-/// of these names (e.g. `<dir>/.claude/CLAUDE.md`). Listed here once so a
-/// future "configurable instruction dirs" feature has a single knob to turn.
+/// Tool-agnostic subdirectories walked alongside each location (e.g. `<dir>/.claude/CLAUDE.md`).
 const INSTRUCTION_DIRS: &[&str] = &[".claude"];
 
-/// A group of candidate paths to try at a single discovery location.
-///
-/// Candidates are tried in order; the first file found wins for this slot.
+/// Candidates tried in order at a single location; the first hit wins.
 struct Slot {
     candidates: Vec<PathBuf>,
     label: &'static str,
 }
 
-/// A discovered instruction file with its content and a human-readable label.
 struct MemoryFile {
     path: PathBuf,
     content: String,
     label: &'static str,
 }
 
-/// Discovers and loads instruction files, returning the formatted section for the
-/// system prompt.
-///
-/// At each directory level, filenames are checked in
-/// [`INSTRUCTION_FILENAMES`] order — the first file found wins. Discovery
-/// walks from the project root down to the working directory so that
-/// subdirectory-specific instructions appear later (higher priority).
-///
-/// Discovery locations:
-///
-/// 1. User global: `~/.claude/CLAUDE.md` or `~/.claude/AGENTS.md`.
-/// 2. Each directory from project root to CWD (inclusive):
-///    - `<dir>/CLAUDE.md` or `<dir>/AGENTS.md`
-///    - `<dir>/.claude/CLAUDE.md` or `<dir>/.claude/AGENTS.md`
-///
-/// The project root is the git repository root when available, otherwise the
-/// current working directory. The global file is always checked regardless of
-/// whether a project root exists.
-///
-/// Returns an empty string when no files are found.
+/// Walks `~/.claude/`, then root → cwd. Subdirectory files appear later (higher priority).
 pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String {
     let project_root = git_root.or(cwd);
     let slots = candidate_slots(cwd, project_root);
@@ -62,12 +36,7 @@ pub(super) async fn load(cwd: Option<&Path>, git_root: Option<&Path>) -> String 
     render(&files)
 }
 
-/// Builds candidate slots — groups of paths to try at each location.
-///
-/// Each slot lists [`INSTRUCTION_FILENAMES`] in priority order. The global
-/// slot is always included when a home directory exists. Project slots walk
-/// from the root to the working directory, generating two slots per directory
-/// level (root-level and `.claude/`).
+/// Emits a global slot (when home exists) plus one root-level + one `.claude/` slot per directory.
 fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot> {
     let mut slots = Vec::new();
 
@@ -104,10 +73,7 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
     slots
 }
 
-/// Returns every directory from `root` down to `cwd` (inclusive).
-///
-/// If `cwd` is not a subdirectory of `root`, or `cwd` is `None`, returns
-/// just `[root]`.
+/// Every directory from `root` down to `cwd` inclusive; `[root]` when `cwd` is outside or `None`.
 fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     let Some(cwd) = cwd else {
         return vec![root.to_path_buf()];
@@ -117,9 +83,8 @@ fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
         return vec![root.to_path_buf()];
     };
 
-    // When cwd == root, strip_prefix returns an empty path whose
-    // components() iterator yields nothing, so the loop is skipped and
-    // we correctly return just [root].
+    // cwd == root yields an empty relative path, so the loop below is skipped and only [root] is
+    // returned.
     let mut dirs = vec![root.to_path_buf()];
     let mut current = root.to_path_buf();
     for component in relative.components() {
@@ -130,7 +95,6 @@ fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-/// Try each slot's candidates in order, loading the first file found per slot.
 async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
     let mut files = Vec::new();
 
@@ -153,7 +117,6 @@ async fn load_files(slots: Vec<Slot>) -> Vec<MemoryFile> {
     files
 }
 
-/// Render memory files into a system prompt section.
 fn render(files: &[MemoryFile]) -> String {
     use std::fmt::Write;
 

@@ -1,17 +1,6 @@
-//! Background AI session title generator.
-//!
-//! Once a fresh session has recorded its first user prompt, spawn a
-//! detached task that asks Haiku for a concise 3-7 word sentence-case
-//! title, append it to the session file as a new
-//! [`Entry::Title`][crate::session::entry::Entry::Title] with source
-//! [`AiGenerated`][crate::session::entry::TitleSource::AiGenerated], and
-//! push an [`AgentEvent::SessionTitleUpdated`] so the TUI status bar
-//! updates live.
-//!
-//! Failure modes (Haiku timeout / malformed response / write error) all
-//! warn-log only — the first-prompt title stays on disk and in the UI.
-//! Callers wire this on fresh sessions exactly once; resumed sessions skip
-//! regeneration (the original title, if any, is already on disk).
+//! Background AI title generator. After the first user prompt, asks Haiku for a 3-7 word title,
+//! persists it as an `AiGenerated` `Entry::Title`, and emits `AgentEvent::SessionTitleUpdated`.
+//! Failures warn-log only — the first-prompt title stays on disk. Fresh sessions only.
 
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
@@ -25,25 +14,17 @@ use crate::session::handle::SessionHandle;
 
 // ── Constants ──
 
-/// Haiku model used for title generation. Small and fast, OAuth-compatible,
-/// and cheap enough to fire on every fresh session without thought.
+/// Haiku model used for title generation. Cheap enough to fire on every fresh session.
 const HAIKU_MODEL: &str = "claude-haiku-4-5";
 
-/// Output budget for the title response. 40 tokens comfortably fits the
-/// 3-7 word JSON envelope the prompt demands; anything longer is a
-/// Haiku misstep we'd rather cut off than bill.
+/// Output budget — 40 tokens comfortably fits the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 40;
 
-/// Clamp on the prompt we feed Haiku. Long first messages occasionally
-/// contain pasted code or logs; truncating to 1 000 chars keeps the title
-/// request small, predictable, and cheap regardless of input size.
+/// Clamp on the prompt — long first messages with pasted code stay cheap to title.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
-/// Title prompt. Instructs the model to return JSON with a single
-/// `title` field; the paired JSON-schema output format (see
-/// [`title_output_format`]) enforces that shape regardless of whether
-/// the model would otherwise try to answer the user's prompt
-/// conversationally.
+/// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces
+/// the `{"title": ...}` shape regardless of how the model would otherwise respond.
 const SYSTEM_PROMPT: &str = indoc! {r#"
     Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
 
@@ -62,21 +43,18 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 // ── Public API ──
 
-/// Spawns a detached task that asks Haiku for a title, records it on
-/// `session`, and notifies `sink`.
-///
-/// `first_prompt` should be the user's first message text — truncated here
-/// to [`MAX_PROMPT_CHARS`] to keep the Haiku request small.
+/// Fire-and-forget: spawns a detached tokio task and returns immediately. The task asks Haiku
+/// for a title, appends it to `session`, and emits `SessionTitleUpdated` through `sink`. All
+/// failures (HTTP, parse, write) warn-log and drop — the first-prompt title persists, so the
+/// session is never left without a title. `first_prompt` is tail-truncated to
+/// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: AgentSink + Clone + Send + 'static,
 {
     tokio::spawn(async move {
         if let Err(e) = generate_and_record(&client, &session, &sink, &first_prompt).await {
-            // Expected failure: network hiccup, rate-limit, or non-JSON
-            // Haiku reply. The first-prompt title stays in the file and
-            // status bar; the warning routes per
-            // `crate::util::log::init_tracing`.
+            // Expected: network hiccup, rate-limit, or non-JSON reply. First-prompt title stays.
             warn!("AI title generation failed: {e}");
         }
     });
@@ -115,16 +93,8 @@ async fn generate_and_record(
     Ok(())
 }
 
-/// `{"title": string}` schema for [`Client::complete`]'s structured
-/// outputs. Built once per call — the schema JSON itself is small and
-/// constructing a `serde_json::Value` is cheap compared to the HTTP
-/// round-trip, so a `LazyLock` optimization would be theatre.
-///
-/// Without this, a first prompt phrased as a direct request (e.g.
-/// `"see what's next to do in this repo"`) would frequently drive Haiku
-/// to answer the task instead of titling it, and [`parse_title`] would
-/// then bail on the conversational reply. The schema forces Haiku onto
-/// the envelope shape regardless of how the prompt scans.
+/// `{"title": string}` schema for structured outputs. Forces the envelope shape so Haiku
+/// doesn't answer the prompt conversationally.
 fn title_output_format() -> OutputFormat {
     OutputFormat::json_schema(serde_json::json!({
         "type": "object",
@@ -138,17 +108,8 @@ fn title_output_format() -> OutputFormat {
 
 // ── Parsing ──
 
-/// Parses Haiku's response as the `{"title": "..."}` JSON envelope, or
-/// bail with enough context for the caller's warn-log.
-///
-/// The envelope is mandatory. A bare plain-text response is almost
-/// always Haiku's conversational refusal to the title task ("I'd be
-/// happy to help! However, I need more details..." for short prompts
-/// like `hi`), and using that prose as the title is worse than keeping
-/// the first-prompt title we already wrote to disk.
-///
-/// Triple-backtick code fences (`` ```json ... ``` ``) are stripped
-/// first — Haiku wraps the envelope that way on some gateways.
+/// Parses the `{"title": "..."}` JSON envelope from Haiku's response. Plain-text responses
+/// (Haiku refusals) are rejected so the first-prompt title stays. Code fences are stripped first.
 fn parse_title(response: &str) -> Result<String> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
@@ -169,8 +130,7 @@ fn parse_title(response: &str) -> Result<String> {
     Ok(cleaned.to_owned())
 }
 
-/// Cap a string for inclusion in a log / error message. Haiku refusals
-/// run long; truncate so the warn-log stays readable.
+/// Cap a string for log / error messages so long Haiku refusals stay readable.
 fn truncate_for_log(s: &str) -> String {
     const LOG_CAP: usize = 120;
     if s.chars().count() <= LOG_CAP {
@@ -180,10 +140,8 @@ fn truncate_for_log(s: &str) -> String {
     format!("{head}...")
 }
 
-/// Strips a surrounding triple-backtick markdown code fence (with an
-/// optional `json` / `text` / ... language tag) from `s`, returning the
-/// inner body trimmed of whitespace. Leaves any input that isn't wrapped
-/// in a fence untouched.
+/// Strips a surrounding triple-backtick code fence (with optional language tag). Leaves
+/// non-fenced input untouched.
 fn strip_code_fence(s: &str) -> &str {
     let Some(rest) = s.strip_prefix("```") else {
         return s;
@@ -193,10 +151,7 @@ fn strip_code_fence(s: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
-/// Truncates `text` to at most `max_chars` characters, preferring the tail
-/// when the input is long. The tail of a long first message is usually the
-/// actual request (setup, pasted logs, or context appear earlier), so the
-/// title signal lives there.
+/// Truncates `text` to `max_chars`, keeping the tail (where the actual request usually lives).
 fn truncate_prompt(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();

@@ -1,7 +1,5 @@
-//! `GitDiffBlock` — `git diff` rendered with the Edit-tool diff
-//! aesthetic (red `-` rows, green `+` rows, dim hunk headers, line-
-//! number gutter). Reuses `numbered_row` / `bordered_row` from the tool
-//! tree. The block owns raw text and parses it lazily on `render`.
+//! `git diff` block — Edit-tool diff aesthetic with line-number gutter. Reuses `numbered_row`
+//! / `bordered_row` from the tool tree; raw text parses lazily on `render`.
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;
@@ -66,17 +64,12 @@ impl ChatBlock for GitDiffBlock {
                 || line.starts_with("new file ")
                 || line.starts_with("deleted file ")
             {
-                // Metadata between "diff --git" and the first hunk;
-                // the path header already names the file.
             } else if let Some((o, n)) = parse_hunk_starts(line) {
                 old_ln = o;
                 new_ln = n;
                 in_hunk = true;
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             } else if line.is_empty() {
-                // Zero-byte line ends the hunk: unified-diff context
-                // is always prefixed with " ", so an empty line marks
-                // a section break (untracked heading, truncation footer).
                 in_hunk = false;
                 bordered_row::render(&mut out, ctx, border, String::new(), ctx.theme.dim());
             } else if !in_hunk {
@@ -98,8 +91,6 @@ impl ChatBlock for GitDiffBlock {
                 old_ln += 1;
                 new_ln += 1;
             } else {
-                // Corrupt hunk body — render as plain row instead of
-                // silently misaligning the line-number gutter.
                 bordered_row::render(&mut out, ctx, border, line.to_owned(), ctx.theme.dim());
             }
         }
@@ -113,8 +104,6 @@ impl ChatBlock for GitDiffBlock {
 
 // ── Diff Parsing ──
 
-/// "a" path of a `diff --git a/X b/Y` line, or `None` when not a
-/// file header.
 fn parse_diff_git_path(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("diff --git ")?;
     let after_a = rest.strip_prefix("a/")?;
@@ -122,8 +111,6 @@ fn parse_diff_git_path(line: &str) -> Option<&str> {
     Some(&after_a[..space])
 }
 
-/// Starting line numbers from `@@ -A,B +C,D @@` (or `@@ -A +C @@` when
-/// count is 1). `None` when not a hunk header.
 fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
     let after_minus = line.strip_prefix("@@ -")?;
     let old_start = parse_first_number(after_minus)?;
@@ -133,13 +120,11 @@ fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
-/// Leading integer up to the next `,` or ` `.
 fn parse_first_number(s: &str) -> Option<usize> {
     let stop = s.find([',', ' ']).unwrap_or(s.len());
     s[..stop].parse().ok()
 }
 
-/// Body of a `+`/`-` line, but not the `+++ b/X` / `--- a/X` metadata.
 fn strip_marker(line: &str, marker: char) -> Option<&str> {
     line.strip_prefix(marker)
         .filter(|rest| !rest.starts_with(marker))
@@ -147,8 +132,6 @@ fn strip_marker(line: &str, marker: char) -> Option<&str> {
 
 // ── Gutter Sizing ──
 
-/// Decimal-digit width of the highest line number across all hunks.
-/// Computed globally so the gutter stays one width through the diff.
 fn max_line_number_width(text: &str) -> usize {
     let mut max_ln: usize = 0;
     for line in text.lines() {
@@ -159,7 +142,6 @@ fn max_line_number_width(text: &str) -> usize {
     max_ln.to_string().len().max(1)
 }
 
-/// Highest line number a hunk header refers to on either side.
 fn parse_hunk_extents(line: &str) -> Option<usize> {
     let after_minus = line.strip_prefix("@@ -")?;
     let old_extent = parse_range_extent(after_minus)?;
@@ -169,7 +151,6 @@ fn parse_hunk_extents(line: &str) -> Option<usize> {
     Some(old_extent.max(new_extent))
 }
 
-/// `start[,count]` → `start + count - 1`. Bare `start` ⇒ one line.
 fn parse_range_extent(s: &str) -> Option<usize> {
     let start = parse_first_number(s)?;
     let Some(comma) = s.find(',') else {
@@ -322,8 +303,7 @@ mod tests {
 
     #[test]
     fn render_skips_index_and_marker_lines() {
-        // `index`, `--- a/X`, `+++ b/X` are all skipped — the path
-        // header already names the file.
+        // `index`, `--- a/X`, `+++ b/X` are all skipped — the path header already names the file.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/foo.rs b/foo.rs
@@ -337,8 +317,7 @@ mod tests {
 
     #[test]
     fn render_add_row_carries_diff_add_row_bg() {
-        // Pin: dropping or swapping `diff_add_row` on the renderer
-        // construction would trip here.
+        // Pin: dropping or swapping `diff_add_row` on the renderer construction would trip here.
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x
@@ -489,8 +468,7 @@ mod tests {
             );
         }
 
-        // Surrounding `+` rows keep 1 and 2 — corrupt line consumed
-        // no number slot on either side.
+        // Surrounding `+` rows keep 1 and 2 — corrupt line consumed no number slot on either side.
         let plus_numbers: Vec<String> = [&body[0], &body[2]]
             .iter()
             .map(|line| line.spans[1].content.trim().to_owned())
