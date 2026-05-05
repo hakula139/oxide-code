@@ -71,7 +71,7 @@ ox                                          # Start an interactive session
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — read-only resolved config + layered file paths
-│   ├── context.rs                          # SlashContext (borrowed ChatView + SessionInfo + modal slot) handed to each command's execute
+│   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort — bare opens picker focused on effort; `/effort <level>` swaps directly
 │   ├── format.rs                           # Shared kv-section / kv-table renderer
@@ -96,11 +96,6 @@ ox                                          # Start an interactive session
 ├── tui/
 │   ├── app.rs                              # Root App struct, tokio::select! event loop, render dispatch
 │   ├── components.rs                       # Components module root
-│   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
-│   ├── theme/
-│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup
-│   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
-│   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
 │   ├── components/
 │   │   ├── chat.rs                         # ChatView: scrollable chat with block stacking and history load
 │   │   ├── chat/
@@ -138,6 +133,11 @@ ox                                          # Start an interactive session
 │   │   └── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
+│   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
+│   ├── theme/
+│   │   ├── builtin.rs                      # Built-in TOML catalogue (Mocha / Macchiato / Frappe / Latte / Material via include_str!) + lookup
+│   │   ├── color.rs                        # Color string parsing (hex, ANSI named, indexed, reset)
+│   │   └── loader.rs                       # Theme TOML deserialization + base+overrides resolution (resolve_theme + SlotPatch)
 │   └── wrap.rs                             # Word-wrap with continuation indent for styled lines
 ├── util.rs                                 # Shared utilities module root
 └── util/
