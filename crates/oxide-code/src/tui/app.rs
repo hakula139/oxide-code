@@ -25,7 +25,7 @@ use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
-use crate::slash::{self, SessionInfo, SlashContext, SlashKind};
+use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
 
@@ -43,7 +43,7 @@ pub(crate) struct App {
     status_bar: StatusBar,
     chat: ChatView,
     input: InputArea,
-    session_info: SessionInfo,
+    session_info: LiveSessionInfo,
     agent_rx: mpsc::Receiver<AgentEvent>,
     user_tx: mpsc::Sender<UserAction>,
     tools: Arc<ToolRegistry>,
@@ -63,7 +63,7 @@ impl App {
     )]
     pub(crate) fn new(
         theme: &Theme,
-        session_info: SessionInfo,
+        session_info: LiveSessionInfo,
         show_thinking: bool,
         title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
@@ -665,12 +665,12 @@ mod tests {
         (app, user_rx, agent_tx)
     }
 
-    fn test_session_info() -> SessionInfo {
+    fn test_session_info() -> LiveSessionInfo {
         // `test-model` is intentionally unknown so `marketing_or_id` falls back to the
         // literal id, keeping insta snapshots stable.
         use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
-        SessionInfo {
+        LiveSessionInfo {
             cwd: "~/test".to_owned(),
             version: "0.0.0-test",
             session_id: "test-session".to_owned(),

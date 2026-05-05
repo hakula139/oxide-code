@@ -23,7 +23,7 @@ mod registry;
 mod status;
 mod status_modal;
 
-pub(crate) use context::{SessionInfo, SlashContext};
+pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
 pub(crate) use parser::{Parsed, parse_slash, popup_query};
 pub(crate) use registry::SlashKind;
@@ -92,13 +92,13 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
     }
 }
 
-/// Fully-populated `SessionInfo` for per-command tests.
+/// Fully-populated `LiveSessionInfo` for per-command tests.
 #[cfg(test)]
-pub(crate) fn test_session_info() -> SessionInfo {
+pub(crate) fn test_session_info() -> LiveSessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
     // Real MODELS row so `marketing_name()` produces a known name.
-    SessionInfo {
+    LiveSessionInfo {
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
         session_id: "test-session".to_owned(),

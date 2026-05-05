@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::context::{SessionInfo, SlashContext};
+use super::context::{LiveSessionInfo, SlashContext};
 use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
 use crate::config::{display_effort, file};
@@ -30,7 +30,7 @@ impl SlashCommand for ConfigCmd {
 }
 
 fn render_config(
-    info: &SessionInfo,
+    info: &LiveSessionInfo,
     user_path: Option<&Path>,
     project_path: Option<&Path>,
 ) -> String {

@@ -7,7 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::context::SessionInfo;
+use super::context::LiveSessionInfo;
 use crate::config::display_effort;
 use crate::tui::modal::{Modal, ModalKey};
 use crate::tui::theme::Theme;
@@ -25,7 +25,7 @@ pub(super) struct StatusModal {
 }
 
 impl StatusModal {
-    pub(super) fn new(info: &SessionInfo) -> Self {
+    pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let model = format!("{} ({})", info.marketing_name(), info.config.model_id);
         let show_thinking = if info.config.show_thinking {
             "on".to_owned()

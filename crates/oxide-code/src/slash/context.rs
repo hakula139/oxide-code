@@ -1,5 +1,5 @@
 //! Inputs to [`SlashCommand::execute`]: [`SlashContext`] borrows App-owned mutable state;
-//! [`SessionInfo`] is the session-level snapshot.
+//! [`LiveSessionInfo`] is the session-level snapshot.
 
 use std::borrow::Cow;
 
@@ -8,15 +8,18 @@ use crate::model::marketing_or_id;
 use crate::tui::components::chat::ChatView;
 use crate::tui::modal::Modal;
 
-/// Built at TUI startup; rebound by `SessionRolled` / `ConfigChanged`.
-pub(crate) struct SessionInfo {
+/// Live snapshot of the running session handed to every slash command. Built at TUI startup and
+/// rebound by `SessionRolled` / `ConfigChanged` so commands always see the current model, effort,
+/// session id, and theme. Distinct from [`crate::session::entry::SessionInfo`], which is the
+/// persisted JSONL record consumed by `--list`.
+pub(crate) struct LiveSessionInfo {
     pub(crate) cwd: String,
     pub(crate) version: &'static str,
     pub(crate) session_id: String,
     pub(crate) config: ConfigSnapshot,
 }
 
-impl SessionInfo {
+impl LiveSessionInfo {
     pub(crate) fn marketing_name(&self) -> Cow<'_, str> {
         marketing_or_id(&self.config.model_id)
     }
@@ -26,12 +29,12 @@ impl SessionInfo {
 /// via [`SlashContext::open_modal`]; the dispatcher harvests the slot after `execute`.
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
-    pub(crate) info: &'a SessionInfo,
+    pub(crate) info: &'a LiveSessionInfo,
     modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
-    pub(crate) fn new(chat: &'a mut ChatView, info: &'a SessionInfo) -> Self {
+    pub(crate) fn new(chat: &'a mut ChatView, info: &'a LiveSessionInfo) -> Self {
         Self {
             chat,
             info,

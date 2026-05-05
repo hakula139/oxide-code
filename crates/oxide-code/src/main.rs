@@ -33,7 +33,7 @@ use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
 use session::store::SessionStore;
-use slash::SessionInfo;
+use slash::LiveSessionInfo;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
     write::WriteTool,
@@ -251,7 +251,7 @@ async fn run_tui(
         .map(tildify)
         .unwrap_or_default();
 
-    let session_info = SessionInfo {
+    let session_info = LiveSessionInfo {
         cwd,
         version: env!("CARGO_PKG_VERSION"),
         session_id: session.session_id().to_owned(),

@@ -8,7 +8,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::context::SessionInfo;
+use super::context::LiveSessionInfo;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{ResolvedModelId, capabilities_for, marketing_or_id};
@@ -105,7 +105,7 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
-    pub(super) fn new(info: &SessionInfo) -> Self {
+    pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let active_model = info.config.model_id.clone();
         let active_effort = info.config.effort;
         let rows = ModelRow::build(&active_model);
