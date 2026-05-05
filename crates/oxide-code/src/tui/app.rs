@@ -76,7 +76,7 @@ impl App {
         chat.load_history(history, history_metadata, tools.as_ref());
         let mut status_bar = StatusBar::new(
             theme,
-            session_info.marketing_name().into_owned(),
+            session_info.display_name().into_owned(),
             session_info.cwd.clone(),
         );
         status_bar.set_title(title);
@@ -417,7 +417,8 @@ impl App {
                     requested_effort,
                 );
                 if model_changed {
-                    self.status_bar.set_model(marketing.into_owned());
+                    self.status_bar
+                        .set_model(crate::model::display_name(&model_id).into_owned());
                 }
                 self.session_info.config.model_id = model_id;
                 self.session_info.config.effort = effort;

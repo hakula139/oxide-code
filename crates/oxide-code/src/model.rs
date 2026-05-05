@@ -286,6 +286,16 @@ pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
     marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
 }
 
+/// Human-facing label: marketing name + " (1M context)" suffix on `[1m]` ids.
+pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
+    let base = marketing_or_id(model);
+    if model.ends_with("[1m]") {
+        Cow::Owned(format!("{base} (1M context)"))
+    } else {
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use super::context::LiveSessionInfo;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::{ResolvedModelId, capabilities_for, marketing_or_id};
+use crate::model::{ResolvedModelId, capabilities_for, display_name};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -44,20 +44,10 @@ impl ModelRow {
             .map(|(idx, id)| Self {
                 id,
                 is_active: *id == active_id,
-                description: describe(id),
+                description: display_name(id).into_owned(),
                 hint: numeric_hint(idx),
             })
             .collect()
-    }
-}
-
-/// Marketing name + "(1M context)" suffix for `[1m]` rows.
-fn describe(id: &str) -> String {
-    let name = marketing_or_id(id);
-    if id.ends_with("[1m]") {
-        format!("{name} (1M context)")
-    } else {
-        name.into_owned()
     }
 }
 
