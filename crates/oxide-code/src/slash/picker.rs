@@ -254,7 +254,6 @@ impl Modal for ModelEffortPicker {
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         match event.code {
-            KeyCode::Esc => ModalKey::Cancelled,
             KeyCode::Enter => self.submit(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.list.select_prev();
@@ -460,15 +459,6 @@ mod tests {
             }
             other => panic!("expected Submitted with effort-only SwapConfig, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn esc_returns_cancelled_regardless_of_axis_state() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Down));
-        p.handle_key(&key(KeyCode::Right));
-        let outcome = p.handle_key(&key(KeyCode::Esc));
-        assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     // ── height ──
