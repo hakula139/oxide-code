@@ -115,6 +115,15 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
         .with_title(format!("Read {name}"))
 }
 
+/// Reads `path` as text and returns a tab-separated `LINENO\tTEXT` excerpt.
+///
+/// Refuses directories, non-regular files (FIFO / socket / device — these can report `len() == 0`
+/// and would otherwise bypass the size gate), files larger than `MAX_READ_FILE_SIZE`, and files
+/// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
+///
+/// Records the read with the [`FileTracker`] so a follow-up Edit / Write can clear the
+/// Read-before-Edit gate. A no-arg read records [`LastView::Full`]; any `offset` or `limit`
+/// records [`LastView::Partial`] so partial views never satisfy the full-read precondition.
 async fn read_file(
     path: &str,
     offset: Option<usize>,

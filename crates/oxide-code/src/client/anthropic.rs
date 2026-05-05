@@ -1,5 +1,9 @@
 //! Anthropic Messages API client. [`Client::stream_message`] drives the agent loop;
-//! [`Client::complete`] handles one-shots.
+//! [`Client::complete`] handles one-shots (title generation, structured-output probes).
+//!
+//! The wire shape mirrors the official `claude-code` CLI: pinned User-Agent and Stainless SDK
+//! header set, billing attestation in `system[0]`, and per-request beta headers gated on model /
+//! auth-mode capabilities. Deviating from any of these trips 3P gateway fingerprinting.
 
 mod betas;
 mod billing;
@@ -46,13 +50,16 @@ const SYSTEM_PROMPT_PREFIX: &str = "You are Claude Code, Anthropic's official CL
 
 // ── Client ──
 
+/// Shareable HTTP client for the Anthropic Messages API. `Clone` is cheap — `reqwest::Client`
+/// shares its connection pool across clones, so callers may stash one per session and roll
+/// `session_id` / `model` / `effort` in place via the `set_*` methods.
 #[derive(Clone)]
 pub(crate) struct Client {
     http: reqwest::Client,
     config: Config,
     session_id: String,
     device_id: String,
-    /// Gates `scope: "global"` in `cache_control`.
+    /// Gates `scope: "global"` in `cache_control` (1P-only — 3P gateways reject it).
     is_first_party: bool,
 }
 
@@ -171,11 +178,18 @@ impl Client {
         effort
     }
 
-    /// Stream a message response from the Anthropic API.
+    /// Streams an agentic turn. The returned receiver delivers parsed [`StreamEvent`]s; the
+    /// background task ends when the stream completes, the receiver is dropped, or an unrecoverable
+    /// transport error is forwarded as a final `Err`.
     ///
-    /// `system_sections` ship as individual `system` text blocks so `cache_control` covers the
-    /// static prefix only. `user_context` rides as a synthetic user message to keep dynamic content
-    /// (CLAUDE.md, etc.) out of the cached `system` parameter.
+    /// Wire shape:
+    ///
+    /// - `system_sections` ship as individual `system` text blocks so `cache_control` covers the
+    ///   static prefix only — anything after [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is left uncached.
+    /// - `user_context` rides as a synthetic user message so dynamic content (CLAUDE.md and
+    ///   friends) does not invalidate the cached `system` parameter on every turn.
+    /// - The billing attestation block is injected unconditionally; 3P gateways reject API-key
+    ///   traffic without it.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],

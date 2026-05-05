@@ -14,6 +14,14 @@ use crate::tui::wrap::wrap_line;
 
 // ── Renderer ──
 
+/// Stateful walker over a `pulldown-cmark` event stream that materializes each block as one or
+/// more styled [`Line`]s.
+///
+/// The renderer is single-pass: every `Event::Start` pushes onto the relevant stack
+/// (`indent_stack` for blockquote / list nesting, `inline_styles` for emphasis / strong / heading
+/// modifiers), every `Event::End` pops, and inline events append spans to `lines.last_mut()`.
+/// Block boundaries set `needs_newline = true` so the next block opener emits a separator
+/// without producing trailing blanks.
 pub(super) struct MarkdownRenderer<I> {
     // Core
     iter: I,
@@ -21,10 +29,18 @@ pub(super) struct MarkdownRenderer<I> {
     width: usize,
     pub(super) lines: Vec<Line<'static>>,
 
+    /// Set after a block ends; the next block opener emits a blank separator before its content.
     needs_newline: bool,
 
+    /// Block-prefix stack — each entry is the spans prepended to every line inside that block
+    /// (blockquote `> `, list-item continuation indent, etc.). Wrapping uses the concatenation
+    /// as the continuation prefix so deep nesting stays visually aligned.
     indent_stack: Vec<Vec<Span<'static>>>,
+    /// One entry per nested list; `Some(n)` for ordered (next marker = `n. `), `None` for
+    /// unordered (`- `).
     list_stack: Vec<Option<u64>>,
+    /// List-item marker queued by `start_item`. The next `push_line` consumes it for the deepest
+    /// indent slot so the marker prints in place of that level's continuation indent.
     pending_marker: Option<Vec<Span<'static>>>,
 
     inline_styles: Vec<Style>,
@@ -417,9 +433,8 @@ where
     }
 
     fn code(&mut self, code: CowStr<'a>) {
-        // Propagate the surrounding inline style (bold, italic, heading
-        // modifiers) onto the code span; `inline_code()` supplies the
-        // distinctive fg + bg, enclosing modifiers apply on top.
+        // Surrounding inline modifiers (bold / italic / heading) compose with the inline-code
+        // palette: theme supplies the distinctive fg, enclosing style adds modifiers on top.
         let style = self.current_inline_style().patch(self.theme.inline_code());
         if self.table.active {
             self.table
@@ -492,8 +507,8 @@ where
     fn push_line(&mut self, line: Line<'static>) {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
-        // Emit indent prefixes. If a pending marker exists, use it for the
-        // deepest list level instead of the continuation indent.
+        // The pending list marker (if any) replaces the continuation indent at the deepest
+        // indent level so the bullet / number lands at the correct column for that nesting depth.
         let marker = self.pending_marker.take();
         let marker_depth = if marker.is_some() {
             self.indent_stack.len().saturating_sub(1)

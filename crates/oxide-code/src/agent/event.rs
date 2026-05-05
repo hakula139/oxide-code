@@ -15,6 +15,8 @@ pub(crate) const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Agent Events ──
 
+/// One-way notifications from the agent loop to whichever UI is rendering it
+/// (TUI [`ChannelSink`](crate::tui::event::ChannelSink) or stdio [`StdioSink`]).
 #[derive(Debug, Clone)]
 pub(crate) enum AgentEvent {
     StreamToken(String),
@@ -52,6 +54,8 @@ pub(crate) enum AgentEvent {
 
 // ── User Actions ──
 
+/// UI → agent-loop commands. Multiplexed onto a single `mpsc` so the loop can race them
+/// against in-flight stream / tool futures with one biased `select!`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UserAction {
     SubmitPrompt(String),
@@ -76,11 +80,18 @@ pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Re
 
 // ── Agent Sink ──
 
+/// Sized to absorb a full streaming-token burst without blocking the agent loop; the TUI drains
+/// per frame, so dropping events here would visibly stutter the rendered response.
 pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
+/// Transport from the agent loop to a UI. Implementations must be cheap to clone-by-`&` (the
+/// loop calls `send` on a hot path) and tolerate dropped events without panicking — `_ =
+/// sink.send(...)` is the standard call pattern at the call sites.
 pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;
 
+    /// Convenience wrapper: surfaces a session-writer failure (sticky once-flag upstream) as a
+    /// single user-visible [`AgentEvent::Error`]. No-op when `failure` is `None`.
     fn session_write_error(&self, failure: Option<&str>) {
         if let Some(msg) = failure {
             _ = self.send(AgentEvent::Error(format!("Session write failed: {msg}")));
@@ -90,6 +101,9 @@ pub(crate) trait AgentSink: Send + Sync {
 
 // ── Stdio Sink (bare REPL / headless) ──
 
+/// [`AgentSink`] for the `--no-tui` REPL and `--prompt` headless modes: assistant tokens stream
+/// to stdout, everything else (tool calls, errors, the interrupted marker) to stderr so piped
+/// output stays clean.
 pub(crate) struct StdioSink {
     show_thinking: bool,
     tools: Arc<ToolRegistry>,

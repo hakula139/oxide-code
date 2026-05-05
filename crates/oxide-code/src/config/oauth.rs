@@ -54,6 +54,8 @@ impl OAuthCredential {
 
 // ── Token Loading ──
 
+/// Loads (and refreshes if near expiry) the Claude Code OAuth access token. On macOS the Keychain
+/// is consulted first; non-macOS and Keychain-miss fall back to `~/.claude/.credentials.json`.
 pub(super) async fn load_token() -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
@@ -83,6 +85,7 @@ async fn load_token_from(
 
     let _lock = acquire_lock(lock_path).await?;
 
+    // Double-checked: a sibling process may have refreshed while we were waiting on the lock.
     let oauth = loader(file_path)?.claude_ai_oauth;
     let expires_at_ms = oauth.expires_at_ms();
     if !is_near_expiry(expires_at_ms) {
@@ -304,6 +307,9 @@ impl Drop for LockGuard {
     }
 }
 
+/// Directory-based advisory lock around credential refresh. `mkdir` is the cross-platform atomic
+/// primitive; the guard `rmdir`s on drop. A lock older than [`LOCK_STALE_THRESHOLD`] is treated
+/// as abandoned by a crashed sibling and cleared on the next retry.
 async fn acquire_lock(path: &Path) -> Result<LockGuard> {
     lock::retry_acquire(
         || match std::fs::create_dir(path) {

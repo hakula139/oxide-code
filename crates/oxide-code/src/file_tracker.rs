@@ -13,6 +13,20 @@ const HASH_SEED: u64 = 0;
 
 // ── FileTracker ──
 
+/// Per-session record of files the agent has read, gating subsequent Edit / Write tool calls.
+///
+/// The gate enforces three invariants before mutation:
+///
+/// - **Read-before-Edit**: every Edit / Write must follow a `Read` of the same path within the
+///   session.
+/// - **Full read required**: a partial (offset / limit) Read does not satisfy the gate; the agent
+///   must Read the file in full before mutating it.
+/// - **Freshness**: if (mtime, size) drifted since the recorded Read, the caller must rehash the
+///   current bytes via [`Self::verify_drift_bytes`]; only matching xxh64 content qualifies as an
+///   unchanged file.
+///
+/// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
+/// resume — see [`Self::restore_verified`].
 #[derive(Default)]
 pub(crate) struct FileTracker {
     by_path: Mutex<HashMap<PathBuf, FileState>>,
@@ -27,6 +41,8 @@ struct FileState {
     recorded_at: OffsetDateTime,
 }
 
+/// Extent of the most recent Read. Only `Full` satisfies the Edit / Write gate; `Partial` requires
+/// the agent to re-Read the file in full before mutating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LastView {
@@ -132,6 +148,8 @@ impl FileTracker {
         }
     }
 
+    /// Records bytes the agent just wrote. Always lands as [`LastView::Full`] so a subsequent Edit
+    /// passes the gate without requiring a fresh Read.
     pub(crate) fn record_modify(&self, path: &Path, bytes: &[u8], mtime: SystemTime, size: u64) {
         let content_hash = xxh64(bytes, HASH_SEED);
         let now = OffsetDateTime::now_utc();
@@ -174,7 +192,9 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Rehydrates from session JSONL; drops entries whose stat no longer matches.
+    /// Rehydrates from session JSONL on resume. Each snapshot must still match disk on (mtime,
+    /// size) — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
+    /// duplicate paths the entry with the newer `recorded_at` wins.
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) {
         let mut by_path = self.lock();
         for snap in snapshots {
@@ -255,7 +275,8 @@ pub(crate) enum GateError {
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
 }
 
-/// Returned in place of file bytes on a redundant full re-Read.
+/// Returned in place of file bytes when the agent re-Reads a full, unchanged file. Saves tokens
+/// without giving up the Read-before-Edit invariant — the gate already saw the original content.
 pub(crate) const CACHE_HIT_STUB: &str =
     "File hasn't been modified since the last read. Returning already-read file.";
 

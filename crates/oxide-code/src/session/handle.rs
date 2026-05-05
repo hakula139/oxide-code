@@ -91,6 +91,7 @@ pub(crate) struct RecordOutcome {
     pub(crate) failure: Option<String>,
 }
 
+/// Plain ack from non-record cmds; carries the same first-failure surface as [`RecordOutcome`].
 pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }

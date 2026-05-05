@@ -6,6 +6,11 @@ use ratatui::text::Line;
 use super::RenderCtx;
 use super::assistant::render_assistant_markdown;
 
+/// In-flight assistant turn buffered between stream tokens.
+///
+/// Tokens append to `buffer`; everything up to the most recent paragraph break (`\n\n`) is
+/// pre-rendered into `rendered` so each frame only re-parses the unstable tail. The cache is
+/// keyed by viewport width and invalidated on resize.
 pub(crate) struct StreamingAssistant {
     buffer: String,
     /// Rendered lines for the stable prefix up to `rendered_boundary`.

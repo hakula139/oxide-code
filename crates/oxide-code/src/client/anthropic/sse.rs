@@ -14,6 +14,11 @@ const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(test)]
 const MAX_SSE_FRAME_BYTES: usize = 4 * 1024;
 
+/// Drives the streaming `/v1/messages` request and forwards parsed [`StreamEvent`]s on `tx`.
+///
+/// Returns `Ok(())` on graceful end-of-stream **or** receiver drop (consumer cancellation is not
+/// an error). Returns `Err` only for transport / HTTP failures and the SSE-buffer overflow guard.
+/// Single malformed frames are logged and skipped — they must not poison the rest of the turn.
 pub(super) async fn stream_sse(
     http: &reqwest::Client,
     url: &str,
@@ -88,6 +93,9 @@ pub(super) async fn stream_sse(
     Ok(())
 }
 
+/// Renders a user-facing diagnostic for a non-2xx Anthropic response. Per-status branches surface
+/// actionable hints (auth recovery, retry-after, transient overload); the body is appended for
+/// debuggability.
 pub(super) fn format_api_error(
     status: reqwest::StatusCode,
     retry_after: Option<&str>,
@@ -108,7 +116,10 @@ pub(super) fn format_api_error(
     format!("{prefix} details: {body}")
 }
 
-/// Per the SSE spec, multiple `data:` lines concatenate with `\n`.
+/// Parses one SSE frame (lines up to a blank-line separator). Returns `Ok(None)` for frames with
+/// no `data:` line (comments, heartbeats). Per the SSE spec, multiple `data:` lines concatenate
+/// with `\n`; both `data: payload` and `data:payload` (no leading space) are accepted because some
+/// gateways drop the space.
 pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
     let mut data_lines: Vec<&str> = Vec::new();
 

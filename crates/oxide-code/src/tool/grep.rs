@@ -202,7 +202,9 @@ struct GrepParams<'a> {
 }
 
 fn grep_files(params: &GrepParams<'_>) -> Result<String, String> {
-    // Bound regex compilation to prevent degenerate patterns from OOMing.
+    // Patterns are line-oriented: the regex matches against each line individually, so `^` / `$`
+    // anchor to line boundaries without needing the multi-line flag. Compiled-program and DFA
+    // size caps keep adversarial patterns (e.g., catastrophic alternations) from OOMing.
     let re = regex::RegexBuilder::new(params.pattern)
         .case_insensitive(params.case_insensitive)
         .size_limit(1 << 20)
@@ -569,6 +571,10 @@ fn parse_content_view(content: &str) -> Option<ToolResultView> {
 }
 
 /// Parses one row: `path:NUM:text` (match) or `path:NUM-text` (context).
+///
+/// Iterates through colons left-to-right because paths can themselves contain `:` (Windows drive
+/// letters, URL-shaped names) — the row only commits on the first colon followed by digits and a
+/// `:` / `-` separator, which uniquely identifies the line-number column.
 fn parse_match_line(line: &str) -> Option<(&str, GrepMatchLine)> {
     let mut search_start = 0;
     while let Some(off) = line[search_start..].find(':') {

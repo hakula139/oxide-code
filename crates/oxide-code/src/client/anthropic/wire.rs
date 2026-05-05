@@ -8,6 +8,10 @@ use crate::tool::ToolDefinition;
 
 // ── Request types ──
 
+/// Body for `POST /v1/messages`. Field declaration order is the wire JSON order and is
+/// load-bearing — the billing `cch=00000` placeholder must appear before user-controlled
+/// `messages` content so [`super::billing::inject_cch`]'s single-occurrence replacement targets
+/// the system block, not a user echo.
 #[derive(Serialize)]
 pub(super) struct CreateMessageRequest<'a> {
     pub(super) model: &'a str,
@@ -121,6 +125,8 @@ pub(super) struct CacheControl {
         reason = "fields are populated by serde and used in downstream matching"
     )
 )]
+/// One frame in the streaming response. `Unknown` swallows future event types so an upstream
+/// addition does not break parsing — agent dispatch ignores `Unknown` rather than erroring.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StreamEvent {

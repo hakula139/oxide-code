@@ -150,6 +150,19 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
     }
 }
 
+/// Performs the in-place exact-string replacement.
+///
+/// Contract:
+///
+/// - `old_string` must occur verbatim in the file (whitespace and indentation included). Without
+///   `replace_all`, ambiguous matches are rejected so the model cannot silently edit the wrong
+///   site.
+/// - The Read-before-Edit gate refuses files that haven't been read in this session and files
+///   whose stat / hash drifted since the last Read.
+/// - CRLF is preserved: the file is normalized to LF for matching, the dominant EOL is restored
+///   on write so we don't flip line endings just because the caller used `\n` in `old_string`.
+/// - Returns `(message, match_count, diff_chunks)` on success; `chunks` carry real post-edit line
+///   numbers shifted by cumulative delta from earlier replacements.
 async fn edit_file(
     path: &str,
     old_string: &str,

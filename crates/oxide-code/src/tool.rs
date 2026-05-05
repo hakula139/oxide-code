@@ -161,6 +161,9 @@ pub(crate) struct GrepMatchLine {
 // ── Tool Trait ──
 
 /// A tool that the agent can invoke.
+///
+/// Per-instance metadata (name, icon, schema, input summary) lives on the trait so that adding a
+/// new tool requires editing only its module — the registry never matches on `name`.
 pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
@@ -170,6 +173,8 @@ pub(crate) trait Tool: Send + Sync {
         "⟡"
     }
 
+    /// Pulls the tool's primary argument out of `input` for terse `Name(arg)` labels in the UI.
+    /// Returning `None` falls back to the bare name.
     fn summarize_input<'a>(&self, input: &'a serde_json::Value) -> Option<&'a str> {
         _ = input;
         None
@@ -183,7 +188,8 @@ pub(crate) trait Tool: Send + Sync {
         }
     }
 
-    /// Returns `None` to fall back to [`ToolResultView::Text`].
+    /// Returns the structured shape of a successful tool result for richer UI rendering, or `None`
+    /// to fall back to [`ToolResultView::Text`]. Errors short-circuit to text in the registry.
     fn result_view(
         &self,
         _input: &serde_json::Value,
@@ -252,6 +258,10 @@ impl ToolRegistry {
             .map_or_else(|| name.to_owned(), |t| t.summarize_call(input))
     }
 
+    /// Dispatches to the named tool and enforces the `MAX_OUTPUT_BYTES` byte safety net on the
+    /// returned content, recording the pre-cap length on `metadata.truncated_bytes` if trimming
+    /// fired. Per-tool row caps run inside the tool itself; this is the last-line defense against
+    /// pathological output sizes.
     pub(crate) async fn run(&self, name: &str, input: serde_json::Value) -> ToolOutput {
         let Some(tool) = self.get(name) else {
             return ToolOutput {
@@ -296,6 +306,10 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
 
 const TRUNCATION_OVERHEAD: usize = 80;
 
+// Keeps head + tail of oversize output and replaces the middle with a `[N bytes truncated]`
+// marker. Skips truncation when the omitted slice is smaller than the marker itself, since
+// truncating would grow the output rather than shrink it. Char-boundary floors guarantee the
+// returned `String` stays valid UTF-8 even when the cap lands inside a multibyte sequence.
 fn cap_output(content: String) -> (String, Option<usize>) {
     if content.len() <= MAX_OUTPUT_BYTES {
         return (content, None);
@@ -392,6 +406,8 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 const BINARY_CHECK_SIZE: usize = 8192;
 
+/// Heuristic: a NUL byte in the first 8 KiB marks the file as binary. Same rule git uses; cheap
+/// enough to run before every text-mode read.
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK_SIZE).any(|&b| b == 0)
 }
@@ -400,6 +416,10 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
 
 const MAX_WALK_DEPTH: usize = 64;
 
+/// Recursively walks `base`, yielding regular files only.
+///
+/// Honors `.gitignore`, global ignore files, and hidden-entry rules via the `ignore` crate's
+/// defaults, and pins the walk to the starting filesystem so symlinked mounts don't escape.
 pub(crate) fn walk_files(base: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(base)
         .same_file_system(true)

@@ -188,6 +188,9 @@ pub(crate) const MODELS: &[ModelInfo] = &[
 ];
 
 impl Capabilities {
+    /// Whether the model accepts a given `output_config.effort` value. Splits on tier because the
+    /// Anthropic API rejects unsupported levels with a 400, not a silent clamp — `xhigh` is 4.7
+    /// only, `max` is Opus-only.
     pub(crate) fn accepts_effort(self, level: Effort) -> bool {
         match level {
             Effort::Low | Effort::Medium | Effort::High => self.effort,
@@ -212,6 +215,8 @@ impl Capabilities {
         .find(|&level| level <= pick && self.accepts_effort(level))
     }
 
+    /// Highest tier the model accepts when the user hasn't picked one — `xhigh` for 4.7, `high`
+    /// for other effort-capable models, `None` otherwise.
     pub(crate) fn default_effort(self) -> Option<Effort> {
         if self.effort_xhigh {
             Some(Effort::Xhigh)

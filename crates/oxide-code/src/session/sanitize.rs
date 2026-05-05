@@ -18,6 +18,13 @@ pub(super) const RESUME_HEAD_SENTINEL: &str = "[Previous session prefix lost in 
 
 // ── Entry Point ──
 
+/// Repairs a transcript loaded from JSONL so the next API call won't 400. Pass order matters:
+/// drop unresolved `tool_use` first so any `tool_result` paired only with a dropped call is
+/// orphaned in the next pass; collapse roles after both filter passes so emptied messages
+/// can't desync the alternation; sentinels run last because head / tail shape only stabilizes
+/// post-collapse. The trailing thinking strip runs twice — once before, once after — so a
+/// thinking block at the end of a now-removed assistant turn doesn't survive into the next API
+/// call.
 pub(super) fn sanitize_resumed_messages(messages: &mut Vec<Message>) {
     strip_trailing_thinking(messages);
     drop_unresolved_tool_uses(messages);

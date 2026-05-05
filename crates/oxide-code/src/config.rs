@@ -20,6 +20,8 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 // ── Auth ──
 
+/// Resolved credential. First source wins, in order: `ANTHROPIC_API_KEY` env, `client.api_key`
+/// in the config file, then OAuth (macOS Keychain → `~/.claude/.credentials.json`).
 #[derive(Debug, Clone)]
 pub(crate) enum Auth {
     ApiKey(String),
@@ -184,7 +186,10 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// Loads from files + env.
+    /// Resolves config from layered sources. Per-field precedence is env > project `ox.toml` >
+    /// user `~/.config/ox/config.toml` > built-in default; see the module docs for the auth
+    /// chain. Parse errors (TOML, env, theme) propagate so a typo doesn't degrade silently into
+    /// "no credentials".
     pub(crate) async fn load() -> Result<Self> {
         let fc = file::load()?;
         let client = fc.client.unwrap_or_default();

@@ -7,6 +7,10 @@ pub(crate) const ELLIPSIS: &str = "...";
 pub(crate) const ELLIPSIS_WIDTH: usize = 3;
 
 /// Truncates `s` to `max_width` display columns, appending [`ELLIPSIS`] when shortened.
+///
+/// Width is measured in terminal columns (CJK and emoji = 2, zero-width = 0), not bytes or
+/// `char` count. The ellipsis is dropped when `max_width < ELLIPSIS_WIDTH` because emitting it
+/// would itself overflow the budget.
 pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();

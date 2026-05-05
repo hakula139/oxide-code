@@ -55,6 +55,9 @@ enum PendingAck {
     Shutdown(oneshot::Sender<()>),
 }
 
+/// Actor task body. Owns [`SessionState`] (which owns the writer); absorbs each `recv`-and-drain
+/// batch into one buffered flush, then fires acks. Exits when the channel closes or a
+/// [`SessionCmd::Shutdown`] is absorbed.
 pub(super) async fn run(
     mut state: SessionState,
     mut rx: mpsc::Receiver<SessionCmd>,
@@ -65,7 +68,8 @@ pub(super) async fn run(
         let mut acks: Vec<PendingAck> = Vec::new();
         let mut should_exit = false;
         absorb(first, &mut entries, &mut acks, &mut state, &mut should_exit);
-        // Drain whatever is already queued — later cmds wait for the next `recv().await`.
+        // try_recv only drains what is already queued; cmds arriving after this loop wait for
+        // the next `recv().await` (and form a new batch). Coalescing without an interval timer.
         while let Ok(next) = rx.try_recv() {
             absorb(next, &mut entries, &mut acks, &mut state, &mut should_exit);
         }

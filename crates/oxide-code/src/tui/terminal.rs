@@ -40,6 +40,10 @@ fn enter_tui_mode(stdout: &mut impl Write) -> Result<()> {
 }
 
 /// Restores the terminal to its original state. Safe to call multiple times.
+///
+/// Errors from each step are intentionally swallowed — restore runs on the panic path and during
+/// normal shutdown, where surfacing an `io::Error` would either mask the original panic or
+/// abort cleanup midway and leave the terminal in raw mode.
 pub(crate) fn restore() {
     let mut stdout = io::stdout();
     _ = leave_tui_mode(&mut stdout);
@@ -57,7 +61,9 @@ fn leave_tui_mode(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Brackets a render closure with DEC synchronized-update sequences to eliminate tearing.
+/// Brackets a render closure with DEC synchronized-update (mode 2026) sequences so the terminal
+/// presents the new frame atomically; without this, fast successive renders can show partial
+/// frames with mid-line tearing.
 pub(crate) fn draw_sync<W: Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     f: impl FnOnce(&mut ratatui::Frame),
@@ -69,7 +75,11 @@ pub(crate) fn draw_sync<W: Write>(
     Ok(())
 }
 
-/// Installs a panic hook that restores the terminal before printing the panic message.
+/// Installs a panic hook that restores the terminal before delegating to the previous hook.
+///
+/// Without this, a panic inside the TUI loop would leave the terminal in raw mode + alternate
+/// screen, hiding the panic message and forcing the user to reset their shell. The original hook
+/// is preserved so any custom panic handler (test harness, backtrace printer, etc.) still runs.
 pub(crate) fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {

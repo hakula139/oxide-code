@@ -14,8 +14,13 @@ use crate::message::{ContentBlock, Message};
 // ── Client::complete ──
 
 impl Client {
-    /// One-shot completion. `output_format` is silently dropped on models without the
-    /// structured-outputs capability.
+    /// Non-streaming completion. Returns the concatenated assistant text; tool-use and thinking
+    /// blocks are dropped. `output_format` is silently ignored on models without the
+    /// structured-outputs capability so callers can pass it unconditionally.
+    ///
+    /// Distinct from [`Client::stream_message`]: no agentic beta stack, no `context_management`
+    /// directive, and the billing block ships **only** on OAuth — API-key one-shots omit it
+    /// because 3P gateways do not gate non-streaming traffic on the attestation.
     pub(crate) async fn complete(
         &self,
         model: &str,

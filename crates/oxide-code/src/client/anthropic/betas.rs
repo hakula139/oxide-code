@@ -13,6 +13,11 @@ pub(super) const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const PROMPT_CACHING_SCOPE_BETA_HEADER: &str = "prompt-caching-scope-2026-01-05";
 pub(super) const STRUCTURED_OUTPUTS_BETA_HEADER: &str = "structured-outputs-2025-12-15";
 
+/// Builds the comma-joined `anthropic-beta` header value.
+///
+/// Order is load-bearing: 3P proxies fingerprint the exact sequence and reject mismatches. The
+/// `is_agentic` gate distinguishes streaming turns (full agentic stack) from one-shots (only the
+/// claude-code tag plus auth / structured-output extensions).
 pub(super) fn compute_betas(
     model: &str,
     auth: &Auth,
@@ -61,6 +66,8 @@ pub(super) fn supports_structured_outputs(model: &str) -> bool {
     crate::model::capabilities_for(model).structured_outputs
 }
 
+/// Whether `base_url` points at Anthropic's production or staging host. Gates body-side
+/// `cache_control.scope = "global"`, which 3P gateways reject downstream of tools.
 pub(super) fn is_first_party_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
@@ -73,6 +80,8 @@ pub(super) fn is_first_party_base_url(base_url: &str) -> bool {
         })
 }
 
+/// `cache_control` for the static system prefix. `scope: "global"` shares the cache across
+/// sessions and is 1P-only — see [`is_first_party_base_url`].
 pub(super) fn static_prefix_cache_control(
     is_first_party: bool,
     ttl: PromptCacheTtl,

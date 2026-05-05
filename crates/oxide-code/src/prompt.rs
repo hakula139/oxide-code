@@ -17,6 +17,12 @@ use sections::{
 /// Marker between cacheable static and per-session dynamic sections.
 pub(crate) const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
+/// Output of [`build_prompt`].
+///
+/// `system_sections` is ordered: cacheable static sections, then [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]
+/// as its own element, then per-session dynamic sections. The client splits on the marker to apply
+/// `cache_control` to the static prefix only. `user_context` is the per-session CLAUDE.md /
+/// AGENTS.md reminder, attached as the first user message rather than to the system prompt.
 pub(crate) struct PromptParts {
     pub(crate) system_sections: Vec<String>,
     pub(crate) user_context: Option<String>,

@@ -94,6 +94,8 @@ impl ChatBlock for ToolResultBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         render_status_line(&mut out, ctx, &self.label, self.is_error);
+        // Per-variant body dispatch — each tool's structured renderer owns its own gutter sizing,
+        // truncation footer, and overflow rules. The `Text` arm is the catch-all fallback.
         match &self.view {
             ToolResultView::Text { content } => {
                 text::render(&mut out, ctx, content, &self.label, self.is_error);

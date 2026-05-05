@@ -105,7 +105,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    // Own process group so timeout can kill the whole tree.
+    // Put the child in its own process group so a timeout can `killpg` the whole tree, including
+    // any `cmd &`-style detached descendants the shell launched.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -170,7 +171,10 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         content.push_str(NO_OUTPUT_MARKER);
     }
 
-    // Nonzero exit codes are informational; only spawn/timeout failures are is_error.
+    // Nonzero exit is reported in the body, not as `is_error`: tools the model invokes (`grep`
+    // returning 1 on no match, `test`-style probes) are expected to use the exit code as a signal.
+    // Reserving `is_error` for spawn / timeout failures keeps the model from treating those probes
+    // as hard failures.
     ToolOutput {
         content,
         is_error: false,

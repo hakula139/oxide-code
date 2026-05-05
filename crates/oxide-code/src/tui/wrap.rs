@@ -5,6 +5,14 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Wraps a line to fit within `max_width`, preserving visual indentation on continuation lines.
+///
+/// `continuation_indent` is the column count reserved on every wrapped sub-line after the first;
+/// `continuation_prefix`, when supplied, replaces the default whitespace fill with styled spans
+/// (used by blockquotes to repeat the `> ` marker, by lists to keep nested indentation, etc.).
+/// The first line is never indented — callers prepend the original prefix themselves.
+///
+/// `max_width == 0` is a width-disabled passthrough; deep indents that would leave less than one
+/// column for content fall back to a one-column minimum so wrapping still terminates.
 pub(crate) fn wrap_line(
     line: Line<'static>,
     max_width: usize,

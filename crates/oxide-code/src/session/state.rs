@@ -20,6 +20,9 @@ const MAX_TITLE_LEN: usize = 80;
 
 // ── SessionState ──
 
+/// Pure-data lifecycle owned by [`super::actor::run`]. All I/O happens through
+/// [`SessionWriter`] held inside [`WriterStatus`]; the rest is bookkeeping the actor mutates
+/// between batches. Never shared across tasks — the actor is the sole owner.
 pub(super) struct SessionState {
     pub(super) session_id: Arc<str>,
     store: SessionStore,
@@ -33,7 +36,14 @@ pub(super) struct SessionState {
     finished: bool,
 }
 
-/// Writer lifecycle: lazy-create, healthy, or poisoned after a partial write.
+/// Writer lifecycle.
+///
+/// `Pending` defers `create + header write` until the first record cmd, so a fresh session
+/// that exits without recording leaves nothing on disk. `Broken` marks the writer's
+/// `BufWriter` as undefined after a partial write — its buffer state is unspecified by the
+/// stdlib, so we drop it and `open_append` afresh on the next batch instead of risking a
+/// torn line. Recovery from `Broken` is automatic: [`SessionState::take_or_open_writer`]
+/// reopens against the existing file and the next flush appends cleanly.
 enum WriterStatus {
     Pending { header: Entry },
     Active(SessionWriter),
@@ -161,7 +171,9 @@ impl SessionState {
     }
 
     fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
-        // Swap with Broken to take ownership; restore on success or error.
+        // Swap-with-Broken takes ownership without an extra clone. On `Pending` failure we
+        // restore the header so the next batch retries `create` instead of `open_append`-ing
+        // a file that was never created.
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
             WriterStatus::Active(w) => Ok(w),
             WriterStatus::Pending { header } => match self.store.create(&header) {

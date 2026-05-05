@@ -117,6 +117,11 @@ impl App {
         self.render(terminal)?;
 
         loop {
+            // Three concurrent sources race to wake the loop. `select!` picks pseudo-randomly
+            // among ready arms, which is the property we want — neither input nor agent output
+            // can starve the other under sustained load. The tick arm is the only one that
+            // renders; per-event handlers just flip `dirty`, so render work is paced by the
+            // 60 FPS clock instead of event volume.
             tokio::select! {
                     event = crossterm_events.next() => {
                     if let Some(Ok(event)) = event {
@@ -126,6 +131,7 @@ impl App {
                 event = self.agent_rx.recv() => {
                     match event {
                         Some(event) => self.handle_agent_event(event),
+                        // Channel closed = agent task gone; quit instead of spinning.
                         None => self.should_quit = true,
                     }
                 }
@@ -154,6 +160,10 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
+        // Modal gate: while any modal is on screen, all key events route to it exclusively —
+        // never the input area or chat. Mouse / resize still fall through so the user can scroll
+        // chat under an overlay. The early return keeps the modal's key from also being seen by
+        // the input on the same frame.
         if let Event::Key(key) = event
             && self.modals.is_active()
         {
@@ -216,6 +226,10 @@ impl App {
     }
 
     /// Applies UI side-effects then forwards to the agent channel.
+    ///
+    /// `apply_action_locally` returns `false` when the action was fully handled in the UI (slash
+    /// command synthesized its own forward, prompt was queued mid-turn, exit-arm was set, etc.),
+    /// gating the forward so the agent loop never sees actions that were never meant for it.
     fn dispatch_user_action(&mut self, action: UserAction) {
         if !self.apply_action_locally(&action) {
             return;
@@ -295,6 +309,9 @@ impl App {
                     }
                     self.pending_prompts.push_back(text.clone());
                     self.sync_input_queue_hint();
+                    // Forward the queued prompt to the agent so it can drain at turn end —
+                    // unless we're already cancelling, in which case the agent will reset and
+                    // the queue drains locally on the next idle transition.
                     !matches!(self.status_bar.status(), Status::Cancelling)
                 }
             }

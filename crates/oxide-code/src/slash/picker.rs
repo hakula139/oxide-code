@@ -127,9 +127,8 @@ impl ModelEffortPicker {
         }
     }
 
-    /// Re-resolve the effort axis after the cursor moves. The axis
-    /// reflects the highlighted model's caps — `None` when that model
-    /// has no effort tier.
+    /// Re-resolve the effort axis after the cursor moves. Reflects the highlighted model's caps
+    /// — `None` when that model has no effort tier.
     fn refresh_effort_for_cursor(&mut self) {
         self.effort = effort_for_highlighted(&self.list, self.effort_or_active());
     }
@@ -172,6 +171,9 @@ impl ModelEffortPicker {
         self.effort_dirty = true;
     }
 
+    /// Commit both axes through one atomic `SwapConfig`. Each axis is `Some` only when actually
+    /// moved — a no-touch Enter (or a touch that returns to the initial pick) cancels rather than
+    /// firing a spurious swap that would re-resolve config defaults.
     fn submit(&self) -> ModalKey {
         let model = self
             .list

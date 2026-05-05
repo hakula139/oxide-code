@@ -128,7 +128,9 @@ impl ChatView {
     }
 
     /// Appends a streamed token to the current assistant response.
-    /// Any pending thinking is committed first.
+    ///
+    /// Pending thinking is committed first so a `Thinking → Text` boundary always lands at a
+    /// block split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.commit_thinking_buffer();
         self.streaming
@@ -148,8 +150,10 @@ impl ChatView {
         }
     }
 
-    /// Finalize the streaming buffer into a committed block. Flushes
-    /// pending thinking first so thinking-only turns still leave a block.
+    /// Finalizes the streaming buffer into a committed block.
+    ///
+    /// Pending thinking is flushed first so a turn that produced only thinking still leaves an
+    /// `AssistantThinking` block in the transcript.
     pub(crate) fn commit_streaming(&mut self) {
         self.commit_thinking_buffer();
         if let Some(mut s) = self.streaming.take() {
@@ -376,6 +380,8 @@ impl ChatView {
                 continue;
             }
             let kind = block.block_kind();
+            // Standalone blocks always take a separator; tool `Call` blocks hug their preceding
+            // `Result` (`Result → Call` opens a new tool group, but `Call → Result` stays flush).
             let needs_blank_before = !lines.is_empty()
                 && last_has_width(&lines)
                 && (block.standalone() || prev_kind == Some(BlockKind::Result));

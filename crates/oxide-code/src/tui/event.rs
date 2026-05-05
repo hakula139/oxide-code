@@ -7,6 +7,10 @@ use crate::agent::event::{AGENT_EVENT_CHANNEL_CAP, AgentEvent, AgentSink};
 // ── Channel Sink (TUI) ──
 
 /// Sends agent events through an `mpsc` channel for TUI consumption.
+///
+/// Non-blocking — uses `try_send` so the agent task never stalls when the TUI is slow to drain.
+/// A full channel surfaces as an error to the agent loop rather than backpressuring the model
+/// stream.
 #[derive(Clone)]
 pub(crate) struct ChannelSink {
     tx: mpsc::Sender<AgentEvent>,

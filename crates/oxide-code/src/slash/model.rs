@@ -82,6 +82,9 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
+/// Resolution tiers (first hit wins): short alias → known canonical id → dated id (`<id>-YYYYMMDD`)
+/// → unique suffix → unique substring. Multi-match at the substring tier is an error so the user
+/// disambiguates rather than silently landing on whichever model sorts first.
 fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target.to_owned());

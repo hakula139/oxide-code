@@ -8,8 +8,12 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
+/// On-disk schema version stamped into every `Header`. Loader rejects files with a higher
+/// version so a downgraded binary fails fast instead of silently dropping unknown fields.
 pub(crate) const CURRENT_VERSION: u32 = 1;
 
+/// One JSONL line — externally tagged on `type` so `serde(other)` lets older readers skip
+/// future variants without aborting the load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {

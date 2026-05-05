@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Prefers `xdg` when set and absolute, otherwise `home/home_fallback`. Appends `subdir`.
+/// Resolves an XDG base directory with a `$HOME`-rooted fallback.
+///
+/// `$XDG_*_HOME` is honoured only when absolute (the spec rejects relative values, which would
+/// otherwise resolve against the process cwd). Returns `None` when neither input can produce an
+/// absolute base.
 pub(crate) fn xdg_dir(
     xdg: Option<PathBuf>,
     home: Option<PathBuf>,

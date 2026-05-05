@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+/// Total attempts = `1 + MAX_RETRIES`; budget bounds the worst-case stall when another oxide
+/// process holds the credentials lock.
 pub(crate) const MAX_RETRIES: u32 = 5;
 
 #[cfg(not(test))]

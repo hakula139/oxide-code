@@ -22,6 +22,11 @@ const MAX_TOOL_ROUNDS: usize = 25;
 
 // ── Turn Abort ──
 
+/// Why a turn ended without a clean assistant reply.
+///
+/// `Cancelled` and `Quit` are user-driven and intentionally distinct so the outer driver can
+/// keep running on cancel but tear down on quit. `Failed` wraps any other error (stream / tool
+/// dispatch / session write) so the caller can render it once via `{e:#}`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
     #[error("turn cancelled")]
@@ -61,7 +66,19 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
-/// Long-running awaits race `user_rx` for cancel / quit / mid-turn submit.
+/// Drives one user prompt to a final assistant text reply.
+///
+/// Each round streams a model response, dispatches any tool calls, and appends both the
+/// assistant message and the synthesized tool-result message to `messages`. The loop returns
+/// as soon as a round produces no tool calls; mid-turn `SubmitPrompt` actions queue and
+/// splice in as user messages at round boundaries. Long-running awaits race `user_rx` so
+/// `Cancel` / `Quit` abort promptly without leaving partial round writes.
+///
+/// Errors:
+///
+/// - [`TurnAbort::Cancelled`] / [`TurnAbort::Quit`] on the matching [`UserAction`].
+/// - [`TurnAbort::Failed`] for stream errors, tool-dispatch failures, or hitting
+///   [`MAX_TOOL_ROUNDS`] without a final response.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,

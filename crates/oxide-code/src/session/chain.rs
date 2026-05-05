@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 use crate::message::Message;
 
+/// Accumulator for messages read off disk. Loader calls [`Self::insert`] per `Entry::Message`,
+/// then [`Self::resolve`] once to flatten the recorded UUID DAG into a linear chain.
+///
+/// The DAG can fork when concurrent resumes (e.g. two `ox -c` processes pointed at the same
+/// session) each append their own follow-ups onto the same parent. `resolve` picks one tip
+/// deterministically rather than returning every branch.
 pub(super) struct ChainBuilder {
     nodes: HashMap<Uuid, ChainNode>,
     /// UUIDs claimed as some other message's `parent_uuid`. Leaves = keys − referenced.
@@ -50,8 +56,13 @@ impl ChainBuilder {
         );
     }
 
-    /// Picks the newest leaf and walks back via `parent_uuid`. Cycles and orphan parents
-    /// terminate the walk so corrupted on-disk state cannot hang.
+    /// Returns `(messages root → tip, tip uuid)`.
+    ///
+    /// Tip selection is fork-aware: the leaf (UUID never referenced as a parent) with the
+    /// newest timestamp wins, with UUID order breaking ties so two callers loading the same
+    /// file always pick the same branch. Walks back via `parent_uuid`; cycles trip the seen-set
+    /// and orphan parents terminate the walk, so corrupted on-disk state cannot hang the loader.
+    /// Returns `(vec![], None)` when no leaf exists (every node referenced — pure cycle).
     pub(super) fn resolve(mut self) -> (Vec<Message>, Option<Uuid>) {
         let tip = self
             .nodes

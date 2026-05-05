@@ -79,7 +79,8 @@ fn format_available(commands: &[&dyn registry::SlashCommand]) -> String {
     out
 }
 
-/// Whether `parsed` is safe to dispatch mid-turn.
+/// Whether `parsed` is safe to dispatch mid-turn. Only `ReadOnly` may run while the agent is
+/// streaming; the caller defers `Mutating` and rejects `Unknown`.
 pub(crate) fn classify(parsed: &Parsed) -> SlashKind {
     classify_in(registry::BUILT_INS, parsed)
 }

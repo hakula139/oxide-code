@@ -32,6 +32,10 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
 }
 
 /// Atomically writes `bytes` to `path` with `0o600` perms on Unix.
+///
+/// Writes to a sibling temp file (same parent so `rename` stays a directory-internal atomic op),
+/// flushes contents to disk, then renames over the destination. On any failure the temp file is
+/// removed instead of being leaked.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

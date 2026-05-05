@@ -13,6 +13,9 @@ pub(crate) enum Role {
     Assistant,
 }
 
+/// One entry in a [`Message::content`] vector. Variants mirror the Anthropic Messages API
+/// content-block taxonomy verbatim so the same struct serves the wire format, the JSONL
+/// session transcript, and the TUI renderer without lossy conversions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {

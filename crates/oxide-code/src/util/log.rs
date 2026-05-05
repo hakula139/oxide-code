@@ -13,7 +13,10 @@ const APP_DIR: &str = "ox";
 const LOG_SUBDIR: &str = "log";
 const LOG_FILE: &str = "oxide-code.log";
 
-/// Bind the returned `WorkerGuard` for the program lifetime (TUI mode only).
+/// Initializes the global tracing subscriber.
+///
+/// The returned `WorkerGuard` (TUI mode only) flushes the non-blocking appender on drop and must
+/// be held for the program lifetime; dropping it early truncates buffered log lines.
 pub(crate) fn init_tracing(tui_mode: bool) -> Result<Option<WorkerGuard>> {
     let filter = make_filter();
     Ok(if let Some((writer, guard)) = build_log_target(tui_mode)? {

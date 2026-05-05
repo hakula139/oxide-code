@@ -22,12 +22,15 @@ const TOP_BORDER_GLYPH: char = '─';
 // ── Modal Trait ──
 
 /// Focus-grabbing UI overlay. `Send` because App lives on tokio; not `Sync` — modals own mutable
-/// state.
+/// state and are exclusively driven from the App task.
 pub(crate) trait Modal: Send {
+    /// Total rows the modal needs at the given terminal width, before the wrapping separator.
     fn height(&self, width: u16) -> u16;
 
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
+    /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted
+    /// a typed action; the stack pops on cancel / submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
 }
 
@@ -50,9 +53,10 @@ pub(crate) enum ModalAction {
 
 // ── ModalStack ──
 
-/// Owns the active modal(s). Single-modal-at-a-time today; the `Vec`
-/// is there so a "confirm leave?" overlay inside a picker can `push`
-/// without ownership rework.
+/// LIFO stack of modal overlays. Only the top modal renders and receives keys; nested entries
+/// resume in reverse `push` order on cancel / submit. Single-modal-at-a-time today; the `Vec`
+/// is there so a future "confirm leave?" overlay inside a picker can `push` without ownership
+/// rework.
 #[derive(Default)]
 pub(crate) struct ModalStack {
     stack: Vec<Box<dyn Modal>>,

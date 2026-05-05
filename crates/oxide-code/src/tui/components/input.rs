@@ -304,6 +304,9 @@ impl InputArea {
     }
 
     fn refresh_popup(&mut self) {
+        // Popup wiring: only the single-line case can be a slash command, and `popup_query`
+        // returns `None` for non-`/`-prefixed text — so a multi-line buffer or a typed-over slash
+        // both close the popup.
         let query = match self.textarea.lines() {
             [single] => popup_query(single),
             _ => None,

@@ -43,8 +43,11 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 // ── Public API ──
 
-/// Spawns a detached task that asks Haiku for a title, records it on `session`, and notifies
-/// `sink`. `first_prompt` is truncated to [`MAX_PROMPT_CHARS`].
+/// Fire-and-forget: spawns a detached tokio task and returns immediately. The task asks Haiku
+/// for a title, appends it to `session`, and emits `SessionTitleUpdated` through `sink`. All
+/// failures (HTTP, parse, write) warn-log and drop — the first-prompt title persists, so the
+/// session is never left without a title. `first_prompt` is tail-truncated to
+/// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
 where
     S: AgentSink + Clone + Send + 'static,
