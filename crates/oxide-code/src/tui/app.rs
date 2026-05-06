@@ -325,6 +325,9 @@ impl App {
         }
     }
 
+    /// Returns whether the submitted text should also forward to the agent. Slash commands always
+    /// return false — they emit synthesized actions through `dispatch_user_action` /
+    /// `forward_to_agent` directly. Plain prompts return true while idle, false while cancelling.
     fn handle_submit_prompt(&mut self, text: &str) -> bool {
         if self.input.is_enabled() {
             if let Some(parsed) = slash::parse_slash(text) {
@@ -379,9 +382,9 @@ impl App {
         }
         self.pending_prompts.push_back(text.to_owned());
         self.sync_input_queue_hint();
-        // Forward the queued prompt to the agent so it can drain at turn end —
-        // unless we're already cancelling, in which case the agent will reset and
-        // the queue drains locally on the next idle transition.
+        // Forward the queued prompt to the agent so it can drain at turn end — unless we're
+        // already cancelling, in which case the agent will reset and the queue drains locally on
+        // the next idle transition.
         !matches!(self.status_bar.status(), Status::Cancelling)
     }
 
@@ -2423,6 +2426,47 @@ mod tests {
     }
 
     #[test]
+    fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
+        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
+        // The frame-area surface fill is the only widget that guarantees this for cells no other
+        // widget covers (gaps that emerge with future layout or widget additions).
+        use ratatui::style::Color;
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        let surface_bg = app
+            .theme
+            .surface()
+            .bg
+            .expect("latte sets explicit surface bg");
+        let sentinel = Color::Rgb(254, 0, 254);
+        assert_ne!(surface_bg, sentinel, "sentinel must differ from theme bg");
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        for cell in &mut terminal.current_buffer_mut().content {
+            cell.set_bg(sentinel);
+        }
+        terminal
+            .draw(|frame| {
+                _ = app.draw_frame(frame);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 {
+            for x in 0..60 {
+                let cell = buffer.cell((x, y)).expect("cell in bounds");
+                assert_ne!(
+                    cell.bg, sentinel,
+                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn slash_typed_swap_theme_routes_through_local_handler() {
         // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
         // forwarded straight to the agent, which silently dropped them. They must now flow
@@ -2438,6 +2482,26 @@ mod tests {
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "TUI-only theme swap must not leak to the agent channel",
         );
+    }
+
+    #[tokio::test]
+    async fn slash_typed_model_routes_synthesized_swap_config_through_dispatch() {
+        // Mirrors the typed-`/theme` regression on the agent-bound side: `/model <id>` synthesizes
+        // a SwapConfig that must reach the agent via dispatch_user_action → forward_to_agent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model haiku".to_owned()));
+
+        let forwarded = rx.recv().await.expect("SwapConfig forwarded to agent");
+        match forwarded {
+            UserAction::SwapConfig { model, effort } => {
+                assert_eq!(
+                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
+                    Some("claude-haiku-4-5")
+                );
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected SwapConfig, got {other:?}"),
+        }
     }
 
     // ── render_preview ──

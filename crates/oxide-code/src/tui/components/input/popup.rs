@@ -333,6 +333,44 @@ mod tests {
         assert_eq!(p.scroll_offset(), 0);
     }
 
+    #[test]
+    fn scroll_offset_keeps_visible_row_at_pad_for_mid_list_selection() {
+        // Pin the centering invariant directly: the visible row of the cursor (selected - offset)
+        // equals `pad` whenever the selection is past the top half but not yet near the bottom.
+        // Mutating the divisor (e.g. `/3`) or the formula would shift this row index.
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        let pad = MAX_VISIBLE_ROWS / 2;
+        for _ in 0..=(pad + 1) {
+            p.select_next();
+        }
+        let visible_row = p.selected - p.scroll_offset();
+        assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
+    }
+
+    #[test]
+    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
+        // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Mutating to `<` would
+        // try to compute max_offset = 0 and still produce 0 here, but tightening the boundary
+        // pins the invariant for the only case where the edge matters.
+        let mut p = long_popup(MAX_VISIBLE_ROWS);
+        while p.selected < MAX_VISIBLE_ROWS - 1 {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
+        // Up-arrow from row 0 wraps to the last row; the bottom-anchored window must clamp to
+        // `len - MAX_VISIBLE_ROWS` (the symmetric case to the existing wrap-to-top test).
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        p.select_prev();
+        assert_eq!(p.selected, total - 1, "wrap to last row");
+        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
+    }
+
     // ── selected ──
 
     #[test]
