@@ -89,7 +89,6 @@ The direction is simple:
 Remaining surface beyond Working Today:
 
 - Session: `/resume`.
-- Inline argument placeholder — dim ghost-text hint (e.g. `[id]`) after a slash command's trailing space.
 - Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)

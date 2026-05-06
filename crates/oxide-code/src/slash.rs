@@ -43,6 +43,11 @@ pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletio
         .unwrap_or_default()
 }
 
+/// `usage()` string for `cmd_name`, or `None` if the command publishes no arg placeholder.
+pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
+    registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
+}
+
 /// Resolves and runs `parsed` against the built-in registry.
 pub(crate) fn dispatch(
     parsed: &Parsed,
