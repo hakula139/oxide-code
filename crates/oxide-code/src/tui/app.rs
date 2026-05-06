@@ -306,12 +306,14 @@ impl App {
                         self.preview_theme_snapshot = Some(self.theme.clone());
                     }
                     self.apply_theme(&preview);
+                } else {
+                    tracing::warn!(name, "PreviewTheme: unknown built-in; picker roster drift");
                 }
                 false
             }
             UserAction::SwapTheme { name } => {
+                self.preview_theme_snapshot = None;
                 if let Some(theme) = super::theme::load_builtin(name) {
-                    self.preview_theme_snapshot = None;
                     self.session_info.config.theme_name.clone_from(name);
                     self.apply_theme(&theme);
                     self.chat
