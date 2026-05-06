@@ -199,4 +199,13 @@ mod tests {
         // Disallowed-char names also fail in arg form so the popup doesn't show stale completions.
         assert!(popup_state("/foo! arg").is_none());
     }
+
+    #[test]
+    fn popup_state_empty_name_rejects_buffer() {
+        // `/` followed by whitespace has no name to dispatch — must not parse as `Arg { name: "" }`,
+        // which would route empty-string lookups through `complete_arg_for` / `arg_placeholder_for`.
+        assert!(popup_state("/ ").is_none());
+        assert!(popup_state("/    ").is_none());
+        assert!(popup_state("/  arg").is_none());
+    }
 }

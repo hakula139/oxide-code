@@ -222,18 +222,28 @@ mod tests {
     }
 
     #[test]
-    fn complete_arg_appends_1m_context_suffix_for_1m_variants() {
-        // The `[1m]` rows must surface the `(1M context)` marker so users can tell variants apart
-        // before committing.
+    fn complete_arg_appends_1m_context_suffix_only_for_1m_variants() {
+        // The `[1m]` rows must surface the `(1M context)` marker so users can tell variants
+        // apart; the bare row must NOT carry the suffix (mutation that always-appends would
+        // otherwise survive).
         let rows = arg_rows("claude-opus-4-7");
         let one_m = rows
             .iter()
             .find(|(v, _)| v == "claude-opus-4-7[1m]")
             .expect("1M variant present");
+        let plain = rows
+            .iter()
+            .find(|(v, _)| v == "claude-opus-4-7")
+            .expect("plain variant present");
         assert!(
             one_m.1.contains("1M context"),
             "1M description: {:?}",
             one_m.1,
+        );
+        assert!(
+            !plain.1.contains("1M context"),
+            "plain description must not carry the 1M marker: {:?}",
+            plain.1,
         );
     }
 

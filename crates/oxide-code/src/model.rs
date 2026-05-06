@@ -580,6 +580,35 @@ mod tests {
         assert!(lookup("gpt-4").is_none());
     }
 
+    // ── is_family_base ──
+
+    #[test]
+    fn is_family_base_recognizes_each_unqualified_base_row() {
+        // Pinning per-id flips a mutation that flipped the bool only on `claude-opus-4` while
+        // leaving sonnet / haiku correct — the slash-resolver filter would still reject opus
+        // but silently accept sonnet/haiku family-bases.
+        for base in ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"] {
+            assert!(is_family_base(base), "{base} must flag as family-base");
+        }
+    }
+
+    #[test]
+    fn is_family_base_rejects_dated_versioned_and_unknown_ids() {
+        for non_base in [
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-opus-4-20250514",
+            "gpt-4",
+            "",
+        ] {
+            assert!(
+                !is_family_base(non_base),
+                "{non_base} must not flag as family-base",
+            );
+        }
+    }
+
     // ── marketing_name ──
 
     #[test]
