@@ -50,7 +50,9 @@ impl SlashCommand for ModelCmd {
             .into_iter()
             .map(|id| ArgCompletion {
                 value: Cow::Borrowed(*id),
-                description: Cow::Owned(display_name(id).into_owned()),
+                // `display_name` is `Cow<'static, str>` for `&'static` ids — the four bare rows
+                // borrow the marketing literal; only `[1m]` rows allocate the suffixed string.
+                description: display_name(id),
             })
             .collect()
     }
