@@ -7,7 +7,7 @@ pub(super) const FRAPPE: &str = include_str!("../../../themes/frappe.toml");
 pub(super) const LATTE: &str = include_str!("../../../themes/latte.toml");
 pub(super) const MATERIAL: &str = include_str!("../../../themes/material.toml");
 
-/// Name → embedded body. Catppuccin variants listed dark→light, then non-Catppuccin palettes.
+/// Name → embedded body. Catppuccin variants listed dark → light, then non-Catppuccin palettes.
 pub(super) const BUILT_IN: &[(&str, &str)] = &[
     ("mocha", MOCHA),
     ("macchiato", MACCHIATO),

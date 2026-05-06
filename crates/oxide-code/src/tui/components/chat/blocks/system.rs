@@ -155,6 +155,6 @@ mod tests {
         assert!(joined.contains("first"));
         assert!(joined.contains("second"));
         // Each logical line wraps to >= 2 visual rows at width 20.
-        assert!(lines.len() >= 4, "expected ≥4 wrapped rows: {bodies:#?}");
+        assert!(lines.len() >= 4, "expected ≥ 4 wrapped rows: {bodies:#?}");
     }
 }
