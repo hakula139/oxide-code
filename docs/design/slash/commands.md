@@ -30,27 +30,13 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 
 ## Per-Command Notes
 
-### /clear
+One bullet per command — non-obvious mechanics or tradeoffs only. Surface details (aliases, args, output) belong in [the user guide](../../guide/slash-commands.md).
 
-Rolls the session UUID, finalizes the old JSONL (still resumable via `ox -c`), drops in-memory messages, clears file tracker, clears AI title. Aliases: `/new`, `/reset`. No confirmation prompt — the cleared session is resumable.
-
-Key design: send-first ordering in `execute` — forward `UserAction::Clear` to `user_tx` first; only on success drop the chat history. `SessionHandle::roll` is the testable extraction point (snapshot-before-clear, replace-before-finalize). `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't paint the old title onto the fresh session.
-
-### /init
-
-Returns `SlashOutcome::Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author/update AGENTS.md. The App pushes the typed `/init` line as a `UserMessage` block, flips turn-start UI state, then forwards. The expanded body is invisible in the live session; on resume, JSONL records the full body.
-
-### /model
-
-Bare `/model` opens the combined model + effort picker modal ([modals.md](modals.md)) — both axes commit through one atomic `UserAction::SwapConfig`. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy — re-clamps current effort against the new model. Both forms emit the same `UserAction::SwapConfig`.
-
-### /effort
-
-`/effort <level>` accepts concrete tiers (`low`, `medium`, `high`, `xhigh`, `max`). No `auto` state. Bare `/effort` opens a horizontal Speed ↔ Intelligence slider modal ([modals.md](modals.md)) — independent of `/model`, since threading a single-axis decision through the two-axis combined picker would force users to navigate models they didn't intend to change.
-
-### /status
-
-Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No args, no chat output — the modal is the surface. Esc / Enter close.
+- **`/clear`** — Send-first ordering: forward `UserAction::Clear` first, drop chat history only on success. `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
+- **`/init`** — Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
+- **`/model`** — Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring; `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
+- **`/effort`** — Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)); two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers — no `auto` state.
+- **`/status`** — Bare opens the read-only overview modal ([modals.md](modals.md)). No args, no chat output. Esc / Enter both dismiss.
 
 ## Sources
 

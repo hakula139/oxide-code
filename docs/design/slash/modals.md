@@ -63,23 +63,11 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 
 ## Per-Modal Notes
 
-### Combined `/model + /effort` picker
+One bullet per modal — non-obvious behavior only. Source links point at the concrete impls.
 
-[`slash::picker::ModelEffortPicker`](../../../crates/oxide-code/src/slash/picker.rs) wraps `ListPicker<ModelRow>` and tracks the effort axis separately. `ModelRow` carries `is_active` (drawn with `✓`) and a `key_hint` (`'1'`–`'9'`) for jump-to-row. The picker drops Claude Code's "Default (recommended)" upsell label, drops the `/fast` line, and shows the canonical model id alongside the marketing name (so `/model <id>` direct-switch and the picker share a mental model).
-
-Effort row hides automatically on no-tier models (Haiku 4.5). Left/Right cycles only through tiers the highlighted model supports; the resolved effort is recomputed on every cursor move so the displayed value never claims a tier the next request would silently clamp.
-
-Submit emits a single `UserAction::SwapConfig { model, effort }`. Both axes are `Option`s — only the axes the user actually changed are populated, so the agent loop can re-clamp atomically without redundant work. When neither axis changed, Enter is treated as `Cancelled`.
-
-### `/effort` slider
-
-[`slash::effort_slider::EffortSlider`](../../../crates/oxide-code/src/slash/effort_slider.rs) — a horizontal Speed ↔ Intelligence visual opened by bare `/effort`. Lists only the tiers the active model accepts (so the cursor never lands on a value the API would reject), seeds the cursor at the resolved active effort, and emits a single `UserAction::SwapConfig { effort, .. }` on Enter. A no-touch Enter or one returning to the initial pick cancels — avoids spurious swaps that would re-resolve config defaults.
-
-Tiers render with a uniform `●` (active) / `○` (inactive) glyph plus a per-tier ANSI color along the blue → red axis. Color encodes tier identity (Low → blue, Max → red); BOLD encodes the active pick. ANSI-named colors decouple the gradient from our theme TOML — the user's terminal palette (Mocha, Solarized, etc.) supplies the actual rendering. Layout is free-flow with a fixed `TIER_GAP` between units; pinning the gap explicitly avoids the half-column drift a slot-based layout produced on even-length labels.
-
-### `/status` overview
-
-[`slash::status_modal::StatusModal`](../../../crates/oxide-code/src/slash/status_modal.rs) renders a kv-table of session descriptors (model, effort, working directory, session id, auth, version, context-cache TTL, show-thinking). Single panel — no tabs today. When `/usage` and `/stats` exist, the modal grows a tab bar (modal-internal change, no infrastructure work).
+- **Combined `/model + /effort` picker** — [`ModelEffortPicker`](../../../crates/oxide-code/src/slash/picker.rs) wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Effort row hides on no-tier models; Left / Right cycles only through tiers the highlighted model supports, recomputed per cursor move so the display never claims a tier the next request would clamp. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes — only changed axes populated; Enter on a no-op cancels.
+- **`/effort` slider** — [`EffortSlider`](../../../crates/oxide-code/src/slash/effort_slider.rs) is a horizontal Speed ↔ Intelligence visual. Lists only tiers the active model accepts; seeds the cursor at the resolved active effort. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red — color encodes identity, BOLD encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
+- **`/status` overview** — [`StatusModal`](../../../crates/oxide-code/src/slash/status_modal.rs) renders a kv-table of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking). Single panel today; will grow a tab bar when `/usage` and `/stats` land.
 
 ## Out of Scope / Deferred
 

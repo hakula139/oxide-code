@@ -64,7 +64,7 @@ The direction is simple:
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter and Tab completion.
 - Mid-session swap: `/model` and `/effort`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker — Up / Down for models, `← →` for effort, number keys to jump, atomic single-action submit. Bare `/effort` opens a Speed ↔ Intelligence slider — `← →` to walk tiers, Enter to confirm, Esc to cancel. `/status` opens a read-only kv overview.
+- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model`, `/effort`, `/status` each open one.
 
 ### Authentication & Configuration
 

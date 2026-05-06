@@ -34,28 +34,11 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 Read-only commands (`/config`, `/diff`, `/help`, `/status`, bare `/model` and bare `/effort` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`) refuse mid-turn — wait for the current response to complete, then retry.
 
-## Switching the Model
+## Model and Effort
 
-`/model` (no argument) opens the combined model + effort picker — Up / Down to navigate models, Left / Right to cycle the effort tier, number keys (`1`–`9`) to jump, Enter to apply, Esc to cancel. Both axes commit through one atomic swap, so changing both never requires two round-trips.
+Bare `/model` opens the combined model + effort picker; bare `/effort` opens a Speed ↔ Intelligence slider. Both apply on Enter and cancel on Esc.
 
-`/model <id>` swaps directly without opening the picker, resolved in four tiers:
-
-- **Alias** — `/model opus`, `/model sonnet`, `/model haiku` route to the latest non-1M row of each family. `/model opus[1m]` and `/model sonnet[1m]` opt into the 1M-context variant. (Haiku 4.5 has no 1M variant — `/model haiku[1m]` errors with a clear message.)
-- **Exact / dated id** — `/model claude-opus-4-7` and dated API ids such as `/model claude-opus-4-6-20250805` pass through. `/model claude-opus-4-7[1m]` is required for the 1M variant.
-- **Unique suffix** — `/model haiku-4-5` resolves to `claude-haiku-4-5`.
-- **Unique substring** — shorter fragments work only when they match one known model.
-
-The picker shows a curated list (Opus 4.7, Sonnet 4.6, Haiku 4.5, plus 1M variants of Opus 4.7 and Sonnet 4.6). Manual entry is wider — any id from the model table works, so `/model claude-opus-4-6` or `/model claude-opus-4-1` swap to those older rows even though they aren't in the picker.
-
-When you swap, your current effort tier is capped to the new model's max — for example, `xhigh` on Opus 4.7 becomes `high` on Sonnet 4.6 since Sonnet 4.6 doesn't accept `xhigh`. The confirmation message says so explicitly (`effort high (clamped from xhigh)`), and `Effort cleared (model has no effort tier)` is shown when the new model accepts no effort tier at all. Swapping back to a model that supported your original effort does not restore it; use `/effort <level>` to pick it back up, or restart to pick up the value from your config (or `ANTHROPIC_EFFORT` if you set one).
-
-## Switching the Effort
-
-Bare `/effort` opens a horizontal Speed ↔ Intelligence slider — `←` / `→` walk through the tiers the active model supports, Enter applies the pick, Esc cancels. Each tier carries its own color along a blue → red axis (Low blue → Max red), and the active tier is marked with a bold `●`; inactive tiers show `○`. The slider seeds the cursor at the current effort, so a no-touch Enter cancels rather than firing a spurious swap.
-
-`/effort <level>` swaps directly. Valid: `low`, `medium`, `high`, `xhigh`, `max`. The active model's caps clamp the pick — `/effort xhigh` on Sonnet 4.6 lands on `high` and the confirmation says `effort high (clamped from xhigh)`.
-
-Bare `/effort` and `/effort xhigh` on a model with no effort tier (Haiku 4.5) both error upfront with a recovery hint pointing at `/model` — silent acceptance would degrade to "no effort param" and confuse the user.
+`/model <id>` resolves in four tiers: alias (`opus`, `sonnet`, `haiku`, with optional `[1m]` for the 1M-context variants) → exact / dated id → unique suffix → unique substring. Swapping clamps the current effort to the new model's caps; `/effort` on a model without effort (Haiku 4.5) errors with a recovery hint. See [Configuration](configuration.md) for the full tier reference and per-model defaults.
 
 ## Stance: No Silent Config Writes
 
