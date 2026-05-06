@@ -4,7 +4,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -17,26 +17,35 @@ use crate::tui::theme::Theme;
 
 // ── Constants ──
 
-/// Per-tier column slot. Wide enough for the longest label ("medium" = 6 chars) with breathing
-/// room on each side.
-const SLOT_WIDTH: usize = 10;
-const SLOT_HALF: usize = SLOT_WIDTH / 2;
-
 const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
 const TRACK_GLYPH: char = '─';
 
-/// Inline radio indicators in the tier-label row — anchoring the glyph to its label dodges the
-/// half-column drift a floating marker would have on even-length labels.
-const RADIO_ACTIVE: char = '●';
-const RADIO_INACTIVE: char = '○';
-const RADIO_PREFIX_WIDTH: usize = 2;
+/// Glyph + trailing space prefixed to each tier label.
+const GLYPH_PREFIX_WIDTH: usize = 2;
+/// Visible columns between adjacent tier units. Fixed gap dodges the half-column drift that a
+/// slot-based layout produced on even-length labels ("medium", "high").
+const TIER_GAP: usize = 3;
 
 const TITLE: &str = "Select effort";
 const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to cancel";
 
 /// Title + blank + speed/intel + track + tier labels + blank + footer.
 const BODY_HEIGHT: u16 = 7;
+
+/// Per-tier color along the speed → intelligence axis. ANSI-named so the gradient inherits the
+/// user's terminal palette — graded circle glyphs were the alternative but they render at
+/// inconsistent widths across monospace fonts. The active-vs-inactive distinction lives on the
+/// glyph (●/○) plus the BOLD modifier; this function only carries tier identity.
+pub(super) fn tier_color(level: Effort) -> Color {
+    match level {
+        Effort::Low => Color::Blue,
+        Effort::Medium => Color::Cyan,
+        Effort::High => Color::Green,
+        Effort::Xhigh => Color::Yellow,
+        Effort::Max => Color::Red,
+    }
+}
 
 // ── EffortSlider ──
 
@@ -89,85 +98,46 @@ impl EffortSlider {
         }))
     }
 
-    /// Total visual width — each tier owns one slot.
+    /// Total visible width: sum of `[glyph][space][label]` units plus one `TIER_GAP` between
+    /// each adjacent pair. Every render line targets this width so `Paragraph::Center` aligns
+    /// them at a single visual axis.
     fn slider_width(&self) -> usize {
-        self.supported.len() * SLOT_WIDTH
-    }
-
-    fn tier_center(i: usize) -> usize {
-        SLOT_HALF + i * SLOT_WIDTH
-    }
-
-    /// Track spans tier 0 center → tier (n-1) center, inclusive.
-    fn track_width(&self) -> usize {
-        (self.supported.len() - 1) * SLOT_WIDTH + 1
+        let units: usize = self
+            .supported
+            .iter()
+            .map(|e| GLYPH_PREFIX_WIDTH + format!("{e}").len())
+            .sum();
+        units + self.supported.len().saturating_sub(1) * TIER_GAP
     }
 
     fn line_speed_intel(&self, theme: &Theme) -> Line<'static> {
         let total = self.slider_width();
-        let n = self.supported.len();
-        let speed_start = SLOT_HALF;
-        let intel_end = SLOT_HALF + (n - 1) * SLOT_WIDTH;
-        let intel_start = (intel_end + 1).saturating_sub(INTEL_LABEL.len());
-        let speed_end = speed_start + SPEED_LABEL.len();
-
-        let mut buf = String::with_capacity(total);
-        buf.push_str(&" ".repeat(speed_start));
-        buf.push_str(SPEED_LABEL);
-        if intel_start > speed_end {
-            buf.push_str(&" ".repeat(intel_start - speed_end));
-            buf.push_str(INTEL_LABEL);
-        }
-        let used = buf.len();
-        if total > used {
-            buf.push_str(&" ".repeat(total - used));
-        }
+        let middle = total
+            .saturating_sub(SPEED_LABEL.len())
+            .saturating_sub(INTEL_LABEL.len());
+        let buf = format!("{SPEED_LABEL}{}{INTEL_LABEL}", " ".repeat(middle));
         Line::from(Span::styled(buf, theme.dim()))
     }
 
     fn line_track(&self, theme: &Theme) -> Line<'static> {
         let total = self.slider_width();
-        let track = self.track_width();
-        let mut buf = String::with_capacity(total);
-        buf.push_str(&" ".repeat(SLOT_HALF));
-        for _ in 0..track {
-            buf.push(TRACK_GLYPH);
-        }
-        let used = SLOT_HALF + track;
-        if total > used {
-            buf.push_str(&" ".repeat(total - used));
-        }
+        let buf: String = std::iter::repeat_n(TRACK_GLYPH, total).collect();
         Line::from(Span::styled(buf, theme.dim()))
     }
 
-    fn line_tier_labels(&self, theme: &Theme) -> Line<'static> {
-        let total = self.slider_width();
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.supported.len() * 3 + 1);
-        let mut col = 0usize;
+    fn line_tier_labels(&self) -> Line<'static> {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.supported.len() * 2);
         for (idx, level) in self.supported.iter().enumerate() {
-            let label = format!("{level}");
-            let label_len = label.chars().count();
-            let center = Self::tier_center(idx);
-            // Center the label at tier_center (keeping label-vs-track alignment unchanged); the
-            // radio glyph hangs `RADIO_PREFIX_WIDTH` cols to the left of it.
-            let label_start = center.saturating_sub(label_len / 2);
-            let prefix_start = label_start.saturating_sub(RADIO_PREFIX_WIDTH);
-            if prefix_start > col {
-                spans.push(Span::raw(" ".repeat(prefix_start - col)));
-                col = prefix_start;
+            if idx > 0 {
+                spans.push(Span::raw(" ".repeat(TIER_GAP)));
             }
-            let (glyph, style) = if idx == self.selected {
-                (RADIO_ACTIVE, theme.accent().add_modifier(Modifier::BOLD))
-            } else {
-                (RADIO_INACTIVE, theme.dim())
-            };
-            spans.push(Span::styled(format!("{glyph} "), style));
-            col += RADIO_PREFIX_WIDTH;
-            spans.push(Span::styled(label, style));
-            col += label_len;
-        }
-        if col < total {
-            spans.push(Span::raw(" ".repeat(total - col)));
+            let active = idx == self.selected;
+            let glyph = if active { '●' } else { '○' };
+            let mut style = Style::default().fg(tier_color(*level));
+            if active {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            spans.push(Span::styled(format!("{glyph} {level}"), style));
         }
         Line::from(spans)
     }
@@ -187,7 +157,7 @@ impl Modal for EffortSlider {
             Line::default(),
             self.line_speed_intel(theme),
             self.line_track(theme),
-            self.line_tier_labels(theme),
+            self.line_tier_labels(),
             Line::default(),
             Line::from(Span::styled(FOOTER, theme.dim())),
         ];
@@ -379,8 +349,8 @@ mod tests {
 
     #[test]
     fn render_active_glyph_column_tracks_selected_tier() {
-        // The ● glyph must move horizontally as the cursor walks the ladder. Render two
-        // adjacent positions and assert the active-radio column actually shifts.
+        // Active tier renders `●` with BOLD; inactive tiers render `○` without it. Find the
+        // bold `●` cell and assert its column shifts when the cursor walks the ladder.
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -389,7 +359,7 @@ mod tests {
         let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
         let height = s.height(width);
 
-        let render_active_x = |s: &EffortSlider| -> u16 {
+        let active_x = |s: &EffortSlider| -> u16 {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
@@ -397,13 +367,16 @@ mod tests {
             let buf = terminal.backend().buffer().clone();
             // Tier-label row is row 4 (title+blank+speed/intel+track = 4 rows above).
             (0..width)
-                .find(|x| buf[(*x, 4)].symbol() == RADIO_ACTIVE.to_string())
-                .expect("active radio glyph must appear on the tier-label row")
+                .find(|x| {
+                    let cell = &buf[(*x, 4)];
+                    cell.symbol() == "●" && cell.style().add_modifier.contains(Modifier::BOLD)
+                })
+                .expect("active bold `●` must appear on the tier-label row")
         };
 
-        let x_low = render_active_x(&s);
+        let x_low = active_x(&s);
         s.handle_key(&key(KeyCode::Right));
-        let x_medium = render_active_x(&s);
+        let x_medium = active_x(&s);
         assert!(
             x_medium > x_low,
             "Right must shift active glyph to the right (low={x_low}, medium={x_medium})",

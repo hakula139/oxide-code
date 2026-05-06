@@ -4,11 +4,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
+use super::effort_slider::tier_color;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{ResolvedModelId, capabilities_for, display_name};
@@ -191,11 +192,12 @@ impl ModelEffortPicker {
         let level = self.effort_or_active()?;
         let was_default = self.active_effort.is_none() && !self.effort_dirty;
         let suffix = if was_default { " (default)" } else { "" };
+        let color = tier_color(level);
         Some(Line::from(vec![
-            Span::styled("● ", theme.accent()),
+            Span::styled("● ", Style::default().fg(color)),
             Span::styled(
                 format!("{level} effort{suffix}"),
-                theme.text().add_modifier(Modifier::BOLD),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ← →  to adjust", theme.dim()),
         ]))
