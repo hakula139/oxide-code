@@ -21,10 +21,8 @@ const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
 const TRACK_GLYPH: char = '─';
 
-/// Glyph + trailing space prefixed to each tier label.
 const GLYPH_PREFIX_WIDTH: usize = 2;
-/// Visible columns between adjacent tier units. Fixed gap dodges the half-column drift that a
-/// slot-based layout produced on even-length labels ("medium", "high").
+/// Fixed inter-tier spacing — slot-based widths drifted by half a col on even-length labels.
 const TIER_GAP: usize = 3;
 
 const TITLE: &str = "Select effort";
@@ -33,11 +31,8 @@ const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to
 /// Title + blank + speed/intel + track + tier labels + blank + footer.
 const BODY_HEIGHT: u16 = 7;
 
-/// Per-tier color along the speed → intelligence axis. ANSI-named so the gradient inherits the
-/// user's terminal palette. Skips yellow at the Xhigh slot in favor of magenta — green and
-/// yellow read close on pastel palettes (Catppuccin Mocha etc.), and the hue-family jump to
-/// purple keeps High and Xhigh distinct on any reasonable theme. Active-vs-inactive lives on
-/// the glyph (●/○) and the BOLD modifier; this function only carries tier identity.
+/// Per-tier color (Low blue → Max red). Magenta — not yellow — at Xhigh keeps High and Xhigh
+/// distinct on pastel palettes where green and yellow read close.
 pub(super) fn tier_color(level: Effort) -> Color {
     match level {
         Effort::Low => Color::Blue,
@@ -99,9 +94,7 @@ impl EffortSlider {
         }))
     }
 
-    /// Total visible width: sum of `[glyph][space][label]` units plus one `TIER_GAP` between
-    /// each adjacent pair. Every render line targets this width so `Paragraph::Center` aligns
-    /// them at a single visual axis.
+    /// Width every render line targets so `Paragraph::Center` aligns them on a single axis.
     fn slider_width(&self) -> usize {
         let units: usize = self
             .supported
@@ -209,7 +202,6 @@ mod tests {
 
     #[test]
     fn new_returns_none_for_no_effort_model() {
-        // Haiku 4.5 has no effort tier — slider returns None; caller surfaces the error.
         let mut info = test_session_info();
         info.config.model_id = "claude-haiku-4-5".to_owned();
         assert!(EffortSlider::new(&info).is_none());
@@ -232,7 +224,6 @@ mod tests {
 
     #[test]
     fn new_falls_back_to_model_default_when_effort_unset() {
-        // No user-set effort + Opus 4.7 default = xhigh.
         let s = slider_for("claude-opus-4-7", None);
         assert_eq!(s.initial, Effort::Xhigh);
         assert_eq!(s.supported[s.selected], Effort::Xhigh);
@@ -266,7 +257,6 @@ mod tests {
 
     #[test]
     fn vim_keys_mirror_arrow_navigation() {
-        // Pin: `h` and `l` must behave like Left/Right respectively.
         let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
         s.handle_key(&key(KeyCode::Char('l')));
         assert_eq!(s.supported[s.selected], Effort::Medium);
@@ -350,8 +340,6 @@ mod tests {
 
     #[test]
     fn render_active_glyph_column_tracks_selected_tier() {
-        // Active tier renders `●` with BOLD; inactive tiers render `○` without it. Find the
-        // bold `●` cell and assert its column shifts when the cursor walks the ladder.
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -366,7 +354,7 @@ mod tests {
                 .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
                 .expect("render must not panic");
             let buf = terminal.backend().buffer().clone();
-            // Tier-label row is row 4 (title+blank+speed/intel+track = 4 rows above).
+            // Row 4 = title + blank + speed/intel + track.
             (0..width)
                 .find(|x| {
                     let cell = &buf[(*x, 4)];

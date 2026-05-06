@@ -367,9 +367,7 @@ mod tests {
 
     #[test]
     fn handle_key_modifier_less_key_routes_to_modal_unchanged() {
-        // Pin: the universal cancel matches only Esc and Ctrl+C exactly; other keys bypass
-        // the early-return and reach the modal. ScriptedModal consumes `c` as its own cancel
-        // sentinel, so we use `x` as a neutral stand-in.
+        // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('x'), KeyModifiers::NONE));

@@ -162,8 +162,7 @@ mod tests {
 
     #[test]
     fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        // Setting xhigh on Haiku silently resolves to None (no effort), confusing the user.
-        // Reject upfront.
+        // Without this, xhigh on Haiku silently resolves to None and confuses the user.
         let (chat, outcome) = run_execute_with_model("claude-haiku-4-5", "xhigh");
         let msg = outcome.expect_err("must error");
         assert!(
