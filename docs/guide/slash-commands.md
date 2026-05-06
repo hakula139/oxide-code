@@ -9,7 +9,7 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 | `/clear` (aliases `/new`, `/reset`) | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
 | `/config`                           | Show the resolved configuration and the file paths it merged.                        |
 | `/diff`                             | Show `git diff HEAD` plus untracked files, capped at 64 KB.                          |
-| `/effort <level>`                   | Set the active effort tier (`low`, `medium`, `high`, `xhigh`, `max`).                |
+| `/effort [<level>]`                 | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
 | `/help`                             | List available commands.                                                             |
 | `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
 | `/model [<id>]`                     | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
@@ -32,7 +32,7 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/config`, `/diff`, `/help`, `/status`, bare `/model` which opens the picker) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`) refuse mid-turn — wait for the current response to complete, then retry.
+Read-only commands (`/config`, `/diff`, `/help`, `/status`, bare `/model` and bare `/effort` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`) refuse mid-turn — wait for the current response to complete, then retry.
 
 ## Switching the Model
 
@@ -51,11 +51,11 @@ When you swap, your current effort tier is capped to the new model's max — for
 
 ## Switching the Effort
 
-`/effort <level>` swaps to that tier. Valid: `low`, `medium`, `high`, `xhigh`, `max`. The active model's caps clamp the pick — `/effort xhigh` on Sonnet 4.6 lands on `high` and the confirmation says `effort high (clamped from xhigh)`.
+Bare `/effort` opens a horizontal Speed ↔ Intelligence slider — `←` / `→` walk through the tiers the active model supports, Enter applies the pick, Esc cancels. Each tier carries its own color along a blue → red axis (Low blue → Max red), and the active tier is marked with a bold `●`; inactive tiers show `○`. The slider seeds the cursor at the current effort, so a no-touch Enter cancels rather than firing a spurious swap.
 
-Bare `/effort` (no argument) errors with a usage hint pointing at `/model` — the picker opened by `/model` is where you adjust effort interactively. Sharing the bare form between two commands made `/effort` look like a `/model` alias and split the discoverability surface for no real benefit.
+`/effort <level>` swaps directly. Valid: `low`, `medium`, `high`, `xhigh`, `max`. The active model's caps clamp the pick — `/effort xhigh` on Sonnet 4.6 lands on `high` and the confirmation says `effort high (clamped from xhigh)`.
 
-`/effort xhigh` on a model with no effort tier (Haiku 4.5) errors upfront with a recovery hint to `/model` first — silent acceptance would degrade to "no effort param" and confuse the user.
+Bare `/effort` and `/effort xhigh` on a model with no effort tier (Haiku 4.5) both error upfront with a recovery hint pointing at `/model` — silent acceptance would degrade to "no effort param" and confuse the user.
 
 ## Stance: No Silent Config Writes
 

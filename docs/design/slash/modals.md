@@ -41,9 +41,10 @@ pub(crate) enum ModalAction {
 
 [`crates/oxide-code/src/tui/modal.rs`](../../../crates/oxide-code/src/tui/modal.rs) defines the trait, key outcome, and `ModalStack` manager. [`crates/oxide-code/src/tui/modal/list_picker.rs`](../../../crates/oxide-code/src/tui/modal/list_picker.rs) is the generic primitive that concrete pickers embed.
 
-Two concrete modals ship today:
+Three concrete modals ship today:
 
 - [`crates/oxide-code/src/slash/picker.rs`](../../../crates/oxide-code/src/slash/picker.rs) — combined `/model + /effort` picker.
+- [`crates/oxide-code/src/slash/effort_slider.rs`](../../../crates/oxide-code/src/slash/effort_slider.rs) — bare `/effort` Speed ↔ Intelligence slider.
 - [`crates/oxide-code/src/slash/status_modal.rs`](../../../crates/oxide-code/src/slash/status_modal.rs) — `/status` overview.
 
 App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: an active modal sees every key before any other component, then `apply_modal_action` dispatches the result through the same path as a keyboard `UserAction`.
@@ -56,7 +57,7 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Reactive subscriptions are deferred — when a value changes mid-modal (rare), the modal closes and reopens with fresh state.
 5. **Layout band sized by `ModalStack::height(width)`.** Zero rows when empty (existing layout unchanged); displaces the chat upward when active, just like the slash popup.
 6. **Modals open via `SlashContext::open_modal`, not a new `SlashOutcome` variant.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`). The dispatcher harvests the slot after `execute` and pushes onto the App's stack — same shape as `chat: &mut ChatView` for write-effects.
-7. **Bare `/model` opens the combined model + effort picker; `/effort` is typed-arg-only.** Sharing the same modal between two bare commands made `/effort` look like a `/model` alias and split the discoverability surface for no real benefit. Typed-arg `/model <id>` and `/effort <level>` keep their direct-switch behaviour for scripting and power users.
+7. **Bare `/model` and bare `/effort` open separate modals — combined picker vs. slider.** `/model` keeps the multi-axis combined picker (model and effort cycle together); `/effort` gets its own single-axis slider. Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
 8. **Generic [`ListPicker<T: PickerItem>`] is _not_ a `Modal`.** It is a state + render primitive that concrete pickers embed and forward keys to. This separates "list selection state" from "what does Enter dispatch", which avoids the boxed-callback pattern while staying broadly reusable (`/model + /effort` today; future `/theme`, future approval prompts).
 9. **`/status` on Esc and Enter both dismiss.** Read-only overview — there's nothing to "confirm". The dual binding makes the close gesture muscle-memory-friendly across users coming from different conventions.
 
@@ -69,6 +70,12 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 Effort row hides automatically on no-tier models (Haiku 4.5). Left/Right cycles only through tiers the highlighted model supports; the resolved effort is recomputed on every cursor move so the displayed value never claims a tier the next request would silently clamp.
 
 Submit emits a single `UserAction::SwapConfig { model, effort }`. Both axes are `Option`s — only the axes the user actually changed are populated, so the agent loop can re-clamp atomically without redundant work. When neither axis changed, Enter is treated as `Cancelled`.
+
+### `/effort` slider
+
+[`slash::effort_slider::EffortSlider`](../../../crates/oxide-code/src/slash/effort_slider.rs) — a horizontal Speed ↔ Intelligence visual opened by bare `/effort`. Lists only the tiers the active model accepts (so the cursor never lands on a value the API would reject), seeds the cursor at the resolved active effort, and emits a single `UserAction::SwapConfig { effort, .. }` on Enter. A no-touch Enter or one returning to the initial pick cancels — avoids spurious swaps that would re-resolve config defaults.
+
+Tiers render with a uniform `●` (active) / `○` (inactive) glyph plus a per-tier ANSI color along the blue → red axis. Color encodes tier identity (Low → blue, Max → red); BOLD encodes the active pick. ANSI-named colors decouple the gradient from our theme TOML — the user's terminal palette (Mocha, Solarized, etc.) supplies the actual rendering. Layout is free-flow with a fixed `TIER_GAP` between units; pinning the gap explicitly avoids the half-column drift a slot-based layout produced on even-length labels.
 
 ### `/status` overview
 
@@ -87,6 +94,7 @@ Submit emits a single `UserAction::SwapConfig { model, effort }`. Both axes are 
 - `crates/oxide-code/src/tui/modal.rs` — `Modal`, `ModalKey`, `ModalAction`, `ModalStack`.
 - `crates/oxide-code/src/tui/modal/list_picker.rs` — generic `ListPicker<T: PickerItem>`.
 - `crates/oxide-code/src/slash/picker.rs` — model + effort picker.
+- `crates/oxide-code/src/slash/effort_slider.rs` — `/effort` slider.
 - `crates/oxide-code/src/slash/status_modal.rs` — status overview.
 - `crates/oxide-code/src/slash/context.rs` — `SlashContext::open_modal` / `take_modal`.
 - `crates/oxide-code/src/tui/app.rs` — `App::handle_crossterm_event` modal gate, `apply_modal_action`, layout band.

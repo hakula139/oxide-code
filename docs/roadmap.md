@@ -64,7 +64,7 @@ The direction is simple:
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter and Tab completion.
 - Mid-session swap: `/model` and `/effort`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker — Up / Down for models, `← →` for effort, number keys to jump, atomic single-action submit. `/status` opens a read-only kv overview.
+- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker — Up / Down for models, `← →` for effort, number keys to jump, atomic single-action submit. Bare `/effort` opens a Speed ↔ Intelligence slider — `← →` to walk tiers, Enter to confirm, Esc to cancel. `/status` opens a read-only kv overview.
 
 ### Authentication & Configuration
 
@@ -90,7 +90,6 @@ Remaining surface beyond Working Today:
 
 - Session: `/resume`.
 - Mid-session swap: `/theme`.
-- `/effort` slider — horizontal Speed ←→ Intelligence visual that gives bare `/effort` its own picker without retreading the `/model` modal.
 - Inline argument placeholder — dim ghost-text hint (e.g. `[id]`) after a slash command's trailing space.
 - Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow, argument-aware popup completion.
 
