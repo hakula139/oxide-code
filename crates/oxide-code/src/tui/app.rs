@@ -2310,6 +2310,47 @@ mod tests {
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
     }
 
+    #[test]
+    fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
+        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
+        // The frame-area surface fill is the only widget that guarantees this for cells no other
+        // widget covers (gaps that emerge with future layout or widget additions).
+        use ratatui::style::Color;
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        let surface_bg = app
+            .theme
+            .surface()
+            .bg
+            .expect("latte sets explicit surface bg");
+        let sentinel = Color::Rgb(254, 0, 254);
+        assert_ne!(surface_bg, sentinel, "sentinel must differ from theme bg");
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        for cell in &mut terminal.current_buffer_mut().content {
+            cell.set_bg(sentinel);
+        }
+        terminal
+            .draw(|frame| {
+                _ = app.draw_frame(frame);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 {
+            for x in 0..60 {
+                let cell = buffer.cell((x, y)).expect("cell in bounds");
+                assert_ne!(
+                    cell.bg, sentinel,
+                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
+                );
+            }
+        }
+    }
+
     // ── preview_height ──
 
     #[test]
@@ -2365,43 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn swap_theme_commits_and_clears_snapshot() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        let previewed = app.theme.clone();
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(app.preview_theme_snapshot.is_none());
-        assert_eq!(app.session_info.config.theme_name, "latte");
-        assert_eq!(app.theme.text, previewed.text);
-
-        app.apply_modal_action(ModalAction::None);
-        assert_eq!(
-            app.session_info.config.theme_name, "latte",
-            "post-commit cancel must not restore the pre-preview theme",
-        );
-    }
-
-    #[tokio::test]
-    async fn theme_actions_are_not_forwarded_to_agent_loop() {
-        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "theme actions must stay client-side",
-        );
-    }
-
-    #[test]
     fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
         // The drift warn arm fires when a PreviewTheme name doesn't resolve. The picker roster
         // and the loader's lookup table must agree, so this is a developer-facing log only;
@@ -2423,6 +2427,27 @@ mod tests {
             app.chat.entry_count(),
             entries_before,
             "preview must never push a chat block",
+        );
+    }
+
+    #[test]
+    fn swap_theme_commits_and_clears_snapshot() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        let previewed = app.theme.clone();
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.session_info.config.theme_name, "latte");
+        assert_eq!(app.theme.text, previewed.text);
+
+        app.apply_modal_action(ModalAction::None);
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "post-commit cancel must not restore the pre-preview theme",
         );
     }
 
@@ -2450,45 +2475,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
-        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
-        // The frame-area surface fill is the only widget that guarantees this for cells no other
-        // widget covers (gaps that emerge with future layout or widget additions).
-        use ratatui::style::Color;
-
-        let (mut app, _rx, _agent_tx) = test_app(None);
+    #[tokio::test]
+    async fn theme_actions_are_not_forwarded_to_agent_loop() {
+        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
         app.dispatch_user_action(UserAction::SwapTheme {
             name: "latte".to_owned(),
         });
-        let surface_bg = app
-            .theme
-            .surface()
-            .bg
-            .expect("latte sets explicit surface bg");
-        let sentinel = Color::Rgb(254, 0, 254);
-        assert_ne!(surface_bg, sentinel, "sentinel must differ from theme bg");
-
-        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
-        for cell in &mut terminal.current_buffer_mut().content {
-            cell.set_bg(sentinel);
-        }
-        terminal
-            .draw(|frame| {
-                _ = app.draw_frame(frame);
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        for y in 0..10 {
-            for x in 0..60 {
-                let cell = buffer.cell((x, y)).expect("cell in bounds");
-                assert_ne!(
-                    cell.bg, sentinel,
-                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
-                );
-            }
-        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "theme actions must stay client-side",
+        );
     }
 
     #[test]

@@ -35,9 +35,7 @@ impl StreamingAssistant {
     }
 
     pub(crate) fn take_buffer(&mut self) -> String {
-        self.rendered.clear();
-        self.rendered_boundary = 0;
-        self.cached_width = 0;
+        self.invalidate_cache();
         std::mem::take(&mut self.buffer)
     }
 

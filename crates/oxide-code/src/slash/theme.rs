@@ -254,68 +254,39 @@ mod tests {
         ThemePicker::new(name)
     }
 
-    // ── ThemeCmd metadata ──
+    // ── ThemeRow ──
 
     #[test]
-    fn metadata_matches_built_ins_contract() {
-        assert_eq!(ThemeCmd.name(), "theme");
-        assert!(ThemeCmd.aliases().is_empty());
-        assert!(!ThemeCmd.description().is_empty());
-        assert_eq!(ThemeCmd.usage(), Some("[<name>]"));
-    }
-
-    #[test]
-    fn classify_splits_on_args() {
-        // Bare form opens the picker (read-only); typed arg races the client (mutating).
-        assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(ThemeCmd.classify("   "), SlashKind::ReadOnly);
-        assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
-    }
-
-    // ── ThemeCmd::execute ──
-
-    #[test]
-    fn execute_no_args_opens_picker_and_pushes_no_chat_block() {
-        let (chat, modal, outcome) = run_execute("");
-        assert_eq!(outcome, Ok(SlashOutcome::Done));
-        assert!(modal.is_some(), "bare /theme must populate the modal slot");
-        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
-    }
-
-    #[test]
-    fn execute_with_known_name_forwards_swap_theme() {
-        for (name, _) in LISTED_THEMES {
-            let (_, _, outcome) = run_execute(name);
-            assert_eq!(
-                outcome,
-                Ok(SlashOutcome::Forward(UserAction::SwapTheme {
-                    name: (*name).to_owned(),
-                })),
-                "`{name}` must forward SwapTheme",
-            );
-        }
-    }
-
-    #[test]
-    fn execute_is_case_insensitive() {
-        let (_, _, outcome) = run_execute("LATTE");
+    fn theme_row_picker_item_methods_return_curated_values() {
+        // Pins the trait-impl surface for ThemeRow — label / description / is_active / key_hint
+        // each have a path the picker depends on and only the render smoke test exercises
+        // indirectly.
+        let rows = ThemeRow::build("latte");
+        let names: Vec<&str> = rows.iter().map(PickerItem::label).collect();
         assert_eq!(
-            outcome,
-            Ok(SlashOutcome::Forward(UserAction::SwapTheme {
-                name: "latte".to_owned(),
-            })),
+            names,
+            LISTED_THEMES.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         );
+
+        let active_count = rows.iter().filter(|r| r.is_active()).count();
+        assert_eq!(active_count, 1, "exactly one row marks the active theme");
+        assert!(rows.iter().find(|r| r.is_active()).unwrap().label() == "latte");
+
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(row.key_hint(), numeric_hint(idx), "idx={idx}");
+            assert_eq!(row.description(), Some(LISTED_THEMES[idx].1));
+        }
     }
 
+    // ── numeric_hint ──
+
     #[test]
-    fn execute_unknown_name_errors_listing_valid_options() {
-        let (chat, _, outcome) = run_execute("solarized");
-        let msg = outcome.expect_err("unknown name must error");
-        assert!(msg.starts_with("Unknown theme: `solarized`."), "{msg}");
-        for (name, _) in LISTED_THEMES {
-            assert!(msg.contains(name), "lists `{name}`: {msg}");
+    fn numeric_hint_covers_first_nine_rows_then_returns_none() {
+        for idx in 0..9 {
+            let expected = char::from_digit(u32::try_from(idx + 1).unwrap(), 10);
+            assert_eq!(numeric_hint(idx), expected, "idx={idx}");
         }
-        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
+        assert_eq!(numeric_hint(9), None, "10th row has no hint");
     }
 
     // ── ThemePicker::new ──
@@ -340,14 +311,18 @@ mod tests {
     // ── ThemePicker::handle_key ──
 
     #[test]
-    fn down_arrow_emits_preview_for_next_row_without_popping() {
-        let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Down));
-        match outcome {
-            ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
-                assert_eq!(name, "macchiato", "Down from mocha lands on macchiato");
+    fn down_and_j_emit_preview_for_next_row_without_popping() {
+        // Down arrow and `j` (vi binding) share an arm; both must advance to the next row and
+        // emit a preview without popping the modal.
+        for code in [KeyCode::Down, KeyCode::Char('j')] {
+            let mut p = picker_with_active("mocha");
+            let outcome = p.handle_key(&key(code));
+            match outcome {
+                ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+                    assert_eq!(name, "macchiato", "{code:?} from mocha lands on macchiato");
+                }
+                other => panic!("expected Preview(PreviewTheme) for {code:?}, got {other:?}"),
             }
-            other => panic!("expected Preview(PreviewTheme), got {other:?}"),
         }
     }
 
@@ -368,20 +343,6 @@ mod tests {
                 }
                 other => panic!("expected Preview for {code:?}, got {other:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn j_alias_for_down_emits_preview() {
-        // `j` shares the Down arm; pin the alias so a regression in the match doesn't silently
-        // drop it.
-        let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Char('j')));
-        match outcome {
-            ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
-                assert_eq!(name, "macchiato");
-            }
-            other => panic!("expected Preview, got {other:?}"),
         }
     }
 
@@ -457,38 +418,67 @@ mod tests {
         }
     }
 
-    // ── ThemeRow ──
+    // ── ThemeCmd metadata ──
 
     #[test]
-    fn theme_row_picker_item_methods_return_curated_values() {
-        // Pins the trait-impl surface for ThemeRow — label / description / is_active / key_hint
-        // each have a path the picker depends on and only the render smoke test exercises
-        // indirectly.
-        let rows = ThemeRow::build("latte");
-        let names: Vec<&str> = rows.iter().map(PickerItem::label).collect();
-        assert_eq!(
-            names,
-            LISTED_THEMES.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        );
+    fn metadata_matches_built_ins_contract() {
+        assert_eq!(ThemeCmd.name(), "theme");
+        assert!(ThemeCmd.aliases().is_empty());
+        assert!(!ThemeCmd.description().is_empty());
+        assert_eq!(ThemeCmd.usage(), Some("[<name>]"));
+    }
 
-        let active_count = rows.iter().filter(|r| r.is_active()).count();
-        assert_eq!(active_count, 1, "exactly one row marks the active theme");
-        assert!(rows.iter().find(|r| r.is_active()).unwrap().label() == "latte");
+    #[test]
+    fn classify_splits_on_args() {
+        // Bare form opens the picker (read-only); typed arg races the client (mutating).
+        assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
+        assert_eq!(ThemeCmd.classify("   "), SlashKind::ReadOnly);
+        assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
+    }
 
-        for (idx, row) in rows.iter().enumerate() {
-            assert_eq!(row.key_hint(), numeric_hint(idx), "idx={idx}");
-            assert_eq!(row.description(), Some(LISTED_THEMES[idx].1));
+    // ── ThemeCmd::execute ──
+
+    #[test]
+    fn execute_no_args_opens_picker_and_pushes_no_chat_block() {
+        let (chat, modal, outcome) = run_execute("");
+        assert_eq!(outcome, Ok(SlashOutcome::Done));
+        assert!(modal.is_some(), "bare /theme must populate the modal slot");
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+    }
+
+    #[test]
+    fn execute_with_known_name_forwards_swap_theme() {
+        for (name, _) in LISTED_THEMES {
+            let (_, _, outcome) = run_execute(name);
+            assert_eq!(
+                outcome,
+                Ok(SlashOutcome::Forward(UserAction::SwapTheme {
+                    name: (*name).to_owned(),
+                })),
+                "`{name}` must forward SwapTheme",
+            );
         }
     }
 
-    // ── numeric_hint ──
+    #[test]
+    fn execute_is_case_insensitive() {
+        let (_, _, outcome) = run_execute("LATTE");
+        assert_eq!(
+            outcome,
+            Ok(SlashOutcome::Forward(UserAction::SwapTheme {
+                name: "latte".to_owned(),
+            })),
+        );
+    }
 
     #[test]
-    fn numeric_hint_covers_first_nine_rows_then_returns_none() {
-        for idx in 0..9 {
-            let expected = char::from_digit(u32::try_from(idx + 1).unwrap(), 10);
-            assert_eq!(numeric_hint(idx), expected, "idx={idx}");
+    fn execute_unknown_name_errors_listing_valid_options() {
+        let (chat, _, outcome) = run_execute("solarized");
+        let msg = outcome.expect_err("unknown name must error");
+        assert!(msg.starts_with("Unknown theme: `solarized`."), "{msg}");
+        for (name, _) in LISTED_THEMES {
+            assert!(msg.contains(name), "lists `{name}`: {msg}");
         }
-        assert_eq!(numeric_hint(9), None, "10th row has no hint");
+        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 }

@@ -215,6 +215,22 @@ mod tests {
         assert_eq!(popup.selected, 0);
     }
 
+    // ── selected ──
+
+    #[test]
+    fn selected_picks_match_at_index() {
+        let mut popup = popup_with_query(Some(""));
+        popup.select_next();
+        let row = popup.selected().expect("popup visible");
+        assert_eq!(row.name, popup.matches[1].name);
+    }
+
+    #[test]
+    fn selected_is_none_when_hidden() {
+        let popup = popup_with_query(None);
+        assert!(popup.selected().is_none());
+    }
+
     // ── select_next / select_prev ──
 
     #[test]
@@ -265,10 +281,11 @@ mod tests {
         assert_eq!(usize::from(popup.height()), expected);
     }
 
-    // ── scroll_offset ──
+    // ── render ──
 
     fn long_popup(n: usize) -> SlashPopup {
-        // Hand-rolled match list keeps the test independent of registry growth.
+        // Hand-rolled match list keeps the test independent of registry growth. Used by both the
+        // scroll-into-view render snapshot and the scroll_offset arithmetic suite below.
         let mut p = SlashPopup::new(&theme());
         p.matches = (0..n)
             .map(|i| MatchedCommand {
@@ -279,115 +296,6 @@ mod tests {
             .collect();
         p
     }
-
-    #[test]
-    fn scroll_offset_anchors_at_top_while_cursor_in_first_half() {
-        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-        for _ in 0..MAX_VISIBLE_ROWS / 2 {
-            assert_eq!(p.scroll_offset(), 0);
-            p.select_next();
-        }
-    }
-
-    #[test]
-    fn scroll_offset_centers_cursor_past_first_half() {
-        // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the offset is
-        // k, keeping the cursor visually at row `pad`.
-        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
-        for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
-            p.select_next();
-        }
-        assert_eq!(p.scroll_offset(), 1, "cursor at pad + 1 → offset = 1");
-    }
-
-    #[test]
-    fn scroll_offset_anchors_at_bottom_near_end() {
-        // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the last
-        // row stays visible while the cursor advances within the bottom-anchored window.
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        while p.selected < total - 1 {
-            p.select_next();
-        }
-        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
-    }
-
-    #[test]
-    fn scroll_offset_resets_on_wrap_to_first_row() {
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        for _ in 0..total {
-            p.select_next();
-        }
-        assert_eq!(p.selected, 0, "wrap to row 0");
-        assert_eq!(p.scroll_offset(), 0, "wrap snaps the window back to top");
-    }
-
-    #[test]
-    fn scroll_offset_is_zero_when_total_fits_window() {
-        // With `MAX_VISIBLE_ROWS = 8` the live registry of 9 commands does scroll, but a
-        // 5-element fake list must never offset.
-        let mut p = long_popup(5);
-        p.select_next();
-        p.select_next();
-        assert_eq!(p.scroll_offset(), 0);
-    }
-
-    #[test]
-    fn scroll_offset_keeps_visible_row_at_pad_for_mid_list_selection() {
-        // Pin the centering invariant directly: the visible row of the cursor (selected - offset)
-        // equals `pad` whenever the selection is past the top half but not yet near the bottom.
-        // Mutating the divisor (e.g. `/3`) or the formula would shift this row index.
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        let pad = MAX_VISIBLE_ROWS / 2;
-        for _ in 0..=(pad + 1) {
-            p.select_next();
-        }
-        let visible_row = p.selected - p.scroll_offset();
-        assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
-    }
-
-    #[test]
-    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
-        // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Mutating to `<` would
-        // try to compute max_offset = 0 and still produce 0 here, but tightening the boundary
-        // pins the invariant for the only case where the edge matters.
-        let mut p = long_popup(MAX_VISIBLE_ROWS);
-        while p.selected < MAX_VISIBLE_ROWS - 1 {
-            p.select_next();
-        }
-        assert_eq!(p.scroll_offset(), 0);
-    }
-
-    #[test]
-    fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
-        // Up-arrow from row 0 wraps to the last row; the bottom-anchored window must clamp to
-        // `len - MAX_VISIBLE_ROWS` (the symmetric case to the existing wrap-to-top test).
-        let total = MAX_VISIBLE_ROWS + 4;
-        let mut p = long_popup(total);
-        p.select_prev();
-        assert_eq!(p.selected, total - 1, "wrap to last row");
-        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
-    }
-
-    // ── selected ──
-
-    #[test]
-    fn selected_picks_match_at_index() {
-        let mut popup = popup_with_query(Some(""));
-        popup.select_next();
-        let row = popup.selected().expect("popup visible");
-        assert_eq!(row.name, popup.matches[1].name);
-    }
-
-    #[test]
-    fn selected_is_none_when_hidden() {
-        let popup = popup_with_query(None);
-        assert!(popup.selected().is_none());
-    }
-
-    // ── render ──
 
     #[test]
     fn render_empty_query_shows_each_command_once() {
@@ -482,5 +390,97 @@ mod tests {
         let rendered = format!("{backend}");
         assert!(!rendered.contains("cmd0"), "cmd0 scrolled off: {rendered}");
         assert!(rendered.contains("cmd8"), "cmd8 in window: {rendered}");
+    }
+
+    // ── scroll_offset ──
+
+    #[test]
+    fn scroll_offset_is_zero_when_total_fits_window() {
+        // With `MAX_VISIBLE_ROWS = 8` the live registry of 9 commands does scroll, but a
+        // 5-element fake list must never offset.
+        let mut p = long_popup(5);
+        p.select_next();
+        p.select_next();
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
+        // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
+        // pins the invariant for the only case where the edge matters.
+        let mut p = long_popup(MAX_VISIBLE_ROWS);
+        while p.selected < MAX_VISIBLE_ROWS - 1 {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_offset_anchors_at_top_while_cursor_in_first_half() {
+        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+        for _ in 0..MAX_VISIBLE_ROWS / 2 {
+            assert_eq!(p.scroll_offset(), 0);
+            p.select_next();
+        }
+    }
+
+    #[test]
+    fn scroll_offset_centers_cursor_past_first_half() {
+        // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the offset is
+        // k, keeping the cursor visually at row `pad`.
+        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+        for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), 1, "cursor at pad + 1 → offset = 1");
+    }
+
+    #[test]
+    fn scroll_offset_keeps_visible_row_at_pad_for_mid_list_selection() {
+        // Pin the centering invariant directly: the visible row of the cursor (selected - offset)
+        // equals `pad` whenever the selection is past the top half but not yet near the bottom.
+        // Mutating the divisor (e.g. `/3`) or the formula would shift this row index.
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        let pad = MAX_VISIBLE_ROWS / 2;
+        for _ in 0..=(pad + 1) {
+            p.select_next();
+        }
+        let visible_row = p.selected - p.scroll_offset();
+        assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
+    }
+
+    #[test]
+    fn scroll_offset_anchors_at_bottom_near_end() {
+        // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the last
+        // row stays visible while the cursor advances within the bottom-anchored window.
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        while p.selected < total - 1 {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn scroll_offset_resets_on_wrap_to_first_row() {
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        for _ in 0..total {
+            p.select_next();
+        }
+        assert_eq!(p.selected, 0, "wrap to row 0");
+        assert_eq!(p.scroll_offset(), 0, "wrap snaps the window back to top");
+    }
+
+    #[test]
+    fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
+        // Up-arrow from row 0 wraps to the last row; the bottom-anchored window must clamp to
+        // `len - MAX_VISIBLE_ROWS` (the symmetric case to the wrap-to-top test above).
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        p.select_prev();
+        assert_eq!(p.selected, total - 1, "wrap to last row");
+        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
     }
 }
