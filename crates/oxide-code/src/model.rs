@@ -11,6 +11,8 @@ use crate::config::Effort;
 pub(crate) struct ModelInfo {
     /// First substring match in [`MODELS`] wins; ordering matters.
     pub(crate) id_substr: &'static str,
+    /// Unqualified fallback row that resolves dated / legacy ids; user-facing listings hide it.
+    pub(crate) is_family_base: bool,
     pub(crate) marketing: &'static str,
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
@@ -49,6 +51,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     // Inherits 4.6 as a monotonic projection; `effort_xhigh` is the 4.7-only addition.
     ModelInfo {
         id_substr: "claude-opus-4-7",
+        is_family_base: false,
         marketing: "Claude Opus 4.7",
         cutoff: Some("January 2026"),
         capabilities: Capabilities {
@@ -63,6 +66,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-opus-4-6",
+        is_family_base: false,
         marketing: "Claude Opus 4.6",
         cutoff: Some("May 2025"),
         capabilities: Capabilities {
@@ -77,6 +81,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-6",
+        is_family_base: false,
         marketing: "Claude Sonnet 4.6",
         cutoff: Some("August 2025"),
         capabilities: Capabilities {
@@ -92,6 +97,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-opus-4-5",
+        is_family_base: false,
         marketing: "Claude Opus 4.5",
         cutoff: Some("May 2025"),
         capabilities: Capabilities {
@@ -106,6 +112,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-5",
+        is_family_base: false,
         marketing: "Claude Sonnet 4.5",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
@@ -120,6 +127,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-haiku-4-5",
+        is_family_base: false,
         marketing: "Claude Haiku 4.5",
         cutoff: Some("February 2025"),
         capabilities: Capabilities {
@@ -135,6 +143,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-opus-4-1",
+        is_family_base: false,
         marketing: "Claude Opus 4.1",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
@@ -150,6 +159,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     // Unqualified base (`claude-opus-4`, `-4-0`, `-4-20250514`); structured outputs arrived in 4.1.
     ModelInfo {
         id_substr: "claude-opus-4",
+        is_family_base: true,
         marketing: "Claude Opus 4",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
@@ -165,6 +175,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     // Sonnet 4 base: all Sonnet 4.x carry 1M per upstream's `sonnet-4` substring rule.
     ModelInfo {
         id_substr: "claude-sonnet-4",
+        is_family_base: true,
         marketing: "Claude Sonnet 4",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
@@ -179,6 +190,7 @@ pub(crate) const MODELS: &[ModelInfo] = &[
     },
     ModelInfo {
         id_substr: "claude-haiku-4",
+        is_family_base: true,
         marketing: "Claude Haiku 4",
         cutoff: Some("February 2025"),
         capabilities: Capabilities {
@@ -268,6 +280,13 @@ impl ResolvedModelId {
 /// First-match substring lookup against [`MODELS`].
 pub(crate) fn lookup(model: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| model.contains(info.id_substr))
+}
+
+/// True when `id` matches a family-base row exactly. User-facing listings filter against this.
+pub(crate) fn is_family_base(id: &str) -> bool {
+    MODELS
+        .iter()
+        .any(|info| info.id_substr == id && info.is_family_base)
 }
 
 /// Capabilities for `model`, falling back to [`Capabilities::default`] for unknown ids.

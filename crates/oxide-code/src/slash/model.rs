@@ -4,7 +4,7 @@
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ResolvedModelId, lookup};
+use crate::model::{MODELS, ResolvedModelId, is_family_base, lookup};
 
 // ── Constants ──
 
@@ -95,13 +95,18 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
         return Ok((*id).to_owned());
     }
-    let matches = candidates(|id| id.contains(arg));
-    match matches.as_slice() {
+    // Family bases are listed only for `lookup` (marketing names of dated ids); listing them
+    // here would invite users to type a deprecated row.
+    let visible: Vec<&'static str> = candidates(|id| id.contains(arg))
+        .into_iter()
+        .filter(|id| !is_family_base(id))
+        .collect();
+    match visible.as_slice() {
         [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
             "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
-            n = matches.len(),
-            list = matches.join(", "),
+            n = visible.len(),
+            list = visible.join(", "),
         )),
         [] => Err(format!(
             "Unknown model: `{arg}`. Run `/model` for selectable shortcuts; \
@@ -296,6 +301,31 @@ mod tests {
             assert!(msg.contains(needle), "candidate `{needle}` listed: {msg}");
         }
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
+    }
+
+    #[test]
+    fn execute_ambiguous_listing_omits_family_base_rows() {
+        // `claude-opus` substring-matches every Opus row, including the deprecated
+        // `claude-opus-4` base. Listing the base would invite a user to type a superseded id.
+        let (_, outcome) = run_execute("claude-opus");
+        let msg = outcome.expect_err("ambiguous arg must error");
+        for current in ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-1"] {
+            assert!(
+                msg.contains(current),
+                "current row `{current}` listed: {msg}"
+            );
+        }
+        // Bound the search to comma-delimited tokens so `claude-opus-4` doesn't false-match
+        // on the longer `claude-opus-4-7`.
+        let listed: Vec<&str> = msg
+            .split([':', ','])
+            .map(str::trim)
+            .filter(|s| s.starts_with("claude-"))
+            .collect();
+        assert!(
+            !listed.contains(&"claude-opus-4"),
+            "family base must not appear in listing: {listed:?}",
+        );
     }
 
     #[test]
