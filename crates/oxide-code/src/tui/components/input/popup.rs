@@ -28,9 +28,9 @@ const COLUMN_GAP: usize = 2;
 
 /// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PopupMode {
+pub(super) enum PopupMode {
     Name,
-    /// Owned because the cmd name is parsed out of the live input buffer, not a `'static` slice.
+    /// Owned because the cmd name comes from the live input buffer.
     Arg {
         cmd: String,
     },
@@ -39,11 +39,11 @@ pub(crate) enum PopupMode {
 /// One popup row. `value` is the bare token (command name or arg value); the renderer adds
 /// `/` and any matched-alias suffix in name mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PopupRow {
-    pub(crate) value: Cow<'static, str>,
-    pub(crate) description: Cow<'static, str>,
+pub(super) struct PopupRow {
+    pub(super) value: Cow<'static, str>,
+    pub(super) description: Cow<'static, str>,
     /// Set in name mode when the typed query matched an alias rather than the canonical name.
-    pub(crate) matched_alias: Option<&'static str>,
+    pub(super) matched_alias: Option<&'static str>,
 }
 
 /// Slash-command autocomplete overlay. Empty `rows` means hidden.
@@ -163,15 +163,17 @@ impl SlashPopup {
         let offset = self.scroll_offset();
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let window = &self.rows[offset..offset + visible];
-        let label_width = window
-            .iter()
-            .map(|r| self.label(r).width())
-            .max()
-            .unwrap_or(0);
+        // Compute labels once and reuse for both width measurement and row rendering — the two
+        // must agree exactly, and computing the same `String` twice per row invites drift.
+        let labels: Vec<String> = window.iter().map(|r| self.label(r)).collect();
+        let label_width = labels.iter().map(|l| l.width()).max().unwrap_or(0);
         let lines: Vec<Line<'static>> = window
             .iter()
+            .zip(labels)
             .enumerate()
-            .map(|(i, r)| self.render_row(r, offset + i == self.selected, label_width, width))
+            .map(|(i, (r, label))| {
+                self.render_row(r, label, offset + i == self.selected, label_width, width)
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), area);
     }
@@ -188,8 +190,9 @@ impl SlashPopup {
         self.selected.saturating_sub(pad).min(max_offset)
     }
 
-    /// Mode-aware left-column label. Used for both rendering and column-width computation, so
-    /// the two must agree exactly.
+    /// Mode-aware left-column label. The `None` arm is unreachable in practice — `render` only
+    /// calls this when `rows` is non-empty, which means `mode` is `Some` — but keep a graceful
+    /// fallback so a future caller doesn't surprise-panic.
     fn label(&self, row: &PopupRow) -> String {
         match &self.mode {
             Some(PopupMode::Name) => match row.matched_alias {
@@ -203,11 +206,11 @@ impl SlashPopup {
     fn render_row(
         &self,
         row: &PopupRow,
+        label_text: String,
         selected: bool,
         label_width: usize,
         width: usize,
     ) -> Line<'static> {
-        let label_text = self.label(row);
         let pad = label_width.saturating_sub(label_text.width());
         let row_style = row_style(&self.theme, selected);
         let desc_budget = width.saturating_sub(label_width + COLUMN_GAP);
