@@ -312,9 +312,8 @@ impl InputArea {
             return;
         };
         self.set_text(&replacement);
-        // Reclassify against the new buffer: name-mode Tab on a command with a curated arg
-        // roster (`/model`, `/effort`, `/theme`) transitions straight into arg mode; arg-mode
-        // Tab leaves a trailing `/cmd value ` that no roster matches, so the popup hides.
+        // Reclassify against the new buffer: name-mode Tab on a curated-roster command chains
+        // into arg mode; arg-mode Tab leaves `/cmd value ` (no match), so the popup hides.
         self.refresh_popup();
     }
 
@@ -1041,9 +1040,8 @@ mod tests {
 
     #[test]
     fn handle_event_popup_tab_in_arg_mode_inserts_cmd_value_and_space() {
-        // Type `/effort ` to enter arg mode against the curated effort roster (first row: low).
-        // Tab must keep the `/effort` prefix and substitute the picked value plus trailing
-        // space — `/{cmd} {value} `, not `/{value} ` (which would drop the cmd context).
+        // Tab keeps the `/effort` prefix and substitutes the picked value plus a trailing space
+        // — `/{cmd} {value} `, not `/{value} ` (which would drop cmd context).
         let mut input = test_input();
         type_text(&mut input, "/effort ");
         input.refresh_popup();

@@ -106,9 +106,8 @@ impl SlashPopup {
                 }
             }
         };
-        // Mode transitions reset selection to row 0 — keeping `selected` from a different
-        // roster surfaces an arbitrary row instead of the canonical first pick. Intra-mode
-        // changes (query / prefix typing) clamp instead so the cursor sticks where it is.
+        // Mode transitions reset to row 0 (rosters are unrelated). Intra-mode query / prefix
+        // changes clamp instead so the cursor sticks.
         let mode_changed = self.mode != mode;
         self.mode = mode;
         self.rows = rows;
@@ -163,8 +162,7 @@ impl SlashPopup {
         let offset = self.scroll_offset();
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let window = &self.rows[offset..offset + visible];
-        // Compute labels once and reuse for both width measurement and row rendering — the two
-        // must agree exactly, and computing the same `String` twice per row invites drift.
+        // Cache labels so width measurement and row rendering can't drift.
         let labels: Vec<String> = window.iter().map(|r| self.label(r)).collect();
         let label_width = labels.iter().map(|l| l.width()).max().unwrap_or(0);
         let lines: Vec<Line<'static>> = window
@@ -190,9 +188,8 @@ impl SlashPopup {
         self.selected.saturating_sub(pad).min(max_offset)
     }
 
-    /// Mode-aware left-column label. The `None` arm is unreachable in practice — `render` only
-    /// calls this when `rows` is non-empty, which means `mode` is `Some` — but keep a graceful
-    /// fallback so a future caller doesn't surprise-panic.
+    /// Mode-aware left-column label. `None` arm is a defensive fallback — `render` gates on
+    /// non-empty `rows`, which keeps `mode` `Some`.
     fn label(&self, row: &PopupRow) -> String {
         match &self.mode {
             Some(PopupMode::Name) => match row.matched_alias {
