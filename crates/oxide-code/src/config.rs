@@ -92,13 +92,25 @@ impl Effort {
     pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
     pub(crate) const VALID_VALUES: &str = "low, medium, high, xhigh, max";
 
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
             Self::Max => "max",
+        }
+    }
+
+    /// One-line UX hint for the typed-arg popup. Behavior-focused so it stays consistent across
+    /// the ladder; per-tier model-availability checks live in the executor.
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::Low => "Fastest, shallow reasoning",
+            Self::Medium => "Balanced",
+            Self::High => "Deep reasoning",
+            Self::Xhigh => "Extended thinking",
+            Self::Max => "Maximum thinking",
         }
     }
 }

@@ -11,16 +11,6 @@ use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
 
-/// Curated autocomplete roster (intensity ladder; matches `Effort::ALL`). Descriptions kept
-/// short so the popup doesn't dominate the screen.
-const ARG_ROSTER: &[(&str, &str)] = &[
-    ("low", "Fastest, shallow reasoning"),
-    ("medium", "Balanced"),
-    ("high", "Deep reasoning"),
-    ("xhigh", "Opus 4.7 ladder ceiling"),
-    ("max", "Opus-only maximum"),
-];
-
 pub(super) struct EffortCmd;
 
 impl SlashCommand for EffortCmd {
@@ -45,11 +35,11 @@ impl SlashCommand for EffortCmd {
     }
 
     fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
-        rank_by_prefix(ARG_ROSTER, prefix, |(value, _)| *value)
+        rank_by_prefix(&Effort::ALL, prefix, |level| level.as_str())
             .into_iter()
-            .map(|(value, description)| ArgCompletion {
-                value: Cow::Borrowed(value),
-                description: Cow::Borrowed(description),
+            .map(|level| ArgCompletion {
+                value: Cow::Borrowed(level.as_str()),
+                description: Cow::Borrowed(level.description()),
             })
             .collect()
     }
