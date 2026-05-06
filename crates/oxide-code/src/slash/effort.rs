@@ -1,5 +1,5 @@
 //! `/effort` — open the slider, or swap with `/effort <level>`. Bare form opens the
-//! Speed↔Intelligence slider (see [`super::effort_slider`]); typed arg shortcuts the picker.
+//! Speed ↔ Intelligence slider (see [`super::effort_slider`]); typed arg shortcuts the picker.
 
 use super::context::SlashContext;
 use super::effort_slider::EffortSlider;

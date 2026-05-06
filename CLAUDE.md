@@ -74,7 +74,7 @@ ox                                          # Start an interactive session
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort — bare opens the slider; `/effort <level>` resolves the typed-arg shortcut
-│   ├── effort_slider.rs                    # EffortSlider — Speed↔Intelligence horizontal slider, opened by bare /effort
+│   ├── effort_slider.rs                    # EffortSlider — Speed ↔ Intelligence horizontal slider, opened by bare /effort
 │   ├── format.rs                           # Shared kv-section / kv-table renderer
 │   ├── help.rs                             # /help — registry-driven command listing
 │   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
