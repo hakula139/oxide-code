@@ -373,7 +373,12 @@ async fn agent_loop_task(
                     }
                 }
             }
-            UserAction::Cancel | UserAction::ConfirmExit => {}
+            // Cancel / ConfirmExit are no-ops here; PreviewTheme / SwapTheme are TUI-only and
+            // applied client-side in `App::apply_action_locally`.
+            UserAction::Cancel
+            | UserAction::ConfirmExit
+            | UserAction::PreviewTheme { .. }
+            | UserAction::SwapTheme { .. } => {}
             UserAction::Clear => {
                 let outcome =
                     roll_session(&mut session, &store, &file_tracker, client.model()).await;

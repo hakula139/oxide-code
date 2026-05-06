@@ -14,6 +14,7 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 | `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
 | `/model [<id>]`                     | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
 | `/status`                           | Show model, effort, working directory, version, auth, session id.                    |
+| `/theme [<name>]`                   | Open the theme picker (live preview), or swap directly to a built-in theme.          |
 
 ## Autocomplete Popup
 
@@ -32,7 +33,7 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/config`, `/diff`, `/help`, `/status`, bare `/model` and bare `/effort` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`) refuse mid-turn — wait for the current response to complete, then retry.
+Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/model` / `/effort` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`, `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
 
 ## Model and Effort
 
@@ -40,6 +41,12 @@ Bare `/model` opens the combined model + effort picker; bare `/effort` opens a S
 
 `/model <id>` resolves in four tiers: alias (`opus`, `sonnet`, `haiku`, with optional `[1m]` for the 1M-context variants) → exact / dated id → unique suffix → unique substring. Swapping clamps the current effort to the new model's caps; `/effort` on a model without effort (Haiku 4.5) errors with a recovery hint. See [Configuration](configuration.md) for the full tier reference and per-model defaults.
 
+## Switching the Theme
+
+`/theme` (no argument) opens a list picker for the built-in themes — Up / Down repaints the full TUI in the candidate theme so you can compare without committing, number keys (`1`–`9`) jump to a row, Enter applies for the rest of the session, Esc snaps back to the original. Restart returns to the theme set in your `ox.toml`.
+
+`/theme <name>` swaps directly to a built-in (`mocha`, `macchiato`, `frappe`, `latte`, `material`). Custom file-path themes aren't accepted via the slash form — edit `~/.config/ox/config.toml` to point `[tui.theme] base` at a custom TOML.
+
 ## Stance: No Silent Config Writes
 
-Slash commands never write user config files. Runtime mutations (`/model`, `/effort` today, `/theme` later) stay session-local; restart returns to the user-declared configuration. Persisting a slash-command choice across restarts will require an explicit subcommand writing to an explicit user-opted-in path — never a silent merge.
+Slash commands never write user config files. Runtime mutations (`/model`, `/effort`, `/theme`) stay session-local; restart returns to the user-declared configuration. Persisting a slash-command choice across restarts will require an explicit subcommand writing to an explicit user-opted-in path — never a silent merge.

@@ -56,6 +56,16 @@ impl ChatView {
         }
     }
 
+    /// Re-skin every subsequent render. Mid-session theme swap (`/theme`) calls this to repaint
+    /// the existing block stack; the streaming-prefix cache also drops so in-flight tokens
+    /// re-render under the new palette.
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+        if let Some(s) = &mut self.streaming {
+            s.invalidate_cache();
+        }
+    }
+
     /// Populates from resumed transcript, projecting the same block shapes as live rendering.
     pub(crate) fn load_history(
         &mut self,
@@ -539,6 +549,40 @@ mod tests {
             })
             .unwrap();
         terminal.backend().clone()
+    }
+
+    // ── set_theme ──
+
+    #[test]
+    fn set_theme_invalidates_streaming_cache_so_in_flight_tokens_repaint() {
+        // Bare `/theme` opens its picker mid-stream; without dropping the cache, committed
+        // prefix tokens would keep painting under the previous palette until commit_streaming.
+        let mut chat = test_chat();
+        _ = chat.update_layout(Rect::new(0, 0, 80, 24));
+        chat.append_stream_token("a complete paragraph\n\n");
+        let s = chat.streaming.as_ref().unwrap();
+        assert_ne!(s.rendered_len(), 0, "cache populated");
+        assert_eq!(s.cached_width(), 80);
+
+        chat.set_theme(&Theme::default());
+
+        let s = chat.streaming.as_ref().unwrap();
+        assert_eq!(s.rendered_len(), 0, "cache dropped on theme swap");
+        assert_eq!(s.rendered_boundary(), 0);
+        assert_eq!(s.cached_width(), 0);
+    }
+
+    #[test]
+    fn set_theme_without_active_streaming_is_a_noop_on_cache_state() {
+        // The `if let Some(streaming)` guard skips the cache reset when no stream is in flight;
+        // pin both branches so the guard isn't accidentally inverted in a future refactor.
+        let mut chat = test_chat();
+        assert!(chat.streaming.is_none());
+        chat.set_theme(&Theme::default());
+        assert!(
+            chat.streaming.is_none(),
+            "set_theme must not spawn a stream"
+        );
     }
 
     // ── load_history ──

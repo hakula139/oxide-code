@@ -35,18 +35,21 @@ impl StreamingAssistant {
     }
 
     pub(crate) fn take_buffer(&mut self) -> String {
-        self.rendered.clear();
-        self.rendered_boundary = 0;
-        self.cached_width = 0;
+        self.invalidate_cache();
         std::mem::take(&mut self.buffer)
     }
 
     pub(crate) fn invalidate_cache_for_width(&mut self, width: u16) {
         if self.cached_width != 0 && self.cached_width != width {
-            self.rendered.clear();
-            self.rendered_boundary = 0;
-            self.cached_width = 0;
+            self.invalidate_cache();
         }
+    }
+
+    /// Drop the prefix cache so the next render re-parses the buffer with current styles.
+    pub(crate) fn invalidate_cache(&mut self) {
+        self.rendered.clear();
+        self.rendered_boundary = 0;
+        self.cached_width = 0;
     }
 
     /// Caches rendered lines up to the last `\n\n` boundary.

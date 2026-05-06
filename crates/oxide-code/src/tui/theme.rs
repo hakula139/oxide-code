@@ -11,6 +11,13 @@ mod loader;
 
 pub(crate) use loader::{SlotPatch, resolve_theme};
 
+/// Resolve a built-in theme name (mocha / latte / ...) to a parsed [`Theme`]. `None` for unknown
+/// names. Vendored TOML must parse: a parse failure is a build-time bug surfaced at startup.
+pub(crate) fn load_builtin(name: &str) -> Option<Theme> {
+    let body = builtin::lookup(name)?;
+    Some(loader::parse_theme(body).expect("vendored builtin theme TOML must parse"))
+}
+
 /// One theme slot — optional fg, bg, and modifiers composed into a [`Style`].
 ///
 /// Each component is independently optional so an override can patch one axis (e.g., bg only)

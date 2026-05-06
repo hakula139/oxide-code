@@ -7,10 +7,7 @@ muted = "#9ca0b0"
 dim = "#acb0be"
 
 # Surfaces
-# Latte ships an opaque base bg (Catppuccin Latte `base`) so dark text
-# is readable on terminals whose own bg is dark. Override to "reset"
-# on transparent / light terminals to let the terminal bg show through.
-surface = { bg = "#eff1f5" }
+surface = { bg = "reset" }
 
 # Semantic accents
 accent = { fg = "#1e66f5", bold = true }

@@ -41,6 +41,9 @@ pub(crate) enum ModalKey {
     Consumed,
     Cancelled,
     Submitted(ModalAction),
+    /// Emit `action` without popping — for live-preview modals where cursor moves should mutate
+    /// app state without committing.
+    Preview(ModalAction),
 }
 
 #[derive(Debug)]
@@ -138,6 +141,7 @@ impl ModalStack {
                 self.stack.pop();
                 Some(action)
             }
+            ModalKey::Preview(action) => Some(action),
         }
     }
 }
@@ -160,7 +164,9 @@ pub(crate) mod testing {
     pub(crate) struct ScriptedModal {
         pub(crate) on_submit_key: char,
         pub(crate) on_cancel_key: char,
+        pub(crate) on_preview_key: char,
         pub(crate) submit_action: ModalAction,
+        pub(crate) preview_action: ModalAction,
         pub(crate) declared_height: u16,
     }
 
@@ -169,7 +175,9 @@ pub(crate) mod testing {
             Self {
                 on_submit_key: 's',
                 on_cancel_key: 'c',
+                on_preview_key: 'p',
                 submit_action,
+                preview_action: ModalAction::None,
                 declared_height: 3,
             }
         }
@@ -191,6 +199,11 @@ pub(crate) mod testing {
                     ModalKey::Submitted(taken)
                 }
                 KeyCode::Char(c) if c == self.on_cancel_key => ModalKey::Cancelled,
+                KeyCode::Char(c) if c == self.on_preview_key => {
+                    let mut taken = ModalAction::None;
+                    std::mem::swap(&mut self.preview_action, &mut taken);
+                    ModalKey::Preview(taken)
+                }
                 _ => ModalKey::Consumed,
             }
         }
@@ -332,6 +345,23 @@ mod tests {
             "submit must surface the modal's UserAction unchanged",
         );
         assert!(!stack.is_active());
+    }
+
+    #[test]
+    fn handle_key_preview_yields_action_without_popping_stack() {
+        // Live-preview modals (theme picker) emit a `User` action on cursor moves so the App can
+        // repaint, but the modal must stay on screen until Enter or Esc.
+        let mut stack = ModalStack::new();
+        let mut modal = ScriptedModal::new(ModalAction::None);
+        modal.preview_action = ModalAction::User(UserAction::Cancel);
+        stack.push(Box::new(modal));
+
+        let outcome = stack.handle_key(&key('p'));
+        assert!(
+            matches!(outcome, Some(ModalAction::User(UserAction::Cancel))),
+            "preview must surface the modal's UserAction unchanged",
+        );
+        assert!(stack.is_active(), "preview must NOT pop the stack");
     }
 
     #[test]

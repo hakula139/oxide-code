@@ -77,6 +77,15 @@ pub(crate) enum UserAction {
         model: Option<ResolvedModelId>,
         effort: Option<Effort>,
     },
+    /// TUI-only: live-preview the picker's highlighted theme without committing it. Cursor moves
+    /// in the `/theme` modal emit this; cancelling the modal restores the snapshot taken on open.
+    PreviewTheme {
+        name: String,
+    },
+    /// TUI-only: commit a theme swap for the rest of the session. Restart returns to user config.
+    SwapTheme {
+        name: String,
+    },
     Cancel,
     /// TUI-only; agent loop ignores this.
     ConfirmExit,

@@ -84,7 +84,8 @@ ox                                          # Start an interactive session
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + BUILT_INS slice + alias-aware lookup
 │   ├── status.rs                           # /status — opens StatusModal
-│   └── status_modal.rs                     # StatusModal — read-only kv-overview of the live session (Esc / Enter close)
+│   ├── status_modal.rs                     # StatusModal — read-only kv-overview of the live session (Esc / Enter close)
+│   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
 │   ├── bash.rs                             # Shell command execution with timeout

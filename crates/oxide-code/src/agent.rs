@@ -264,7 +264,9 @@ where
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
-                    | UserAction::SwapConfig { .. }),
+                    | UserAction::SwapConfig { .. }
+                    | UserAction::PreviewTheme { .. }
+                    | UserAction::SwapTheme { .. }),
                 ) => warn!("dropped mid-turn action: {action:?}"),
             },
             output = &mut fut => return Ok(output),

@@ -23,6 +23,7 @@ mod picker;
 mod registry;
 mod status;
 mod status_modal;
+mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
@@ -111,6 +112,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             max_tokens: 32_000,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
             show_thinking: false,
+            theme_name: "mocha".to_owned(),
         },
     }
 }

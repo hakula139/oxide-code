@@ -1,6 +1,8 @@
 //! Slash-command autocomplete popup. Selected row paints in `text`, others dim — contrast
 //! stands in for a prefix glyph or fill. Aliases parenthesize only the typed alias
-//! (`/clear (new)`); never the full list.
+//! (`/clear (new)`); the full list stays unparenthesized.
+//!
+//! Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code typeahead style).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -31,6 +33,10 @@ impl SlashPopup {
             matches: Vec::new(),
             selected: 0,
         }
+    }
+
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
     }
 
     pub(crate) fn set_query(&mut self, query: Option<&str>) {
@@ -69,15 +75,10 @@ impl SlashPopup {
         };
     }
 
-    /// Number of rows the popup needs in the surrounding layout. Zero
-    /// when hidden so the input keeps full height.
+    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`].
     pub(crate) fn height(&self) -> u16 {
-        if self.matches.is_empty() {
-            return 0;
-        }
         let visible = self.matches.len().min(MAX_VISIBLE_ROWS);
-        let footer = usize::from(self.matches.len() > MAX_VISIBLE_ROWS);
-        u16::try_from(visible + footer).unwrap_or(u16::MAX)
+        u16::try_from(visible).unwrap_or(u16::MAX)
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
@@ -85,22 +86,28 @@ impl SlashPopup {
             return;
         }
         let width = usize::from(area.width);
-        let label_width = self
-            .matches
+        let offset = self.scroll_offset();
+        let visible = self.matches.len().min(MAX_VISIBLE_ROWS);
+        let window = &self.matches[offset..offset + visible];
+        let label_width = window.iter().map(|m| label(m).width()).max().unwrap_or(0);
+        let lines: Vec<Line<'static>> = window
             .iter()
-            .take(MAX_VISIBLE_ROWS)
-            .map(|m| label(m).width())
-            .max()
-            .unwrap_or(0);
-        let lines: Vec<Line<'static>> = self
-            .matches
-            .iter()
-            .take(MAX_VISIBLE_ROWS)
             .enumerate()
-            .map(|(i, m)| self.render_row(m, i == self.selected, label_width, width))
-            .chain(self.render_footer(width))
+            .map(|(i, m)| self.render_row(m, offset + i == self.selected, label_width, width))
             .collect();
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), area);
+    }
+
+    /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
+    /// middle once it leaves the top half, then anchors at the bottom near the end of the list.
+    fn scroll_offset(&self) -> usize {
+        let total = self.matches.len();
+        if total <= MAX_VISIBLE_ROWS {
+            return 0;
+        }
+        let pad = MAX_VISIBLE_ROWS / 2;
+        let max_offset = total - MAX_VISIBLE_ROWS;
+        self.selected.saturating_sub(pad).min(max_offset)
     }
 
     fn render_row(
@@ -124,19 +131,6 @@ impl SlashPopup {
         spans.push(Span::raw(gap));
         spans.push(Span::styled(desc, row_style));
         Line::from(spans)
-    }
-
-    /// `... (N more)` overflow footer; iterator form keeps the caller branch-free.
-    fn render_footer(&self, width: usize) -> impl Iterator<Item = Line<'static>> {
-        let hidden = self.matches.len().saturating_sub(MAX_VISIBLE_ROWS);
-        let style = self.theme.dim();
-        (hidden > 0)
-            .then(move || {
-                let raw = format!("  ... ({hidden} more)");
-                let text = truncate_to_width(&raw, width);
-                Line::from(Span::styled(text, style))
-            })
-            .into_iter()
     }
 }
 
@@ -221,6 +215,22 @@ mod tests {
         assert_eq!(popup.selected, 0);
     }
 
+    // ── selected ──
+
+    #[test]
+    fn selected_picks_match_at_index() {
+        let mut popup = popup_with_query(Some(""));
+        popup.select_next();
+        let row = popup.selected().expect("popup visible");
+        assert_eq!(row.name, popup.matches[1].name);
+    }
+
+    #[test]
+    fn selected_is_none_when_hidden() {
+        let popup = popup_with_query(None);
+        assert!(popup.selected().is_none());
+    }
+
     // ── select_next / select_prev ──
 
     #[test]
@@ -265,30 +275,26 @@ mod tests {
     // ── height ──
 
     #[test]
-    fn height_matches_match_count_below_cap() {
-        // BUILT_INS sits below `MAX_VISIBLE_ROWS`, so empty query
-        // renders every command and the popup occupies that many rows.
+    fn height_caps_at_max_visible_rows() {
         let popup = popup_with_query(Some(""));
-        assert_eq!(usize::from(popup.height()), popup.matches.len());
-    }
-
-    // ── selected ──
-
-    #[test]
-    fn selected_picks_match_at_index() {
-        let mut popup = popup_with_query(Some(""));
-        popup.select_next();
-        let row = popup.selected().expect("popup visible");
-        assert_eq!(row.name, popup.matches[1].name);
-    }
-
-    #[test]
-    fn selected_is_none_when_hidden() {
-        let popup = popup_with_query(None);
-        assert!(popup.selected().is_none());
+        let expected = popup.matches.len().min(MAX_VISIBLE_ROWS);
+        assert_eq!(usize::from(popup.height()), expected);
     }
 
     // ── render ──
+
+    fn long_popup(n: usize) -> SlashPopup {
+        // Hand-rolled list keeps the test independent of registry growth.
+        let mut p = SlashPopup::new(&theme());
+        p.matches = (0..n)
+            .map(|i| MatchedCommand {
+                name: Box::leak(format!("cmd{i}").into_boxed_str()),
+                description: "desc",
+                matched_alias: None,
+            })
+            .collect();
+        p
+    }
 
     #[test]
     fn render_empty_query_shows_each_command_once() {
@@ -372,22 +378,107 @@ mod tests {
     }
 
     #[test]
-    fn render_overflow_emits_n_more_footer_when_matches_exceed_cap() {
-        // Cap is 8; a hand-rolled list of 10 commands triggers the
-        // "... (N more)" footer. Live registry is too small to drive this branch.
-        let mut popup = SlashPopup::new(&theme());
-        popup.matches = (0..10)
-            .map(|i| MatchedCommand {
-                name: Box::leak(format!("cmd{i}").into_boxed_str()),
-                description: "fake",
-                matched_alias: None,
-            })
-            .collect();
+    fn render_after_scroll_shows_window_starting_at_offset() {
+        // 12 fake rows; advance to row 8 to push the window past the top so `cmd0` is hidden and
+        // `cmd8` is visible — confirms the slice and the offset agree.
+        let mut popup = long_popup(12);
+        for _ in 0..8 {
+            popup.select_next();
+        }
         let backend = render_to_backend(&popup, 30);
         let rendered = format!("{backend}");
-        assert!(
-            rendered.contains("(2 more)"),
-            "footer must surface the hidden count: {rendered}",
-        );
+        assert!(!rendered.contains("cmd0"), "cmd0 scrolled off: {rendered}");
+        assert!(rendered.contains("cmd8"), "cmd8 in window: {rendered}");
+    }
+
+    // ── scroll_offset ──
+
+    #[test]
+    fn scroll_offset_is_zero_when_total_fits_window() {
+        // total < cap → no scroll regardless of cursor.
+        let mut p = long_popup(5);
+        p.select_next();
+        p.select_next();
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
+        // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
+        // pins the invariant for the only case where the edge matters.
+        let mut p = long_popup(MAX_VISIBLE_ROWS);
+        while p.selected < MAX_VISIBLE_ROWS - 1 {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_offset_anchors_at_top_while_cursor_in_first_half() {
+        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+        for _ in 0..MAX_VISIBLE_ROWS / 2 {
+            assert_eq!(p.scroll_offset(), 0);
+            p.select_next();
+        }
+    }
+
+    #[test]
+    fn scroll_offset_centers_cursor_past_first_half() {
+        // pad = MAX_VISIBLE_ROWS / 2 = 4 for the default cap. At selected = pad + k the offset is
+        // k, keeping the cursor visually at row `pad`.
+        let mut p = long_popup(MAX_VISIBLE_ROWS + 4);
+        for _ in 0..=(MAX_VISIBLE_ROWS / 2) {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), 1, "cursor at pad + 1 → offset = 1");
+    }
+
+    #[test]
+    fn scroll_offset_keeps_visible_row_at_pad_for_mid_list_selection() {
+        // Pin the centering invariant directly: the visible row of the cursor (selected - offset)
+        // equals `pad` whenever the selection is past the top half but not yet near the bottom.
+        // Mutating the divisor (e.g. `/3`) or the formula would shift this row index.
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        let pad = MAX_VISIBLE_ROWS / 2;
+        for _ in 0..=(pad + 1) {
+            p.select_next();
+        }
+        let visible_row = p.selected - p.scroll_offset();
+        assert_eq!(visible_row, pad, "cursor must sit at the visual middle row");
+    }
+
+    #[test]
+    fn scroll_offset_anchors_at_bottom_near_end() {
+        // Once selected nears the end, the offset clamps to `len - MAX_VISIBLE_ROWS` so the last
+        // row stays visible while the cursor advances within the bottom-anchored window.
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        while p.selected < total - 1 {
+            p.select_next();
+        }
+        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
+    }
+
+    #[test]
+    fn scroll_offset_resets_on_wrap_to_first_row() {
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        for _ in 0..total {
+            p.select_next();
+        }
+        assert_eq!(p.selected, 0, "wrap to row 0");
+        assert_eq!(p.scroll_offset(), 0, "wrap snaps the window back to top");
+    }
+
+    #[test]
+    fn scroll_offset_select_prev_from_top_anchors_at_bottom_window() {
+        // Up-arrow from row 0 wraps to the last row; the bottom-anchored window must clamp to
+        // `len - MAX_VISIBLE_ROWS` (the symmetric case to the wrap-to-top test above).
+        let total = MAX_VISIBLE_ROWS + 4;
+        let mut p = long_popup(total);
+        p.select_prev();
+        assert_eq!(p.selected, total - 1, "wrap to last row");
+        assert_eq!(p.scroll_offset(), total - MAX_VISIBLE_ROWS);
     }
 }

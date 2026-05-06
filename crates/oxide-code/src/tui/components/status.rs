@@ -60,6 +60,11 @@ impl StatusBar {
         self.model = model;
     }
 
+    /// Re-skin subsequent renders; the spinner / status state is unaffected.
+    pub(crate) fn set_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+    }
+
     pub(crate) fn set_status(&mut self, status: Status) {
         if status != self.status {
             self.spinner_frame = 0;

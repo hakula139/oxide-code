@@ -2,7 +2,7 @@
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
 //! loop multiplexing crossterm events, agent events, user actions, and a 60 FPS render tick.
-//! A dirty flag coalesces redraws so render work tracks state change, not event throughput.
+//! A dirty flag coalesces redraws so renders fire per state change rather than per event.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -52,6 +52,9 @@ pub(crate) struct App {
     /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     modals: ModalStack,
+    /// Saved theme captured when a `/theme` picker opens; restored if the modal cancels so
+    /// live-preview moves don't leak into the rest of the session.
+    preview_theme_snapshot: Option<Theme>,
     should_quit: bool,
     dirty: bool,
 }
@@ -92,6 +95,7 @@ impl App {
             pending_calls: PendingCalls::new(),
             pending_prompts: VecDeque::new(),
             modals: ModalStack::new(),
+            preview_theme_snapshot: None,
             should_quit: false,
             dirty: true,
         }
@@ -202,9 +206,23 @@ impl App {
 
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            ModalAction::None => {}
+            // Cancel: revert any in-flight theme preview to the snapshot taken on open.
+            ModalAction::None => {
+                if let Some(theme) = self.preview_theme_snapshot.take() {
+                    self.apply_theme(&theme);
+                }
+            }
             ModalAction::User(user_action) => self.dispatch_user_action(user_action),
         }
+    }
+
+    /// Repaints every theme-styled component for a mid-session theme swap.
+    fn apply_theme(&mut self, theme: &Theme) {
+        self.theme = theme.clone();
+        self.chat.set_theme(theme);
+        self.status_bar.set_theme(theme);
+        self.input.set_theme(theme);
+        self.dirty = true;
     }
 
     #[cfg(test)]
@@ -258,63 +276,7 @@ impl App {
     /// Applies UI-state changes; returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
-            UserAction::SubmitPrompt(text) => {
-                if self.input.is_enabled() {
-                    if let Some(parsed) = slash::parse_slash(text) {
-                        self.chat.push_user_message(text.clone());
-                        let (synthesized, modal) = {
-                            let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                            let action = slash::dispatch(&parsed, &mut ctx);
-                            (action, ctx.take_modal())
-                        };
-                        if let Some(modal) = modal {
-                            self.modals.push(modal);
-                        }
-                        if let Some(action) = synthesized {
-                            if matches!(action, UserAction::SubmitPrompt(_)) {
-                                self.input.set_enabled(false);
-                                self.status_bar.set_status(Status::Streaming);
-                            }
-                            self.forward_to_agent(action);
-                        }
-                        return false;
-                    }
-                    self.chat.push_user_message(text.clone());
-                    self.input.set_enabled(false);
-                    self.status_bar.set_status(Status::Streaming);
-                    true
-                } else {
-                    if let Some(parsed) = slash::parse_slash(text) {
-                        self.chat.push_user_message(text.clone());
-                        match slash::classify(&parsed) {
-                            SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let modal = {
-                                    let mut ctx =
-                                        SlashContext::new(&mut self.chat, &self.session_info);
-                                    _ = slash::dispatch(&parsed, &mut ctx);
-                                    ctx.take_modal()
-                                };
-                                if let Some(modal) = modal {
-                                    self.modals.push(modal);
-                                }
-                            }
-                            SlashKind::Mutating => {
-                                self.chat.push_system_message(format!(
-                                    "/{} runs only when idle. Try again after the turn finishes.",
-                                    parsed.name,
-                                ));
-                            }
-                        }
-                        return false;
-                    }
-                    self.pending_prompts.push_back(text.clone());
-                    self.sync_input_queue_hint();
-                    // Forward the queued prompt to the agent so it can drain at turn end —
-                    // unless we're already cancelling, in which case the agent will reset and
-                    // the queue drains locally on the next idle transition.
-                    !matches!(self.status_bar.status(), Status::Cancelling)
-                }
-            }
+            UserAction::SubmitPrompt(text) => self.handle_submit_prompt(text),
             UserAction::Cancel => {
                 self.status_bar.set_status(Status::Cancelling);
                 true
@@ -335,7 +297,91 @@ impl App {
                 true
             }
             UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::PreviewTheme { name } => {
+                if let Some(preview) = super::theme::load_builtin(name) {
+                    if self.preview_theme_snapshot.is_none() {
+                        self.preview_theme_snapshot = Some(self.theme.clone());
+                    }
+                    self.apply_theme(&preview);
+                } else {
+                    tracing::warn!(name, "PreviewTheme: unknown built-in; picker roster drift");
+                }
+                false
+            }
+            UserAction::SwapTheme { name } => {
+                self.preview_theme_snapshot = None;
+                if let Some(theme) = super::theme::load_builtin(name) {
+                    self.session_info.config.theme_name.clone_from(name);
+                    self.apply_theme(&theme);
+                    self.chat
+                        .push_system_message(format!("Theme set to {name}."));
+                } else {
+                    tracing::warn!(name, "SwapTheme: unknown built-in; picker roster drift");
+                }
+                false
+            }
         }
+    }
+
+    /// Returns whether the submitted text should also forward to the agent. Slash commands always
+    /// return false — they emit synthesized actions through `dispatch_user_action` /
+    /// `forward_to_agent` directly. Plain prompts return true while idle, false while cancelling.
+    fn handle_submit_prompt(&mut self, text: &str) -> bool {
+        if self.input.is_enabled() {
+            if let Some(parsed) = slash::parse_slash(text) {
+                self.chat.push_user_message(text.to_owned());
+                let (synthesized, modal) = {
+                    let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                    let action = slash::dispatch(&parsed, &mut ctx);
+                    (action, ctx.take_modal())
+                };
+                if let Some(modal) = modal {
+                    self.modals.push(modal);
+                }
+                if let Some(action) = synthesized {
+                    if matches!(action, UserAction::SubmitPrompt(_)) {
+                        self.input.set_enabled(false);
+                        self.status_bar.set_status(Status::Streaming);
+                        self.forward_to_agent(action);
+                    } else {
+                        // TUI-only synthesized actions (e.g. SwapTheme) flow through dispatch
+                        // so the local arm runs; forwarding to the agent would drop them.
+                        self.dispatch_user_action(action);
+                    }
+                }
+                return false;
+            }
+            self.chat.push_user_message(text.to_owned());
+            self.input.set_enabled(false);
+            self.status_bar.set_status(Status::Streaming);
+            return true;
+        }
+        if let Some(parsed) = slash::parse_slash(text) {
+            self.chat.push_user_message(text.to_owned());
+            match slash::classify(&parsed) {
+                SlashKind::ReadOnly | SlashKind::Unknown => {
+                    let modal = {
+                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                        _ = slash::dispatch(&parsed, &mut ctx);
+                        ctx.take_modal()
+                    };
+                    if let Some(modal) = modal {
+                        self.modals.push(modal);
+                    }
+                }
+                SlashKind::Mutating => {
+                    self.chat.push_system_message(format!(
+                        "/{} runs only when idle. Try again after the turn finishes.",
+                        parsed.name,
+                    ));
+                }
+            }
+            return false;
+        }
+        self.pending_prompts.push_back(text.to_owned());
+        self.sync_input_queue_hint();
+        // Skip forwarding while cancelling — the agent resets and we drain locally on idle.
+        !matches!(self.status_bar.status(), Status::Cancelling)
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -497,10 +543,21 @@ impl App {
 
     /// Returns the chat area so the scroll cache can refresh its layout.
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
-        let input_height = self.input.height();
         let preview_height = self.preview_height();
-        let popup_height = self.input.popup_height();
         let modal_height = self.modals.height(frame.area().width);
+        // Modal owns focus — input + popup are unreachable, so collapse them.
+        let modal_active = modal_height > 0;
+        let popup_height = if modal_active {
+            0
+        } else {
+            self.input.popup_height()
+        };
+        let input_height = if modal_active { 0 } else { self.input.height() };
+        // Pre-fill with surface bg so unpainted gaps inherit the theme.
+        frame.render_widget(
+            ratatui::widgets::Block::default().style(self.theme.surface()),
+            frame.area(),
+        );
         let chunks = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
@@ -516,13 +573,14 @@ impl App {
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
-        if modal_height > 0 {
+        if modal_active {
             self.modals.render(frame, chunks[3], &self.theme);
+        } else {
+            if popup_height > 0 {
+                self.input.render_popup(frame, chunks[4]);
+            }
+            self.input.render(frame, chunks[5]);
         }
-        if popup_height > 0 {
-            self.input.render_popup(frame, chunks[4]);
-        }
-        self.input.render(frame, chunks[5]);
         chunks[1]
     }
 
@@ -683,7 +741,42 @@ mod tests {
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 show_thinking: false,
+                theme_name: "mocha".to_owned(),
             },
+        }
+    }
+
+    /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.
+    struct FakeModal {
+        title: String,
+    }
+
+    impl FakeModal {
+        fn new(title: &str) -> Self {
+            Self {
+                title: title.to_owned(),
+            }
+        }
+    }
+
+    impl crate::tui::modal::Modal for FakeModal {
+        fn height(&self, _width: u16) -> u16 {
+            1
+        }
+
+        fn render(
+            &self,
+            frame: &mut ratatui::Frame<'_>,
+            area: Rect,
+            theme: &crate::tui::theme::Theme,
+        ) {
+            use ratatui::widgets::Paragraph;
+            let line = Line::from(Span::styled(self.title.clone(), theme.text()));
+            frame.render_widget(Paragraph::new(line).style(theme.surface()), area);
+        }
+
+        fn handle_key(&mut self, _event: &KeyEvent) -> crate::tui::modal::ModalKey {
+            crate::tui::modal::ModalKey::Consumed
         }
     }
 
@@ -865,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
-        // Mid-turn Ctrl+C must reach the agent loop as `Cancel`, not flip `should_quit`.
+        // Mid-turn Ctrl+C forwards `Cancel` to the agent loop and leaves `should_quit` clear.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
         assert!(!app.input.is_enabled());
@@ -1303,8 +1396,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
-        // Read-only slash commands during busy must run immediately, not queue —
-        // otherwise the LLM ends up answering `/help` literally on drain.
+        // Read-only slash commands during busy run client-side immediately; queueing them
+        // would make the LLM answer `/help` literally on drain.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -1447,6 +1540,181 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty),
         ));
         assert!(app.chat.last_is_error());
+    }
+
+    // ── apply_action_locally / theme ──
+
+    #[test]
+    fn preview_theme_repaints_components_and_caches_original() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            app.preview_theme_snapshot.is_some(),
+            "first PreviewTheme must cache the original",
+        );
+        assert_ne!(app.theme.text, original.text, "live theme must change");
+        // preview leaves session_info.config.theme_name as-is until commit.
+        assert_eq!(app.session_info.config.theme_name, "mocha");
+    }
+
+    #[test]
+    fn preview_theme_then_modal_cancel_restores_original() {
+        // Esc / Ctrl+C surface as ModalAction::None; the snapshot must roll back.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.apply_modal_action(ModalAction::None);
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "snapshot consumed on cancel",
+        );
+        assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
+    }
+
+    #[test]
+    fn modal_cancel_without_snapshot_is_noop() {
+        // Modals that never previewed (e.g. /model picker) cancel through the same
+        // ModalAction::None path; the rollback arm must skip cleanly with no snapshot.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_text = app.theme.text;
+        app.apply_modal_action(ModalAction::None);
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.theme.text, original_text);
+    }
+
+    #[test]
+    fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
+        // Roster drift between slash + builtin tables logs via tracing only — user state stays put.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_text = app.theme.text;
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "no snapshot when load_builtin returns None",
+        );
+        assert_eq!(app.theme.text, original_text, "theme stays put on drift");
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "preview must never push a chat block",
+        );
+    }
+
+    #[test]
+    fn swap_theme_commits_and_clears_snapshot() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        let previewed = app.theme.clone();
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.session_info.config.theme_name, "latte");
+        assert_eq!(app.theme.text, previewed.text);
+
+        app.apply_modal_action(ModalAction::None);
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "post-commit cancel must not restore the pre-preview theme",
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_theme_with_unknown_name_is_silent_noop() {
+        // Roster drift between slash::theme::LISTED_THEMES and tui::theme::builtin::TABLE is a
+        // dev bug, not user error — log via tracing and leave UI state untouched.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.session_info.config.theme_name.clone();
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert_eq!(app.session_info.config.theme_name, original);
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "no chat block — drift is dev-only",
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_actions_are_not_forwarded_to_agent_loop() {
+        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "theme actions must stay client-side",
+        );
+    }
+
+    // ── handle_submit_prompt ──
+
+    #[test]
+    fn submit_slash_theme_pushes_picker_onto_modal_stack() {
+        // Bare `/theme` is the ReadOnly modal-opening branch — `slash::dispatch` populates the
+        // SlashContext modal slot, then handle_submit_prompt drains it onto `App::modals`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        assert!(!app.modals.is_active(), "stack starts empty");
+        app.dispatch_user_action(UserAction::SubmitPrompt("/theme".to_owned()));
+        assert!(app.modals.is_active(), "bare `/theme` opens a picker modal");
+    }
+
+    #[test]
+    fn slash_typed_swap_theme_routes_through_local_handler() {
+        // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
+        // forwarded straight to the agent, which silently dropped them. They must now flow
+        // through dispatch_user_action so the local theme arm runs.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
+
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "typed `/theme <name>` must mutate session theme",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "TUI-only theme swap must not leak to the agent channel",
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_typed_model_routes_synthesized_swap_config_through_dispatch() {
+        // Mirrors the typed-`/theme` regression on the agent-bound side: `/model <id>` synthesizes
+        // a SwapConfig that must reach the agent via dispatch_user_action → forward_to_agent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model haiku".to_owned()));
+
+        let forwarded = rx.recv().await.expect("SwapConfig forwarded to agent");
+        match forwarded {
+            UserAction::SwapConfig { model, effort } => {
+                assert_eq!(
+                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
+                    Some("claude-haiku-4-5")
+                );
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected SwapConfig, got {other:?}"),
+        }
     }
 
     // ── handle_agent_event ──
@@ -2252,6 +2520,71 @@ mod tests {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
+    }
+
+    #[test]
+    fn draw_frame_hides_input_and_popup_while_modal_active() {
+        // Modal owns focus, so the layout must collapse the input + popup bands. The idle
+        // placeholder is the cheapest substring proof that the input got rendered.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let baseline = rendered_text(&mut app, 60, 14);
+        assert!(
+            baseline.contains("Ask anything..."),
+            "input placeholder must paint without a modal: {baseline}",
+        );
+
+        app.modals
+            .push(Box::new(FakeModal::new("FAKE-MODAL-TITLE")));
+        let with_modal = rendered_text(&mut app, 60, 14);
+        assert!(
+            with_modal.contains("FAKE-MODAL-TITLE"),
+            "modal body must render: {with_modal}",
+        );
+        assert!(
+            !with_modal.contains("Ask anything..."),
+            "input must collapse while modal is active: {with_modal}",
+        );
+
+        // Non-cancel keys land at the modal's handle_key — proves the focus-grab is wired up
+        // and the layout collapse doesn't bypass it.
+        let action = app
+            .modals
+            .handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(action.is_none(), "FakeModal consumes without emitting");
+        assert!(app.modals.is_active(), "Consumed must not pop the stack");
+    }
+
+    #[test]
+    fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
+        // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
+        // The frame-area surface fill is the only widget that guarantees this for cells no
+        // other widget covers.
+        use ratatui::style::Color;
+
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let sentinel = Color::Rgb(254, 0, 254);
+        let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        for cell in &mut terminal.current_buffer_mut().content {
+            cell.set_bg(sentinel);
+        }
+        terminal
+            .draw(|frame| {
+                _ = app.draw_frame(frame);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 {
+            for x in 0..60 {
+                let cell = buffer.cell((x, y)).expect("cell in bounds");
+                assert_eq!(
+                    cell.bg, surface_bg,
+                    "cell ({x},{y}) kept the sentinel — surface fill regressed",
+                );
+            }
+        }
     }
 
     // ── preview_height ──
