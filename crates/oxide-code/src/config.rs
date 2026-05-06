@@ -710,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_effort_clamps_xhigh_down_to_high_on_sonnet_4_6() {
-        // Sonnet 4.6 has effort but not `xhigh` / `max`; must clamp, not 400 the gateway.
+        // Sonnet 4.6 has effort but caps below `xhigh`; clamping keeps the request from 400ing.
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
             xdg(&dir),

@@ -2,7 +2,7 @@
 //!
 //! [`App`] owns every component, holds the cross-task channels, and runs the `tokio::select!`
 //! loop multiplexing crossterm events, agent events, user actions, and a 60 FPS render tick.
-//! A dirty flag coalesces redraws so render work tracks state change, not event throughput.
+//! A dirty flag coalesces redraws so renders fire per state change rather than per event.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -217,9 +217,7 @@ impl App {
         }
     }
 
-    /// Repaint every component with `theme`. Sole entry point for mid-session theme swaps so the
-    /// per-component `set_theme` calls stay grouped — adding a new theme-styled component should
-    /// only need a single edit here.
+    /// Sole entry point for mid-session theme swaps; repaints every theme-styled component.
     fn apply_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.chat.set_theme(theme);
@@ -341,12 +339,12 @@ impl App {
                 }
                 if let Some(action) = synthesized {
                     if matches!(action, UserAction::SubmitPrompt(_)) {
-                        // Synthesized prompts skip apply_action_locally — re-entry would
-                        // re-parse the leading `/` and recurse.
                         self.input.set_enabled(false);
                         self.status_bar.set_status(Status::Streaming);
                         self.forward_to_agent(action);
                     } else {
+                        // TUI-only synthesized actions (e.g. SwapTheme) need apply_action_locally —
+                        // forwarding to the agent drops them.
                         self.dispatch_user_action(action);
                     }
                 }
@@ -550,8 +548,7 @@ impl App {
         let preview_height = self.preview_height();
         let popup_height = self.input.popup_height();
         let modal_height = self.modals.height(frame.area().width);
-        // Fill the backing buffer with surface bg so widgets that don't paint their entire area
-        // (gaps between blocks, modal bodies, popup rows) inherit the active theme.
+        // Pre-fill with surface bg so unpainted gaps inherit the theme.
         frame.render_widget(
             ratatui::widgets::Block::default().style(self.theme.surface()),
             frame.area(),
@@ -921,7 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_crossterm_key_ctrl_c_busy_forwards_cancel_without_quitting() {
-        // Mid-turn Ctrl+C must reach the agent loop as `Cancel`, not flip `should_quit`.
+        // Mid-turn Ctrl+C forwards `Cancel` to the agent loop and leaves `should_quit` clear.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::StreamToken("partial".into()));
         assert!(!app.input.is_enabled());
@@ -1359,8 +1356,8 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_read_only_slash_during_busy_runs_client_side_without_queueing() {
-        // Read-only slash commands during busy must run immediately, not queue —
-        // otherwise the LLM ends up answering `/help` literally on drain.
+        // Read-only slash commands during busy run client-side immediately; queueing them
+        // would make the LLM answer `/help` literally on drain.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
         rx.recv().await.expect("active submit forwarded");
@@ -2334,8 +2331,6 @@ mod tests {
 
     #[test]
     fn preview_theme_repaints_components_and_caches_original() {
-        // First PreviewTheme captures the snapshot; cursor moves on the picker repaint without
-        // committing. Apply a known mocha → latte swap and confirm both axes mutate.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let original = app.theme.clone();
         app.dispatch_user_action(UserAction::PreviewTheme {
@@ -2346,7 +2341,7 @@ mod tests {
             "first PreviewTheme must cache the original",
         );
         assert_ne!(app.theme.text, original.text, "live theme must change");
-        // session_info.config.theme_name unchanged — preview is not a commit.
+        // preview leaves session_info.config.theme_name as-is until commit.
         assert_eq!(app.session_info.config.theme_name, "mocha");
     }
 
@@ -2368,8 +2363,6 @@ mod tests {
 
     #[test]
     fn swap_theme_commits_and_clears_snapshot() {
-        // Enter on a moved cursor: snapshot drops, session theme name updates, chat shows the
-        // confirmation. A subsequent ModalAction::None then must NOT roll anything back.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::PreviewTheme {
             name: "latte".to_owned(),

@@ -1,6 +1,5 @@
-//! `/theme` — open the picker, or swap with `/theme <name>`. Bare form opens a list picker
-//! whose cursor moves live-preview the highlighted theme by repainting the full TUI; Esc snaps
-//! back to the original, Enter commits for the rest of the session.
+//! `/theme` — open the picker, or swap directly with `/theme <name>`. Picker live-previews on
+//! cursor moves and reverts on cancel.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -17,9 +16,7 @@ use crate::tui::theme::Theme;
 
 // ── Constants ──
 
-/// Curated roster shown in the picker. Order matches `tui/theme/builtin.rs` — Catppuccin variants
-/// dark→light, then non-Catppuccin palettes. Static descriptions live alongside so the picker
-/// can render a one-glance summary without re-resolving each TOML.
+/// Curated picker roster (name, one-line description). Order matches `tui/theme/builtin.rs`.
 const LISTED_THEMES: &[(&str, &str)] = &[
     ("mocha", "Catppuccin dark (default)"),
     ("macchiato", "Catppuccin dark (medium)"),
@@ -52,7 +49,6 @@ impl ThemeRow {
     }
 }
 
-/// `'1'`–`'9'` for the first nine rows; `None` after that.
 fn numeric_hint(idx: usize) -> Option<char> {
     char::from_digit(u32::try_from(idx).ok()? + 1, 10)
 }
@@ -119,7 +115,7 @@ impl ThemePicker {
 
 impl Modal for ThemePicker {
     fn height(&self, width: u16) -> u16 {
-        // List body + spacer + footer.
+        // +2: blank spacer row, then the footer hint row.
         self.list.height(width).saturating_add(2)
     }
 
@@ -208,8 +204,8 @@ impl SlashCommand for ThemeCmd {
     }
 }
 
-/// Validates `arg` against the curated picker roster. Custom file paths aren't accepted via
-/// `/theme <name>` — users who maintain a custom TOML edit `~/.config/ox/config.toml` directly.
+/// Custom file paths are intentionally rejected here; users with a custom TOML edit
+/// `~/.config/ox/config.toml` directly.
 fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
     let lower = arg.to_ascii_lowercase();
     LISTED_THEMES

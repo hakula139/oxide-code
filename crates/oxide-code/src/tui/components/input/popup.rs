@@ -1,9 +1,8 @@
 //! Slash-command autocomplete popup. Selected row paints in `text`, others dim — contrast
 //! stands in for a prefix glyph or fill. Aliases parenthesize only the typed alias
-//! (`/clear (new)`); never the full list.
+//! (`/clear (new)`); the full list stays unparenthesized.
 //!
-//! Lists longer than [`MAX_VISIBLE_ROWS`] scroll: the cursor stays at the visual middle once it
-//! leaves the top half of the window, mirroring Claude Code's typeahead.
+//! Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code typeahead style).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -76,8 +75,7 @@ impl SlashPopup {
         };
     }
 
-    /// Number of rows the popup needs in the surrounding layout. Zero when hidden, capped at
-    /// [`MAX_VISIBLE_ROWS`] regardless of match count — overflow scrolls.
+    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`].
     pub(crate) fn height(&self) -> u16 {
         let visible = self.matches.len().min(MAX_VISIBLE_ROWS);
         u16::try_from(visible).unwrap_or(u16::MAX)
