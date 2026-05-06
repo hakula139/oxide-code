@@ -86,8 +86,8 @@ impl SlashPopup {
             Some(PopupState::Arg { name, prefix }) => {
                 let completions = complete_arg_for(name, prefix);
                 if completions.is_empty() {
-                    // Hidden popup — leaves room for the placeholder ghost-text. Mode is
-                    // intentionally `None` so `is_visible()` returns false.
+                    // No curated roster for this command — hide the popup so it doesn't
+                    // intercept Tab / Enter while the user types the arg.
                     (None, Vec::new())
                 } else {
                     (
@@ -307,9 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn set_state_arg_with_empty_roster_stays_hidden_for_ghost_text_fallback() {
-        // /init has no curated arg roster — popup must hide so the placeholder ghost-text path
-        // can render instead.
+    fn set_state_arg_with_empty_roster_stays_hidden() {
+        // /init has no curated arg roster — popup must hide so the user can type the arg
+        // without the popup intercepting Tab / Enter.
         let popup = arg_popup("init", "");
         assert!(!popup.is_visible());
         assert!(popup.mode().is_none());

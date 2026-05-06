@@ -43,12 +43,6 @@ pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletio
         .unwrap_or_default()
 }
 
-/// Static placeholder hint for `cmd_name` (e.g., `[<id>]`). Returned by [`SlashCommand::usage`];
-/// rendered as dim ghost-text after `/cmd ` when there are no arg completions to show.
-pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
-    registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
-}
-
 /// Resolves and runs `parsed` against the built-in registry.
 pub(crate) fn dispatch(
     parsed: &Parsed,
