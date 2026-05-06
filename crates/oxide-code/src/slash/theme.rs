@@ -54,12 +54,7 @@ impl ThemeRow {
 
 /// `'1'`–`'9'` for the first nine rows; `None` after that.
 fn numeric_hint(idx: usize) -> Option<char> {
-    let digit = u32::try_from(idx).ok()?.checked_add(1)?;
-    if (1..=9).contains(&digit) {
-        char::from_digit(digit, 10)
-    } else {
-        None
-    }
+    char::from_digit(u32::try_from(idx).ok()? + 1, 10)
 }
 
 impl PickerItem for ThemeRow {
