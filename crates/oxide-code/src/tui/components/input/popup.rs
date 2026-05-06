@@ -106,9 +106,17 @@ impl SlashPopup {
                 }
             }
         };
+        // Mode transitions reset selection to row 0 — keeping `selected` from a different
+        // roster surfaces an arbitrary row instead of the canonical first pick. Intra-mode
+        // changes (query / prefix typing) clamp instead so the cursor sticks where it is.
+        let mode_changed = self.mode != mode;
         self.mode = mode;
         self.rows = rows;
-        self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+        self.selected = if mode_changed {
+            0
+        } else {
+            self.selected.min(self.rows.len().saturating_sub(1))
+        };
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -295,6 +303,24 @@ mod tests {
         popup.set_state(Some(&PopupState::Name("help")));
         assert_eq!(popup.rows.len(), 1);
         assert_eq!(popup.selected, 0);
+    }
+
+    #[test]
+    fn set_state_resets_selection_on_mode_transition() {
+        // Park selection on a non-zero name-mode row, then transition to arg mode — the new
+        // mode's roster is unrelated, so selection must drop back to row 0 instead of pointing
+        // at whichever index happens to survive the clamp.
+        let mut popup = name_popup("");
+        popup.select_next();
+        popup.select_next();
+        assert!(popup.selected >= 2, "park selection past row 0");
+
+        popup.set_state(Some(&PopupState::Arg {
+            name: "model",
+            prefix: "",
+        }));
+        assert!(matches!(popup.mode(), Some(PopupMode::Arg { .. })));
+        assert_eq!(popup.selected, 0, "mode transition resets selection");
     }
 
     #[test]
