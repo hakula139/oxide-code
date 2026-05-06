@@ -57,9 +57,13 @@ impl ChatView {
     }
 
     /// Re-skin every subsequent render. Mid-session theme swap (`/theme`) calls this to repaint
-    /// the existing block stack — block content stays cached, only the styles change next frame.
+    /// the existing block stack; the streaming-prefix cache also drops so in-flight tokens
+    /// re-render under the new palette.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
+        if let Some(s) = &mut self.streaming {
+            s.invalidate_cache();
+        }
     }
 
     /// Populates from resumed transcript, projecting the same block shapes as live rendering.
