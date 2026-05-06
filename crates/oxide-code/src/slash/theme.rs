@@ -432,6 +432,30 @@ mod tests {
         }
     }
 
+    // ── ThemeRow ──
+
+    #[test]
+    fn theme_row_picker_item_methods_return_curated_values() {
+        // Pins the trait-impl surface for ThemeRow — label / description / is_active / key_hint
+        // each have a path the picker depends on and only the render smoke test exercises
+        // indirectly.
+        let rows = ThemeRow::build("latte");
+        let names: Vec<&str> = rows.iter().map(PickerItem::label).collect();
+        assert_eq!(
+            names,
+            LISTED_THEMES.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        );
+
+        let active_count = rows.iter().filter(|r| r.is_active()).count();
+        assert_eq!(active_count, 1, "exactly one row marks the active theme");
+        assert!(rows.iter().find(|r| r.is_active()).unwrap().label() == "latte");
+
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(row.key_hint(), numeric_hint(idx), "idx={idx}");
+            assert_eq!(row.description(), Some(LISTED_THEMES[idx].1));
+        }
+    }
+
     // ── numeric_hint ──
 
     #[test]

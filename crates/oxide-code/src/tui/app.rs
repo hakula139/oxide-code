@@ -293,10 +293,14 @@ impl App {
                         }
                         if let Some(action) = synthesized {
                             if matches!(action, UserAction::SubmitPrompt(_)) {
+                                // Synthesized prompts skip apply_action_locally — re-entry would
+                                // re-parse the leading `/` and recurse.
                                 self.input.set_enabled(false);
                                 self.status_bar.set_status(Status::Streaming);
+                                self.forward_to_agent(action);
+                            } else {
+                                self.dispatch_user_action(action);
                             }
-                            self.forward_to_agent(action);
                         }
                         return false;
                     }
@@ -544,6 +548,12 @@ impl App {
         let preview_height = self.preview_height();
         let popup_height = self.input.popup_height();
         let modal_height = self.modals.height(frame.area().width);
+        // Fill the backing buffer with surface bg so widgets that don't paint their entire area
+        // (gaps between blocks, modal bodies, popup rows) inherit the active theme.
+        frame.render_widget(
+            ratatui::widgets::Block::default().style(self.theme.surface()),
+            frame.area(),
+        );
         let chunks = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
@@ -2390,6 +2400,48 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "theme actions must stay client-side",
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_theme_with_unknown_name_pushes_error_and_keeps_active_theme() {
+        // Pins the defensive `else` arm — load_builtin returning None must not silently swallow
+        // the request. Today the slash form pre-validates names, but the arm guards against any
+        // future caller passing through unchecked.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.session_info.config.theme_name.clone();
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert_eq!(
+            app.session_info.config.theme_name, original,
+            "unknown name must not flip the active theme",
+        );
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before + 1,
+            "error must surface as a chat block",
+        );
+    }
+
+    #[test]
+    fn slash_typed_swap_theme_routes_through_local_handler() {
+        // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
+        // forwarded straight to the agent, which silently dropped them. They must now flow
+        // through dispatch_user_action so the local theme arm runs.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
+
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "typed `/theme <name>` must mutate session theme",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "TUI-only theme swap must not leak to the agent channel",
         );
     }
 
