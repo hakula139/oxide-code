@@ -366,10 +366,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_plain_c_without_ctrl_is_not_a_cancel() {
-        // Pin: only Ctrl+C cancels. Plain `c` reaches the modal — ScriptedModal happens to
-        // map `c` to its own cancel sentinel for unrelated reasons; assert via a non-`c` key
-        // that the modal still handles its own keys without stack interference.
+    fn handle_key_modifier_less_key_routes_to_modal_unchanged() {
+        // Pin: the universal cancel matches only Esc and Ctrl+C exactly; other keys bypass
+        // the early-return and reach the modal. ScriptedModal consumes `c` as its own cancel
+        // sentinel, so we use `x` as a neutral stand-in.
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('x'), KeyModifiers::NONE));

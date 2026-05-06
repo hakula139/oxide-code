@@ -625,4 +625,11 @@ mod tests {
         // Plain ids share their label with `marketing_or_id`; only `[1m]` triggers the suffix.
         assert_eq!(display_name("claude-opus-4-7"), "Claude Opus 4.7");
     }
+
+    #[test]
+    fn display_name_unknown_plain_id_falls_through_to_raw() {
+        // Unknown ids without `[1m]` route through `marketing_or_id` and stay borrowed —
+        // pinning this catches a regression where the Cow path accidentally allocates.
+        assert_eq!(display_name("gpt-4"), "gpt-4");
+    }
 }

@@ -1,4 +1,4 @@
-//! `/effort` — horizontal Speed ←→ Intelligence slider opened by bare `/effort`. Typed-arg
+//! `/effort` — horizontal Speed ↔ Intelligence slider opened by bare `/effort`. Typed-arg
 //! `/effort <level>` keeps direct-switch semantics in [`super::effort::EffortCmd`].
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn new_returns_none_for_no_effort_model() {
-        // Haiku 4.5 has no effort tier — slider opens to nothing, caller errors first.
+        // Haiku 4.5 has no effort tier — slider returns None; caller surfaces the error.
         let mut info = test_session_info();
         info.config.model_id = "claude-haiku-4-5".to_owned();
         assert!(EffortSlider::new(&info).is_none());
@@ -324,7 +324,7 @@ mod tests {
         let outcome = s.handle_key(&key(KeyCode::Enter));
         match outcome {
             ModalKey::Submitted(ModalAction::User(UserAction::SwapConfig { model, effort })) => {
-                assert!(model.is_none(), "model axis must NOT be set");
+                assert!(model.is_none(), "effort-only swap; model unchanged");
                 assert_eq!(effort, Some(Effort::Medium));
             }
             other => panic!("expected Submitted SwapConfig, got {other:?}"),
