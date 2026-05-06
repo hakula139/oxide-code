@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn render_advances_line_numbers_through_context_rows() {
         // Pin both increments via one fixture: `+third` rides new_ln
-        // (bumped 2→3 by context), `-fourth` rides old_ln (1→2).
+        // (bumped 2 → 3 by context), `-fourth` rides old_ln (1 → 2).
         let theme = Theme::default();
         let block = GitDiffBlock::new(indoc! {"
             diff --git a/x b/x

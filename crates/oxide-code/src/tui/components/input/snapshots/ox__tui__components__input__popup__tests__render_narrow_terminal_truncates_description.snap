@@ -1,11 +1,12 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
+assertion_line: 342
 expression: "render_to_backend(&popup, 30)"
 ---
 "/clear   Reset the conversa..."
 "/config  Show the resolved ..."
 "/diff    Show uncommitted w..."
-"/effort  Set the effort tie..."
+"/effort  Open the effort sl..."
 "/help    List the available..."
 "/init    Generate or update..."
 "/model   Open the model pic..."

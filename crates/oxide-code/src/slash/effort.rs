@@ -1,7 +1,8 @@
-//! `/effort <level>` — direct effort swap. The bare form errors with a usage hint; users adjust
-//! effort interactively via the `/model` picker (Left / Right on the effort row).
+//! `/effort` — open the slider, or swap with `/effort <level>`. Bare form opens the
+//! Speed ↔ Intelligence slider (see [`super::effort_slider`]); typed arg shortcuts the picker.
 
 use super::context::SlashContext;
+use super::effort_slider::EffortSlider;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
@@ -15,41 +16,49 @@ impl SlashCommand for EffortCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Set the effort tier with `/effort <level>`"
+        "Open the effort slider or switch directly with `/effort <level>`"
     }
 
-    fn classify(&self, _args: &str) -> SlashKind {
-        // Both bare (error response) and typed (real swap) paths reach `execute`; the typed
-        // path races the in-flight client, so gate as Mutating.
-        SlashKind::Mutating
+    fn classify(&self, args: &str) -> SlashKind {
+        if args.trim().is_empty() {
+            SlashKind::ReadOnly
+        } else {
+            SlashKind::Mutating
+        }
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some("<level>")
+        Some("[<level>]")
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let arg = args.trim();
         if arg.is_empty() {
-            return Err(format!(
-                "Usage: /effort <level>. Valid: {}. Or use /model to pick interactively.",
-                Effort::VALID_VALUES,
-            ));
+            // No-effort model has nothing to slide — error with the same recovery hint the
+            // typed-arg path uses.
+            let Some(slider) = EffortSlider::new(ctx.info) else {
+                return Err(no_effort_tier_msg(&ctx.info.config.model_id));
+            };
+            ctx.open_modal(Box::new(slider));
+            return Ok(SlashOutcome::Done);
         }
         let pick = parse_effort_arg(arg)?;
-        // Reject upfront — setting a level on a no-effort model would silently resolve to None.
         let caps = capabilities_for(&ctx.info.config.model_id);
         if !caps.effort {
-            return Err(format!(
-                "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
-                marketing_or_id(&ctx.info.config.model_id),
-            ));
+            return Err(no_effort_tier_msg(&ctx.info.config.model_id));
         }
         Ok(SlashOutcome::Forward(UserAction::SwapConfig {
             model: None,
             effort: Some(pick),
         }))
     }
+}
+
+fn no_effort_tier_msg(model_id: &str) -> String {
+    format!(
+        "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
+        marketing_or_id(model_id),
+    )
 }
 
 fn parse_effort_arg(arg: &str) -> Result<Effort, String> {
@@ -73,13 +82,14 @@ mod tests {
         assert_eq!(EffortCmd.name(), "effort");
         assert!(EffortCmd.aliases().is_empty());
         assert!(!EffortCmd.description().is_empty());
-        assert_eq!(EffortCmd.usage(), Some("<level>"));
+        assert_eq!(EffortCmd.usage(), Some("[<level>]"));
     }
 
     #[test]
-    fn classify_is_mutating_regardless_of_args() {
-        assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
-        assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
+    fn classify_splits_on_args() {
+        // Bare form opens the slider (read-only); typed arg races the client (mutating).
+        assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
+        assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
@@ -104,16 +114,28 @@ mod tests {
     }
 
     #[test]
-    fn execute_no_args_errors_with_usage_hint_and_model_pointer() {
-        // Bare `/effort` is invalid usage — the typed-arg form is the only direct shortcut;
-        // interactive adjustment lives in `/model`.
-        let (chat, outcome) = run_execute("");
-        let msg = outcome.expect_err("bare /effort must error");
-        assert!(msg.contains("Usage: /effort <level>"), "{msg}");
-        assert!(msg.contains("/model"), "must point at the picker: {msg}");
-        for valid in Effort::VALID_VALUES.split(", ") {
-            assert!(msg.contains(valid), "lists `{valid}`: {msg}");
-        }
+    fn execute_no_args_opens_slider_via_ctx_and_pushes_no_chat_block() {
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        let outcome = EffortCmd.execute("", &mut ctx);
+        assert_eq!(outcome, Ok(SlashOutcome::Done));
+        assert!(
+            ctx.take_modal().is_some(),
+            "bare /effort must populate the modal slot",
+        );
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
+    }
+
+    #[test]
+    fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
+        // Slider can't render zero tiers — error before opening the modal.
+        let (chat, outcome) = run_execute_with_model("claude-haiku-4-5", "");
+        let msg = outcome.expect_err("must error");
+        assert!(
+            msg.contains("Claude Haiku 4.5") && msg.contains("/model"),
+            "marketing name + recovery hint: {msg}",
+        );
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
 
@@ -140,8 +162,7 @@ mod tests {
 
     #[test]
     fn execute_explicit_level_on_no_tier_model_errors_with_recovery_hint() {
-        // Setting xhigh on Haiku silently resolves to None (no
-        // effort), confusing the user. Reject upfront.
+        // Without this, xhigh on Haiku silently resolves to None and confuses the user.
         let (chat, outcome) = run_execute_with_model("claude-haiku-4-5", "xhigh");
         let msg = outcome.expect_err("must error");
         assert!(

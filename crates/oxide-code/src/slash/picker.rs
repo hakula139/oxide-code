@@ -4,14 +4,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::context::LiveSessionInfo;
+use super::effort_slider::tier_color;
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::{ResolvedModelId, capabilities_for, marketing_or_id};
+use crate::model::{ResolvedModelId, capabilities_for, display_name};
 use crate::tui::modal::list_picker::{ListPicker, PickerItem};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -44,20 +45,10 @@ impl ModelRow {
             .map(|(idx, id)| Self {
                 id,
                 is_active: *id == active_id,
-                description: describe(id),
+                description: display_name(id).into_owned(),
                 hint: numeric_hint(idx),
             })
             .collect()
-    }
-}
-
-/// Marketing name + "(1M context)" suffix for `[1m]` rows.
-fn describe(id: &str) -> String {
-    let name = marketing_or_id(id);
-    if id.ends_with("[1m]") {
-        format!("{name} (1M context)")
-    } else {
-        name.into_owned()
     }
 }
 
@@ -105,6 +96,7 @@ pub(super) struct ModelEffortPicker {
 }
 
 impl ModelEffortPicker {
+    /// Infallible — both axes are always populated.
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let active_model = info.config.model_id.clone();
         let active_effort = info.config.effort;
@@ -200,11 +192,12 @@ impl ModelEffortPicker {
         let level = self.effort_or_active()?;
         let was_default = self.active_effort.is_none() && !self.effort_dirty;
         let suffix = if was_default { " (default)" } else { "" };
+        let color = tier_color(level);
         Some(Line::from(vec![
-            Span::styled("● ", theme.accent()),
+            Span::styled("● ", Style::default().fg(color)),
             Span::styled(
                 format!("{level} effort{suffix}"),
-                theme.text().add_modifier(Modifier::BOLD),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ← →  to adjust", theme.dim()),
         ]))
@@ -264,7 +257,6 @@ impl Modal for ModelEffortPicker {
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         match event.code {
-            KeyCode::Esc => ModalKey::Cancelled,
             KeyCode::Enter => self.submit(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.list.select_prev();
@@ -381,7 +373,7 @@ mod tests {
 
     #[test]
     fn right_arrow_on_no_tier_model_is_a_noop() {
-        // Haiku 4.5 has no effort tier — Left/Right must not mutate the (None) effort state.
+        // Haiku 4.5 has no effort tier — Left / Right must not mutate the (None) effort state.
         let mut p = picker();
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
         assert!(p.effort.is_none());
@@ -470,15 +462,6 @@ mod tests {
             }
             other => panic!("expected Submitted with effort-only SwapConfig, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn esc_returns_cancelled_regardless_of_axis_state() {
-        let mut p = picker();
-        p.handle_key(&key(KeyCode::Down));
-        p.handle_key(&key(KeyCode::Right));
-        let outcome = p.handle_key(&key(KeyCode::Esc));
-        assert!(matches!(outcome, ModalKey::Cancelled));
     }
 
     // ── height ──

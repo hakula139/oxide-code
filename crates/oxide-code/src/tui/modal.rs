@@ -6,7 +6,7 @@
 
 pub(crate) mod list_picker;
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -117,8 +117,16 @@ impl ModalStack {
     }
 
     /// Routes `event` to the top modal. `None` = key consumed or stack empty;
-    /// `Some(ModalAction::None)` = silent close.
+    /// `Some(ModalAction::None)` = silent close. Esc and Ctrl+C cancel any modal universally —
+    /// short-circuit before delegation so individual modals don't reimplement the gesture.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        if is_universal_cancel(event) {
+            self.stack.pop();
+            return Some(ModalAction::None);
+        }
         let outcome = self.stack.last_mut()?.handle_key(event);
         match outcome {
             ModalKey::Consumed => None,
@@ -132,6 +140,11 @@ impl ModalStack {
             }
         }
     }
+}
+
+fn is_universal_cancel(event: &KeyEvent) -> bool {
+    matches!(event.code, KeyCode::Esc)
+        || (event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 // ── Test Fixtures ──
@@ -193,6 +206,10 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::from(KeyCode::Char(c))
+    }
+
+    fn key_with_mods(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
     }
 
     // ── is_active ──
@@ -323,6 +340,39 @@ mod tests {
         let mut stack = ModalStack::new();
         assert!(stack.handle_key(&key('s')).is_none());
         assert!(!stack.is_active());
+    }
+
+    #[test]
+    fn handle_key_esc_cancels_universally_without_reaching_modal() {
+        // Bypass the modal entirely — the ScriptedModal has no Esc handler, so this would
+        // fall through to `Consumed` if Esc were not intercepted at the stack layer.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(ScriptedModal::new(ModalAction::User(
+            UserAction::Clear,
+        ))));
+        let outcome = stack.handle_key(&key_with_mods(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, Some(ModalAction::None)));
+        assert!(!stack.is_active(), "Esc must pop the stack");
+    }
+
+    #[test]
+    fn handle_key_ctrl_c_cancels_universally_like_esc() {
+        // Pairs with the Esc test — Ctrl+C is the second universal-cancel gesture.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(outcome, Some(ModalAction::None)));
+        assert!(!stack.is_active(), "Ctrl+C must pop the stack");
+    }
+
+    #[test]
+    fn handle_key_modifier_less_key_routes_to_modal_unchanged() {
+        // `x` because ScriptedModal consumes `c` as its own cancel sentinel.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        let outcome = stack.handle_key(&key_with_mods(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(outcome.is_none(), "non-cancel key must not pop the stack");
+        assert!(stack.is_active());
     }
 
     #[test]

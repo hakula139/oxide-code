@@ -12,6 +12,7 @@ mod config;
 mod context;
 mod diff;
 mod effort;
+mod effort_slider;
 mod format;
 mod help;
 mod init;

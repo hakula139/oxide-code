@@ -18,7 +18,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 2. **Parse at submit, not in `InputArea`.** `App::dispatch_user_action` runs `parse_slash` first, then dispatches locally or forwards.
 3. **One synthetic block kind: `SystemMessageBlock`.** Left-bar in `accent`. Errors reuse `ErrorBlock`.
 4. **Two-column popup, plain rows.** Name left, description right. Filter ranks name-prefix > alias-prefix > name-substring > alias-substring, alphabetical within each tier. Names accept `:` and `.` for future `/plugin:cmd` namespace.
-5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })` — the same payload the picker modal emits, so the typed-arg path and the modal share one resolver. Per-request paths re-read config every call so betas / `output_config` pick up the swap. `classify(&self, args: &str) -> SlashKind` lets bare `/model` (which opens the picker, [`docs/design/slash/modals.md`](modals.md)) dispatch mid-turn while arg-bearing forms — and bare `/effort`, which errors with a usage hint — refuse.
+5. **Mid-session model + effort swap via `&mut Client`.** Both `/model <id>` and `/effort <level>` return `Forward(UserAction::SwapConfig { model, effort })` — the same payload both modals emit, so the typed-arg path and the modals share one resolver. Per-request paths re-read config every call so betas / `output_config` pick up the swap. `classify(&self, args: &str) -> SlashKind` lets bare `/model` (combined picker) and bare `/effort` (slider) dispatch mid-turn as read-only modals; arg-bearing forms refuse. See [modals.md](modals.md).
 6. **Slash commands never write user config files.** Session-only state. Restart returns to config.toml values. Deliberate rejection of Claude Code's silent mega-file writes.
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical; `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 8. **No `/quit` or `/exit`.** Ctrl+C x2 / Ctrl+D already exit.
@@ -30,27 +30,11 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 
 ## Per-Command Notes
 
-### /clear
-
-Rolls the session UUID, finalizes the old JSONL (still resumable via `ox -c`), drops in-memory messages, clears file tracker, clears AI title. Aliases: `/new`, `/reset`. No confirmation prompt — the cleared session is resumable.
-
-Key design: send-first ordering in `execute` — forward `UserAction::Clear` to `user_tx` first; only on success drop the chat history. `SessionHandle::roll` is the testable extraction point (snapshot-before-clear, replace-before-finalize). `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't paint the old title onto the fresh session.
-
-### /init
-
-Returns `SlashOutcome::Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author/update AGENTS.md. The App pushes the typed `/init` line as a `UserMessage` block, flips turn-start UI state, then forwards. The expanded body is invisible in the live session; on resume, JSONL records the full body.
-
-### /model
-
-Bare `/model` opens the combined model + effort picker modal ([modals.md](modals.md)) — both axes commit through one atomic `UserAction::SwapConfig`. `/model <arg>` resolves via: alias -> exact/dated id -> unique suffix -> unique substring. `[1m]` is an opt-in tag (strip -> resolve -> reattach). Effort coupling stays explicit and lossy — re-clamps current effort against the new model. Both forms emit the same `UserAction::SwapConfig`.
-
-### /effort
-
-`/effort <level>` accepts concrete tiers (`low`, `medium`, `high`, `xhigh`, `max`). No `auto` state. Bare `/effort` errors with a usage hint pointing at `/model` — sharing the picker between two bare commands made `/effort` look like a `/model` alias and split the discoverability surface for no real benefit.
-
-### /status
-
-Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No args, no chat output — the modal is the surface. Esc / Enter close.
+- **`/clear`** — Send-first ordering: forward `UserAction::Clear` first, drop chat history only on success. `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
+- **`/init`** — Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
+- **`/model`** — Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring; `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
+- **`/effort`** — Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)); two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers — no `auto` state.
+- **`/status`** — Bare opens the read-only overview modal ([modals.md](modals.md)). No args, no chat output. Esc / Enter both dismiss.
 
 ## Sources
 
@@ -62,6 +46,7 @@ Bare `/status` opens a read-only overview modal ([modals.md](modals.md)). No arg
 - `crates/oxide-code/src/slash/model.rs` — `ModelCmd`, resolver.
 - `crates/oxide-code/src/slash/effort.rs` — `EffortCmd`, level parser.
 - `crates/oxide-code/src/slash/picker.rs` — combined model + effort picker modal.
+- `crates/oxide-code/src/slash/effort_slider.rs` — bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/oxide-code/src/slash/status_modal.rs` — `/status` overview modal.
 - `crates/oxide-code/src/tui/app.rs` — `dispatch_user_action`, `apply_action_locally`, modal gate.
 - `crates/oxide-code/src/tui/modal.rs` — `Modal` trait, `ModalStack`, key routing.

@@ -286,6 +286,16 @@ pub(crate) fn marketing_or_id(model: &str) -> Cow<'_, str> {
     marketing_name(model).map_or_else(|| Cow::Borrowed(model), Cow::Borrowed)
 }
 
+/// Human-facing label: marketing name + ` (1M context)` suffix on `[1m]` ids.
+pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
+    let base = marketing_or_id(model);
+    if model.ends_with("[1m]") {
+        Cow::Owned(format!("{base} (1M context)"))
+    } else {
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +608,25 @@ mod tests {
     fn marketing_or_id_falls_back_to_raw_id_for_unknown() {
         // Single seam for unknown-id fallback — every UI surface goes through this.
         assert_eq!(marketing_or_id("gpt-4"), "gpt-4");
+    }
+
+    // ── display_name ──
+
+    #[test]
+    fn display_name_appends_1m_context_suffix_on_1m_id() {
+        assert_eq!(
+            display_name("claude-opus-4-7[1m]"),
+            "Claude Opus 4.7 (1M context)"
+        );
+    }
+
+    #[test]
+    fn display_name_omits_suffix_on_plain_id() {
+        assert_eq!(display_name("claude-opus-4-7"), "Claude Opus 4.7");
+    }
+
+    #[test]
+    fn display_name_unknown_plain_id_falls_through_to_raw() {
+        assert_eq!(display_name("gpt-4"), "gpt-4");
     }
 }

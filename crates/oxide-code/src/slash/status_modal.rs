@@ -1,4 +1,5 @@
-//! `/status` overview modal — read-only single panel of session descriptors. Esc / Enter close.
+//! `/status` overview modal — read-only single panel of session descriptors. Enter closes;
+//! Esc / Ctrl+C cancel via the modal stack's universal handler.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -84,7 +85,7 @@ impl Modal for StatusModal {
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
         match event.code {
-            KeyCode::Esc | KeyCode::Enter => ModalKey::Cancelled,
+            KeyCode::Enter => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
     }
@@ -160,14 +161,9 @@ mod tests {
     // ── handle_key ──
 
     #[test]
-    fn esc_closes_modal_silently() {
-        let mut m = modal();
-        let outcome = m.handle_key(&key(KeyCode::Esc));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn enter_also_closes_modal_silently() {
+    fn enter_closes_modal_silently() {
+        // Modal-specific shortcut: a read-only modal accepts Enter as a "done reading" gesture.
+        // (Esc / Ctrl+C are intercepted at ModalStack — covered there.)
         let mut m = modal();
         let outcome = m.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Cancelled));
