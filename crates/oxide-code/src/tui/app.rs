@@ -279,67 +279,7 @@ impl App {
     /// Applies UI-state changes; returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
-            UserAction::SubmitPrompt(text) => {
-                if self.input.is_enabled() {
-                    if let Some(parsed) = slash::parse_slash(text) {
-                        self.chat.push_user_message(text.clone());
-                        let (synthesized, modal) = {
-                            let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
-                            let action = slash::dispatch(&parsed, &mut ctx);
-                            (action, ctx.take_modal())
-                        };
-                        if let Some(modal) = modal {
-                            self.modals.push(modal);
-                        }
-                        if let Some(action) = synthesized {
-                            if matches!(action, UserAction::SubmitPrompt(_)) {
-                                // Synthesized prompts skip apply_action_locally — re-entry would
-                                // re-parse the leading `/` and recurse.
-                                self.input.set_enabled(false);
-                                self.status_bar.set_status(Status::Streaming);
-                                self.forward_to_agent(action);
-                            } else {
-                                self.dispatch_user_action(action);
-                            }
-                        }
-                        return false;
-                    }
-                    self.chat.push_user_message(text.clone());
-                    self.input.set_enabled(false);
-                    self.status_bar.set_status(Status::Streaming);
-                    true
-                } else {
-                    if let Some(parsed) = slash::parse_slash(text) {
-                        self.chat.push_user_message(text.clone());
-                        match slash::classify(&parsed) {
-                            SlashKind::ReadOnly | SlashKind::Unknown => {
-                                let modal = {
-                                    let mut ctx =
-                                        SlashContext::new(&mut self.chat, &self.session_info);
-                                    _ = slash::dispatch(&parsed, &mut ctx);
-                                    ctx.take_modal()
-                                };
-                                if let Some(modal) = modal {
-                                    self.modals.push(modal);
-                                }
-                            }
-                            SlashKind::Mutating => {
-                                self.chat.push_system_message(format!(
-                                    "/{} runs only when idle. Try again after the turn finishes.",
-                                    parsed.name,
-                                ));
-                            }
-                        }
-                        return false;
-                    }
-                    self.pending_prompts.push_back(text.clone());
-                    self.sync_input_queue_hint();
-                    // Forward the queued prompt to the agent so it can drain at turn end —
-                    // unless we're already cancelling, in which case the agent will reset and
-                    // the queue drains locally on the next idle transition.
-                    !matches!(self.status_bar.status(), Status::Cancelling)
-                }
-            }
+            UserAction::SubmitPrompt(text) => self.handle_submit_prompt(text),
             UserAction::Cancel => {
                 self.status_bar.set_status(Status::Cancelling);
                 true
@@ -383,6 +323,66 @@ impl App {
                 false
             }
         }
+    }
+
+    fn handle_submit_prompt(&mut self, text: &str) -> bool {
+        if self.input.is_enabled() {
+            if let Some(parsed) = slash::parse_slash(text) {
+                self.chat.push_user_message(text.to_owned());
+                let (synthesized, modal) = {
+                    let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                    let action = slash::dispatch(&parsed, &mut ctx);
+                    (action, ctx.take_modal())
+                };
+                if let Some(modal) = modal {
+                    self.modals.push(modal);
+                }
+                if let Some(action) = synthesized {
+                    if matches!(action, UserAction::SubmitPrompt(_)) {
+                        // Synthesized prompts skip apply_action_locally — re-entry would
+                        // re-parse the leading `/` and recurse.
+                        self.input.set_enabled(false);
+                        self.status_bar.set_status(Status::Streaming);
+                        self.forward_to_agent(action);
+                    } else {
+                        self.dispatch_user_action(action);
+                    }
+                }
+                return false;
+            }
+            self.chat.push_user_message(text.to_owned());
+            self.input.set_enabled(false);
+            self.status_bar.set_status(Status::Streaming);
+            return true;
+        }
+        if let Some(parsed) = slash::parse_slash(text) {
+            self.chat.push_user_message(text.to_owned());
+            match slash::classify(&parsed) {
+                SlashKind::ReadOnly | SlashKind::Unknown => {
+                    let modal = {
+                        let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                        _ = slash::dispatch(&parsed, &mut ctx);
+                        ctx.take_modal()
+                    };
+                    if let Some(modal) = modal {
+                        self.modals.push(modal);
+                    }
+                }
+                SlashKind::Mutating => {
+                    self.chat.push_system_message(format!(
+                        "/{} runs only when idle. Try again after the turn finishes.",
+                        parsed.name,
+                    ));
+                }
+            }
+            return false;
+        }
+        self.pending_prompts.push_back(text.to_owned());
+        self.sync_input_queue_hint();
+        // Forward the queued prompt to the agent so it can drain at turn end —
+        // unless we're already cancelling, in which case the agent will reset and
+        // the queue drains locally on the next idle transition.
+        !matches!(self.status_bar.status(), Status::Cancelling)
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
