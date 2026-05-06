@@ -63,8 +63,6 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 
 ## Per-Modal Notes
 
-One bullet per modal — non-obvious behavior only. Source links point at the concrete impls.
-
 - **Combined `/model + /effort` picker** — [`ModelEffortPicker`](../../../crates/oxide-code/src/slash/picker.rs) wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Effort row hides on no-tier models; Left / Right cycles only through tiers the highlighted model supports, recomputed per cursor move so the display never claims a tier the next request would clamp. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes — only changed axes populated; Enter on a no-op cancels.
 - **`/effort` slider** — [`EffortSlider`](../../../crates/oxide-code/src/slash/effort_slider.rs) is a horizontal Speed ↔ Intelligence visual. Lists only tiers the active model accepts; seeds the cursor at the resolved active effort. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red — color encodes identity, BOLD encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
 - **`/status` overview** — [`StatusModal`](../../../crates/oxide-code/src/slash/status_modal.rs) renders a kv-table of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking). Single panel today; will grow a tab bar when `/usage` and `/stats` land.

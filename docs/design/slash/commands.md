@@ -30,8 +30,6 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 
 ## Per-Command Notes
 
-One bullet per command — non-obvious mechanics or tradeoffs only. Surface details (aliases, args, output) belong in [the user guide](../../guide/slash-commands.md).
-
 - **`/clear`** — Send-first ordering: forward `UserAction::Clear` first, drop chat history only on success. `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
 - **`/init`** — Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 - **`/model`** — Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring; `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
