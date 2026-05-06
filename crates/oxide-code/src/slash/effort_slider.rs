@@ -28,7 +28,7 @@ const TIER_GAP: usize = 3;
 const TITLE: &str = "Select effort";
 const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to cancel";
 
-/// Title + blank + speed/intel + track + tier labels + blank + footer.
+/// Title + blank + speed / intel + track + tier labels + blank + footer.
 const BODY_HEIGHT: u16 = 7;
 
 /// Per-tier color (Low blue → Max red). Magenta — not yellow — at Xhigh keeps High and Xhigh
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn new_lists_only_supported_tiers_low_to_high() {
-        // Sonnet 4.6 supports low/medium/high but not xhigh/max — the slider must drop the
+        // Sonnet 4.6 supports low / medium / high but not xhigh / max — the slider must drop the
         // unsupported tiers entirely so the cursor never lands on a value the API would reject.
         let s = slider_for("claude-sonnet-4-6", Some(Effort::High));
         assert_eq!(s.supported, vec![Effort::Low, Effort::Medium, Effort::High]);
@@ -354,7 +354,7 @@ mod tests {
                 .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
                 .expect("render must not panic");
             let buf = terminal.backend().buffer().clone();
-            // Row 4 = title + blank + speed/intel + track.
+            // Row 4 = title + blank + speed / intel + track.
             (0..width)
                 .find(|x| {
                     let cell = &buf[(*x, 4)];

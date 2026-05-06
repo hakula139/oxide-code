@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn right_arrow_on_no_tier_model_is_a_noop() {
-        // Haiku 4.5 has no effort tier — Left/Right must not mutate the (None) effort state.
+        // Haiku 4.5 has no effort tier — Left / Right must not mutate the (None) effort state.
         let mut p = picker();
         p.handle_key(&key(KeyCode::Char('5'))); // jump to Haiku
         assert!(p.effort.is_none());
