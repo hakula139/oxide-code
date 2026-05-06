@@ -312,7 +312,10 @@ impl InputArea {
             return;
         };
         self.set_text(&replacement);
-        self.popup.set_state(None);
+        // Reclassify against the new buffer: name-mode Tab on a command with a curated arg
+        // roster (`/model`, `/effort`, `/theme`) transitions straight into arg mode; arg-mode
+        // Tab leaves a trailing `/cmd value ` that no roster matches, so the popup hides.
+        self.refresh_popup();
     }
 
     /// Mode-aware Tab insertion. Name mode replaces the buffer with `/{name} `; arg mode keeps
@@ -1010,15 +1013,30 @@ mod tests {
 
     #[test]
     fn handle_event_popup_tab_in_name_mode_inserts_slash_name_and_space() {
-        // Lone `/` shows the full roster; first row is `clear` (alphabetical). Tab inserts
-        // `/clear ` and dismisses — pins the trailing-space contract that lets the user start
-        // typing args immediately.
+        // First alphabetical row is `clear` (no arg roster); Tab writes `/clear ` and the popup
+        // hides on reclassification — arg mode with an empty roster yields no rows.
         let mut input = input_with_popup();
         let selected = selected_value(&input);
         let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
         assert!(action.is_none(), "Tab is consumed, no UserAction");
         assert_eq!(input.textarea.lines(), vec![format!("/{selected} ")]);
-        assert!(!input.popup_visible(), "popup dismisses after Tab");
+        assert!(!input.popup_visible(), "no arg roster → popup hides");
+    }
+
+    #[test]
+    fn handle_event_popup_tab_in_name_mode_chains_into_arg_mode_for_curated_commands() {
+        // Tab from `/mo` lands on `/model `; the arg-mode popup must reopen with the curated
+        // roster so the user keeps moving without re-opening the popup.
+        let mut input = test_input();
+        type_text(&mut input, "/mo");
+        input.refresh_popup();
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["/model "]);
+        assert!(
+            input.popup_visible(),
+            "/model has a curated arg roster — popup chains into arg mode",
+        );
     }
 
     #[test]
