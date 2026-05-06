@@ -352,6 +352,40 @@ mod tests {
     }
 
     #[test]
+    fn up_and_k_emit_preview_for_prev_row_without_popping() {
+        // Up arrow and `k` (vi binding) share an arm; both must cycle to the previous row and
+        // emit a preview. From the first row they wrap to the last via `select_prev`.
+        for code in [KeyCode::Up, KeyCode::Char('k')] {
+            let mut p = picker_with_active("mocha");
+            let outcome = p.handle_key(&key(code));
+            match outcome {
+                ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+                    assert_eq!(
+                        name,
+                        LISTED_THEMES.last().unwrap().0,
+                        "{code:?} from first row wraps to last",
+                    );
+                }
+                other => panic!("expected Preview for {code:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn j_alias_for_down_emits_preview() {
+        // `j` shares the Down arm; pin the alias so a regression in the match doesn't silently
+        // drop it.
+        let mut p = picker_with_active("mocha");
+        let outcome = p.handle_key(&key(KeyCode::Char('j')));
+        match outcome {
+            ModalKey::Preview(ModalAction::User(UserAction::PreviewTheme { name })) => {
+                assert_eq!(name, "macchiato");
+            }
+            other => panic!("expected Preview, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn numeric_jump_emits_preview_for_target_row() {
         let mut p = picker_with_active("mocha");
         let outcome = p.handle_key(&key(KeyCode::Char('4')));

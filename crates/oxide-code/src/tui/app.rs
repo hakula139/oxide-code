@@ -2401,6 +2401,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
+        // The drift warn arm fires when a PreviewTheme name doesn't resolve. The picker roster
+        // and the loader's lookup table must agree, so this is a developer-facing log only;
+        // user-visible state stays put (no snapshot, no theme swap, no chat block).
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_text = app.theme.text;
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "no snapshot when load_builtin returns None",
+        );
+        assert_eq!(app.theme.text, original_text, "theme stays put on drift");
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "preview must never push a chat block",
+        );
+    }
+
     #[tokio::test]
     async fn swap_theme_with_unknown_name_pushes_error_and_keeps_active_theme() {
         // Pins the defensive `else` arm — load_builtin returning None must not silently swallow
