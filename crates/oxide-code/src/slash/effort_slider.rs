@@ -25,12 +25,18 @@ const SLOT_HALF: usize = SLOT_WIDTH / 2;
 const SPEED_LABEL: &str = "Speed";
 const INTEL_LABEL: &str = "Intelligence";
 const TRACK_GLYPH: char = '─';
-const MARKER_GLYPH: char = '▲';
+
+/// Inline radio indicators in the tier-label row — anchoring the glyph to its label dodges the
+/// half-column drift a floating marker would have on even-length labels.
+const RADIO_ACTIVE: char = '●';
+const RADIO_INACTIVE: char = '○';
+const RADIO_PREFIX_WIDTH: usize = 2;
 
 const TITLE: &str = "Select effort";
 const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to cancel";
 
-const BODY_HEIGHT: u16 = 8;
+/// Title + blank + speed/intel + track + tier labels + blank + footer.
+const BODY_HEIGHT: u16 = 7;
 
 // ── EffortSlider ──
 
@@ -134,40 +140,29 @@ impl EffortSlider {
         Line::from(Span::styled(buf, theme.dim()))
     }
 
-    fn line_marker(&self, theme: &Theme) -> Line<'static> {
-        let total = self.slider_width();
-        let center = Self::tier_center(self.selected);
-        let mut spans = Vec::with_capacity(3);
-        spans.push(Span::raw(" ".repeat(center)));
-        spans.push(Span::styled(
-            MARKER_GLYPH.to_string(),
-            theme.accent().add_modifier(Modifier::BOLD),
-        ));
-        let used = center + 1;
-        if total > used {
-            spans.push(Span::raw(" ".repeat(total - used)));
-        }
-        Line::from(spans)
-    }
-
     fn line_tier_labels(&self, theme: &Theme) -> Line<'static> {
         let total = self.slider_width();
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.supported.len() * 2 + 1);
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.supported.len() * 3 + 1);
         let mut col = 0usize;
         for (idx, level) in self.supported.iter().enumerate() {
             let label = format!("{level}");
             let label_len = label.chars().count();
             let center = Self::tier_center(idx);
+            // Center the label at tier_center (keeping label-vs-track alignment unchanged); the
+            // radio glyph hangs `RADIO_PREFIX_WIDTH` cols to the left of it.
             let label_start = center.saturating_sub(label_len / 2);
-            if label_start > col {
-                spans.push(Span::raw(" ".repeat(label_start - col)));
-                col = label_start;
+            let prefix_start = label_start.saturating_sub(RADIO_PREFIX_WIDTH);
+            if prefix_start > col {
+                spans.push(Span::raw(" ".repeat(prefix_start - col)));
+                col = prefix_start;
             }
-            let style = if idx == self.selected {
-                theme.accent().add_modifier(Modifier::BOLD)
+            let (glyph, style) = if idx == self.selected {
+                (RADIO_ACTIVE, theme.accent().add_modifier(Modifier::BOLD))
             } else {
-                theme.dim()
+                (RADIO_INACTIVE, theme.dim())
             };
+            spans.push(Span::styled(format!("{glyph} "), style));
+            col += RADIO_PREFIX_WIDTH;
             spans.push(Span::styled(label, style));
             col += label_len;
         }
@@ -192,7 +187,6 @@ impl Modal for EffortSlider {
             Line::default(),
             self.line_speed_intel(theme),
             self.line_track(theme),
-            self.line_marker(theme),
             self.line_tier_labels(theme),
             Line::default(),
             Line::from(Span::styled(FOOTER, theme.dim())),
@@ -384,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn render_marker_column_tracks_selected_tier() {
-        // The ▲ glyph must move horizontally as the cursor walks the ladder. Render two
-        // adjacent positions and assert the marker column actually shifts.
+    fn render_active_glyph_column_tracks_selected_tier() {
+        // The ● glyph must move horizontally as the cursor walks the ladder. Render two
+        // adjacent positions and assert the active-radio column actually shifts.
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -395,24 +389,24 @@ mod tests {
         let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));
         let height = s.height(width);
 
-        let render_marker_x = |s: &EffortSlider| -> u16 {
+        let render_active_x = |s: &EffortSlider| -> u16 {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| s.render(frame, Rect::new(0, 0, width, height), &theme))
                 .expect("render must not panic");
             let buf = terminal.backend().buffer().clone();
-            // Marker is on row 4 (title+blank+speed/intel+track = 4 rows above).
+            // Tier-label row is row 4 (title+blank+speed/intel+track = 4 rows above).
             (0..width)
-                .find(|x| buf[(*x, 4)].symbol() == MARKER_GLYPH.to_string())
-                .expect("marker glyph must appear on the marker row")
+                .find(|x| buf[(*x, 4)].symbol() == RADIO_ACTIVE.to_string())
+                .expect("active radio glyph must appear on the tier-label row")
         };
 
-        let x_low = render_marker_x(&s);
+        let x_low = render_active_x(&s);
         s.handle_key(&key(KeyCode::Right));
-        let x_medium = render_marker_x(&s);
+        let x_medium = render_active_x(&s);
         assert!(
             x_medium > x_low,
-            "Right must shift marker to the right (low={x_low}, medium={x_medium})",
+            "Right must shift active glyph to the right (low={x_low}, medium={x_medium})",
         );
     }
 }
