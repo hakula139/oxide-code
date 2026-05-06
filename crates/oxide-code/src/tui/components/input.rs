@@ -13,9 +13,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
-use self::popup::SlashPopup;
+use self::popup::{PopupMode, SlashPopup};
 use crate::agent::event::UserAction;
-use crate::slash::popup_query;
+use crate::slash::{PopupState, arg_placeholder_for, popup_state};
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
@@ -236,11 +236,23 @@ impl InputArea {
         };
         self.scroll_top.set(top);
 
-        let cursor_x = textarea_area
-            .x
-            .saturating_add(to_u16(sc.col))
-            .min(textarea_area.right().saturating_sub(1));
+        let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
+        let cursor_x = raw_cursor_x.min(textarea_area.right().saturating_sub(1));
         let cursor_y = textarea_area.y + cursor_row - top;
+
+        if let Some(token) = self.ghost_text() {
+            // Paint past the cursor, clipped to the textarea's right edge so wrapping mid-token
+            // doesn't bleed into the next row.
+            let width = textarea_area.right().saturating_sub(raw_cursor_x);
+            if width > 0 {
+                let area = Rect::new(raw_cursor_x, cursor_y, width, 1);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(token, self.theme.dim()))),
+                    area,
+                );
+            }
+        }
+
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -280,7 +292,7 @@ impl InputArea {
                 PopupKey::Consumed
             }
             KeyCode::Esc => {
-                self.popup.set_query(None);
+                self.popup.set_state(None);
                 PopupKey::Consumed
             }
             KeyCode::Tab if modifiers.is_empty() => {
@@ -296,31 +308,62 @@ impl InputArea {
     }
 
     fn popup_complete_to_buffer(&mut self) {
-        let Some(name) = self.popup.selected().map(|m| m.name) else {
+        let Some(replacement) = self.popup_completion_text() else {
             return;
         };
-        self.set_text(&format!("/{name} "));
-        self.popup.set_query(None);
+        self.set_text(&replacement);
+        self.popup.set_state(None);
+    }
+
+    /// Mode-aware Tab insertion. Name mode replaces the buffer with `/{name} `; arg mode keeps
+    /// the typed `/cmd ` and substitutes the prefix with the picked value plus a trailing space.
+    fn popup_completion_text(&self) -> Option<String> {
+        let row = self.popup.selected()?;
+        Some(match self.popup.mode()? {
+            PopupMode::Name => format!("/{} ", row.value),
+            PopupMode::Arg { cmd } => format!("/{cmd} {} ", row.value),
+        })
     }
 
     fn popup_submit_selected(&mut self) -> Option<UserAction> {
-        let name = self.popup.selected()?.name;
+        let row = self.popup.selected()?;
+        let submission = match self.popup.mode()? {
+            PopupMode::Name => format!("/{}", row.value),
+            PopupMode::Arg { cmd } => format!("/{cmd} {}", row.value),
+        };
         self.textarea.select_all();
         self.textarea.cut();
         self.scroll_top.set(0);
-        self.popup.set_query(None);
-        Some(UserAction::SubmitPrompt(format!("/{name}")))
+        self.popup.set_state(None);
+        Some(UserAction::SubmitPrompt(submission))
     }
 
     fn refresh_popup(&mut self) {
-        // Popup wiring: only the single-line case can be a slash command, and `popup_query`
-        // returns `None` for non-`/`-prefixed text — so a multi-line buffer or a typed-over slash
-        // both close the popup.
-        let query = match self.textarea.lines() {
-            [single] => popup_query(single),
+        // Only the single-line case can be a slash command; multi-line buffers close the popup.
+        let state = match self.textarea.lines() {
+            [single] => popup_state(single),
             _ => None,
         };
-        self.popup.set_query(query);
+        self.popup.set_state(state.as_ref());
+    }
+
+    /// Dim hint token (`[id]`, `[level]`, `[name]`) painted at the cursor in arg mode with an
+    /// empty prefix. Suppressed when the popup is visible — the popup's curated roster is a
+    /// richer hint. Fires when the popup yields (command publishes `usage()` without a
+    /// `complete_arg` impl).
+    fn ghost_text(&self) -> Option<String> {
+        if self.popup.is_visible() {
+            return None;
+        }
+        let [single] = self.textarea.lines() else {
+            return None;
+        };
+        let state = popup_state(single)?;
+        let usage = match &state {
+            PopupState::Arg { name, .. } => arg_placeholder_for(name),
+            PopupState::Name(_) => None,
+        };
+        ghost_text_from_state(&state, usage)
     }
 
     fn is_scroll_key(event: &Event) -> bool {
@@ -384,6 +427,35 @@ impl InputArea {
 }
 
 // ── Free Functions ──
+
+/// Pure decision: ghost-text fires only in `Arg` mode with an empty prefix and a `usage()` to
+/// surface. The popup-visibility gate lives at the call site so this helper stays trivially
+/// testable without a `SlashPopup` instance.
+fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
+    let PopupState::Arg { prefix, .. } = state else {
+        return None;
+    };
+    if !prefix.is_empty() {
+        return None;
+    }
+    Some(normalize_placeholder(usage?))
+}
+
+/// Normalize a `usage()` syntax fragment to a single bracketed token. Strips one optional layer
+/// each of `[...]` and `<...>` so `[<id>]`, `<id>`, and `[id]` all render as `[id]`.
+fn normalize_placeholder(usage: &str) -> String {
+    let inner = usage.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(inner)
+        .trim();
+    let inner = inner
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(inner);
+    format!("[{inner}]")
+}
 
 /// Lossy `usize → u16` for cursor / column positions, bounded by terminal dimensions.
 #[expect(
@@ -896,13 +968,17 @@ mod tests {
         input
     }
 
+    fn selected_value(input: &InputArea) -> String {
+        input.popup.selected().unwrap().value.clone().into_owned()
+    }
+
     #[test]
     fn handle_event_popup_down_advances_selection() {
         let mut input = input_with_popup();
-        let initial = input.popup.selected().map(|m| m.name).unwrap();
+        let initial = selected_value(&input);
         let action = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
         assert!(action.is_none(), "Down is consumed silently");
-        let after = input.popup.selected().map(|m| m.name).unwrap();
+        let after = selected_value(&input);
         assert_ne!(initial, after, "Down moves to a different command");
     }
 
@@ -910,9 +986,9 @@ mod tests {
     fn handle_event_popup_up_reverses_selection() {
         let mut input = input_with_popup();
         input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
-        let after_down = input.popup.selected().map(|m| m.name).unwrap();
+        let after_down = selected_value(&input);
         input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
-        let after_up = input.popup.selected().map(|m| m.name).unwrap();
+        let after_up = selected_value(&input);
         assert_ne!(after_down, after_up, "Up reverses Down");
     }
 
@@ -935,6 +1011,89 @@ mod tests {
         let action = input.handle_event(&Event::Resize(80, 24));
         assert!(action.is_none());
         assert!(input.popup_visible());
+    }
+
+    // ── ghost_text ──
+
+    #[test]
+    fn ghost_text_suppresses_when_popup_visible() {
+        // `/model ` shows the curated roster — popup wins, no ghost-text. Pins the gate.
+        let mut input = test_input();
+        type_text(&mut input, "/model ");
+        input.refresh_popup();
+        assert!(input.popup_visible());
+        assert_eq!(input.ghost_text(), None);
+    }
+
+    #[test]
+    fn ghost_text_suppresses_in_name_mode() {
+        // Typing the command name itself is `Name`, never `Arg` — no hint applies.
+        let mut input = test_input();
+        type_text(&mut input, "/mod");
+        input.refresh_popup();
+        assert_eq!(input.ghost_text(), None);
+    }
+
+    // ── ghost_text_from_state ──
+
+    #[test]
+    fn ghost_text_from_state_arg_with_empty_prefix_and_usage_renders_token() {
+        let state = PopupState::Arg {
+            name: "model",
+            prefix: "",
+        };
+        assert_eq!(
+            ghost_text_from_state(&state, Some("[<id>]")),
+            Some("[id]".to_owned()),
+        );
+    }
+
+    #[test]
+    fn ghost_text_from_state_non_empty_prefix_returns_none() {
+        // Once the user starts typing the arg, the hint disappears so it doesn't trail their text.
+        let state = PopupState::Arg {
+            name: "model",
+            prefix: "claude-",
+        };
+        assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
+    }
+
+    #[test]
+    fn ghost_text_from_state_arg_without_usage_returns_none() {
+        // No usage to surface → nothing to hint.
+        let state = PopupState::Arg {
+            name: "init",
+            prefix: "",
+        };
+        assert_eq!(ghost_text_from_state(&state, None), None);
+    }
+
+    #[test]
+    fn ghost_text_from_state_name_mode_returns_none_even_with_usage() {
+        // Defensive: usage is read off the parsed name only in Arg mode, but pin the helper too.
+        let state = PopupState::Name("mo");
+        assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
+    }
+
+    // ── normalize_placeholder ──
+
+    #[test]
+    fn normalize_placeholder_strips_outer_brackets_and_inner_angles() {
+        // `[<id>]` is the canonical form `usage()` returns today.
+        assert_eq!(normalize_placeholder("[<id>]"), "[id]");
+    }
+
+    #[test]
+    fn normalize_placeholder_handles_missing_layers() {
+        // Forward-compatible with terser usage strings — strip what's there.
+        assert_eq!(normalize_placeholder("<level>"), "[level]");
+        assert_eq!(normalize_placeholder("[name]"), "[name]");
+        assert_eq!(normalize_placeholder("topic"), "[topic]");
+    }
+
+    #[test]
+    fn normalize_placeholder_trims_whitespace_inside_brackets() {
+        assert_eq!(normalize_placeholder("[ <id> ]"), "[id]");
     }
 
     // ── render_popup ──

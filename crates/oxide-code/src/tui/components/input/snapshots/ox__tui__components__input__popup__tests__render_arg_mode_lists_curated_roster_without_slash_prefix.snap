@@ -1,0 +1,10 @@
+---
+source: crates/oxide-code/src/tui/components/input/popup.rs
+assertion_line: 423
+expression: "render_to_backend(&popup, 60)"
+---
+"low     Fastest, shallow reasoning                          "
+"medium  Balanced                                            "
+"high    Deep reasoning                                      "
+"xhigh   Opus 4.7 ladder ceiling                             "
+"max     Opus-only maximum                                   "

@@ -1,6 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
-assertion_line: 296
+assertion_line: 409
 expression: "render_to_backend(&popup, 60)"
 ---
 "/clear   Reset the conversation context                     "

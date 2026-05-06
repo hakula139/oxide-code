@@ -28,14 +28,36 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')
 }
 
-/// In-progress query (leading `/` stripped) when `buffer` is a slash command being typed.
-/// `None` for plain prompts, `//` escape, or once whitespace appears (args started).
-pub(crate) fn popup_query(buffer: &str) -> Option<&str> {
+/// In-progress popup context. `Name` while typing the command name (no whitespace yet);
+/// `Arg` once the user has typed a space after the name. `None` for plain prompts and `//`
+/// escape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PopupState<'a> {
+    Name(&'a str),
+    Arg { name: &'a str, prefix: &'a str },
+}
+
+/// Classifies the cursor's position within a single-line input. Empty `prefix` in `Arg` means
+/// the user typed `/cmd ` and is poised to start the argument — distinct from `Arg { prefix:
+/// non-empty }` (already typing) and `Name` (still inside the name).
+pub(crate) fn popup_state(buffer: &str) -> Option<PopupState<'_>> {
     let rest = buffer.trim_start().strip_prefix('/')?;
-    if rest.starts_with('/') || !rest.chars().all(is_name_char) {
+    if rest.starts_with('/') {
         return None;
     }
-    Some(rest)
+    let Some((name, after)) = rest.split_once(char::is_whitespace) else {
+        return rest
+            .chars()
+            .all(is_name_char)
+            .then_some(PopupState::Name(rest));
+    };
+    if name.is_empty() || !name.chars().all(is_name_char) {
+        return None;
+    }
+    Some(PopupState::Arg {
+        name,
+        prefix: after.trim_start(),
+    })
 }
 
 #[cfg(test)]
@@ -108,47 +130,73 @@ mod tests {
         assert!(parse_slash("/foo,bar").is_none());
     }
 
-    // ── popup_query ──
+    // ── popup_state ──
 
-    #[test]
-    fn popup_query_bare_slash_is_empty_query() {
-        assert_eq!(popup_query("/"), Some(""));
+    fn name(s: &str) -> PopupState<'_> {
+        PopupState::Name(s)
+    }
+
+    fn arg<'a>(name: &'a str, prefix: &'a str) -> PopupState<'a> {
+        PopupState::Arg { name, prefix }
     }
 
     #[test]
-    fn popup_query_partial_name_produces_typed_chars() {
-        assert_eq!(popup_query("/cl"), Some("cl"));
-        assert_eq!(popup_query("/clear"), Some("clear"));
+    fn popup_state_bare_slash_is_empty_name() {
+        assert_eq!(popup_state("/"), Some(name("")));
     }
 
     #[test]
-    fn popup_query_tolerates_leading_whitespace() {
-        assert_eq!(popup_query("   /he"), Some("he"));
+    fn popup_state_partial_name_carries_typed_chars() {
+        assert_eq!(popup_state("/cl"), Some(name("cl")));
+        assert_eq!(popup_state("/clear"), Some(name("clear")));
     }
 
     #[test]
-    fn popup_query_hides_once_whitespace_appears() {
-        assert!(popup_query("/clear ").is_none());
-        assert!(popup_query("/clear arg").is_none());
-        assert!(popup_query("/cl ear").is_none());
+    fn popup_state_tolerates_leading_whitespace_before_slash() {
+        assert_eq!(popup_state("   /he"), Some(name("he")));
     }
 
     #[test]
-    fn popup_query_hides_for_double_slash_escape() {
-        assert!(popup_query("//etc/hosts").is_none());
-        assert!(popup_query("//").is_none());
+    fn popup_state_trailing_space_after_name_switches_to_empty_arg() {
+        // The empty-prefix case is the trigger for the placeholder ghost-text — we have to be
+        // able to distinguish it from `Name`, otherwise the popup never opens for arg mode.
+        assert_eq!(popup_state("/clear "), Some(arg("clear", "")));
     }
 
     #[test]
-    fn popup_query_hides_for_plain_prompts() {
-        assert!(popup_query("hello").is_none());
-        assert!(popup_query("explain /etc/hosts").is_none());
-        assert!(popup_query("").is_none());
+    fn popup_state_typed_arg_carries_prefix_trimmed_of_leading_whitespace() {
+        assert_eq!(popup_state("/model claude-"), Some(arg("model", "claude-")));
+        assert_eq!(popup_state("/model    opus"), Some(arg("model", "opus")));
     }
 
     #[test]
-    fn popup_query_hides_when_name_chars_violated() {
-        assert!(popup_query("/foo🦀").is_none());
-        assert!(popup_query("/foo!").is_none());
+    fn popup_state_inner_whitespace_in_args_is_kept_for_free_form_commands() {
+        // /init takes a free-form sentence — the popup is hidden via empty `complete_arg`, but
+        // the parser still classifies it as Arg with the full remainder as prefix.
+        assert_eq!(
+            popup_state("/init please write CLAUDE.md"),
+            Some(arg("init", "please write CLAUDE.md")),
+        );
+    }
+
+    #[test]
+    fn popup_state_double_slash_escape_is_not_a_command() {
+        assert!(popup_state("//etc/hosts").is_none());
+        assert!(popup_state("//").is_none());
+    }
+
+    #[test]
+    fn popup_state_plain_prompts_are_not_a_command() {
+        assert!(popup_state("hello").is_none());
+        assert!(popup_state("explain /etc/hosts").is_none());
+        assert!(popup_state("").is_none());
+    }
+
+    #[test]
+    fn popup_state_invalid_name_chars_reject_the_buffer() {
+        assert!(popup_state("/foo🦀").is_none());
+        assert!(popup_state("/foo!").is_none());
+        // Disallowed-char names also fail in arg form so the popup doesn't show stale completions.
+        assert!(popup_state("/foo! arg").is_none());
     }
 }

@@ -27,12 +27,26 @@ mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
 pub(crate) use matcher::MatchedCommand;
-pub(crate) use parser::{Parsed, parse_slash, popup_query};
-pub(crate) use registry::SlashKind;
+pub(crate) use parser::{Parsed, PopupState, parse_slash, popup_state};
+pub(crate) use registry::{ArgCompletion, SlashKind};
 
 /// Filter the built-in registry against a popup query (leading `/` stripped).
 pub(crate) fn filter_built_ins(query: &str) -> Vec<MatchedCommand> {
     matcher::filter_and_rank(query, registry::BUILT_INS)
+}
+
+/// Typed-arg completions for `cmd_name`, prefix-filtered. Returns empty for unknown commands
+/// or commands without a curated roster.
+pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletion> {
+    registry::lookup_in(registry::BUILT_INS, cmd_name)
+        .map(|cmd| cmd.complete_arg(prefix))
+        .unwrap_or_default()
+}
+
+/// Static placeholder hint for `cmd_name` (e.g., `[<id>]`). Returned by [`SlashCommand::usage`];
+/// rendered as dim ghost-text after `/cmd ` when there are no arg completions to show.
+pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
+    registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
 }
 
 /// Resolves and runs `parsed` against the built-in registry.
