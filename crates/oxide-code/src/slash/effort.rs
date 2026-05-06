@@ -1,9 +1,12 @@
 //! `/effort` — open the slider, or swap with `/effort <level>`. Bare form opens the
 //! Speed ↔ Intelligence slider (see [`super::effort_slider`]); typed arg shortcuts the picker.
 
+use std::borrow::Cow;
+
 use super::context::SlashContext;
 use super::effort_slider::EffortSlider;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::matcher::rank_by_prefix;
+use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
 use crate::model::{capabilities_for, marketing_or_id};
@@ -29,6 +32,16 @@ impl SlashCommand for EffortCmd {
 
     fn usage(&self) -> Option<&'static str> {
         Some("[<level>]")
+    }
+
+    fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
+        rank_by_prefix(&Effort::ALL, prefix, |level| level.as_str())
+            .into_iter()
+            .map(|level| ArgCompletion {
+                value: Cow::Borrowed(level.as_str()),
+                description: Cow::Borrowed(level.description()),
+            })
+            .collect()
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -91,6 +104,41 @@ mod tests {
         assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
         assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
+    }
+
+    // ── EffortCmd::complete_arg ──
+
+    fn arg_values(prefix: &str) -> Vec<String> {
+        EffortCmd
+            .complete_arg(prefix)
+            .into_iter()
+            .map(|c| c.value.into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn complete_arg_empty_prefix_lists_full_ladder_in_intensity_order() {
+        assert_eq!(
+            arg_values(""),
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
+    fn complete_arg_prefix_match_pulls_xhigh_above_max_substring() {
+        // `x` prefixes `xhigh`; `max` ends in `x` (substring). Prefix tier wins.
+        assert_eq!(arg_values("x"), vec!["xhigh", "max"]);
+    }
+
+    #[test]
+    fn complete_arg_substring_match_lands_after_prefix_tier() {
+        // `high` is a substring of `xhigh` and a prefix of `high` — both tiers fire.
+        assert_eq!(arg_values("high"), vec!["high", "xhigh"]);
+    }
+
+    #[test]
+    fn complete_arg_is_case_insensitive() {
+        assert_eq!(arg_values("MAX"), vec!["max"]);
     }
 
     // ── EffortCmd::execute ──

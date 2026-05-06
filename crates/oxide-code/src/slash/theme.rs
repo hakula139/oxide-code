@@ -1,6 +1,8 @@
 //! `/theme` — open the picker, or swap directly with `/theme <name>`. Picker live-previews on
 //! cursor moves and reverts on cancel.
 
+use std::borrow::Cow;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -8,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::matcher::rank_by_prefix;
+use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::tui::modal::list_picker::{ListPicker, PickerItem};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -189,6 +192,16 @@ impl SlashCommand for ThemeCmd {
 
     fn usage(&self) -> Option<&'static str> {
         Some("[<name>]")
+    }
+
+    fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
+        rank_by_prefix(LISTED_THEMES, prefix, |(name, _)| *name)
+            .into_iter()
+            .map(|(name, description)| ArgCompletion {
+                value: Cow::Borrowed(*name),
+                description: Cow::Borrowed(*description),
+            })
+            .collect()
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -435,6 +448,43 @@ mod tests {
         assert_eq!(ThemeCmd.classify(""), SlashKind::ReadOnly);
         assert_eq!(ThemeCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
+    }
+
+    // ── ThemeCmd::complete_arg ──
+
+    fn arg_values(prefix: &str) -> Vec<String> {
+        ThemeCmd
+            .complete_arg(prefix)
+            .into_iter()
+            .map(|c| c.value.into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn complete_arg_empty_prefix_lists_full_roster_in_curated_order() {
+        let expected: Vec<String> = LISTED_THEMES
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(arg_values(""), expected);
+    }
+
+    #[test]
+    fn complete_arg_prefix_filter_narrows_to_matching_themes() {
+        // `m` prefixes mocha, macchiato, material; matters that all three surface and roster
+        // order is preserved.
+        assert_eq!(arg_values("m"), vec!["mocha", "macchiato", "material"]);
+    }
+
+    #[test]
+    fn complete_arg_substring_match_below_prefix_tier() {
+        // `te` is a substring of `latte` and `material`; preserves declared order.
+        assert_eq!(arg_values("te"), vec!["latte", "material"]);
+    }
+
+    #[test]
+    fn complete_arg_is_case_insensitive() {
+        assert_eq!(arg_values("MOCHA"), vec!["mocha"]);
     }
 
     // ── ThemeCmd::execute ──

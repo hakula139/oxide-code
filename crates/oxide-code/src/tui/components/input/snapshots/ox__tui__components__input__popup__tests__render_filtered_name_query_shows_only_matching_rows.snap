@@ -1,6 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
-assertion_line: 325
+assertion_line: 416
 expression: "render_to_backend(&popup, 60)"
 ---
 "/help  List the available slash commands and their usage ..."

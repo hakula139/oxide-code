@@ -70,6 +70,30 @@ fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option
         .find(|alias| pred(&alias.to_ascii_lowercase()))
 }
 
+/// Two-tier prefix-then-substring rank over a curated roster, preserving declared order within
+/// each tier. Empty `query` returns every item in declared order. Lower-cased internally.
+pub(super) fn rank_by_prefix<'a, T>(
+    items: &'a [T],
+    query: &str,
+    key: impl Fn(&T) -> &str,
+) -> Vec<&'a T> {
+    if query.is_empty() {
+        return items.iter().collect();
+    }
+    let q = query.to_ascii_lowercase();
+    let mut prefix_hits: Vec<&'a T> = Vec::new();
+    let mut substring_hits: Vec<&'a T> = Vec::new();
+    for item in items {
+        let label = key(item).to_ascii_lowercase();
+        if label.starts_with(&q) {
+            prefix_hits.push(item);
+        } else if label.contains(&q) {
+            substring_hits.push(item);
+        }
+    }
+    prefix_hits.into_iter().chain(substring_hits).collect()
+}
+
 fn on_name(cmd: &dyn SlashCommand) -> MatchedCommand {
     MatchedCommand {
         name: cmd.name(),
@@ -235,6 +259,41 @@ mod tests {
     #[test]
     fn best_match_is_none_when_neither_name_nor_alias_match() {
         assert!(best_match("zzz", &CLEAR).is_none());
+    }
+
+    // ── rank_by_prefix ──
+
+    fn levels() -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh", "max"]
+    }
+
+    fn ranked(query: &str) -> Vec<&'static str> {
+        let xs = levels();
+        rank_by_prefix(&xs, query, |s| *s)
+            .into_iter()
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn rank_by_prefix_empty_query_yields_full_roster_in_declared_order() {
+        assert_eq!(ranked(""), levels());
+    }
+
+    #[test]
+    fn rank_by_prefix_promotes_prefix_matches_above_substring_within_declared_order() {
+        // `h` prefixes `high`; substring-matches `xhigh`. Prefix wins; declared order otherwise.
+        assert_eq!(ranked("h"), vec!["high", "xhigh"]);
+    }
+
+    #[test]
+    fn rank_by_prefix_is_case_insensitive() {
+        assert_eq!(ranked("HI"), vec!["high", "xhigh"]);
+    }
+
+    #[test]
+    fn rank_by_prefix_unmatched_query_is_empty() {
+        assert!(ranked("zzz").is_empty());
     }
 
     // ── Fake fixture ──

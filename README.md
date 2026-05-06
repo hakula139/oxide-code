@@ -20,7 +20,7 @@ Early development. What works today:
 - Agent loop with extended thinking and tool-use round-trip
 - File and search tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`
 - Turn interruption (Esc / Ctrl+C) plus mid-turn queued follow-up prompts that splice into the same turn between tool calls, with double-press Ctrl+C exit confirmation
-- Slash commands with `/`-triggered autocomplete: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`
+- Slash commands with `/`-triggered autocomplete (name and curated-arg modes): `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`
 - `CLAUDE.md` / `AGENTS.md` instruction-file discovery
 - Session persistence with JSONL conversation logs, listing, and resume
 - Per-session file-change tracking with a Read-before-Edit gate and on-disk drift detection

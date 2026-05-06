@@ -1,10 +1,14 @@
 //! `/model` — open the picker, or swap with `/model <id>`. Resolution: alias → exact / dated-id →
 //! unique suffix → unique substring. `[1m]` rejected on models lacking `context_1m`.
 
+use std::borrow::Cow;
+
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::matcher::rank_by_prefix;
+use super::picker::LISTED_MODELS;
+use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ResolvedModelId, lookup};
+use crate::model::{MODELS, ResolvedModelId, display_name, is_family_base, lookup};
 
 // ── Constants ──
 
@@ -39,6 +43,18 @@ impl SlashCommand for ModelCmd {
 
     fn usage(&self) -> Option<&'static str> {
         Some("[<id>]")
+    }
+
+    fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
+        rank_by_prefix(LISTED_MODELS, prefix, |id| *id)
+            .into_iter()
+            .map(|id| ArgCompletion {
+                value: Cow::Borrowed(*id),
+                // `display_name` is `Cow<'static, str>` for `&'static` ids — the four bare rows
+                // borrow the marketing literal; only `[1m]` rows allocate the suffixed string.
+                description: display_name(id),
+            })
+            .collect()
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -82,26 +98,31 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
-/// Resolution tiers (first hit wins): short alias → known canonical id → dated id (`<id>-YYYYMMDD`)
-/// → unique suffix → unique substring. Multi-match at the substring tier is an error so the user
-/// disambiguates rather than silently landing on whichever model sorts first.
+/// Resolution tiers (first hit wins): short alias → dated id (`<id>-YYYYMMDD`) → known canonical
+/// id → unique suffix → unique substring. Family-bases are filtered at every selectable tier so
+/// users can't land on a deprecated row by typing its id directly — only dated ids of a
+/// family-base remain reachable since the user explicitly opted into a specific snapshot.
 fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target.to_owned());
     }
-    if is_known_model_id(arg) || is_dated_model_id(arg) {
+    if is_dated_model_id(arg) {
         return Ok(arg.to_owned());
     }
-    if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
+    if is_selectable_known_id(arg) {
+        return Ok(arg.to_owned());
+    }
+    let suffix_hits = candidates(|id| id.ends_with(arg) && !is_family_base(id));
+    if let [id] = suffix_hits.as_slice() {
         return Ok((*id).to_owned());
     }
-    let matches = candidates(|id| id.contains(arg));
-    match matches.as_slice() {
+    let visible = candidates(|id| id.contains(arg) && !is_family_base(id));
+    match visible.as_slice() {
         [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
             "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
-            n = matches.len(),
-            list = matches.join(", "),
+            n = visible.len(),
+            list = visible.join(", "),
         )),
         [] => Err(format!(
             "Unknown model: `{arg}`. Run `/model` for selectable shortcuts; \
@@ -110,8 +131,10 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     }
 }
 
-fn is_known_model_id(arg: &str) -> bool {
-    MODELS.iter().any(|m| m.id_substr == arg)
+fn is_selectable_known_id(arg: &str) -> bool {
+    MODELS
+        .iter()
+        .any(|m| m.id_substr == arg && !m.is_family_base)
 }
 
 fn is_dated_model_id(arg: &str) -> bool {
@@ -170,6 +193,64 @@ mod tests {
         assert_eq!(ModelCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
         assert_eq!(ModelCmd.classify("claude-opus-4-7"), SlashKind::Mutating);
+    }
+
+    // ── ModelCmd::complete_arg ──
+
+    fn arg_rows(prefix: &str) -> Vec<(String, String)> {
+        ModelCmd
+            .complete_arg(prefix)
+            .into_iter()
+            .map(|c| (c.value.into_owned(), c.description.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn complete_arg_empty_prefix_lists_curated_roster_in_picker_order() {
+        let expected: Vec<String> = LISTED_MODELS.iter().map(|id| (*id).to_owned()).collect();
+        let got: Vec<String> = arg_rows("").into_iter().map(|(v, _)| v).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn complete_arg_prefix_filter_narrows_to_matching_ids() {
+        let got: Vec<String> = arg_rows("claude-opus")
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
+        assert_eq!(got, vec!["claude-opus-4-7", "claude-opus-4-7[1m]"]);
+    }
+
+    #[test]
+    fn complete_arg_appends_1m_context_suffix_only_for_1m_variants() {
+        // The `[1m]` rows must surface the `(1M context)` marker so users can tell variants
+        // apart; the bare row must NOT carry the suffix (mutation that always-appends would
+        // otherwise survive).
+        let rows = arg_rows("claude-opus-4-7");
+        let one_m = rows
+            .iter()
+            .find(|(v, _)| v == "claude-opus-4-7[1m]")
+            .expect("1M variant present");
+        let plain = rows
+            .iter()
+            .find(|(v, _)| v == "claude-opus-4-7")
+            .expect("plain variant present");
+        assert!(
+            one_m.1.contains("1M context"),
+            "1M description: {:?}",
+            one_m.1,
+        );
+        assert!(
+            !plain.1.contains("1M context"),
+            "plain description must not carry the 1M marker: {:?}",
+            plain.1,
+        );
+    }
+
+    #[test]
+    fn complete_arg_is_case_insensitive() {
+        let got: Vec<String> = arg_rows("HAIKU").into_iter().map(|(v, _)| v).collect();
+        assert_eq!(got, vec!["claude-haiku-4-5"]);
     }
 
     // ── ModelCmd::execute ──
@@ -279,9 +360,30 @@ mod tests {
     }
 
     #[test]
-    fn execute_unique_suffix_resolves_above_substring_ambiguity() {
-        let (_, outcome) = run_execute("opus-4");
-        assert_eq!(outcome, Ok(swap_model("claude-opus-4")));
+    fn execute_family_base_id_no_longer_silently_selects_deprecated() {
+        // `claude-opus-4` / `claude-sonnet-4` are kept in MODELS only so dated ids resolve
+        // their capabilities. Direct typing must NOT land on the deprecated base — opus-4 has
+        // four current descendants so it errors with ambiguity, sonnet-4 has two.
+        for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
+            let (_, outcome) = run_execute(arg);
+            let msg = outcome.expect_err(&format!("`{arg}` must error"));
+            assert!(
+                msg.contains("matches"),
+                "ambiguity error for `{arg}`: {msg}"
+            );
+            assert!(
+                !msg.contains("claude-opus-4,") && !msg.contains("claude-sonnet-4,"),
+                "deprecated family-base must not appear in candidate list: {msg}",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_family_base_with_unique_current_descendant_promotes_to_it() {
+        // `claude-haiku-4` substrings only `claude-haiku-4-5` (after family-base filter), so the
+        // substring tier resolves uniquely instead of erroring.
+        let (_, outcome) = run_execute("claude-haiku-4");
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
 
     #[test]
@@ -296,6 +398,31 @@ mod tests {
             assert!(msg.contains(needle), "candidate `{needle}` listed: {msg}");
         }
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
+    }
+
+    #[test]
+    fn execute_ambiguous_listing_omits_family_base_rows() {
+        // `claude-opus` substring-matches every Opus row, including the deprecated
+        // `claude-opus-4` base. Listing the base would invite a user to type a superseded id.
+        let (_, outcome) = run_execute("claude-opus");
+        let msg = outcome.expect_err("ambiguous arg must error");
+        for current in ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-1"] {
+            assert!(
+                msg.contains(current),
+                "current row `{current}` listed: {msg}"
+            );
+        }
+        // Bound the search to comma-delimited tokens so `claude-opus-4` doesn't false-match
+        // on the longer `claude-opus-4-7`.
+        let listed: Vec<&str> = msg
+            .split([':', ','])
+            .map(str::trim)
+            .filter(|s| s.starts_with("claude-"))
+            .collect();
+        assert!(
+            !listed.contains(&"claude-opus-4"),
+            "family base must not appear in listing: {listed:?}",
+        );
     }
 
     #[test]
@@ -323,8 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_arg_round_trips_every_models_row() {
+    fn resolve_model_arg_round_trips_every_selectable_models_row() {
+        // Family-bases are deprecated for direct selection — covered by the
+        // `family_base_id_no_longer_silently_selects_deprecated` test instead.
         for info in MODELS {
+            if info.is_family_base {
+                continue;
+            }
             assert_eq!(
                 resolve_model_arg(info.id_substr)
                     .as_ref()

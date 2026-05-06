@@ -13,9 +13,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
 
-use self::popup::SlashPopup;
+use self::popup::{PopupMode, SlashPopup};
 use crate::agent::event::UserAction;
-use crate::slash::popup_query;
+use crate::slash::{PopupState, arg_placeholder_for, popup_state};
 use crate::tui::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::tui::theme::Theme;
 
@@ -236,11 +236,23 @@ impl InputArea {
         };
         self.scroll_top.set(top);
 
-        let cursor_x = textarea_area
-            .x
-            .saturating_add(to_u16(sc.col))
-            .min(textarea_area.right().saturating_sub(1));
+        let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
+        let cursor_x = raw_cursor_x.min(textarea_area.right().saturating_sub(1));
         let cursor_y = textarea_area.y + cursor_row - top;
+
+        if let Some(token) = self.ghost_text() {
+            // Paint past the cursor, clipped to the textarea's right edge so wrapping mid-token
+            // doesn't bleed into the next row.
+            let width = textarea_area.right().saturating_sub(raw_cursor_x);
+            if width > 0 {
+                let area = Rect::new(raw_cursor_x, cursor_y, width, 1);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(token, self.theme.dim()))),
+                    area,
+                );
+            }
+        }
+
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -280,7 +292,7 @@ impl InputArea {
                 PopupKey::Consumed
             }
             KeyCode::Esc => {
-                self.popup.set_query(None);
+                self.popup.set_state(None);
                 PopupKey::Consumed
             }
             KeyCode::Tab if modifiers.is_empty() => {
@@ -296,31 +308,60 @@ impl InputArea {
     }
 
     fn popup_complete_to_buffer(&mut self) {
-        let Some(name) = self.popup.selected().map(|m| m.name) else {
+        let Some(replacement) = self.popup_completion_text() else {
             return;
         };
-        self.set_text(&format!("/{name} "));
-        self.popup.set_query(None);
+        self.set_text(&replacement);
+        // Reclassify against the new buffer: name-mode Tab on a curated-roster command chains
+        // into arg mode; arg-mode Tab leaves `/cmd value ` (no match), so the popup hides.
+        self.refresh_popup();
+    }
+
+    /// Mode-aware Tab insertion. Name mode replaces the buffer with `/{name} `; arg mode keeps
+    /// the typed `/cmd ` and substitutes the prefix with the picked value plus a trailing space.
+    fn popup_completion_text(&self) -> Option<String> {
+        let row = self.popup.selected()?;
+        Some(match self.popup.mode()? {
+            PopupMode::Name => format!("/{} ", row.value),
+            PopupMode::Arg { cmd } => format!("/{cmd} {} ", row.value),
+        })
     }
 
     fn popup_submit_selected(&mut self) -> Option<UserAction> {
-        let name = self.popup.selected()?.name;
+        let row = self.popup.selected()?;
+        let submission = match self.popup.mode()? {
+            PopupMode::Name => format!("/{}", row.value),
+            PopupMode::Arg { cmd } => format!("/{cmd} {}", row.value),
+        };
         self.textarea.select_all();
         self.textarea.cut();
         self.scroll_top.set(0);
-        self.popup.set_query(None);
-        Some(UserAction::SubmitPrompt(format!("/{name}")))
+        self.popup.set_state(None);
+        Some(UserAction::SubmitPrompt(submission))
     }
 
     fn refresh_popup(&mut self) {
-        // Popup wiring: only the single-line case can be a slash command, and `popup_query`
-        // returns `None` for non-`/`-prefixed text — so a multi-line buffer or a typed-over slash
-        // both close the popup.
-        let query = match self.textarea.lines() {
-            [single] => popup_query(single),
+        // Only the single-line case can be a slash command; multi-line buffers close the popup.
+        let state = match self.textarea.lines() {
+            [single] => popup_state(single),
             _ => None,
         };
-        self.popup.set_query(query);
+        self.popup.set_state(state.as_ref());
+    }
+
+    /// Dim placeholder token (`[id]`, `[level]`, `[name]`) painted at the cursor in arg mode with
+    /// an empty prefix. Coexists with the popup — the popup lists curated picks, the hint
+    /// confirms the slot's shape.
+    fn ghost_text(&self) -> Option<String> {
+        let [single] = self.textarea.lines() else {
+            return None;
+        };
+        let state = popup_state(single)?;
+        let usage = match &state {
+            PopupState::Arg { name, .. } => arg_placeholder_for(name),
+            PopupState::Name(_) => None,
+        };
+        ghost_text_from_state(&state, usage)
     }
 
     fn is_scroll_key(event: &Event) -> bool {
@@ -384,6 +425,34 @@ impl InputArea {
 }
 
 // ── Free Functions ──
+
+/// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface; coexists with the
+/// popup (no visibility gate).
+fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
+    let PopupState::Arg { prefix, .. } = state else {
+        return None;
+    };
+    if !prefix.is_empty() {
+        return None;
+    }
+    Some(normalize_placeholder(usage?))
+}
+
+/// Normalize a `usage()` syntax fragment to a single bracketed token. Strips one optional layer
+/// each of `[...]` and `<...>` so `[<id>]`, `<id>`, and `[id]` all render as `[id]`.
+fn normalize_placeholder(usage: &str) -> String {
+    let inner = usage.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(inner)
+        .trim();
+    let inner = inner
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(inner);
+    format!("[{inner}]")
+}
 
 /// Lossy `usize → u16` for cursor / column positions, bounded by terminal dimensions.
 #[expect(
@@ -896,13 +965,17 @@ mod tests {
         input
     }
 
+    fn selected_value(input: &InputArea) -> String {
+        input.popup.selected().unwrap().value.clone().into_owned()
+    }
+
     #[test]
     fn handle_event_popup_down_advances_selection() {
         let mut input = input_with_popup();
-        let initial = input.popup.selected().map(|m| m.name).unwrap();
+        let initial = selected_value(&input);
         let action = input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
         assert!(action.is_none(), "Down is consumed silently");
-        let after = input.popup.selected().map(|m| m.name).unwrap();
+        let after = selected_value(&input);
         assert_ne!(initial, after, "Down moves to a different command");
     }
 
@@ -910,9 +983,9 @@ mod tests {
     fn handle_event_popup_up_reverses_selection() {
         let mut input = input_with_popup();
         input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
-        let after_down = input.popup.selected().map(|m| m.name).unwrap();
+        let after_down = selected_value(&input);
         input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
-        let after_up = input.popup.selected().map(|m| m.name).unwrap();
+        let after_up = selected_value(&input);
         assert_ne!(after_down, after_up, "Up reverses Down");
     }
 
@@ -935,6 +1008,163 @@ mod tests {
         let action = input.handle_event(&Event::Resize(80, 24));
         assert!(action.is_none());
         assert!(input.popup_visible());
+    }
+
+    #[test]
+    fn handle_event_popup_tab_in_name_mode_inserts_slash_name_and_space() {
+        // First alphabetical row is `clear` (no arg roster); Tab writes `/clear ` and the popup
+        // hides on reclassification — arg mode with an empty roster yields no rows.
+        let mut input = input_with_popup();
+        let selected = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        assert_eq!(input.textarea.lines(), vec![format!("/{selected} ")]);
+        assert!(!input.popup_visible(), "no arg roster → popup hides");
+    }
+
+    #[test]
+    fn handle_event_popup_tab_in_name_mode_chains_into_arg_mode_for_curated_commands() {
+        // Tab from `/mo` lands on `/model `; the arg-mode popup must reopen with the curated
+        // roster so the user keeps moving without re-opening the popup.
+        let mut input = test_input();
+        type_text(&mut input, "/mo");
+        input.refresh_popup();
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_eq!(input.textarea.lines(), vec!["/model "]);
+        assert!(
+            input.popup_visible(),
+            "/model has a curated arg roster — popup chains into arg mode",
+        );
+    }
+
+    #[test]
+    fn handle_event_popup_tab_in_arg_mode_inserts_cmd_value_and_space() {
+        // Tab keeps the `/effort` prefix and substitutes the picked value plus a trailing space
+        // — `/{cmd} {value} `, not `/{value} ` (which would drop cmd context).
+        let mut input = test_input();
+        type_text(&mut input, "/effort ");
+        input.refresh_popup();
+        assert!(input.popup_visible(), "popup opens for /effort arg mode");
+        let picked = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        assert_eq!(input.textarea.lines(), vec![format!("/effort {picked} ")]);
+        assert!(!input.popup_visible(), "popup dismisses after Tab");
+    }
+
+    #[test]
+    fn handle_event_popup_enter_in_name_mode_submits_slash_name() {
+        // Enter on a name-mode row submits `/{name}` (no trailing space — submission is final).
+        let mut input = input_with_popup();
+        let selected = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt(format!("/{selected}")))
+        );
+        assert!(input.textarea.is_empty(), "buffer clears on submit");
+    }
+
+    #[test]
+    fn handle_event_popup_enter_in_arg_mode_submits_cmd_value() {
+        // Enter on an arg-mode row submits `/{cmd} {value}` so the dispatcher receives the
+        // full typed-arg form, not just the picked value.
+        let mut input = test_input();
+        type_text(&mut input, "/effort ");
+        input.refresh_popup();
+        let picked = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt(format!("/effort {picked}"))),
+        );
+        assert!(input.textarea.is_empty(), "buffer clears on submit");
+    }
+
+    // ── ghost_text ──
+
+    #[test]
+    fn ghost_text_shows_alongside_popup_when_arg_prefix_empty() {
+        // Popup and ghost coexist: popup lists curated picks; ghost confirms the slot's shape.
+        let mut input = test_input();
+        type_text(&mut input, "/model ");
+        input.refresh_popup();
+        assert!(input.popup_visible());
+        assert_eq!(input.ghost_text(), Some("[id]".to_owned()));
+    }
+
+    #[test]
+    fn ghost_text_suppresses_in_name_mode() {
+        let mut input = test_input();
+        type_text(&mut input, "/mod");
+        input.refresh_popup();
+        assert_eq!(input.ghost_text(), None);
+    }
+
+    #[test]
+    fn ghost_text_suppresses_once_user_types_arg_prefix() {
+        let mut input = test_input();
+        type_text(&mut input, "/model claude-");
+        input.refresh_popup();
+        assert_eq!(input.ghost_text(), None);
+    }
+
+    // ── ghost_text_from_state ──
+
+    #[test]
+    fn ghost_text_from_state_arg_with_empty_prefix_and_usage_renders_token() {
+        let state = PopupState::Arg {
+            name: "model",
+            prefix: "",
+        };
+        assert_eq!(
+            ghost_text_from_state(&state, Some("[<id>]")),
+            Some("[id]".to_owned()),
+        );
+    }
+
+    #[test]
+    fn ghost_text_from_state_non_empty_prefix_returns_none() {
+        let state = PopupState::Arg {
+            name: "model",
+            prefix: "claude-",
+        };
+        assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
+    }
+
+    #[test]
+    fn ghost_text_from_state_arg_without_usage_returns_none() {
+        let state = PopupState::Arg {
+            name: "init",
+            prefix: "",
+        };
+        assert_eq!(ghost_text_from_state(&state, None), None);
+    }
+
+    #[test]
+    fn ghost_text_from_state_name_mode_returns_none_even_with_usage() {
+        let state = PopupState::Name("mo");
+        assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
+    }
+
+    // ── normalize_placeholder ──
+
+    #[test]
+    fn normalize_placeholder_strips_outer_brackets_and_inner_angles() {
+        assert_eq!(normalize_placeholder("[<id>]"), "[id]");
+    }
+
+    #[test]
+    fn normalize_placeholder_handles_missing_layers() {
+        assert_eq!(normalize_placeholder("<level>"), "[level]");
+        assert_eq!(normalize_placeholder("[name]"), "[name]");
+        assert_eq!(normalize_placeholder("topic"), "[topic]");
+    }
+
+    #[test]
+    fn normalize_placeholder_trims_whitespace_inside_brackets() {
+        assert_eq!(normalize_placeholder("[ <id> ]"), "[id]");
     }
 
     // ── render_popup ──
