@@ -547,10 +547,16 @@ impl App {
 
     /// Returns the chat area so the scroll cache can refresh its layout.
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
-        let input_height = self.input.height();
         let preview_height = self.preview_height();
-        let popup_height = self.input.popup_height();
         let modal_height = self.modals.height(frame.area().width);
+        // Modal owns focus — input + popup are unreachable, so collapse them.
+        let modal_active = modal_height > 0;
+        let popup_height = if modal_active {
+            0
+        } else {
+            self.input.popup_height()
+        };
+        let input_height = if modal_active { 0 } else { self.input.height() };
         // Pre-fill with surface bg so unpainted gaps inherit the theme.
         frame.render_widget(
             ratatui::widgets::Block::default().style(self.theme.surface()),
@@ -571,13 +577,14 @@ impl App {
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
-        if modal_height > 0 {
+        if modal_active {
             self.modals.render(frame, chunks[3], &self.theme);
+        } else {
+            if popup_height > 0 {
+                self.input.render_popup(frame, chunks[4]);
+            }
+            self.input.render(frame, chunks[5]);
         }
-        if popup_height > 0 {
-            self.input.render_popup(frame, chunks[4]);
-        }
-        self.input.render(frame, chunks[5]);
         chunks[1]
     }
 
@@ -740,6 +747,40 @@ mod tests {
                 show_thinking: false,
                 theme_name: "mocha".to_owned(),
             },
+        }
+    }
+
+    /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.
+    struct FakeModal {
+        title: String,
+    }
+
+    impl FakeModal {
+        fn new(title: &str) -> Self {
+            Self {
+                title: title.to_owned(),
+            }
+        }
+    }
+
+    impl crate::tui::modal::Modal for FakeModal {
+        fn height(&self, _width: u16) -> u16 {
+            1
+        }
+
+        fn render(
+            &self,
+            frame: &mut ratatui::Frame<'_>,
+            area: Rect,
+            theme: &crate::tui::theme::Theme,
+        ) {
+            use ratatui::widgets::Paragraph;
+            let line = Line::from(Span::styled(self.title.clone(), theme.text()));
+            frame.render_widget(Paragraph::new(line).style(theme.surface()), area);
+        }
+
+        fn handle_key(&mut self, _event: &KeyEvent) -> crate::tui::modal::ModalKey {
+            crate::tui::modal::ModalKey::Consumed
         }
     }
 
@@ -2308,6 +2349,30 @@ mod tests {
             app.pending_prompts.push_back(format!("queued {i}"));
         }
         insta::assert_snapshot!(render_app(&mut app, 60, 14));
+    }
+
+    #[test]
+    fn draw_frame_hides_input_and_popup_while_modal_active() {
+        // Modal owns focus, so the layout must collapse the input + popup bands. The idle
+        // placeholder is the cheapest substring proof that the input got rendered.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let baseline = rendered_text(&mut app, 60, 14);
+        assert!(
+            baseline.contains("Ask anything..."),
+            "input placeholder must paint without a modal: {baseline}",
+        );
+
+        app.modals
+            .push(Box::new(FakeModal::new("FAKE-MODAL-TITLE")));
+        let with_modal = rendered_text(&mut app, 60, 14);
+        assert!(
+            with_modal.contains("FAKE-MODAL-TITLE"),
+            "modal body must render: {with_modal}",
+        );
+        assert!(
+            !with_modal.contains("Ask anything..."),
+            "input must collapse while modal is active: {with_modal}",
+        );
     }
 
     #[test]
