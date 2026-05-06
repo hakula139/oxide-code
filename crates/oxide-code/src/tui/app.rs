@@ -1667,6 +1667,18 @@ mod tests {
         );
     }
 
+    // ── handle_submit_prompt ──
+
+    #[test]
+    fn submit_slash_theme_pushes_picker_onto_modal_stack() {
+        // Bare `/theme` is the ReadOnly modal-opening branch — `slash::dispatch` populates the
+        // SlashContext modal slot, then handle_submit_prompt drains it onto `App::modals`.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        assert!(!app.modals.is_active(), "stack starts empty");
+        app.dispatch_user_action(UserAction::SubmitPrompt("/theme".to_owned()));
+        assert!(app.modals.is_active(), "bare `/theme` opens a picker modal");
+    }
+
     #[test]
     fn slash_typed_swap_theme_routes_through_local_handler() {
         // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
@@ -2532,6 +2544,14 @@ mod tests {
             !with_modal.contains("Ask anything..."),
             "input must collapse while modal is active: {with_modal}",
         );
+
+        // Non-cancel keys land at the modal's handle_key — proves the focus-grab is wired up
+        // and the layout collapse doesn't bypass it.
+        let action = app
+            .modals
+            .handle_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(action.is_none(), "FakeModal consumes without emitting");
+        assert!(app.modals.is_active(), "Consumed must not pop the stack");
     }
 
     #[test]
