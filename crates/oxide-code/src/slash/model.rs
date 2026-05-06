@@ -96,25 +96,25 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
-/// Resolution tiers (first hit wins): short alias → known canonical id → dated id (`<id>-YYYYMMDD`)
-/// → unique suffix → unique substring. Multi-match at the substring tier is an error so the user
-/// disambiguates rather than silently landing on whichever model sorts first.
+/// Resolution tiers (first hit wins): short alias → dated id (`<id>-YYYYMMDD`) → known canonical
+/// id → unique suffix → unique substring. Family-bases are filtered at every selectable tier so
+/// users can't land on a deprecated row by typing its id directly — only dated ids of a
+/// family-base remain reachable since the user explicitly opted into a specific snapshot.
 fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target.to_owned());
     }
-    if is_known_model_id(arg) || is_dated_model_id(arg) {
+    if is_dated_model_id(arg) {
         return Ok(arg.to_owned());
     }
-    if let [id] = candidates(|id| id.ends_with(arg)).as_slice() {
+    if is_selectable_known_id(arg) {
+        return Ok(arg.to_owned());
+    }
+    let suffix_hits = candidates(|id| id.ends_with(arg) && !is_family_base(id));
+    if let [id] = suffix_hits.as_slice() {
         return Ok((*id).to_owned());
     }
-    // Family bases are listed only for `lookup` (marketing names of dated ids); listing them
-    // here would invite users to type a deprecated row.
-    let visible: Vec<&'static str> = candidates(|id| id.contains(arg))
-        .into_iter()
-        .filter(|id| !is_family_base(id))
-        .collect();
+    let visible = candidates(|id| id.contains(arg) && !is_family_base(id));
     match visible.as_slice() {
         [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
@@ -129,8 +129,10 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     }
 }
 
-fn is_known_model_id(arg: &str) -> bool {
-    MODELS.iter().any(|m| m.id_substr == arg)
+fn is_selectable_known_id(arg: &str) -> bool {
+    MODELS
+        .iter()
+        .any(|m| m.id_substr == arg && !m.is_family_base)
 }
 
 fn is_dated_model_id(arg: &str) -> bool {
@@ -346,9 +348,30 @@ mod tests {
     }
 
     #[test]
-    fn execute_unique_suffix_resolves_above_substring_ambiguity() {
-        let (_, outcome) = run_execute("opus-4");
-        assert_eq!(outcome, Ok(swap_model("claude-opus-4")));
+    fn execute_family_base_id_no_longer_silently_selects_deprecated() {
+        // `claude-opus-4` / `claude-sonnet-4` are kept in MODELS only so dated ids resolve
+        // their capabilities. Direct typing must NOT land on the deprecated base — opus-4 has
+        // four current descendants so it errors with ambiguity, sonnet-4 has two.
+        for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
+            let (_, outcome) = run_execute(arg);
+            let msg = outcome.expect_err(&format!("`{arg}` must error"));
+            assert!(
+                msg.contains("matches"),
+                "ambiguity error for `{arg}`: {msg}"
+            );
+            assert!(
+                !msg.contains("claude-opus-4,") && !msg.contains("claude-sonnet-4,"),
+                "deprecated family-base must not appear in candidate list: {msg}",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_family_base_with_unique_current_descendant_promotes_to_it() {
+        // `claude-haiku-4` substrings only `claude-haiku-4-5` (after family-base filter), so the
+        // substring tier resolves uniquely instead of erroring.
+        let (_, outcome) = run_execute("claude-haiku-4");
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
 
     #[test]
@@ -415,8 +438,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_arg_round_trips_every_models_row() {
+    fn resolve_model_arg_round_trips_every_selectable_models_row() {
+        // Family-bases are deprecated for direct selection — covered by the
+        // `family_base_id_no_longer_silently_selects_deprecated` test instead.
         for info in MODELS {
+            if info.is_family_base {
+                continue;
+            }
             assert_eq!(
                 resolve_model_arg(info.id_substr)
                     .as_ref()
