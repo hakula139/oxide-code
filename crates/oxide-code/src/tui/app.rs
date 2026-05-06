@@ -2313,21 +2313,12 @@ mod tests {
     #[test]
     fn draw_frame_surface_fill_overwrites_unpainted_cells_with_surface_bg() {
         // Buffer-wide invariant: pre-stain every cell, render, and assert no sentinel survives.
-        // The frame-area surface fill is the only widget that guarantees this for cells no other
-        // widget covers (gaps that emerge with future layout or widget additions).
+        // The frame-area surface fill is the only widget that guarantees this for cells no
+        // other widget covers.
         use ratatui::style::Color;
 
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        let surface_bg = app
-            .theme
-            .surface()
-            .bg
-            .expect("latte sets explicit surface bg");
         let sentinel = Color::Rgb(254, 0, 254);
-        assert_ne!(surface_bg, sentinel, "sentinel must differ from theme bg");
 
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         for cell in &mut terminal.current_buffer_mut().content {

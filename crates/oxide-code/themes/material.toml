@@ -11,9 +11,7 @@ muted = "#999999"
 dim = "#616161"
 
 # Surfaces
-# M2 dark theme baseline surface (elevation 0). Override to "reset"
-# to inherit the terminal background instead.
-surface = { bg = "#121212" }
+surface = { bg = "reset" }
 
 # Semantic accents (M2 dark theme baseline primary, Material 200-tone)
 accent = { fg = "#bb86fc", bold = true }
