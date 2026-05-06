@@ -34,15 +34,16 @@ const FOOTER: &str = "←/→ to change effort  ·  Enter to confirm  ·  Esc to
 const BODY_HEIGHT: u16 = 7;
 
 /// Per-tier color along the speed → intelligence axis. ANSI-named so the gradient inherits the
-/// user's terminal palette — graded circle glyphs were the alternative but they render at
-/// inconsistent widths across monospace fonts. The active-vs-inactive distinction lives on the
-/// glyph (●/○) plus the BOLD modifier; this function only carries tier identity.
+/// user's terminal palette. Skips yellow at the Xhigh slot in favor of magenta — green and
+/// yellow read close on pastel palettes (Catppuccin Mocha etc.), and the hue-family jump to
+/// purple keeps High and Xhigh distinct on any reasonable theme. Active-vs-inactive lives on
+/// the glyph (●/○) and the BOLD modifier; this function only carries tier identity.
 pub(super) fn tier_color(level: Effort) -> Color {
     match level {
         Effort::Low => Color::Blue,
         Effort::Medium => Color::Cyan,
         Effort::High => Color::Green,
-        Effort::Xhigh => Color::Yellow,
+        Effort::Xhigh => Color::Magenta,
         Effort::Max => Color::Red,
     }
 }
