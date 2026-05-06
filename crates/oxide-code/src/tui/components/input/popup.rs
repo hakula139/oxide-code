@@ -284,8 +284,7 @@ mod tests {
     // ── render ──
 
     fn long_popup(n: usize) -> SlashPopup {
-        // Hand-rolled match list keeps the test independent of registry growth. Used by both the
-        // scroll-into-view render snapshot and the scroll_offset arithmetic suite below.
+        // Hand-rolled list keeps the test independent of registry growth.
         let mut p = SlashPopup::new(&theme());
         p.matches = (0..n)
             .map(|i| MatchedCommand {
@@ -396,8 +395,7 @@ mod tests {
 
     #[test]
     fn scroll_offset_is_zero_when_total_fits_window() {
-        // With `MAX_VISIBLE_ROWS = 8` the live registry of 9 commands does scroll, but a
-        // 5-element fake list must never offset.
+        // total < cap → no scroll regardless of cursor.
         let mut p = long_popup(5);
         p.select_next();
         p.select_next();

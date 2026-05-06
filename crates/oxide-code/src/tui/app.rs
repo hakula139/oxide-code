@@ -206,8 +206,7 @@ impl App {
 
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
-            // Modal cancelled or silently closed: undo any in-flight theme preview so the user
-            // returns to exactly the state before opening the picker.
+            // Cancel: revert any in-flight theme preview to the snapshot taken on open.
             ModalAction::None => {
                 if let Some(theme) = self.preview_theme_snapshot.take() {
                     self.apply_theme(&theme);
@@ -217,7 +216,7 @@ impl App {
         }
     }
 
-    /// Sole entry point for mid-session theme swaps; repaints every theme-styled component.
+    /// Repaints every theme-styled component for a mid-session theme swap.
     fn apply_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.chat.set_theme(theme);
@@ -317,8 +316,7 @@ impl App {
                     self.chat
                         .push_system_message(format!("Theme set to {name}."));
                 } else {
-                    self.chat
-                        .push_error(&format!("unknown theme: `{name}` (this is a bug)"));
+                    tracing::warn!(name, "SwapTheme: unknown built-in; picker roster drift");
                 }
                 false
             }
@@ -346,8 +344,8 @@ impl App {
                         self.status_bar.set_status(Status::Streaming);
                         self.forward_to_agent(action);
                     } else {
-                        // TUI-only synthesized actions (e.g. SwapTheme) need apply_action_locally —
-                        // forwarding to the agent drops them.
+                        // TUI-only synthesized actions (e.g. SwapTheme) flow through dispatch
+                        // so the local arm runs; forwarding to the agent would drop them.
                         self.dispatch_user_action(action);
                     }
                 }
@@ -382,9 +380,7 @@ impl App {
         }
         self.pending_prompts.push_back(text.to_owned());
         self.sync_input_queue_hint();
-        // Forward the queued prompt to the agent so it can drain at turn end — unless we're
-        // already cancelling, in which case the agent will reset and the queue drains locally on
-        // the next idle transition.
+        // Skip forwarding while cancelling — the agent resets and we drain locally on idle.
         !matches!(self.status_bar.status(), Status::Cancelling)
     }
 
@@ -1546,6 +1542,169 @@ mod tests {
         assert!(app.chat.last_is_error());
     }
 
+    // ── apply_action_locally / theme ──
+
+    #[test]
+    fn preview_theme_repaints_components_and_caches_original() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            app.preview_theme_snapshot.is_some(),
+            "first PreviewTheme must cache the original",
+        );
+        assert_ne!(app.theme.text, original.text, "live theme must change");
+        // preview leaves session_info.config.theme_name as-is until commit.
+        assert_eq!(app.session_info.config.theme_name, "mocha");
+    }
+
+    #[test]
+    fn preview_theme_then_modal_cancel_restores_original() {
+        // Esc / Ctrl+C surface as ModalAction::None; the snapshot must roll back.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.apply_modal_action(ModalAction::None);
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "snapshot consumed on cancel",
+        );
+        assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
+    }
+
+    #[test]
+    fn modal_cancel_without_snapshot_is_noop() {
+        // Modals that never previewed (e.g. /model picker) cancel through the same
+        // ModalAction::None path; the rollback arm must skip cleanly with no snapshot.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_text = app.theme.text;
+        app.apply_modal_action(ModalAction::None);
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.theme.text, original_text);
+    }
+
+    #[test]
+    fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
+        // Roster drift between slash + builtin tables logs via tracing only — user state stays put.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original_text = app.theme.text;
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert!(
+            app.preview_theme_snapshot.is_none(),
+            "no snapshot when load_builtin returns None",
+        );
+        assert_eq!(app.theme.text, original_text, "theme stays put on drift");
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "preview must never push a chat block",
+        );
+    }
+
+    #[test]
+    fn swap_theme_commits_and_clears_snapshot() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        let previewed = app.theme.clone();
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.session_info.config.theme_name, "latte");
+        assert_eq!(app.theme.text, previewed.text);
+
+        app.apply_modal_action(ModalAction::None);
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "post-commit cancel must not restore the pre-preview theme",
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_theme_with_unknown_name_is_silent_noop() {
+        // Roster drift between slash::theme::LISTED_THEMES and tui::theme::builtin::TABLE is a
+        // dev bug, not user error — log via tracing and leave UI state untouched.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.session_info.config.theme_name.clone();
+        let entries_before = app.chat.entry_count();
+
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "nonexistent".to_owned(),
+        });
+
+        assert_eq!(app.session_info.config.theme_name, original);
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before,
+            "no chat block — drift is dev-only",
+        );
+    }
+
+    #[tokio::test]
+    async fn theme_actions_are_not_forwarded_to_agent_loop() {
+        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+        app.dispatch_user_action(UserAction::SwapTheme {
+            name: "latte".to_owned(),
+        });
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "theme actions must stay client-side",
+        );
+    }
+
+    #[test]
+    fn slash_typed_swap_theme_routes_through_local_handler() {
+        // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
+        // forwarded straight to the agent, which silently dropped them. They must now flow
+        // through dispatch_user_action so the local theme arm runs.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
+
+        assert_eq!(
+            app.session_info.config.theme_name, "latte",
+            "typed `/theme <name>` must mutate session theme",
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "TUI-only theme swap must not leak to the agent channel",
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_typed_model_routes_synthesized_swap_config_through_dispatch() {
+        // Mirrors the typed-`/theme` regression on the agent-bound side: `/model <id>` synthesizes
+        // a SwapConfig that must reach the agent via dispatch_user_action → forward_to_agent.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("/model haiku".to_owned()));
+
+        let forwarded = rx.recv().await.expect("SwapConfig forwarded to agent");
+        match forwarded {
+            UserAction::SwapConfig { model, effort } => {
+                assert_eq!(
+                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
+                    Some("claude-haiku-4-5")
+                );
+                assert_eq!(effort, None);
+            }
+            other => panic!("expected SwapConfig, got {other:?}"),
+        }
+    }
+
     // ── handle_agent_event ──
 
     #[test]
@@ -2384,6 +2543,7 @@ mod tests {
 
         let (mut app, _rx, _agent_tx) = test_app(None);
         let sentinel = Color::Rgb(254, 0, 254);
+        let surface_bg = app.theme.surface().bg.expect("surface slot defines bg");
 
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         for cell in &mut terminal.current_buffer_mut().content {
@@ -2399,8 +2559,8 @@ mod tests {
         for y in 0..10 {
             for x in 0..60 {
                 let cell = buffer.cell((x, y)).expect("cell in bounds");
-                assert_ne!(
-                    cell.bg, sentinel,
+                assert_eq!(
+                    cell.bg, surface_bg,
                     "cell ({x},{y}) kept the sentinel — surface fill regressed",
                 );
             }
@@ -2425,164 +2585,6 @@ mod tests {
             app.preview_height(),
             u16::try_from(PREVIEW_VISIBLE + 1).unwrap(),
         );
-    }
-
-    // ── apply_action_locally / theme ──
-
-    #[test]
-    fn preview_theme_repaints_components_and_caches_original() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let original = app.theme.clone();
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(
-            app.preview_theme_snapshot.is_some(),
-            "first PreviewTheme must cache the original",
-        );
-        assert_ne!(app.theme.text, original.text, "live theme must change");
-        // preview leaves session_info.config.theme_name as-is until commit.
-        assert_eq!(app.session_info.config.theme_name, "mocha");
-    }
-
-    #[test]
-    fn preview_theme_then_modal_cancel_restores_original() {
-        // Esc / Ctrl+C surface as ModalAction::None; the snapshot must roll back.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let original = app.theme.clone();
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        app.apply_modal_action(ModalAction::None);
-        assert!(
-            app.preview_theme_snapshot.is_none(),
-            "snapshot consumed on cancel",
-        );
-        assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
-    }
-
-    #[test]
-    fn preview_theme_with_unknown_name_does_nothing_and_keeps_active_theme() {
-        // The drift warn arm fires when a PreviewTheme name doesn't resolve. The picker roster
-        // and the loader's lookup table must agree, so this is a developer-facing log only;
-        // user-visible state stays put (no snapshot, no theme swap, no chat block).
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let original_text = app.theme.text;
-        let entries_before = app.chat.entry_count();
-
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "nonexistent".to_owned(),
-        });
-
-        assert!(
-            app.preview_theme_snapshot.is_none(),
-            "no snapshot when load_builtin returns None",
-        );
-        assert_eq!(app.theme.text, original_text, "theme stays put on drift");
-        assert_eq!(
-            app.chat.entry_count(),
-            entries_before,
-            "preview must never push a chat block",
-        );
-    }
-
-    #[test]
-    fn swap_theme_commits_and_clears_snapshot() {
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        let previewed = app.theme.clone();
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(app.preview_theme_snapshot.is_none());
-        assert_eq!(app.session_info.config.theme_name, "latte");
-        assert_eq!(app.theme.text, previewed.text);
-
-        app.apply_modal_action(ModalAction::None);
-        assert_eq!(
-            app.session_info.config.theme_name, "latte",
-            "post-commit cancel must not restore the pre-preview theme",
-        );
-    }
-
-    #[tokio::test]
-    async fn swap_theme_with_unknown_name_pushes_error_and_keeps_active_theme() {
-        // Pins the defensive `else` arm — load_builtin returning None must not silently swallow
-        // the request. Today the slash form pre-validates names, but the arm guards against any
-        // future caller passing through unchecked.
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        let original = app.session_info.config.theme_name.clone();
-        let entries_before = app.chat.entry_count();
-
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "nonexistent".to_owned(),
-        });
-
-        assert_eq!(
-            app.session_info.config.theme_name, original,
-            "unknown name must not flip the active theme",
-        );
-        assert_eq!(
-            app.chat.entry_count(),
-            entries_before + 1,
-            "error must surface as a chat block",
-        );
-    }
-
-    #[tokio::test]
-    async fn theme_actions_are_not_forwarded_to_agent_loop() {
-        // PreviewTheme / SwapTheme are TUI-only; reaching `user_tx` would race the client.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::PreviewTheme {
-            name: "latte".to_owned(),
-        });
-        app.dispatch_user_action(UserAction::SwapTheme {
-            name: "latte".to_owned(),
-        });
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "theme actions must stay client-side",
-        );
-    }
-
-    #[test]
-    fn slash_typed_swap_theme_routes_through_local_handler() {
-        // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
-        // forwarded straight to the agent, which silently dropped them. They must now flow
-        // through dispatch_user_action so the local theme arm runs.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
-
-        assert_eq!(
-            app.session_info.config.theme_name, "latte",
-            "typed `/theme <name>` must mutate session theme",
-        );
-        assert!(
-            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-            "TUI-only theme swap must not leak to the agent channel",
-        );
-    }
-
-    #[tokio::test]
-    async fn slash_typed_model_routes_synthesized_swap_config_through_dispatch() {
-        // Mirrors the typed-`/theme` regression on the agent-bound side: `/model <id>` synthesizes
-        // a SwapConfig that must reach the agent via dispatch_user_action → forward_to_agent.
-        let (mut app, mut rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/model haiku".to_owned()));
-
-        let forwarded = rx.recv().await.expect("SwapConfig forwarded to agent");
-        match forwarded {
-            UserAction::SwapConfig { model, effort } => {
-                assert_eq!(
-                    model.as_ref().map(crate::model::ResolvedModelId::as_str),
-                    Some("claude-haiku-4-5")
-                );
-                assert_eq!(effort, None);
-            }
-            other => panic!("expected SwapConfig, got {other:?}"),
-        }
     }
 
     // ── render_preview ──

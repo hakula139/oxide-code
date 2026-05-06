@@ -115,7 +115,7 @@ impl ThemePicker {
 
 impl Modal for ThemePicker {
     fn height(&self, width: u16) -> u16 {
-        // +2: blank spacer row, then the footer hint row.
+        // Reserve one blank spacer + one footer line below the list.
         self.list.height(width).saturating_add(2)
     }
 
@@ -204,8 +204,8 @@ impl SlashCommand for ThemeCmd {
     }
 }
 
-/// Custom file paths are intentionally rejected here; users with a custom TOML edit
-/// `~/.config/ox/config.toml` directly.
+/// Resolve a typed `/theme <name>` argument against the curated catalogue. Custom file paths
+/// are rejected — users with a custom TOML edit `~/.config/ox/config.toml` directly.
 fn resolve_theme_arg(arg: &str) -> Result<&'static str, String> {
     let lower = arg.to_ascii_lowercase();
     LISTED_THEMES
@@ -258,9 +258,6 @@ mod tests {
 
     #[test]
     fn theme_row_picker_item_methods_return_curated_values() {
-        // Pins the trait-impl surface for ThemeRow — label / description / is_active / key_hint
-        // each have a path the picker depends on and only the render smoke test exercises
-        // indirectly.
         let rows = ThemeRow::build("latte");
         let names: Vec<&str> = rows.iter().map(PickerItem::label).collect();
         assert_eq!(
@@ -270,7 +267,10 @@ mod tests {
 
         let active_count = rows.iter().filter(|r| r.is_active()).count();
         assert_eq!(active_count, 1, "exactly one row marks the active theme");
-        assert!(rows.iter().find(|r| r.is_active()).unwrap().label() == "latte");
+        assert_eq!(
+            rows.iter().find(|r| r.is_active()).unwrap().label(),
+            "latte"
+        );
 
         for (idx, row) in rows.iter().enumerate() {
             assert_eq!(row.key_hint(), numeric_hint(idx), "idx={idx}");
@@ -301,8 +301,7 @@ mod tests {
 
     #[test]
     fn new_with_unknown_active_keeps_cursor_on_first_row() {
-        // User-provided custom file path won't match any built-in row; cursor falls back to the
-        // first listed theme rather than panicking or silently picking nothing.
+        // Custom file path doesn't match any built-in row; cursor falls back to the first.
         let p = picker_with_active("~/themes/custom.toml");
         let row = p.list.selected().expect("first row");
         assert_eq!(row.name, "mocha");
@@ -359,11 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn numeric_jump_unknown_digit_is_a_consumed_noop() {
-        // Only digits 1..=N (curated count) jump; out-of-range digits leave cursor and emit no
-        // preview, so the App doesn't repaint for nothing.
+    fn numeric_jump_past_roster_is_a_consumed_noop() {
+        // Out-of-range digits stay Consumed so the App doesn't repaint for nothing. Use the
+        // first digit past the curated count so the test survives roster growth.
+        let past_end = char::from_digit(u32::try_from(LISTED_THEMES.len()).unwrap() + 1, 10)
+            .expect("roster fits in a single digit");
         let mut p = picker_with_active("mocha");
-        let outcome = p.handle_key(&key(KeyCode::Char('9')));
+        let outcome = p.handle_key(&key(KeyCode::Char(past_end)));
         assert!(matches!(outcome, ModalKey::Consumed));
     }
 
