@@ -1,10 +1,14 @@
 //! `/model` — open the picker, or swap with `/model <id>`. Resolution: alias → exact / dated-id →
 //! unique suffix → unique substring. `[1m]` rejected on models lacking `context_1m`.
 
+use std::borrow::Cow;
+
 use super::context::SlashContext;
-use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use super::matcher::rank_by_prefix;
+use super::picker::LISTED_MODELS;
+use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ResolvedModelId, is_family_base, lookup};
+use crate::model::{MODELS, ResolvedModelId, display_name, is_family_base, lookup};
 
 // ── Constants ──
 
@@ -39,6 +43,16 @@ impl SlashCommand for ModelCmd {
 
     fn usage(&self) -> Option<&'static str> {
         Some("[<id>]")
+    }
+
+    fn complete_arg(&self, prefix: &str) -> Vec<ArgCompletion> {
+        rank_by_prefix(LISTED_MODELS, prefix, |id| *id)
+            .into_iter()
+            .map(|id| ArgCompletion {
+                value: Cow::Borrowed(*id),
+                description: Cow::Owned(display_name(id).into_owned()),
+            })
+            .collect()
     }
 
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
@@ -175,6 +189,54 @@ mod tests {
         assert_eq!(ModelCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
         assert_eq!(ModelCmd.classify("claude-opus-4-7"), SlashKind::Mutating);
+    }
+
+    // ── ModelCmd::complete_arg ──
+
+    fn arg_rows(prefix: &str) -> Vec<(String, String)> {
+        ModelCmd
+            .complete_arg(prefix)
+            .into_iter()
+            .map(|c| (c.value.into_owned(), c.description.into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn complete_arg_empty_prefix_lists_curated_roster_in_picker_order() {
+        let expected: Vec<String> = LISTED_MODELS.iter().map(|id| (*id).to_owned()).collect();
+        let got: Vec<String> = arg_rows("").into_iter().map(|(v, _)| v).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn complete_arg_prefix_filter_narrows_to_matching_ids() {
+        let got: Vec<String> = arg_rows("claude-opus")
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
+        assert_eq!(got, vec!["claude-opus-4-7", "claude-opus-4-7[1m]"]);
+    }
+
+    #[test]
+    fn complete_arg_appends_1m_context_suffix_for_1m_variants() {
+        // The `[1m]` rows must surface the `(1M context)` marker so users can tell variants apart
+        // before committing.
+        let rows = arg_rows("claude-opus-4-7");
+        let one_m = rows
+            .iter()
+            .find(|(v, _)| v == "claude-opus-4-7[1m]")
+            .expect("1M variant present");
+        assert!(
+            one_m.1.contains("1M context"),
+            "1M description: {:?}",
+            one_m.1,
+        );
+    }
+
+    #[test]
+    fn complete_arg_is_case_insensitive() {
+        let got: Vec<String> = arg_rows("HAIKU").into_iter().map(|(v, _)| v).collect();
+        assert_eq!(got, vec!["claude-haiku-4-5"]);
     }
 
     // ── ModelCmd::execute ──

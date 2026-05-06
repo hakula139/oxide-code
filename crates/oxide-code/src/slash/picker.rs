@@ -19,8 +19,9 @@ use crate::tui::theme::Theme;
 
 // ── Constants ──
 
-/// Curated roster shown in the picker; `/model <id>` resolves against the full `MODELS` table.
-const LISTED_MODELS: &[&str] = &[
+/// Curated roster shown in the picker AND in `/model`'s typed-arg autocomplete; `/model <id>`
+/// still resolves against the full `MODELS` table.
+pub(super) const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
     "claude-sonnet-4-6",
