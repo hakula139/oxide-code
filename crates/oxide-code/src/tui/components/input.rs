@@ -953,6 +953,64 @@ mod tests {
         assert!(input.popup_visible());
     }
 
+    #[test]
+    fn handle_event_popup_tab_in_name_mode_inserts_slash_name_and_space() {
+        // Lone `/` shows the full roster; first row is `clear` (alphabetical). Tab inserts
+        // `/clear ` and dismisses — pins the trailing-space contract that lets the user start
+        // typing args immediately.
+        let mut input = input_with_popup();
+        let selected = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        assert_eq!(input.textarea.lines(), vec![format!("/{selected} ")]);
+        assert!(!input.popup_visible(), "popup dismisses after Tab");
+    }
+
+    #[test]
+    fn handle_event_popup_tab_in_arg_mode_inserts_cmd_value_and_space() {
+        // Type `/effort ` to enter arg mode against the curated effort roster (first row: low).
+        // Tab must keep the `/effort` prefix and substitute the picked value plus trailing
+        // space — `/{cmd} {value} `, not `/{value} ` (which would drop the cmd context).
+        let mut input = test_input();
+        type_text(&mut input, "/effort ");
+        input.refresh_popup();
+        assert!(input.popup_visible(), "popup opens for /effort arg mode");
+        let picked = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(action.is_none(), "Tab is consumed, no UserAction");
+        assert_eq!(input.textarea.lines(), vec![format!("/effort {picked} ")]);
+        assert!(!input.popup_visible(), "popup dismisses after Tab");
+    }
+
+    #[test]
+    fn handle_event_popup_enter_in_name_mode_submits_slash_name() {
+        // Enter on a name-mode row submits `/{name}` (no trailing space — submission is final).
+        let mut input = input_with_popup();
+        let selected = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt(format!("/{selected}")))
+        );
+        assert!(input.textarea.is_empty(), "buffer clears on submit");
+    }
+
+    #[test]
+    fn handle_event_popup_enter_in_arg_mode_submits_cmd_value() {
+        // Enter on an arg-mode row submits `/{cmd} {value}` so the dispatcher receives the
+        // full typed-arg form, not just the picked value.
+        let mut input = test_input();
+        type_text(&mut input, "/effort ");
+        input.refresh_popup();
+        let picked = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt(format!("/effort {picked}"))),
+        );
+        assert!(input.textarea.is_empty(), "buffer clears on submit");
+    }
+
     // ── render_popup ──
 
     #[test]
