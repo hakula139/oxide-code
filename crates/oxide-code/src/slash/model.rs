@@ -8,7 +8,7 @@ use super::matcher::rank_by_prefix;
 use super::picker::LISTED_MODELS;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::model::{MODELS, ResolvedModelId, display_name, is_family_base, lookup};
+use crate::model::{MODELS, ResolvedModelId, display_name, lookup};
 
 // ── Constants ──
 
@@ -50,8 +50,6 @@ impl SlashCommand for ModelCmd {
             .into_iter()
             .map(|id| ArgCompletion {
                 value: Cow::Borrowed(*id),
-                // `display_name` is `Cow<'static, str>` for `&'static` ids — the four bare rows
-                // borrow the marketing literal; only `[1m]` rows allocate the suffixed string.
                 description: display_name(id),
             })
             .collect()
@@ -92,16 +90,14 @@ fn resolve_model_arg(arg: &str) -> Result<ResolvedModelId, String> {
     if !info.capabilities.context_1m {
         return Err(format!(
             "{}: 1M context not supported. Drop the `{TAG_1M}` tag.",
-            info.marketing,
+            info.display_name,
         ));
     }
     Ok(ResolvedModelId::new(format!("{base_id}{TAG_1M}")))
 }
 
 /// Resolution tiers (first hit wins): short alias → dated id (`<id>-YYYYMMDD`) → known canonical
-/// id → unique suffix → unique substring. Family-bases are filtered at every selectable tier so
-/// users can't land on a deprecated row by typing its id directly — only dated ids of a
-/// family-base remain reachable since the user explicitly opted into a specific snapshot.
+/// id → unique suffix → unique substring.
 fn resolve_base(arg: &str) -> Result<String, String> {
     if let Some(&(_, target)) = ALIASES.iter().find(|(name, _)| *name == arg) {
         return Ok(target.to_owned());
@@ -112,29 +108,39 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     if is_selectable_known_id(arg) {
         return Ok(arg.to_owned());
     }
-    let suffix_hits = candidates(|id| id.ends_with(arg) && !is_family_base(id));
+    let suffix_hits = candidates(|id| id.ends_with(arg));
     if let [id] = suffix_hits.as_slice() {
         return Ok((*id).to_owned());
     }
-    let visible = candidates(|id| id.contains(arg) && !is_family_base(id));
+    let visible = candidates(|id| id.contains(arg));
     match visible.as_slice() {
         [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
-            "`{arg}` matches {n} models: {list}. Type a more specific id or use a short alias (`opus`, `sonnet`, `haiku`).",
+            "`{arg}` matches {n} models. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):\n\n{list}",
             n = visible.len(),
-            list = visible.join(", "),
+            list = format_supported_models(&visible),
         )),
         [] => Err(format!(
-            "Unknown model: `{arg}`. Run `/model` for selectable shortcuts; \
-             any id from the model table works (e.g. `claude-opus-4-6`).",
+            "Unknown model: `{arg}`. Supported models:\n\n{list}",
+            list = format_supported_models(&candidates(|_| true)),
         )),
     }
 }
 
 fn is_selectable_known_id(arg: &str) -> bool {
-    MODELS
-        .iter()
-        .any(|m| m.id_substr == arg && !m.is_family_base)
+    MODELS.iter().any(|m| m.id_substr == arg)
+}
+
+/// Markdown bullet list of `id — display name` rows.
+fn format_supported_models(ids: &[&'static str]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for id in ids {
+        let label = lookup(id).map_or(*id, |m| m.display_name);
+        _ = writeln!(out, "- `{id}` — {label}");
+    }
+    out.truncate(out.trim_end_matches('\n').len());
+    out
 }
 
 fn is_dated_model_id(arg: &str) -> bool {
@@ -344,44 +350,35 @@ mod tests {
     }
 
     #[test]
-    fn execute_unknown_arg_errors_with_recovery_hint() {
+    fn execute_unknown_arg_errors_with_supported_model_listing() {
         let (chat, outcome) = run_execute("gpt-4");
         let msg = outcome.expect_err("unknown arg must error");
+        assert!(msg.starts_with("Unknown model: `gpt-4`."), "{msg}");
+        assert!(msg.contains("Supported models:"), "{msg}");
+        for id in ["claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5"] {
+            assert!(msg.contains(id), "{id} should appear in listing: {msg}");
+        }
         assert!(
-            msg.starts_with("Unknown model: `gpt-4`."),
-            "leading capital + backticked input: {msg}",
+            msg.contains("Claude Opus 4.7"),
+            "marketing names render: {msg}"
         );
-        assert!(msg.contains("Run `/model`"), "recovery hint: {msg}");
-        assert!(
-            msg.contains("claude-opus-4-6"),
-            "manual-entry example surfaces: {msg}",
-        );
-        assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
+        assert_eq!(chat.entry_count(), 0);
     }
 
     #[test]
-    fn execute_family_base_id_no_longer_silently_selects_deprecated() {
-        // `claude-opus-4` / `claude-sonnet-4` are kept in MODELS only so dated ids resolve
-        // their capabilities. Direct typing must NOT land on the deprecated base — opus-4 has
-        // four current descendants so it errors with ambiguity, sonnet-4 has two.
+    fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
+        // Retired Opus 4 / Sonnet 4 ids and the loose `opus-4` form substring-match multiple
+        // current descendants — must error with the candidate listing, not silently pick one.
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err(&format!("`{arg}` must error"));
-            assert!(
-                msg.contains("matches"),
-                "ambiguity error for `{arg}`: {msg}"
-            );
-            assert!(
-                !msg.contains("claude-opus-4,") && !msg.contains("claude-sonnet-4,"),
-                "deprecated family-base must not appear in candidate list: {msg}",
-            );
+            assert!(msg.contains("matches"), "ambiguity for `{arg}`: {msg}");
         }
     }
 
     #[test]
-    fn execute_family_base_with_unique_current_descendant_promotes_to_it() {
-        // `claude-haiku-4` substrings only `claude-haiku-4-5` (after family-base filter), so the
-        // substring tier resolves uniquely instead of erroring.
+    fn execute_haiku_4_resolves_to_only_extant_descendant() {
+        // `claude-haiku-4` substring-matches only `claude-haiku-4-5` (Haiku 4 was never released).
         let (_, outcome) = run_execute("claude-haiku-4");
         assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
@@ -390,39 +387,26 @@ mod tests {
     fn execute_ambiguous_substring_lists_count_and_each_candidate() {
         let (_, outcome) = run_execute("4-6");
         let msg = outcome.expect_err("ambiguous arg must error");
-        assert!(
-            msg.starts_with("`4-6` matches"),
-            "leading backtick + count substring: {msg}",
-        );
+        assert!(msg.starts_with("`4-6` matches"), "{msg}");
         for needle in ["claude-opus-4-6", "claude-sonnet-4-6"] {
-            assert!(msg.contains(needle), "candidate `{needle}` listed: {msg}");
+            assert!(msg.contains(needle), "{needle} listed: {msg}");
         }
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
     }
 
     #[test]
-    fn execute_ambiguous_listing_omits_family_base_rows() {
-        // `claude-opus` substring-matches every Opus row, including the deprecated
-        // `claude-opus-4` base. Listing the base would invite a user to type a superseded id.
+    fn execute_ambiguous_listing_covers_every_current_match() {
+        // `claude-opus` substring-matches every current Opus row.
         let (_, outcome) = run_execute("claude-opus");
         let msg = outcome.expect_err("ambiguous arg must error");
-        for current in ["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-1"] {
-            assert!(
-                msg.contains(current),
-                "current row `{current}` listed: {msg}"
-            );
+        for current in [
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-1",
+        ] {
+            assert!(msg.contains(current), "{current} listed: {msg}");
         }
-        // Bound the search to comma-delimited tokens so `claude-opus-4` doesn't false-match
-        // on the longer `claude-opus-4-7`.
-        let listed: Vec<&str> = msg
-            .split([':', ','])
-            .map(str::trim)
-            .filter(|s| s.starts_with("claude-"))
-            .collect();
-        assert!(
-            !listed.contains(&"claude-opus-4"),
-            "family base must not appear in listing: {listed:?}",
-        );
     }
 
     #[test]
@@ -450,13 +434,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_arg_round_trips_every_selectable_models_row() {
-        // Family-bases are deprecated for direct selection — covered by the
-        // `family_base_id_no_longer_silently_selects_deprecated` test instead.
+    fn resolve_model_arg_round_trips_every_models_row() {
         for info in MODELS {
-            if info.is_family_base {
-                continue;
-            }
             assert_eq!(
                 resolve_model_arg(info.id_substr)
                     .as_ref()

@@ -135,7 +135,7 @@ impl ModelEffortPicker {
             return;
         };
         let caps = capabilities_for(row.id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return;
         }
         let supported: Vec<Effort> = Effort::ALL
@@ -187,7 +187,7 @@ impl ModelEffortPicker {
     fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
         let row = self.list.selected()?;
         let caps = capabilities_for(row.id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return None;
         }
         let level = self.effort_or_active()?;
@@ -297,13 +297,13 @@ enum Direction {
 }
 
 fn has_effort_tier(row: &ModelRow) -> bool {
-    capabilities_for(row.id).effort
+    capabilities_for(row.id).has_effort()
 }
 
 fn effort_for_highlighted(list: &ListPicker<ModelRow>, fallback: Option<Effort>) -> Option<Effort> {
     let row = list.selected()?;
     let caps = capabilities_for(row.id);
-    if !caps.effort {
+    if !caps.has_effort() {
         return None;
     }
     Some(caps.resolve_effort(fallback).unwrap_or(Effort::High))

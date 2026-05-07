@@ -57,7 +57,7 @@ impl SlashCommand for EffortCmd {
         }
         let pick = parse_effort_arg(arg)?;
         let caps = capabilities_for(&ctx.info.config.model_id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return Err(no_effort_tier_msg(&ctx.info.config.model_id));
         }
         Ok(SlashOutcome::Forward(UserAction::SwapConfig {

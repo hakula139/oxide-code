@@ -252,16 +252,17 @@ mod tests {
 
     #[test]
     fn knowledge_cutoff_known_models() {
-        assert_eq!(knowledge_cutoff("claude-opus-4-7"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4-6"), Some("August 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-6"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-5"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff("claude-haiku-4-5"), Some("February 2025"));
-        assert_eq!(knowledge_cutoff("claude-haiku-4"), Some("February 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-1"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4-5"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4"), Some("January 2025"));
+        for (id, expected) in [
+            ("claude-opus-4-7", "January 2026"),
+            ("claude-sonnet-4-6", "August 2025"),
+            ("claude-opus-4-6", "May 2025"),
+            ("claude-opus-4-5", "May 2025"),
+            ("claude-haiku-4-5", "February 2025"),
+            ("claude-opus-4-1", "January 2025"),
+            ("claude-sonnet-4-5", "January 2025"),
+        ] {
+            assert_eq!(knowledge_cutoff(id), Some(expected), "{id}");
+        }
     }
 
     #[test]

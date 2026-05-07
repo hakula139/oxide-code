@@ -59,7 +59,7 @@ impl EffortSlider {
     /// `None` when the active model has no effort tier; caller errors before opening.
     pub(super) fn new(info: &LiveSessionInfo) -> Option<Self> {
         let caps = capabilities_for(&info.config.model_id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return None;
         }
         let supported: Vec<Effort> = Effort::ALL
@@ -69,7 +69,7 @@ impl EffortSlider {
             .collect();
         let initial = caps
             .resolve_effort(info.config.effort)
-            .expect("caps.effort implies a resolvable tier");
+            .expect("caps.has_effort() implies a resolvable tier");
         let selected = supported
             .iter()
             .position(|e| *e == initial)

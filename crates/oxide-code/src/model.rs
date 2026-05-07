@@ -11,9 +11,7 @@ use crate::config::Effort;
 pub(crate) struct ModelInfo {
     /// First substring match in [`MODELS`] wins; ordering matters.
     pub(crate) id_substr: &'static str,
-    /// Unqualified fallback row that resolves dated / legacy ids; user-facing listings hide it.
-    pub(crate) is_family_base: bool,
-    pub(crate) marketing: &'static str,
+    pub(crate) display_name: &'static str,
     pub(crate) cutoff: Option<&'static str>,
     pub(crate) capabilities: Capabilities,
 }
@@ -22,11 +20,10 @@ pub(crate) struct ModelInfo {
 
 /// Per-model gate set consumed by the wire-builder (header + body fields), the slash commands
 /// (`/effort` rejects unsupported tiers, `/model` rejects `[1m]` on non-1M models), and the
-/// effort picker (renders only the supported ladder). Every field is a Boolean because each one
-/// maps 1:1 to a distinct upstream switch — combining them would obscure the source of truth.
+/// effort picker (renders only the supported ladder).
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "seven independent capability flags — each maps 1:1 to a separate upstream `modelSupports*` predicate or a per-version allowlist; a bitflag or state-machine refactor would add indirection without any expressiveness gain"
+    reason = "each flag maps 1:1 to a separate upstream `modelSupports*` predicate or per-version allowlist; bitflags add indirection without expressiveness"
 )]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Capabilities {
@@ -34,12 +31,8 @@ pub(crate) struct Capabilities {
     pub(crate) context_management: bool,
     /// `context-1m-2025-08-07` beta.
     pub(crate) context_1m: bool,
-    /// `output_config.effort` at low / medium / high.
-    pub(crate) effort: bool,
-    /// `effort = "max"`. Opus-only.
-    pub(crate) effort_max: bool,
-    /// `effort = "xhigh"`. Opus 4.7 only.
-    pub(crate) effort_xhigh: bool,
+    /// `output_config.effort` levels accepted upstream. Empty when the model rejects `effort`.
+    pub(crate) supported_efforts: &'static [Effort],
     /// `structured-outputs-2025-12-15` beta.
     pub(crate) structured_outputs: bool,
 }
@@ -48,201 +41,127 @@ pub(crate) struct Capabilities {
 
 /// Most-specific substring first. No inheritance between rows.
 pub(crate) const MODELS: &[ModelInfo] = &[
-    // Inherits 4.6 as a monotonic projection; `effort_xhigh` is the 4.7-only addition.
     ModelInfo {
         id_substr: "claude-opus-4-7",
-        is_family_base: false,
-        marketing: "Claude Opus 4.7",
+        display_name: "Claude Opus 4.7",
         cutoff: Some("January 2026"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: true,
-            effort: true,
-            effort_max: true,
-            effort_xhigh: true,
+            supported_efforts: &[
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::Xhigh,
+                Effort::Max,
+            ],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-opus-4-6",
-        is_family_base: false,
-        marketing: "Claude Opus 4.6",
+        display_name: "Claude Opus 4.6",
         cutoff: Some("May 2025"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: true,
-            effort: true,
-            effort_max: true,
-            effort_xhigh: false,
+            supported_efforts: &[Effort::Low, Effort::Medium, Effort::High, Effort::Max],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-6",
-        is_family_base: false,
-        marketing: "Claude Sonnet 4.6",
+        display_name: "Claude Sonnet 4.6",
         cutoff: Some("August 2025"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: true,
-            effort: true,
-            // `max` is Opus-only; Sonnet 4.6 400s on it.
-            effort_max: false,
-            effort_xhigh: false,
+            supported_efforts: &[Effort::Low, Effort::Medium, Effort::High],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-opus-4-5",
-        is_family_base: false,
-        marketing: "Claude Opus 4.5",
+        display_name: "Claude Opus 4.5",
         cutoff: Some("May 2025"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: false,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
+            supported_efforts: &[],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-sonnet-4-5",
-        is_family_base: false,
-        marketing: "Claude Sonnet 4.5",
+        display_name: "Claude Sonnet 4.5",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: true,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
+            supported_efforts: &[],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-haiku-4-5",
-        is_family_base: false,
-        marketing: "Claude Haiku 4.5",
+        display_name: "Claude Haiku 4.5",
         cutoff: Some("February 2025"),
         capabilities: Capabilities {
             // 3P gateways 400 on `interleaved-thinking` for Haiku 4.5.
             interleaved_thinking: false,
             context_management: true,
             context_1m: false,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
+            supported_efforts: &[],
             structured_outputs: true,
         },
     },
     ModelInfo {
         id_substr: "claude-opus-4-1",
-        is_family_base: false,
-        marketing: "Claude Opus 4.1",
+        display_name: "Claude Opus 4.1",
         cutoff: Some("January 2025"),
         capabilities: Capabilities {
             interleaved_thinking: true,
             context_management: true,
             context_1m: false,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
+            supported_efforts: &[],
             structured_outputs: true,
-        },
-    },
-    // Unqualified base (`claude-opus-4`, `-4-0`, `-4-20250514`); structured outputs arrived in 4.1.
-    ModelInfo {
-        id_substr: "claude-opus-4",
-        is_family_base: true,
-        marketing: "Claude Opus 4",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: false,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
-            structured_outputs: false,
-        },
-    },
-    // Sonnet 4 base: all Sonnet 4.x carry 1M per upstream's `sonnet-4` substring rule.
-    ModelInfo {
-        id_substr: "claude-sonnet-4",
-        is_family_base: true,
-        marketing: "Claude Sonnet 4",
-        cutoff: Some("January 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: true,
-            context_management: true,
-            context_1m: true,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
-            structured_outputs: false,
-        },
-    },
-    ModelInfo {
-        id_substr: "claude-haiku-4",
-        is_family_base: true,
-        marketing: "Claude Haiku 4",
-        cutoff: Some("February 2025"),
-        capabilities: Capabilities {
-            interleaved_thinking: false,
-            context_management: true,
-            context_1m: false,
-            effort: false,
-            effort_max: false,
-            effort_xhigh: false,
-            structured_outputs: false,
         },
     },
 ];
 
 impl Capabilities {
-    /// Whether the model accepts a given `output_config.effort` value. Splits on tier because the
-    /// Anthropic API rejects unsupported levels with a 400, not a silent clamp — `xhigh` is 4.7
-    /// only, `max` is Opus-only.
+    /// Whether `output_config.effort` is sent at all for this model.
+    pub(crate) fn has_effort(self) -> bool {
+        !self.supported_efforts.is_empty()
+    }
+
+    /// Whether the model accepts `level`. Anthropic 400s on unsupported tiers — no silent clamp.
     pub(crate) fn accepts_effort(self, level: Effort) -> bool {
-        match level {
-            Effort::Low | Effort::Medium | Effort::High => self.effort,
-            Effort::Xhigh => self.effort_xhigh,
-            Effort::Max => self.effort_max,
-        }
+        self.supported_efforts.contains(&level)
     }
 
-    /// Highest accepted level ≤ `pick`. `None` when the model doesn't support effort.
+    /// Highest accepted level ≤ `pick`. `None` when the model rejects effort entirely.
     pub(crate) fn clamp_effort(self, pick: Effort) -> Option<Effort> {
-        if !self.effort {
-            return None;
-        }
-        [
-            Effort::Max,
-            Effort::Xhigh,
-            Effort::High,
-            Effort::Medium,
-            Effort::Low,
-        ]
-        .into_iter()
-        .find(|&level| level <= pick && self.accepts_effort(level))
+        self.supported_efforts
+            .iter()
+            .copied()
+            .rev()
+            .find(|&level| level <= pick)
     }
 
-    /// Highest tier the model accepts when the user hasn't picked one — `xhigh` for 4.7, `high`
-    /// for other effort-capable models, `None` otherwise.
+    /// Default tier when the user hasn't picked one. `Max` is opt-in, so the implicit ceiling is
+    /// the highest non-`Max` supported level.
     pub(crate) fn default_effort(self) -> Option<Effort> {
-        if self.effort_xhigh {
-            Some(Effort::Xhigh)
-        } else if self.effort {
-            Some(Effort::High)
-        } else {
-            None
-        }
+        self.supported_efforts
+            .iter()
+            .copied()
+            .rev()
+            .find(|&level| level != Effort::Max)
     }
 
     /// Clamps `pick` when present, otherwise falls back to [`Self::default_effort`].
@@ -282,13 +201,6 @@ pub(crate) fn lookup(model: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|info| model.contains(info.id_substr))
 }
 
-/// True when `id` matches a family-base row exactly. User-facing listings filter against this.
-pub(crate) fn is_family_base(id: &str) -> bool {
-    MODELS
-        .iter()
-        .any(|info| info.id_substr == id && info.is_family_base)
-}
-
 /// Capabilities for `model`, falling back to [`Capabilities::default`] for unknown ids.
 pub(crate) fn capabilities_for(model: &str) -> Capabilities {
     lookup(model)
@@ -297,7 +209,7 @@ pub(crate) fn capabilities_for(model: &str) -> Capabilities {
 }
 
 pub(crate) fn marketing_name(model: &str) -> Option<&'static str> {
-    lookup(model).map(|info| info.marketing)
+    lookup(model).map(|info| info.display_name)
 }
 
 /// Marketing name when known, raw id otherwise.
@@ -323,15 +235,14 @@ mod tests {
 
     #[test]
     fn capability_flags_match_upstream_substring_predicates() {
-        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Allowlist
-        // flags have their own tests. Opus 4.7 postdates the predicate set and is skipped.
+        // Locks substring-derived flags to upstream's `modelSupports*` predicates. Opus 4.7
+        // postdates the predicate set and is skipped.
         for info in MODELS {
             if info.id_substr == "claude-opus-4-7" {
                 continue;
             }
             let m = info.id_substr;
             let is_opus_or_sonnet_4 = m.contains("opus-4") || m.contains("sonnet-4");
-            // haiku-4 is not in modelSupportsISP
             let expect_interleaved_thinking = is_opus_or_sonnet_4;
             let expect_context_management = is_opus_or_sonnet_4 || m.contains("haiku-4");
             let expect_context_1m = m.contains("claude-sonnet-4") || m.contains("opus-4-6");
@@ -339,20 +250,14 @@ mod tests {
 
             assert_eq!(
                 info.capabilities.interleaved_thinking, expect_interleaved_thinking,
-                "{m}: interleaved_thinking should match modelSupportsISP",
+                "{m}"
             );
             assert_eq!(
                 info.capabilities.context_management, expect_context_management,
-                "{m}: context_management should match modelSupportsContextManagement",
+                "{m}"
             );
-            assert_eq!(
-                info.capabilities.context_1m, expect_context_1m,
-                "{m}: context_1m should match modelSupports1M",
-            );
-            assert_eq!(
-                info.capabilities.effort, expect_effort,
-                "{m}: effort should match modelSupportsEffort",
-            );
+            assert_eq!(info.capabilities.context_1m, expect_context_1m, "{m}");
+            assert_eq!(info.capabilities.has_effort(), expect_effort, "{m}");
         }
     }
 
@@ -363,9 +268,8 @@ mod tests {
         assert!(caps.interleaved_thinking);
         assert!(caps.context_management);
         assert!(caps.context_1m);
-        assert!(caps.effort);
-        assert!(caps.effort_max);
-        assert!(caps.effort_xhigh);
+        assert!(caps.accepts_effort(Effort::Xhigh));
+        assert!(caps.accepts_effort(Effort::Max));
         assert!(caps.structured_outputs);
 
         for other in [
@@ -377,19 +281,24 @@ mod tests {
             "claude-opus-4-1",
         ] {
             assert!(
-                !lookup(other).unwrap().capabilities.effort_xhigh,
-                "{other} must not claim effort_xhigh — it 400s on non-4.7",
+                !lookup(other)
+                    .unwrap()
+                    .capabilities
+                    .accepts_effort(Effort::Xhigh),
+                "{other} must not accept Xhigh — it 400s on non-4.7",
             );
         }
     }
 
     #[test]
     fn effort_max_is_opus_only() {
-        // `max` is Opus-only; Sonnet 4.6 supports base `effort` but 400s on `max`.
         for supported in ["claude-opus-4-7", "claude-opus-4-6"] {
             assert!(
-                lookup(supported).unwrap().capabilities.effort_max,
-                "{supported} should claim effort_max",
+                lookup(supported)
+                    .unwrap()
+                    .capabilities
+                    .accepts_effort(Effort::Max),
+                "{supported}",
             );
         }
         for unsupported in [
@@ -398,20 +307,19 @@ mod tests {
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
             "claude-opus-4-1",
-            "claude-opus-4",
-            "claude-sonnet-4",
-            "claude-haiku-4",
         ] {
             assert!(
-                !lookup(unsupported).unwrap().capabilities.effort_max,
-                "{unsupported} must not claim effort_max",
+                !lookup(unsupported)
+                    .unwrap()
+                    .capabilities
+                    .accepts_effort(Effort::Max),
+                "{unsupported}",
             );
         }
     }
 
     #[test]
     fn structured_outputs_flag_tracks_upstream_allowlist() {
-        // Per-version allowlist: Opus 4.1/4.5/4.6 (+ our 4.7 bump), Sonnet 4.5/4.6, Haiku 4.5.
         for supported in [
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -423,13 +331,7 @@ mod tests {
         ] {
             assert!(
                 lookup(supported).unwrap().capabilities.structured_outputs,
-                "{supported} should claim structured outputs per upstream",
-            );
-        }
-        for unsupported in ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"] {
-            assert!(
-                !lookup(unsupported).unwrap().capabilities.structured_outputs,
-                "{unsupported} fallback row must not claim structured outputs",
+                "{supported}"
             );
         }
     }
@@ -561,51 +463,30 @@ mod tests {
     // ── lookup ──
 
     #[test]
-    fn lookup_matches_most_specific_row_before_family_base() {
+    fn lookup_picks_first_matching_substring_row() {
         let info = lookup("claude-opus-4-6").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
-        assert!(info.capabilities.effort);
+        assert_eq!(info.display_name, "Claude Opus 4.6");
+        assert!(info.capabilities.has_effort());
     }
 
     #[test]
     fn lookup_ignores_1m_suffix_tag_for_matching() {
         // `[1m]` is a client-side opt-in marker; substring match still finds the base row.
         let info = lookup("claude-opus-4-6[1m]").unwrap();
-        assert_eq!(info.marketing, "Claude Opus 4.6");
+        assert_eq!(info.display_name, "Claude Opus 4.6");
     }
 
     #[test]
-    fn lookup_unknown_model_family_is_absent() {
-        assert!(lookup("claude-opus-5-0").is_none());
-        assert!(lookup("gpt-4").is_none());
-    }
-
-    // ── is_family_base ──
-
-    #[test]
-    fn is_family_base_recognizes_each_unqualified_base_row() {
-        // Pinning per-id flips a mutation that flipped the bool only on `claude-opus-4` while
-        // leaving sonnet / haiku correct — the slash-resolver filter would still reject opus
-        // but silently accept sonnet/haiku family-bases.
-        for base in ["claude-opus-4", "claude-sonnet-4", "claude-haiku-4"] {
-            assert!(is_family_base(base), "{base} must flag as family-base");
-        }
-    }
-
-    #[test]
-    fn is_family_base_rejects_dated_versioned_and_unknown_ids() {
-        for non_base in [
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
+    fn lookup_unknown_or_retired_model_family_is_absent() {
+        for unknown in [
+            "claude-opus-5-0",
+            "claude-opus-4",
+            "claude-sonnet-4",
+            "claude-haiku-4",
             "claude-opus-4-20250514",
             "gpt-4",
-            "",
         ] {
-            assert!(
-                !is_family_base(non_base),
-                "{non_base} must not flag as family-base",
-            );
+            assert!(lookup(unknown).is_none(), "{unknown} must not resolve");
         }
     }
 
@@ -613,26 +494,21 @@ mod tests {
 
     #[test]
     fn marketing_name_known_models() {
-        assert_eq!(marketing_name("claude-opus-4-7"), Some("Claude Opus 4.7"));
-        assert_eq!(marketing_name("claude-opus-4-6"), Some("Claude Opus 4.6"));
-        assert_eq!(
-            marketing_name("claude-sonnet-4-6"),
-            Some("Claude Sonnet 4.6")
-        );
-        assert_eq!(marketing_name("claude-opus-4-5"), Some("Claude Opus 4.5"));
-        assert_eq!(
-            marketing_name("claude-sonnet-4-5"),
-            Some("Claude Sonnet 4.5")
-        );
-        assert_eq!(marketing_name("claude-haiku-4-5"), Some("Claude Haiku 4.5"));
-        assert_eq!(marketing_name("claude-opus-4-1"), Some("Claude Opus 4.1"));
-        assert_eq!(marketing_name("claude-opus-4"), Some("Claude Opus 4"));
-        assert_eq!(marketing_name("claude-sonnet-4"), Some("Claude Sonnet 4"));
-        assert_eq!(marketing_name("claude-haiku-4"), Some("Claude Haiku 4"));
+        for (id, expected) in [
+            ("claude-opus-4-7", "Claude Opus 4.7"),
+            ("claude-opus-4-6", "Claude Opus 4.6"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-opus-4-5", "Claude Opus 4.5"),
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ("claude-opus-4-1", "Claude Opus 4.1"),
+        ] {
+            assert_eq!(marketing_name(id), Some(expected), "{id}");
+        }
     }
 
     #[test]
-    fn marketing_name_with_dated_suffix_falls_through_to_family_row() {
+    fn marketing_name_dated_suffix_falls_through_to_substring_row() {
         assert_eq!(
             marketing_name("claude-opus-4-6-20260401"),
             Some("Claude Opus 4.6")
