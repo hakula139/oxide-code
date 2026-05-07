@@ -1,12 +1,13 @@
-//! `/config` — read-only view of resolved config plus its layered TOML source paths. Path
-//! discovery is per-invocation so mid-session file edits surface immediately.
+//! `/config` — open a read-only [`KvOverview`] of the resolved config plus the layered TOML
+//! source paths it was assembled from. Path discovery is per-invocation so mid-session file
+//! edits surface immediately.
 
 use std::path::Path;
 
 use super::context::{LiveSessionInfo, SlashContext};
-use super::format::write_kv_section;
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_effort, file};
+use crate::config::{display_bool, display_effort, file};
+use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
 
 pub(super) struct ConfigCmd;
@@ -20,44 +21,55 @@ impl SlashCommand for ConfigCmd {
         "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
     }
 
+    fn echoes_input(&self, _args: &str) -> bool {
+        false
+    }
+
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let user = file::user_config_path();
         let project = file::find_project_config();
-        ctx.chat
-            .push_system_message(render_config(ctx.info, user.as_deref(), project.as_deref()));
+        ctx.open_modal(Box::new(build_modal(
+            ctx.info,
+            user.as_deref(),
+            project.as_deref(),
+        )));
         Ok(SlashOutcome::Done)
     }
 }
 
-fn render_config(
+fn build_modal(
     info: &LiveSessionInfo,
     user_path: Option<&Path>,
     project_path: Option<&Path>,
-) -> String {
+) -> KvOverview {
     let cfg = &info.config;
-    let effort = display_effort(cfg.effort);
-    let max_tokens = cfg.max_tokens.to_string();
-    let cache_ttl = cfg.prompt_cache_ttl.to_string();
-    let thinking = if cfg.show_thinking { "yes" } else { "no" };
-    let model = info.display_name();
-    let resolved: [(&str, &str); 8] = [
-        ("Model", &model),
-        ("Model ID", &cfg.model_id),
-        ("Effort", &effort),
-        ("Auth", cfg.auth_label),
-        ("Base URL", &cfg.base_url),
-        ("Max Tokens", &max_tokens),
-        ("Prompt Cache TTL", &cache_ttl),
-        ("Show Thinking", thinking),
+    let resolved = vec![
+        ("Model".to_owned(), info.display_name().into_owned()),
+        ("Model ID".to_owned(), cfg.model_id.clone()),
+        ("Effort".to_owned(), display_effort(cfg.effort)),
+        ("Auth".to_owned(), cfg.auth_label.to_owned()),
+        ("Base URL".to_owned(), cfg.base_url.clone()),
+        ("Max Tokens".to_owned(), cfg.max_tokens.to_string()),
+        (
+            "Prompt Cache TTL".to_owned(),
+            cfg.prompt_cache_ttl.to_string(),
+        ),
+        (
+            "Show Thinking".to_owned(),
+            display_bool(cfg.show_thinking).to_owned(),
+        ),
     ];
-    let user = display_path(user_path);
-    let project = display_path(project_path);
-    let files: [(&str, &str); 2] = [("User", &user), ("Project", &project)];
-
-    let mut out = String::new();
-    write_kv_section(&mut out, "Resolved Config", resolved);
-    write_kv_section(&mut out, "Source Files", files);
-    out
+    let files = vec![
+        ("User".to_owned(), display_path(user_path)),
+        ("Project".to_owned(), display_path(project_path)),
+    ];
+    KvOverview::new(
+        "Configuration",
+        vec![
+            KvSection::new(resolved).with_heading("Resolved"),
+            KvSection::new(files).with_heading("Source Files"),
+        ],
+    )
 }
 
 /// `(not configured)` when unresolved; `~/...` plus ` (not found)` when missing.
@@ -79,6 +91,9 @@ mod tests {
 
     use super::*;
     use crate::slash::test_session_info;
+    use crate::tui::components::chat::ChatView;
+    use crate::tui::modal::Modal;
+    use crate::tui::theme::Theme;
 
     // ── ConfigCmd metadata ──
 
@@ -92,95 +107,27 @@ mod tests {
     // ── ConfigCmd::execute ──
 
     #[test]
-    fn config_execute_pushes_a_non_error_block() {
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
+    fn execute_opens_a_modal_via_ctx_and_pushes_no_chat_block() {
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let mut ctx = SlashContext::new(&mut chat, &info);
         ConfigCmd.execute("", &mut ctx).unwrap();
-        assert_eq!(chat.entry_count(), 1);
-        assert!(!chat.last_is_error());
-    }
-
-    // ── render_config ──
-
-    #[test]
-    fn render_config_starts_with_resolved_heading_then_sources_section() {
-        let info = test_session_info();
-        let body = render_config(&info, None, None);
-        assert!(body.starts_with("Resolved Config"), "{body}");
-        assert!(body.contains("\nSource Files\n"), "{body}");
-    }
-
-    #[test]
-    fn render_config_includes_every_resolved_field_value() {
-        let info = test_session_info();
-        let cfg = &info.config;
-        let model = info.display_name();
-        let body = render_config(&info, None, None);
-        let effort = cfg
-            .effort
-            .map(|e| e.to_string())
-            .expect("fixture sets effort = Some");
-        for needle in [
-            model.as_ref(),
-            cfg.model_id.as_str(),
-            cfg.base_url.as_str(),
-            cfg.auth_label,
-            effort.as_str(),
-            "no", // fixture: show_thinking = false
-        ] {
-            assert!(body.contains(needle), "missing `{needle}`: {body}");
-        }
         assert!(
-            body.contains(&cfg.max_tokens.to_string()),
-            "missing max_tokens: {body}",
+            ctx.take_modal().is_some(),
+            "/config must populate the modal slot",
         );
-        assert!(
-            body.contains(&cfg.prompt_cache_ttl.to_string()),
-            "missing prompt_cache_ttl: {body}",
-        );
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
     }
 
-    #[test]
-    fn render_config_renders_no_effort_tier_when_none() {
-        let mut info = test_session_info();
-        info.config.effort = None;
-        let body = render_config(&info, None, None);
-        assert!(body.contains("(no effort tier)"), "{body}");
-    }
+    // ── build_modal ──
 
     #[test]
-    fn render_config_thinking_renders_yes_or_no_per_flag() {
-        let mut info = test_session_info();
-        info.config.show_thinking = false;
-        let body = render_config(&info, None, None);
-        assert!(body.contains("Show Thinking"), "label missing: {body}");
-        assert!(body.contains("  no"), "false should render `no`: {body}");
-        info.config.show_thinking = true;
-        let body = render_config(&info, None, None);
-        assert!(body.contains("  yes"), "true should render `yes`: {body}");
-    }
-
-    #[test]
-    fn render_config_paths_present_renders_tildified_value() {
+    fn build_modal_height_accounts_for_both_sections() {
+        // title + blank + (heading + blank + 8 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 10 + 1 + 4 + 2 = 19.
         let info = test_session_info();
-        let path = PathBuf::from("/nonexistent/dir/config.toml");
-        let body = render_config(&info, Some(&path), None);
-        assert!(body.contains("(not found)"), "{body}");
-        assert!(
-            body.contains("/nonexistent/dir/config.toml"),
-            "missing path body: {body}",
-        );
-    }
-
-    #[test]
-    fn render_config_paths_none_marks_each_section_explicitly() {
-        let info = test_session_info();
-        let body = render_config(&info, None, None);
-        assert_eq!(body.matches("(not configured)").count(), 2, "{body}");
+        let m = build_modal(&info, None, None);
+        assert_eq!(m.height(80), 19);
     }
 
     // ── display_path ──

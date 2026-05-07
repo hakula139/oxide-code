@@ -13,7 +13,6 @@ mod context;
 mod diff;
 mod effort;
 mod effort_slider;
-mod format;
 mod help;
 mod init;
 mod matcher;
@@ -22,7 +21,6 @@ mod parser;
 mod picker;
 mod registry;
 mod status;
-mod status_modal;
 mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
@@ -46,6 +44,13 @@ pub(crate) fn complete_arg_for(cmd_name: &str, prefix: &str) -> Vec<ArgCompletio
 /// `usage()` string for `cmd_name`, or `None` if the command publishes no arg placeholder.
 pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
     registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
+}
+
+/// Whether the typed `/foo args` line should echo into chat history. Unknown commands echo
+/// so the dispatcher's error block has the original line for context.
+pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
+    registry::lookup_in(registry::BUILT_INS, &parsed.name)
+        .is_none_or(|cmd| cmd.echoes_input(&parsed.args))
 }
 
 /// Resolves and runs `parsed` against the built-in registry.
@@ -125,6 +130,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             max_tokens: 32_000,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
             show_thinking: false,
+            show_welcome: true,
             theme_name: "mocha".to_owned(),
         },
     }
@@ -151,10 +157,16 @@ mod tests {
             name: "help".to_owned(),
             args: String::new(),
         };
-        let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        let outcome = dispatch(&parsed, &mut ctx);
         assert!(outcome.is_none(), "/help is Done, not Forward");
+        assert!(ctx.take_modal().is_some(), "/help opens a modal");
         assert!(!chat.last_is_error());
-        assert_eq!(chat.entry_count(), 1);
+        assert_eq!(
+            chat.entry_count(),
+            0,
+            "modal-only commands push no chat blocks"
+        );
         assert_eq!(chat.last_error_text(), None);
     }
 
@@ -266,6 +278,44 @@ mod tests {
         let registry: &[&dyn registry::SlashCommand] = &[&Failing];
         dispatch_with(registry, &parsed, &mut SlashContext::new(&mut chat, &info));
         assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
+    }
+
+    // ── echoes_input ──
+
+    #[test]
+    fn echoes_input_modal_only_commands_suppress_their_typed_line() {
+        for name in ["status", "config", "help"] {
+            let parsed = Parsed {
+                name: name.to_owned(),
+                args: String::new(),
+            };
+            assert!(!echoes_input(&parsed), "/{name} must not echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_picker_or_typed_commands_split_on_args() {
+        for name in ["effort", "model", "theme"] {
+            let bare = Parsed {
+                name: name.to_owned(),
+                args: String::new(),
+            };
+            assert!(!echoes_input(&bare), "bare /{name} must not echo");
+            let typed = Parsed {
+                name: name.to_owned(),
+                args: "x".to_owned(),
+            };
+            assert!(echoes_input(&typed), "typed /{name} must echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_unknown_command_echoes_so_error_block_has_context() {
+        let parsed = Parsed {
+            name: "no-such-thing".to_owned(),
+            args: String::new(),
+        };
+        assert!(echoes_input(&parsed));
     }
 
     // ── classify ──

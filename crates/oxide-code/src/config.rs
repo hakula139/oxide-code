@@ -51,6 +51,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) show_thinking: bool,
+    pub(crate) show_welcome: bool,
     /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
     /// to mark the active row in the picker.
     pub(crate) theme_name: String,
@@ -198,6 +199,7 @@ pub(crate) struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
+    pub(crate) show_welcome: bool,
     pub(crate) theme: Theme,
     /// Built-in catalogue key (e.g. `"mocha"`) or filesystem path; mirrors `[tui.theme] base`,
     /// falling back to [`DEFAULT_THEME`] when unset.
@@ -251,6 +253,10 @@ impl Config {
             .or(tui.show_thinking)
             .unwrap_or(false);
 
+        let show_welcome = env::bool("OX_SHOW_WELCOME")
+            .or(tui.show_welcome)
+            .unwrap_or(true);
+
         // 4.7 silently defaulted to `omitted`; `display` opts back into summarized. 4.6 and older
         // ignore the field.
         let thinking = Some(ThinkingConfig::Adaptive {
@@ -282,6 +288,7 @@ impl Config {
             prompt_cache_ttl,
             thinking,
             show_thinking,
+            show_welcome,
             theme,
             theme_name,
         })
@@ -297,6 +304,7 @@ impl Config {
             max_tokens: self.max_tokens,
             prompt_cache_ttl: self.prompt_cache_ttl,
             show_thinking: self.show_thinking,
+            show_welcome: self.show_welcome,
             theme_name: self.theme_name.clone(),
         }
     }
@@ -306,6 +314,10 @@ impl Config {
 
 pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
+}
+
+pub(crate) fn display_bool(flag: bool) -> &'static str {
+    if flag { "on" } else { "off" }
 }
 
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
@@ -427,6 +439,7 @@ mod tests {
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
         "OX_SHOW_THINKING",
+        "OX_SHOW_WELCOME",
         "OX_PROMPT_CACHE_TTL",
         "XDG_CONFIG_HOME",
     ];
@@ -485,6 +498,10 @@ mod tests {
         assert_eq!(config.effort, Some(Effort::Xhigh));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(!config.show_thinking);
+        assert!(
+            config.show_welcome,
+            "default-on so the empty chat surfaces the welcome"
+        );
         assert!(matches!(config.auth, Auth::ApiKey(k) if k == "sk-default"));
         assert_eq!(config.theme_name, DEFAULT_THEME);
     }
@@ -514,6 +531,7 @@ mod tests {
             env("ANTHROPIC_BASE_URL", "https://example.invalid"),
             env("ANTHROPIC_MAX_TOKENS", "64"),
             env("OX_SHOW_THINKING", "1"),
+            env("OX_SHOW_WELCOME", "0"),
         ]);
         let config = temp_env::async_with_vars(vars, Config::load())
             .await
@@ -522,6 +540,10 @@ mod tests {
         assert_eq!(config.base_url, "https://example.invalid");
         assert_eq!(config.max_tokens, 64);
         assert!(config.show_thinking);
+        assert!(
+            !config.show_welcome,
+            "env `0` flips the default-on welcome off"
+        );
     }
 
     #[tokio::test]
@@ -537,6 +559,7 @@ mod tests {
 
                 [tui]
                 show_thinking = true
+                show_welcome = false
             "#},
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
@@ -546,6 +569,10 @@ mod tests {
         assert_eq!(config.base_url, "https://config-file.invalid");
         assert_eq!(config.max_tokens, 128);
         assert!(config.show_thinking);
+        assert!(
+            !config.show_welcome,
+            "file `false` opts out of the default-on welcome"
+        );
     }
 
     #[tokio::test]
@@ -866,6 +893,7 @@ mod tests {
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             thinking: None,
             show_thinking: true,
+            show_welcome: false,
             theme: Theme::default(),
             theme_name: "macchiato".to_owned(),
         };
@@ -877,6 +905,7 @@ mod tests {
         assert_eq!(snap.max_tokens, 64_000);
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert!(snap.show_thinking);
+        assert!(!snap.show_welcome);
         assert_eq!(snap.theme_name, "macchiato");
     }
 
@@ -886,6 +915,14 @@ mod tests {
     fn display_effort_names_effective_tier_or_no_tier() {
         assert_eq!(display_effort(Some(Effort::High)), "high");
         assert_eq!(display_effort(None), "(no effort tier)");
+    }
+
+    // ── display_bool ──
+
+    #[test]
+    fn display_bool_names_the_two_flag_states() {
+        assert_eq!(display_bool(true), "on");
+        assert_eq!(display_bool(false), "off");
     }
 
     // ── default_max_tokens ──

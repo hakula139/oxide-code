@@ -30,6 +30,10 @@ impl SlashCommand for EffortCmd {
         }
     }
 
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.trim().is_empty()
+    }
+
     fn usage(&self) -> Option<&'static str> {
         Some("[<level>]")
     }
@@ -100,7 +104,6 @@ mod tests {
 
     #[test]
     fn classify_splits_on_args() {
-        // Bare form opens the slider (read-only); typed arg races the client (mutating).
         assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
         assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
@@ -177,7 +180,6 @@ mod tests {
 
     #[test]
     fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
-        // Slider can't render zero tiers — error before opening the modal.
         let (chat, outcome) = run_execute_with_model("claude-haiku-4-5", "");
         let msg = outcome.expect_err("must error");
         assert!(

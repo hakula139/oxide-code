@@ -70,21 +70,19 @@ ox                                          # Start an interactive session
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
-│   ├── config.rs                           # /config — read-only resolved config + layered file paths
+│   ├── config.rs                           # /config — opens a KvOverview modal of resolved config + layered file paths
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort — bare opens the slider; `/effort <level>` resolves the typed-arg shortcut
 │   ├── effort_slider.rs                    # EffortSlider — Speed ↔ Intelligence horizontal slider, opened by bare /effort
-│   ├── format.rs                           # Shared kv-section / kv-table renderer
-│   ├── help.rs                             # /help — registry-driven command listing
+│   ├── help.rs                             # /help — opens a KvOverview modal listing every registered command
 │   ├── init.rs                             # /init — synthesize an AGENTS.md / CLAUDE.md author-or-update prompt
 │   ├── matcher.rs                          # filter_and_rank: tier-ranked popup matches
 │   ├── model.rs                            # /model — bare opens picker; `/model <id>` resolves alias → lookup → unique suffix → unique substring; `[1m]` first-class
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
-│   ├── registry.rs                         # SlashCommand trait + SlashOutcome + BUILT_INS slice + alias-aware lookup
-│   ├── status.rs                           # /status — opens StatusModal
-│   ├── status_modal.rs                     # StatusModal — read-only kv-overview of the live session (Esc / Enter close)
+│   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
+│   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
 ├── tool/
@@ -132,6 +130,7 @@ ox                                          # Start an interactive session
 │   │   └── render.rs                       # pulldown-cmark event walker, inline / block / list / table rendering
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack — focus-grabbing UI overlays
 │   ├── modal/
+│   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection — read-only sectioned kv-table modal used by /status, /config, /help
 │   │   └── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook

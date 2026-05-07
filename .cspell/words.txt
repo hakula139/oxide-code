@@ -10,6 +10,7 @@ atuin
 catppuccin
 Catppuccin
 claudemd
+Clawd
 clippy
 cmark
 codex
@@ -42,9 +43,11 @@ Kobalte
 latte
 macchiato
 misparse
+MMIX
 mplan
 mpsc
 mtimes
+MULT
 nonewline
 onig
 pgid

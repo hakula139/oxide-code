@@ -2,7 +2,7 @@
 
 Research on TUI patterns across reference projects. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
-## Claude Code (TypeScript / Ink)
+## Claude Code (TypeScript + Ink)
 
 Custom fork of Ink — React-based terminal rendering with Yoga Flexbox layout.
 
@@ -13,7 +13,7 @@ Custom fork of Ink — React-based terminal rendering with Yoga Flexbox layout.
 - **Scroll**: `ScrollBox` bypasses React for scroll. Height cache per message. `React.memo` on static content. `OffscreenFreeze`.
 - **Flickering**: Full-screen redraw on every state change causes severe flicker in long sessions (anthropics/claude-code#1913).
 
-## OpenAI Codex (Rust / ratatui)
+## OpenAI Codex (Rust + Ratatui)
 
 Markdown renderer (`tui/markdown_render.rs`) was the primary reference for oxide-code's pulldown-cmark renderer.
 
@@ -21,7 +21,7 @@ Key insight: **deferred list marker** (`pending_marker`) pattern. When `Start(It
 
 State: `list_stack` (nesting + counters), `indent_stack`, `inline_styles` (style modifiers stack), `pending_marker` (consumed on next text event).
 
-## opencode (TypeScript / @opentui + Solid.js)
+## opencode (TypeScript + @opentui + Solid.js)
 
 Fine-grained reactivity via Solid.js signals — only the specific text node receiving a new token re-renders.
 

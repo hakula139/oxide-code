@@ -41,6 +41,10 @@ impl SlashCommand for ModelCmd {
         }
     }
 
+    fn echoes_input(&self, args: &str) -> bool {
+        !args.trim().is_empty()
+    }
+
     fn usage(&self) -> Option<&'static str> {
         Some("[<id>]")
     }
@@ -243,7 +247,6 @@ mod tests {
 
     #[test]
     fn complete_arg_appends_1m_context_suffix_only_for_1m_variants() {
-        // `[1m]` variants get the marker; bare row must not.
         let rows = arg_rows("claude-opus-4-7");
         let one_m = rows
             .iter()
@@ -428,12 +431,7 @@ mod tests {
 
     #[test]
     fn execute_ambiguous_listing_falls_back_to_full_curated_set_when_filter_empty() {
-        // No `LISTED_MODELS` entry contains `4-7-but-also`, but the resolver still flags an
-        // ambiguity through `MODELS`. The error listing falls back to the full curated set so
-        // the user always has actionable picks.
-        // Synthetic case: build via `claude-opus-4` which substring-matches multiple MODELS
-        // rows but only `claude-opus-4-7` / `[1m]` in LISTED_MODELS — filter has matches, so
-        // we exercise the empty-filter fallback through a different shape.
+        // `claude-opus` matches the listed Opus 4.7 entries; older non-listed rows must not surface.
         let (_, outcome) = run_execute("claude-opus");
         let msg = outcome.expect_err("ambiguous arg must error");
         // `claude-opus` matches the listed Opus 4.7 entries; the listing surfaces those.

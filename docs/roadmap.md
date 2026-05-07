@@ -14,6 +14,7 @@ The direction is simple:
 
 - Streaming output with markdown rendering and syntax-highlighted code blocks.
 - Multi-line input with a prompt marker, dynamic placeholder hints, and a status bar showing model, working directory, and run state.
+- Welcome surface on empty chat with identity, environment, and a few starter commands.
 - Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, structured glob lists, and bash output.
 - Themable via runtime-loaded TOML — 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) with per-slot overrides.
 - Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
@@ -64,7 +65,7 @@ The direction is simple:
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
 - Mid-session swap: `/model`, `/effort`, and `/theme`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status` opens a read-only kv overview. Esc / Ctrl+C cancel any modal universally.
+- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status`, `/config`, and `/help` open read-only kv overviews. Esc / Ctrl+C cancel any modal universally.
 
 ### Authentication & Configuration
 
@@ -122,10 +123,10 @@ Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only;
 - Auth slash commands: `/login`, `/logout`.
 - Configurable instruction directories beyond `.claude/`.
 
-### Welcome Screen
+### Status Bar Redesign
 
-- Richer first-impression banner for empty sessions — name + version, active model and effort, working directory, and starter slash commands.
-- Pairs with Slash Commands (the welcome is where they get advertised); not blocking anything else.
+- Current bar packs model + status + (optional) title + cwd into a single line; layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
+- Direction: a richer, possibly multi-segment surface — token / cost meter, queued-prompt indicator, session id glance, theme indicator. Likely needs a layout rethink rather than incremental slot additions.
 
 ## Not the Goal Right Now
 

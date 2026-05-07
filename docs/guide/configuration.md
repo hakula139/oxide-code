@@ -80,11 +80,14 @@ model = "claude-opus-4-7[1m]"
 
 ### `[tui]` — Terminal UI
 
-| Key             | Type    | Default | Description            |
-| --------------- | ------- | ------- | ---------------------- |
-| `show_thinking` | boolean | `false` | Show extended thinking |
+| Key             | Type    | Default | Description                                |
+| --------------- | ------- | ------- | ------------------------------------------ |
+| `show_thinking` | boolean | `false` | Show extended thinking                     |
+| `show_welcome`  | boolean | `true`  | Paint the welcome splash on an empty chat  |
 
 On Opus 4.7, `show_thinking = true` additionally opts the request into `thinking.display = "summarized"` so the API streams reasoning text; otherwise the 4.7 default (`"omitted"`) applies and the UI sees nothing until the final answer starts.
+
+`show_welcome = false` blanks the chat region until you submit a prompt — useful when piping or screen-recording.
 
 ### `[tui.theme]` — Terminal theme
 
@@ -131,5 +134,8 @@ Environment variables override all config file values.
 | `ANTHROPIC_MAX_TOKENS` | `client.max_tokens`       | effort-derived              | Max tokens per response      |
 | `OX_PROMPT_CACHE_TTL`  | `client.prompt_cache_ttl` | `1h`                        | Prompt-cache TTL             |
 | `OX_SHOW_THINKING`     | `tui.show_thinking`       | `false`                     | Show extended thinking       |
+| `OX_SHOW_WELCOME`      | `tui.show_welcome`        | `true`                      | Paint the welcome splash     |
 
 Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
+
+Set `OX_SHOW_WELCOME=0` to suppress the welcome splash on an empty chat.

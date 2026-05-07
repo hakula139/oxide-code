@@ -1,9 +1,8 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
-assertion_line: 1733
 expression: "render_app(&mut app, 60, 12)"
 ---
-"  ox │ test-model │ Ready                           ~/test  "
+"  test-model │ Ready                                ~/test  "
 "────────────────────────────────────────────────────────────"
 "▎ $ ls                                                      "
 "▎ ✓ ran ls                                                  "

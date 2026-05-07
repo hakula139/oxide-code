@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::slash::{PopupState, complete_arg_for, filter_built_ins};
@@ -25,6 +25,10 @@ use crate::util::text::truncate_to_width;
 const MAX_VISIBLE_ROWS: usize = 8;
 
 const COLUMN_GAP: usize = 2;
+
+/// Rows of chrome above the row list — one dim horizontal rule that frames the popup as a
+/// separate overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
+const CHROME_ROWS: u16 = 1;
 
 /// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,17 +152,31 @@ impl SlashPopup {
         };
     }
 
-    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`].
+    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`] plus chrome.
     pub(crate) fn height(&self) -> u16 {
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        u16::try_from(visible).unwrap_or(u16::MAX)
+        let body = u16::try_from(visible).unwrap_or(u16::MAX);
+        if body == 0 {
+            0
+        } else {
+            body.saturating_add(CHROME_ROWS)
+        }
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         if self.rows.is_empty() {
             return;
         }
-        let width = usize::from(area.width);
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(self.theme.border_unfocused())
+            .style(self.theme.surface());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        let width = usize::from(inner.width);
         let offset = self.scroll_offset();
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let window = &self.rows[offset..offset + visible];
@@ -173,7 +191,7 @@ impl SlashPopup {
                 self.render_row(r, label, offset + i == self.selected, label_width, width)
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), area);
+        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), inner);
     }
 
     /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
@@ -274,7 +292,6 @@ mod tests {
 
     #[test]
     fn set_state_name_empty_query_lists_full_registry_in_presentation_order() {
-        // Empty query is what the user sees right after typing `/`.
         let popup = name_popup("");
         assert!(popup.is_visible());
         assert_eq!(popup.mode(), Some(&PopupMode::Name));
@@ -290,8 +307,7 @@ mod tests {
 
     #[test]
     fn set_state_clamps_selection_when_row_count_shrinks() {
-        // Empty query → full list; park selection on the last row, then narrow to a single match
-        // — selection must clamp so render() doesn't index past the end.
+        // Park selection past the surviving row count — must clamp instead of indexing past end.
         let mut popup = name_popup("");
         let n = popup.rows.len();
         for _ in 0..n - 1 {
@@ -306,9 +322,7 @@ mod tests {
 
     #[test]
     fn set_state_resets_selection_on_mode_transition() {
-        // Park selection on a non-zero name-mode row, then transition to arg mode — the new
-        // mode's roster is unrelated, so selection must drop back to row 0 instead of pointing
-        // at whichever index happens to survive the clamp.
+        // Mode transition resets selection — new roster is unrelated.
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
@@ -324,8 +338,6 @@ mod tests {
 
     #[test]
     fn set_state_intra_mode_query_change_preserves_selection_via_clamp() {
-        // Twin to the mode-transition test: within the same mode, selection sticks (clamped
-        // to the new row count) so a refining keystroke doesn't yank the cursor back to row 0.
         let mut popup = name_popup("");
         popup.select_next();
         let parked = popup.selected;
@@ -419,10 +431,18 @@ mod tests {
     // ── height ──
 
     #[test]
-    fn height_caps_at_max_visible_rows() {
+    fn height_caps_at_max_visible_rows_plus_chrome() {
+        // Visible rows + the top-border chrome row.
         let popup = name_popup("");
-        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS);
+        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS) + usize::from(CHROME_ROWS);
         assert_eq!(usize::from(popup.height()), expected);
+    }
+
+    #[test]
+    fn height_is_zero_when_hidden() {
+        // Chrome must not inflate height when the popup has nothing to show.
+        let popup = popup_with_state(None);
+        assert_eq!(popup.height(), 0);
     }
 
     // ── render ──
@@ -480,7 +500,9 @@ mod tests {
         popup.select_next();
         let backend = render_to_backend(&popup, 60);
 
-        let selected = backend.buffer().cell(Position::new(0, 1)).unwrap();
+        // Skip the top-border chrome row; data rows start at y = CHROME_ROWS.
+        let chrome = CHROME_ROWS;
+        let selected = backend.buffer().cell(Position::new(0, chrome + 1)).unwrap();
         assert_eq!(selected.fg, theme.text().fg.unwrap());
         assert!(
             selected.modifier.contains(Modifier::BOLD),
@@ -488,7 +510,7 @@ mod tests {
             selected.modifier,
         );
 
-        let unselected = backend.buffer().cell(Position::new(0, 0)).unwrap();
+        let unselected = backend.buffer().cell(Position::new(0, chrome)).unwrap();
         assert_eq!(unselected.fg, theme.dim().fg.unwrap());
         assert!(
             !unselected.modifier.contains(Modifier::BOLD),
@@ -517,6 +539,31 @@ mod tests {
             matched_alias: Some("new"),
         }];
         insta::assert_snapshot!(render_to_backend(&popup, 60));
+    }
+
+    #[test]
+    fn render_with_only_chrome_room_paints_the_border_and_skips_rows() {
+        // When the layout reserves exactly CHROME_ROWS, the inner area has zero height — the
+        // border still paints, but the row loop is skipped.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let popup = name_popup("");
+        let width: u16 = 60;
+        let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
+        terminal
+            .draw(|frame| popup.render(frame, Rect::new(0, 0, width, CHROME_ROWS)))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        for x in 0..width {
+            assert_eq!(
+                buf.cell(ratatui::layout::Position::new(x, 0))
+                    .unwrap()
+                    .symbol(),
+                "─",
+                "chrome row must be a continuous border at col {x}",
+            );
+        }
     }
 
     #[test]

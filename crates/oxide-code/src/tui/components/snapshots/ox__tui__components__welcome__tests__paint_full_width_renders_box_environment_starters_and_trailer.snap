@@ -1,0 +1,18 @@
+---
+source: crates/oxide-code/src/tui/components/welcome.rs
+expression: "render(80, 14, &snap)"
+---
+"                                                                                "
+"                           ━━━━ oxide-code v0.1.0 ━━━━                          "
+"                                                                                "
+"                    Claude Opus 4.7 · xhigh effort · OAuth                      "
+"                    ~/github/oxide-code                                         "
+"                                                                                "
+"                    Try one of:                                                 "
+"                                                                                "
+"                      /clear     reset conversation                             "
+"                      /effort    tune Speed ↔ Intelligence                      "
+"                      /theme     switch theme                                   "
+"                                                                                "
+"                    Tip — /clear starts a fresh conversation                    "
+"                                                                                "

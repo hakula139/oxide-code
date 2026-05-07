@@ -6,35 +6,36 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## API References
 
-| Document                                              | Description                                        |
-| ----------------------------------------------------- | -------------------------------------------------- |
-| [Anthropic API](api/anthropic.md)                     | OAuth flow, required headers, system prompt prefix |
-| [Extended Thinking](api/extended-thinking.md)         | Content block types, signatures, round-tripping    |
-| [System Prompt](api/system-prompt.md)                 | Section assembly, CLAUDE.md, caching, block layout |
+| Document                                      | Description                                        |
+| --------------------------------------------- | -------------------------------------------------- |
+| [Anthropic API](api/anthropic.md)             | OAuth flow, required headers, system prompt prefix |
+| [Extended Thinking](api/extended-thinking.md) | Content block types, signatures, round-tripping    |
+| [System Prompt](api/system-prompt.md)         | Section assembly, CLAUDE.md, caching, block layout |
 
 ## Session
 
-| Document                                              | Description                                          |
-| ----------------------------------------------------- | ---------------------------------------------------- |
-| [Persistence](session/persistence.md)                 | JSONL format, storage layout, write strategy         |
-| [File Change Tracking](session/file-tracking.md)      | Read-before-Edit gates, staleness detection          |
+| Document                                         | Description                                  |
+| ------------------------------------------------ | -------------------------------------------- |
+| [Persistence](session/persistence.md)            | JSONL format, storage layout, write strategy |
+| [File Change Tracking](session/file-tracking.md) | Read-before-Edit gates, staleness detection  |
 
 ## Slash Commands
 
-| Document                                              | Description                                          |
-| ----------------------------------------------------- | ---------------------------------------------------- |
-| [Commands](slash/commands.md)                         | Registry shape, popup UX, execution models           |
-| [Modals](slash/modals.md)                             | Picker / dialog primitives across the three CLIs     |
+| Document                      | Description                                      |
+| ----------------------------- | ------------------------------------------------ |
+| [Commands](slash/commands.md) | Registry shape, popup UX, execution models       |
+| [Modals](slash/modals.md)     | Picker / dialog primitives across the three CLIs |
 
 ## Tools
 
-| Document                                              | Description                                          |
-| ----------------------------------------------------- | ---------------------------------------------------- |
-| [Output Truncation](tools/truncation.md)              | Per-tool vs central caps, spillover strategies       |
+| Document                                 | Description                                    |
+| ---------------------------------------- | ---------------------------------------------- |
+| [Output Truncation](tools/truncation.md) | Per-tool vs central caps, spillover strategies |
 
 ## Terminal UI
 
-| Document                                              | Description                                              |
-| ----------------------------------------------------- | -------------------------------------------------------- |
-| [Overview](tui/overview.md)                           | Reference TUI patterns, flickering prevention, ecosystem |
-| [Cancellation and Queued Input](tui/cancellation.md)  | Cancel, exit, and input queueing patterns                |
+| Document                                             | Description                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------- |
+| [Overview](tui/overview.md)                          | Reference TUI patterns, flickering prevention, ecosystem         |
+| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and input queueing patterns                        |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state surfaces and layout primitives across the three CLIs |

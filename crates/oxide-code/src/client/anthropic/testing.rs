@@ -17,6 +17,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         thinking: None,
         show_thinking: false,
+        show_welcome: true,
         theme: Theme::default(),
         theme_name: "mocha".to_owned(),
     }

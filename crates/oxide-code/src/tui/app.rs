@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::components::welcome::{self, WelcomeSnapshot};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
@@ -329,7 +330,9 @@ impl App {
     fn handle_submit_prompt(&mut self, text: &str) -> bool {
         if self.input.is_enabled() {
             if let Some(parsed) = slash::parse_slash(text) {
-                self.chat.push_user_message(text.to_owned());
+                if slash::echoes_input(&parsed) {
+                    self.chat.push_user_message(text.to_owned());
+                }
                 let (synthesized, modal) = {
                     let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
                     let action = slash::dispatch(&parsed, &mut ctx);
@@ -357,7 +360,9 @@ impl App {
             return true;
         }
         if let Some(parsed) = slash::parse_slash(text) {
-            self.chat.push_user_message(text.to_owned());
+            if slash::echoes_input(&parsed) {
+                self.chat.push_user_message(text.to_owned());
+            }
             match slash::classify(&parsed) {
                 SlashKind::ReadOnly | SlashKind::Unknown => {
                     let modal = {
@@ -443,8 +448,6 @@ impl App {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
                 self.chat.clear_history();
-                self.chat
-                    .push_system_message("Conversation cleared. Next message starts fresh.");
             }
             AgentEvent::ConfigChanged {
                 model_id,
@@ -567,7 +570,12 @@ impl App {
         .split(frame.area());
 
         self.status_bar.render(frame, chunks[0]);
-        self.chat.render(frame, chunks[1]);
+        if self.chat.is_empty() && self.session_info.config.show_welcome {
+            let snap = WelcomeSnapshot::from_live(&self.session_info);
+            welcome::paint(frame, chunks[1], &self.theme, &snap);
+        } else {
+            self.chat.render(frame, chunks[1]);
+        }
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }
@@ -741,6 +749,7 @@ mod tests {
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 show_thinking: false,
+                show_welcome: true,
                 theme_name: "mocha".to_owned(),
             },
         }
@@ -1200,10 +1209,11 @@ mod tests {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
 
+        assert!(app.modals.is_active(), "/help opens a modal");
         assert_eq!(
             app.chat.entry_count(),
-            2,
-            "user-message + system-message blocks expected",
+            0,
+            "modal-only commands push no chat blocks and suppress their own echo",
         );
         assert!(
             app.input.is_enabled(),
@@ -1413,8 +1423,10 @@ mod tests {
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "slash command must not forward to user_tx",
         );
-        assert_eq!(app.chat.entry_count(), 3);
+        // Only the original "active" prompt: /help is modal-only and suppresses its own echo.
+        assert_eq!(app.chat.entry_count(), 1);
         assert!(!app.chat.last_is_error());
+        assert!(app.modals.is_active(), "/help opens a modal");
     }
 
     #[tokio::test]
@@ -1948,14 +1960,9 @@ mod tests {
             app.status_bar.title().is_none(),
             "stale AI title must be cleared on roll",
         );
-        assert_eq!(
-            app.chat.entry_count(),
-            1,
-            "only the confirmation message remains after clear",
-        );
-        assert_eq!(
-            app.chat.last_system_text(),
-            Some("Conversation cleared. Next message starts fresh."),
+        assert!(
+            app.chat.is_empty(),
+            "clear must drain the chat so the welcome can repaint",
         );
         assert!(app.dirty);
     }
@@ -2390,17 +2397,21 @@ mod tests {
     }
 
     #[test]
-    fn render_repaints_when_slash_dispatch_grows_content_past_viewport() {
-        // Regression: pre-fix, slash output landed below the viewport
-        // until the user scrolled — the post-paint `update_layout`
-        // re-clamp arrived too late for the same frame.
+    fn render_repaints_when_chat_content_grows_past_viewport() {
+        use std::fmt::Write as _;
+
+        // Regression: content pushed in the same handler tick used to land below the viewport
+        // because the post-paint `update_layout` re-clamp arrived too late for the same frame.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
-        // Tight viewport guarantees /help overflows.
+        let mut body = String::new();
+        for i in 0..40 {
+            _ = writeln!(body, "line {i:02} of a long system block");
+        }
+        app.chat.push_system_message(body);
         let text = rendered_text(&mut app, 60, 12);
         assert!(
-            text.contains("//etc/hosts"),
-            "tail of /help body must be in the viewport after the first render, got:\n{text}",
+            text.contains("line 39"),
+            "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
         );
     }
 
