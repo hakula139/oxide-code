@@ -1,7 +1,7 @@
 //! Read-only key-value overview modal — title, multi-section body, fixed footer.
 //! Used by `/status`, `/config`, `/help`. Compose `KvSection` fixtures; the modal owns layout.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -63,10 +63,8 @@ impl KvOverview {
     }
 
     fn line_count(&self) -> usize {
-        // title + blank.
         let mut total = 2;
         for (i, section) in self.sections.iter().enumerate() {
-            // Blank between sections after the first.
             if i > 0 {
                 total += 1;
             }
@@ -75,7 +73,6 @@ impl KvOverview {
             }
             total += section.rows.len();
         }
-        // blank + footer.
         total + 2
     }
 }
@@ -121,11 +118,9 @@ impl Modal for KvOverview {
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        match event.code {
-            KeyCode::Enter => ModalKey::Cancelled,
-            _ => ModalKey::Consumed,
-        }
+    fn handle_key(&mut self, _event: &KeyEvent) -> ModalKey {
+        // Read-only: nothing to commit. Esc / Ctrl+C cancel universally via the modal stack.
+        ModalKey::Consumed
     }
 }
 
@@ -218,16 +213,17 @@ mod tests {
     // ── KvOverview::handle_key ──
 
     #[test]
-    fn enter_closes_modal_silently() {
+    fn every_key_is_consumed_so_only_universal_cancel_dismisses() {
+        // Read-only modal — Esc / Ctrl+C close at the stack layer; the modal itself never pops.
+        use crossterm::event::KeyCode;
         let mut m = flat_overview();
-        let outcome = m.handle_key(&KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Cancelled));
-    }
-
-    #[test]
-    fn other_keys_are_consumed_without_popping() {
-        let mut m = flat_overview();
-        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Char('x'), KeyCode::Tab] {
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('x'),
+            KeyCode::Tab,
+        ] {
             let outcome = m.handle_key(&KeyEvent::from(code));
             assert!(
                 matches!(outcome, ModalKey::Consumed),
