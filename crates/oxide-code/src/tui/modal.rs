@@ -4,6 +4,7 @@
 //!
 //! Companion design: `docs/design/slash/modals.md`.
 
+pub(crate) mod kv_overview;
 pub(crate) mod list_picker;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

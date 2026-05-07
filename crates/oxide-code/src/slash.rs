@@ -22,7 +22,6 @@ mod parser;
 mod picker;
 mod registry;
 mod status;
-mod status_modal;
 mod theme;
 
 pub(crate) use context::{LiveSessionInfo, SlashContext};
