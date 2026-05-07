@@ -566,11 +566,7 @@ impl App {
         .split(frame.area());
 
         self.status_bar.render(frame, chunks[0]);
-        // Suppress the welcome under an open slash popup — the popup IS the discovery surface,
-        // and stacking both makes the empty chat read as dense / duplicated.
-        let show_welcome =
-            self.chat.is_empty() && self.session_info.config.show_welcome && popup_height == 0;
-        if show_welcome {
+        if self.chat.is_empty() && self.session_info.config.show_welcome {
             let snap = WelcomeSnapshot::from_live(&self.session_info);
             welcome::paint(frame, chunks[1], &self.theme, &snap);
         } else {
