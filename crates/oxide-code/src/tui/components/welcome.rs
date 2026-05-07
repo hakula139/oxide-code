@@ -64,6 +64,7 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &Wel
 }
 
 fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'static>> {
+    let max_body = usize::from(width);
     let full = width >= FULL_MIN;
     let with_starters = width >= COLLAPSED_MIN;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -72,13 +73,15 @@ fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'s
     push_identity(&mut lines, theme, snap, full);
     lines.push(Line::raw(""));
 
-    // Compose the body as one column: pad every line to a shared width so they all share the same
-    // left edge under `Paragraph::alignment(Center)`. Padding individual rows to their natural
-    // widths produces the "ransom note" look where each line floats to its own center.
-    let env = environment_text(snap, with_starters);
-    let cwd = cwd_text(width, snap, with_starters);
+    // Pad body rows to a shared column width so they share one left edge under
+    // `Paragraph::alignment(Center)`. Without the pad, each row centers on its own width and
+    // floats independently ("ransom note" stack).
+    let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
+    let cwd = cwd_text(max_body, snap, with_starters);
     let starter_rows = with_starters.then(starter_rows);
-    let column_width = column_width(&env, &cwd, starter_rows.as_deref());
+    // Clamp column_width to area.width — a wider column would overflow centering and clip on the
+    // right edge of the pane.
+    let column_width = column_width(&env, &cwd, starter_rows.as_deref()).min(max_body);
 
     push_padded(&mut lines, &env, theme.text(), column_width);
     push_padded(&mut lines, &cwd, theme.dim(), column_width);
@@ -125,22 +128,23 @@ fn push_identity(
     }
 }
 
-fn environment_text(snap: &WelcomeSnapshot, with_auth: bool) -> String {
-    // 25-39 cols drops the auth segment; the model + effort pair carries more session signal.
-    let mut text = format!("{} · {} effort", snap.model_label, snap.effort_label);
-    if with_auth {
+fn environment_text(snap: &WelcomeSnapshot, full: bool, with_starters: bool) -> String {
+    // Below COLLAPSED_MIN (i.e., narrow tier) drops the " effort" suffix so the line fits at
+    // 25 cols; the suffix is verbose redundancy once the value is visible.
+    let suffix = if with_starters { " effort" } else { "" };
+    let mut text = format!("{} · {}{}", snap.model_label, snap.effort_label, suffix);
+    if full {
         text.push_str(" · ");
         text.push_str(snap.auth_label);
     }
     text
 }
 
-fn cwd_text(width: u16, snap: &WelcomeSnapshot, with_starters: bool) -> String {
-    let budget = usize::from(width).saturating_sub(2);
+fn cwd_text(max_body: usize, snap: &WelcomeSnapshot, with_starters: bool) -> String {
     if with_starters {
-        truncate_to_width(&snap.cwd, budget)
+        truncate_to_width(&snap.cwd, max_body)
     } else {
-        center_truncate_to_width(&snap.cwd, budget)
+        center_truncate_to_width(&snap.cwd, max_body)
     }
 }
 
@@ -189,12 +193,14 @@ fn push_starter_row(
     theme: &Theme,
     column_width: usize,
 ) {
-    let row_width = name.width() + STARTER_GAP.len() + desc.width();
-    let pad = column_width.saturating_sub(row_width);
+    let prefix_width = name.width() + STARTER_GAP.len();
+    let desc_budget = column_width.saturating_sub(prefix_width);
+    let desc = truncate_to_width(desc, desc_budget);
+    let pad = column_width.saturating_sub(prefix_width + desc.width());
     lines.push(Line::from(vec![
         Span::styled(name.to_owned(), theme.accent()),
         Span::raw(STARTER_GAP),
-        Span::styled(desc.to_owned(), theme.dim()),
+        Span::styled(desc, theme.dim()),
         Span::raw(" ".repeat(pad)),
     ]));
 }
@@ -288,5 +294,73 @@ mod tests {
         info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
         let snap = WelcomeSnapshot::from_live(&info);
         insta::assert_snapshot!(render(30, 8, &snap));
+    }
+
+    #[test]
+    fn paint_at_narrow_min_does_not_clip_environment_text() {
+        // env at the narrow tier is "Claude Opus 4.7 · xhigh" (23 cols), fitting NARROW_MIN.
+        let snap = WelcomeSnapshot::from_live(&fixture());
+        let backend = render(NARROW_MIN, 8, &snap);
+        let row: String = (0..NARROW_MIN)
+            .map(|x| {
+                backend
+                    .buffer()
+                    .cell((x, 3))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        assert!(
+            row.contains("xhigh"),
+            "narrow env must end without clipping: {row:?}"
+        );
+    }
+
+    #[test]
+    fn paint_just_below_collapsed_min_drops_starters() {
+        // 39 cols (COLLAPSED_MIN - 1) must hide the starter list and trailer.
+        let snap = WelcomeSnapshot::from_live(&fixture());
+        let backend = render(COLLAPSED_MIN - 1, 12, &snap);
+        let body: String = backend
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            !body.contains(STARTER_HEADER),
+            "starter header must disappear at narrow tier"
+        );
+        assert!(
+            !body.contains("press / to browse"),
+            "trailer must disappear at narrow tier"
+        );
+    }
+
+    #[test]
+    fn paint_just_below_full_min_drops_ribbon() {
+        // 59 cols (FULL_MIN - 1) must show the wordmark only — no ribbon flanks.
+        let snap = WelcomeSnapshot::from_live(&fixture());
+        let backend = render(FULL_MIN - 1, 14, &snap);
+        let body: String = backend
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(body.contains(WORDMARK), "wordmark must still render");
+        assert!(
+            !body.contains(RIBBON_FLANK),
+            "ribbon flanks must disappear below FULL_MIN"
+        );
+    }
+
+    #[test]
+    fn paint_zero_height_is_a_no_op() {
+        let snap = WelcomeSnapshot::from_live(&fixture());
+        let backend = render(80, 0, &snap);
+        assert!(
+            backend.buffer().content.is_empty(),
+            "zero-height area paints nothing"
+        );
     }
 }
