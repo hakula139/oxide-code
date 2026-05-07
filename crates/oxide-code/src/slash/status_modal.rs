@@ -28,11 +28,6 @@ pub(super) struct StatusModal {
 impl StatusModal {
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
         let model = format!("{} ({})", info.display_name(), info.config.model_id);
-        let show_thinking = if info.config.show_thinking {
-            "on".to_owned()
-        } else {
-            "off".to_owned()
-        };
         let rows = vec![
             ("Model", model),
             ("Effort", display_effort(info.config.effort)),
@@ -41,7 +36,8 @@ impl StatusModal {
             ("Auth", info.config.auth_label.to_owned()),
             ("Version", info.version.to_owned()),
             ("Context Cache", info.config.prompt_cache_ttl.to_string()),
-            ("Show Thinking", show_thinking),
+            ("Show Thinking", on_off(info.config.show_thinking)),
+            ("Show Welcome", on_off(info.config.show_welcome)),
         ];
         Self { rows }
     }
@@ -91,6 +87,10 @@ impl Modal for StatusModal {
     }
 }
 
+fn on_off(flag: bool) -> String {
+    if flag { "on" } else { "off" }.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn new_produces_one_row_per_session_descriptor() {
         let m = modal();
-        assert_eq!(m.rows.len(), 8);
+        assert_eq!(m.rows.len(), 9);
     }
 
     #[test]
@@ -156,6 +156,24 @@ mod tests {
             .find(|(k, _)| *k == "Show Thinking")
             .expect("show-thinking row");
         assert_eq!(thinking_row.1, "on");
+    }
+
+    #[test]
+    fn new_renders_welcome_flag_state() {
+        let mut info = test_session_info();
+        info.config.show_welcome = false;
+        let m = StatusModal::new(&info);
+        let row = m
+            .rows
+            .iter()
+            .find(|(k, _)| *k == "Show Welcome")
+            .expect("show-welcome row");
+        assert_eq!(row.1, "off");
+
+        info.config.show_welcome = true;
+        let m = StatusModal::new(&info);
+        let row = m.rows.iter().find(|(k, _)| *k == "Show Welcome").unwrap();
+        assert_eq!(row.1, "on");
     }
 
     // ── handle_key ──

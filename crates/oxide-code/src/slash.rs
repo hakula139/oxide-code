@@ -125,6 +125,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             max_tokens: 32_000,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
             show_thinking: false,
+            show_welcome: true,
             theme_name: "mocha".to_owned(),
         },
     }

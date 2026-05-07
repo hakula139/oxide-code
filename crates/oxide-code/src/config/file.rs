@@ -39,6 +39,7 @@ pub(super) struct ClientConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct TuiConfig {
     pub(super) show_thinking: Option<bool>,
+    pub(super) show_welcome: Option<bool>,
     pub(super) theme: Option<ThemeFileConfig>,
 }
 
@@ -78,6 +79,7 @@ impl TuiConfig {
     fn merge(self, other: Self) -> Self {
         Self {
             show_thinking: other.show_thinking.or(self.show_thinking),
+            show_welcome: other.show_welcome.or(self.show_welcome),
             theme: merge_section(self.theme, other.theme, ThemeFileConfig::merge),
         }
     }
@@ -192,6 +194,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
+                show_welcome: None,
                 theme: None,
             }),
         };
@@ -206,6 +209,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                show_welcome: None,
                 theme: None,
             }),
         };
@@ -242,6 +246,7 @@ mod tests {
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                show_welcome: None,
                 theme: None,
             }),
         };
@@ -275,6 +280,7 @@ mod tests {
             client: None,
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
+                show_welcome: None,
                 theme: None,
             }),
         };
