@@ -1,10 +1,11 @@
-//! `/help` — list every registered command. Aliases appear parenthesized after the canonical name.
+//! `/help` — open a read-only [`KvOverview`] of every registered command. Aliases parenthesize
+//! after the canonical name; the optional `usage()` placeholder appends after that.
 
 use std::fmt::Write as _;
 
 use super::context::SlashContext;
-use super::format::write_kv_section;
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
+use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
 pub(super) struct HelpCmd;
 
@@ -18,23 +19,17 @@ impl SlashCommand for HelpCmd {
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
-        ctx.chat.push_system_message(render_help());
+        ctx.open_modal(Box::new(build_modal()));
         Ok(SlashOutcome::Done)
     }
 }
 
-fn render_help() -> String {
-    let labels: Vec<String> = BUILT_INS.iter().map(|c| display_label(*c)).collect();
-    let rows = labels
+fn build_modal() -> KvOverview {
+    let rows = BUILT_INS
         .iter()
-        .zip(BUILT_INS)
-        .map(|(label, cmd)| (label.as_str(), cmd.description()));
-    let mut out = String::new();
-    write_kv_section(&mut out, "Available Commands", rows);
-    out.push_str(
-        "\nTip: prefix with `//` to send a literal slash to the model (e.g., `//etc/hosts`).\n",
-    );
-    out
+        .map(|cmd| (display_label(*cmd), cmd.description().to_owned()))
+        .collect();
+    KvOverview::new("Help", vec![KvSection::new(rows)])
 }
 
 /// `/name (aliases) <usage>` — alias list and usage are optional.
@@ -53,6 +48,10 @@ fn display_label(cmd: &dyn SlashCommand) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slash::context::SlashContext;
+    use crate::tui::components::chat::ChatView;
+    use crate::tui::modal::Modal;
+    use crate::tui::theme::Theme;
 
     // ── HelpCmd metadata ──
 
@@ -63,51 +62,29 @@ mod tests {
         assert!(!HelpCmd.description().is_empty());
     }
 
-    // ── render_help ──
+    // ── HelpCmd::execute ──
 
     #[test]
-    fn render_help_starts_with_heading_and_lists_every_command() {
-        let body = render_help();
-        let mut lines = body.lines();
-        assert_eq!(lines.next(), Some("Available Commands"));
-        assert_eq!(lines.next(), Some(""), "heading separated by blank line");
-        for cmd in BUILT_INS {
-            let needle = format!("/{}", cmd.name());
-            assert!(
-                body.contains(&needle),
-                "help body missing `{needle}`: {body}",
-            );
-        }
-    }
-
-    #[test]
-    fn render_help_includes_escape_tip_footer() {
-        let body = render_help();
-        assert!(body.contains("`//`"), "footer missing tip body: {body}");
+    fn execute_opens_a_modal_via_ctx_and_pushes_no_chat_block() {
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        HelpCmd.execute("", &mut ctx).unwrap();
         assert!(
-            body.trim_end().ends_with("`//etc/hosts`)."),
-            "tip should be the last paragraph: {body}",
+            ctx.take_modal().is_some(),
+            "/help must populate the modal slot",
         );
+        assert_eq!(chat.entry_count(), 0, "chat must stay clean on open");
     }
 
+    // ── build_modal ──
+
     #[test]
-    fn render_help_aligns_descriptions_to_a_shared_gutter() {
-        let body = render_help();
-        let longest = BUILT_INS
-            .iter()
-            .map(|c| display_label(*c).len())
-            .max()
-            .unwrap_or(0);
-        let expected = "  ".len() + longest + "  ".len();
-        for (line, desc) in body
-            .lines()
-            .skip(2)
-            .filter(|l| !l.is_empty())
-            .zip(BUILT_INS.iter().map(|c| c.description()))
-        {
-            let col = line.find(desc).expect("description missing from row");
-            assert_eq!(col, expected, "row mis-aligned: {line:?}");
-        }
+    fn build_modal_renders_one_row_per_built_in() {
+        let m = build_modal();
+        // title + blank + N rows + blank + footer.
+        let expected = u16::try_from(BUILT_INS.len() + 4).unwrap();
+        assert_eq!(m.height(80), expected);
     }
 
     // ── display_label ──
@@ -124,13 +101,10 @@ mod tests {
 
     #[test]
     fn fake_fixture_stub_methods_satisfy_trait_contract() {
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
-        assert_eq!(Fake::CLEAR.description(), "");
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = crate::slash::test_session_info();
         let mut ctx = SlashContext::new(&mut chat, &info);
+        assert_eq!(Fake::CLEAR.description(), "");
         assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Done));
     }
 
