@@ -14,7 +14,7 @@ The direction is simple:
 
 - Streaming output with markdown rendering and syntax-highlighted code blocks.
 - Multi-line input with a prompt marker, dynamic placeholder hints, and a status bar showing model, working directory, and run state.
-- Welcome surface on empty chat: identity ribbon, model + effort + auth, cwd, randomized starter list, randomized tip. Re-shows after `/clear`; suppressed by `[tui] show_welcome = false` or `OX_SHOW_WELCOME=0`.
+- Welcome surface on empty chat with identity, environment, and a few starter commands.
 - Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, structured glob lists, and bash output.
 - Themable via runtime-loaded TOML — 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) with per-slot overrides.
 - Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
