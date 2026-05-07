@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
@@ -376,13 +376,11 @@ impl ChatView {
     }
 
     fn build_text(&self, width: u16) -> Text<'static> {
+        if self.is_empty() {
+            return Text::default();
+        }
         let ctx = self.render_ctx(width);
         let mut lines: Vec<Line<'static>> = Vec::new();
-
-        if self.is_empty() {
-            push_welcome(&mut lines, &ctx);
-            return Text::from(lines);
-        }
 
         let mut prev_kind: Option<BlockKind> = None;
         for block in &self.blocks {
@@ -445,29 +443,11 @@ impl ChatView {
             .is_some_and(|b| b.continues_assistant_turn())
     }
 
-    fn is_empty(&self) -> bool {
+    /// `true` when no committed blocks, no in-flight streaming buffer, and no pending thinking
+    /// buffer. App reads this to decide whether to paint the welcome surface in the chat region.
+    pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
     }
-}
-
-/// Welcome splash for an empty chat.
-fn push_welcome(lines: &mut Vec<Line<'static>>, ctx: &RenderCtx<'_>) {
-    let title = "Welcome to ox";
-    let subtitle = "Ask anything to begin.";
-    let width = usize::from(ctx.width);
-    let title_pad = width.saturating_sub(title.len()) / 2;
-    let subtitle_pad = width.saturating_sub(subtitle.len()) / 2;
-
-    lines.push(Line::raw(""));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::raw(" ".repeat(title_pad)),
-        Span::styled(title, ctx.theme.accent()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::raw(" ".repeat(subtitle_pad)),
-        Span::styled(subtitle, ctx.theme.dim()),
-    ]));
 }
 
 #[cfg(test)]
@@ -2191,14 +2171,23 @@ mod tests {
     #[test]
     fn render_updates_content_height() {
         let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
         render_chat(&mut chat, 80, 24);
-        assert_eq!(chat.content_height.get(), 4);
+        assert!(
+            chat.content_height.get() > 0,
+            "non-empty chat reports content height"
+        );
     }
 
     #[test]
-    fn render_empty_shows_welcome_screen() {
+    fn render_empty_paints_blank_chat_region() {
+        // Empty chats now defer the welcome to App::draw_frame; ChatView's job is to paint the
+        // surface bg so the blank region inherits the theme.
         let mut chat = test_chat();
-        insta::assert_snapshot!(render_chat(&mut chat, 60, 8));
+        let backend = render_chat(&mut chat, 60, 8);
+        for cell in &backend.buffer().content {
+            assert_eq!(cell.symbol(), " ", "cell painted unexpected glyph");
+        }
     }
 
     #[test]
@@ -2431,11 +2420,9 @@ mod tests {
     // ── build_text ──
 
     #[test]
-    fn build_text_empty_shows_welcome() {
+    fn build_text_empty_returns_no_lines() {
         let chat = test_chat();
-        let text = all_text(&chat);
-        assert!(text.contains("Welcome to ox"));
-        assert!(text.contains("Ask anything to begin."));
+        assert!(chat.build_text(60).lines.is_empty());
     }
 
     #[test]
@@ -2549,19 +2536,5 @@ mod tests {
             assert_ne!(s.rendered_len(), 0);
             assert_eq!(s.cached_width(), 80);
         }
-    }
-
-    // ── push_welcome ──
-
-    #[test]
-    fn push_welcome_centered_for_width() {
-        let chat = test_chat();
-
-        let narrow = chat.build_text(30);
-        let wide = chat.build_text(120);
-
-        let narrow_pad = narrow.lines[2].spans.first().map_or(0, |s| s.content.len());
-        let wide_pad = wide.lines[2].spans.first().map_or(0, |s| s.content.len());
-        assert!(wide_pad > narrow_pad);
     }
 }

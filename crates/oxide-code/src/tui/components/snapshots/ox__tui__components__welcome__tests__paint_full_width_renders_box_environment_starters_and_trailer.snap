@@ -1,0 +1,18 @@
+---
+source: crates/oxide-code/src/tui/components/welcome.rs
+expression: "render(80, 14, &snap)"
+---
+"                                                                                "
+"                              ┌───────────────────┐                             "
+"                              │     ox v0.1.0     │                             "
+"                              └───────────────────┘                             "
+"                                                                                "
+"                     Claude Opus 4.7 · xhigh effort · OAuth                     "
+"                     ~/github/oxide-code                                        "
+"                                                                                "
+"                     Try one of:                                                "
+"                       /help    list commands                                   "
+"                       /init    author or update AGENTS.md                      "
+"                       /diff    show staged changes                             "
+"                                                                                "
+"                     Or type / to browse all commands.                          "

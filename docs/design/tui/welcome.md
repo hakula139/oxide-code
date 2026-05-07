@@ -22,22 +22,22 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 ## Layout
 
 ```text
-                            ┌───────────────────┐
-                            │     ox v0.1.0     │
-                            └───────────────────┘
+                              ┌───────────────────┐
+                              │     ox v0.1.0     │
+                              └───────────────────┘
 
-    Claude Opus 4.7 (1M) · xhigh effort · OAuth (Claude Code)
-                       ~/github/oxide-code
+                     Claude Opus 4.7 (1M) · xhigh effort · OAuth
+                     ~/github/oxide-code
 
-                          Try one of:
-                            /help        list commands
-                            /init        author or update AGENTS.md
-                            /diff        show staged changes
+                     Try one of:
+                       /help    list commands
+                       /init    author or update AGENTS.md
+                       /diff    show staged changes
 
-                  Or type / to browse all commands.
+                     Or type / to browse all commands.
 ```
 
-Sections: identity (boxed) → environment line → cwd → starter list → trailer hint. All centered. The chat area's full width.
+Sections: identity (boxed, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)` — without that pad each line floats to its own visual center and the welcome reads as a "ransom note" stack. The box is centered as its own unit above the body column.
 
 ### Width ladder
 
@@ -63,9 +63,10 @@ Below 25 cols nothing paints — the terminal is too narrow to read the welcome 
 5. **Curated rows live alongside the welcome (in `welcome.rs`), not as a method on `SlashCommand`.** Adding `is_starter() -> bool` to the trait would push welcome-specific concern into every command. The welcome's curation is the welcome's responsibility.
 6. **Static text logo (`ox v{ver}` boxed); no ASCII mark, no animation.** Reference projects span no-art (Codex header) → static mascot (Claude Code) → two-tone ASCII (opencode). All three came across as outsized lift for the value; static box reads as professional and is theme-agnostic.
 7. **Two-tier width ladder, not three.** Codex / Claude Code lean on truncate-and-reflow; opencode leans on flex-shrink. For a fixed-content welcome a coarse ladder (full / collapsed / suppressed) is simpler than tuning per-element shrink behavior.
-8. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape (TOML option + env, empty-is-absent). When false, the chat region is blank — the input field anchors the empty session.
-9. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path needed (the opposite of Codex's history-cell shape).
-10. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
+8. **Body lines pad to one shared column width; box centers independently.** `Paragraph::alignment(Center)` aligns each line on its own visual center, so a naive layout has every line floating to its own indent ("ransom note"). Padding env / cwd / starters / trailer to one common width forces a single shared left edge. The identity box stays centered as its own unit, anchoring the screen above the body column.
+9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape (TOML option + env, empty-is-absent). When false, the chat region is blank — the input field anchors the empty session.
+10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path needed (the opposite of Codex's history-cell shape).
+11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
 
 ## Out of Scope / Deferred
 

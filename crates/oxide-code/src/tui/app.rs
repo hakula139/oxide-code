@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
 use super::components::status::{Status, StatusBar};
+use super::components::welcome::{self, WelcomeSnapshot};
 use super::glyphs::{NEWLINE_GLYPH, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use super::modal::{ModalAction, ModalStack};
 use super::pending_calls::{PendingCall, PendingCalls, result_header};
@@ -567,7 +568,12 @@ impl App {
         .split(frame.area());
 
         self.status_bar.render(frame, chunks[0]);
-        self.chat.render(frame, chunks[1]);
+        if self.chat.is_empty() && self.session_info.config.show_welcome {
+            let snap = WelcomeSnapshot::from_live(&self.session_info);
+            welcome::paint(frame, chunks[1], &self.theme, &snap);
+        } else {
+            self.chat.render(frame, chunks[1]);
+        }
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
         }

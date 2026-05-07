@@ -34,6 +34,49 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Truncates `s` to `max_width` columns by removing characters from the middle, replacing the
+/// excised run with [`ELLIPSIS`].
+///
+/// Preserves the head and tail, useful for paths where both `~/` and the leaf project name carry
+/// signal. Falls back to right-truncation when `max_width <= ELLIPSIS_WIDTH` since centering can't
+/// fit any context around the ellipsis.
+pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_owned();
+    }
+    if max_width < ELLIPSIS_WIDTH {
+        return truncate_to_width(s, max_width);
+    }
+    let budget = max_width - ELLIPSIS_WIDTH;
+    let head_budget = budget / 2;
+    let tail_budget = budget - head_budget;
+
+    let mut head = String::new();
+    let mut head_used = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if head_used + w > head_budget {
+            break;
+        }
+        head.push(ch);
+        head_used += w;
+    }
+
+    let mut tail_chars: Vec<char> = Vec::new();
+    let mut tail_used = 0;
+    for ch in s.chars().rev() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if tail_used + w > tail_budget {
+            break;
+        }
+        tail_chars.push(ch);
+        tail_used += w;
+    }
+    let tail: String = tail_chars.into_iter().rev().collect();
+
+    format!("{head}{ELLIPSIS}{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +111,38 @@ mod tests {
         // Drop the marker — emitting "..." into a 1- or 2-col slot would overflow the budget.
         assert_eq!(truncate_to_width("abc", 1), "a");
         assert_eq!(truncate_to_width("abc", 2), "ab");
+    }
+
+    // ── center_truncate_to_width ──
+
+    #[test]
+    fn center_truncate_to_width_passes_through_strings_that_fit() {
+        assert_eq!(center_truncate_to_width("short", 10), "short");
+        assert_eq!(center_truncate_to_width("exact", 5), "exact");
+        assert_eq!(center_truncate_to_width("", 5), "");
+    }
+
+    #[test]
+    fn center_truncate_to_width_keeps_head_and_tail_around_ellipsis() {
+        // Path use case: `~/work/project/src/x.rs` should keep the `~/` prefix and `.rs` leaf.
+        assert_eq!(
+            center_truncate_to_width("~/work/project/src/x.rs", 13),
+            "~/wor.../x.rs",
+        );
+    }
+
+    #[test]
+    fn center_truncate_to_width_falls_back_to_right_truncation_when_budget_too_small() {
+        // Below the ellipsis floor center-truncate would underflow the budget split; the
+        // right-truncate fallback returns whatever fits.
+        assert_eq!(center_truncate_to_width("abcdef", 2), "ab");
+        assert_eq!(center_truncate_to_width("abcdef", 1), "a");
+    }
+
+    #[test]
+    fn center_truncate_to_width_accounts_for_cjk_double_width() {
+        // 测试文本编辑 = 6 chars × 2 cols = 12 cols; budget 9 = 3 head + 3 tail around `...`. Only
+        // one CJK char fits each side at 2 cols.
+        assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
     }
 }
