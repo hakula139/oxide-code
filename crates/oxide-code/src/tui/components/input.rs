@@ -768,6 +768,35 @@ mod tests {
     }
 
     #[test]
+    fn render_paints_ghost_text_at_cursor_in_arg_mode_with_empty_prefix() {
+        // `/model ` puts the input in arg mode with an empty prefix; the dim `[id]` placeholder
+        // must paint into the rendered buffer (covers the per-render Paragraph paint).
+        let mut input = test_input();
+        type_text(&mut input, "/model ");
+        input.refresh_popup();
+        let backend = render_to_backend(&input, 60, 3);
+        let rendered = format!("{backend}");
+        assert!(
+            rendered.contains("[id]"),
+            "ghost-text `[id]` should paint at the cursor: {rendered}",
+        );
+    }
+
+    #[test]
+    fn render_omits_ghost_text_once_user_types_arg_prefix() {
+        // Pins the suppression branch: any non-empty arg prefix hides the placeholder.
+        let mut input = test_input();
+        type_text(&mut input, "/model claude-");
+        input.refresh_popup();
+        let backend = render_to_backend(&input, 60, 3);
+        let rendered = format!("{backend}");
+        assert!(
+            !rendered.contains("[id]"),
+            "ghost-text must hide once prefix is typed: {rendered}",
+        );
+    }
+
+    #[test]
     fn render_advances_scroll_top_when_cursor_below_viewport() {
         // After typing N+1 logical lines, the cursor sits at row N
         // while we render with only 3 visible content rows. The
