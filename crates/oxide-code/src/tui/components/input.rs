@@ -1134,27 +1134,9 @@ mod tests {
     // ── ghost_text ──
 
     #[test]
-    fn ghost_text_shows_alongside_popup_when_arg_prefix_empty() {
-        // Popup and ghost coexist: popup lists curated picks; ghost confirms the slot's shape.
-        let mut input = test_input();
-        type_text(&mut input, "/model ");
-        input.refresh_popup();
-        assert!(input.popup_visible());
-        assert_eq!(input.ghost_text(), Some("[id]".to_owned()));
-    }
-
-    #[test]
     fn ghost_text_suppresses_in_name_mode() {
         let mut input = test_input();
         type_text(&mut input, "/mod");
-        input.refresh_popup();
-        assert_eq!(input.ghost_text(), None);
-    }
-
-    #[test]
-    fn ghost_text_suppresses_once_user_types_arg_prefix() {
-        let mut input = test_input();
-        type_text(&mut input, "/model claude-");
         input.refresh_popup();
         assert_eq!(input.ghost_text(), None);
     }

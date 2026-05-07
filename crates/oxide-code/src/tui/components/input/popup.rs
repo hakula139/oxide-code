@@ -323,6 +323,19 @@ mod tests {
     }
 
     #[test]
+    fn set_state_intra_mode_query_change_preserves_selection_via_clamp() {
+        // Twin to the mode-transition test: within the same mode, selection sticks (clamped
+        // to the new row count) so a refining keystroke doesn't yank the cursor back to row 0.
+        let mut popup = name_popup("");
+        popup.select_next();
+        let parked = popup.selected;
+        assert!(parked > 0, "selection past row 0");
+
+        popup.set_state(Some(&PopupState::Name("")));
+        assert_eq!(popup.selected, parked, "same mode preserves selection");
+    }
+
+    #[test]
     fn set_state_arg_with_curated_roster_populates_arg_mode() {
         let popup = arg_popup("model", "");
         assert!(popup.is_visible());

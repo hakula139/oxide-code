@@ -505,4 +505,20 @@ mod tests {
         assert!(msg.contains("tag, not a model"), "{msg}");
         assert!(!msg.contains("matches"), "must not list candidates: {msg}");
     }
+
+    // ── format_supported_models ──
+
+    #[test]
+    fn format_supported_models_renders_one_markdown_bullet_per_id() {
+        let out = format_supported_models(&["claude-opus-4-7", "gpt-4"]);
+        assert_eq!(
+            out,
+            "- `claude-opus-4-7` — Claude Opus 4.7\n- `gpt-4` — gpt-4",
+        );
+    }
+
+    #[test]
+    fn format_supported_models_empty_input_renders_empty_string() {
+        assert_eq!(format_supported_models(&[]), "");
+    }
 }

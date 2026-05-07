@@ -313,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn supported_efforts_is_ascending_for_every_models_row() {
+        // `clamp_effort` and `default_effort` walk the slice in reverse to find the highest
+        // tier ≤ pick. They depend on the slice being authored in ascending order.
+        for info in MODELS {
+            let efforts = info.capabilities.supported_efforts;
+            assert!(
+                efforts.windows(2).all(|w| w[0] < w[1]),
+                "{}: supported_efforts must be ascending: {efforts:?}",
+                info.id_substr,
+            );
+        }
+    }
+
+    #[test]
     fn structured_outputs_flag_tracks_upstream_allowlist() {
         for supported in [
             "claude-opus-4-7",
