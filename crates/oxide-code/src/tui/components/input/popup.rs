@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::slash::{PopupState, complete_arg_for, filter_built_ins};
@@ -25,6 +25,10 @@ use crate::util::text::truncate_to_width;
 const MAX_VISIBLE_ROWS: usize = 8;
 
 const COLUMN_GAP: usize = 2;
+
+/// Rows of chrome above the row list — one dim horizontal rule that frames the popup as a
+/// separate overlay so it doesn't bleed into whatever sits above (welcome, chat, preview).
+const CHROME_ROWS: u16 = 1;
 
 /// Mode-tagged so [`super::InputArea`] can format the right Tab-insertion text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,17 +152,31 @@ impl SlashPopup {
         };
     }
 
-    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`].
+    /// Row count needed in layout; zero when hidden, capped at [`MAX_VISIBLE_ROWS`] plus chrome.
     pub(crate) fn height(&self) -> u16 {
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
-        u16::try_from(visible).unwrap_or(u16::MAX)
+        let body = u16::try_from(visible).unwrap_or(u16::MAX);
+        if body == 0 {
+            0
+        } else {
+            body.saturating_add(CHROME_ROWS)
+        }
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         if self.rows.is_empty() {
             return;
         }
-        let width = usize::from(area.width);
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(self.theme.border_unfocused())
+            .style(self.theme.surface());
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        let width = usize::from(inner.width);
         let offset = self.scroll_offset();
         let visible = self.rows.len().min(MAX_VISIBLE_ROWS);
         let window = &self.rows[offset..offset + visible];
@@ -173,7 +191,7 @@ impl SlashPopup {
                 self.render_row(r, label, offset + i == self.selected, label_width, width)
             })
             .collect();
-        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), area);
+        frame.render_widget(Paragraph::new(lines).style(self.theme.surface()), inner);
     }
 
     /// First visible match index. Centered-cursor scroll: the selected row sits at the visual
@@ -419,10 +437,18 @@ mod tests {
     // ── height ──
 
     #[test]
-    fn height_caps_at_max_visible_rows() {
+    fn height_caps_at_max_visible_rows_plus_chrome() {
+        // Visible rows + the top-border chrome row.
         let popup = name_popup("");
-        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS);
+        let expected = popup.rows.len().min(MAX_VISIBLE_ROWS) + usize::from(CHROME_ROWS);
         assert_eq!(usize::from(popup.height()), expected);
+    }
+
+    #[test]
+    fn height_is_zero_when_hidden() {
+        // Chrome must not inflate height when the popup has nothing to show.
+        let popup = popup_with_state(None);
+        assert_eq!(popup.height(), 0);
     }
 
     // ── render ──
@@ -480,7 +506,9 @@ mod tests {
         popup.select_next();
         let backend = render_to_backend(&popup, 60);
 
-        let selected = backend.buffer().cell(Position::new(0, 1)).unwrap();
+        // Skip the top-border chrome row; data rows start at y = CHROME_ROWS.
+        let chrome = CHROME_ROWS;
+        let selected = backend.buffer().cell(Position::new(0, chrome + 1)).unwrap();
         assert_eq!(selected.fg, theme.text().fg.unwrap());
         assert!(
             selected.modifier.contains(Modifier::BOLD),
@@ -488,7 +516,7 @@ mod tests {
             selected.modifier,
         );
 
-        let unselected = backend.buffer().cell(Position::new(0, 0)).unwrap();
+        let unselected = backend.buffer().cell(Position::new(0, chrome)).unwrap();
         assert_eq!(unselected.fg, theme.dim().fg.unwrap());
         assert!(
             !unselected.modifier.contains(Modifier::BOLD),
