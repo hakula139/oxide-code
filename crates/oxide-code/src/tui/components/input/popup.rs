@@ -30,9 +30,9 @@ const COLUMN_GAP: usize = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PopupMode {
     Name,
-    /// Owned because the cmd name comes from the live input buffer.
+    /// Owned because the name comes from the live input buffer.
     Arg {
-        cmd: String,
+        name: String,
     },
 }
 
@@ -92,7 +92,7 @@ impl SlashPopup {
                 } else {
                     (
                         Some(PopupMode::Arg {
-                            cmd: (*name).to_owned(),
+                            name: (*name).to_owned(),
                         }),
                         completions
                             .into_iter()
@@ -327,7 +327,7 @@ mod tests {
     fn set_state_arg_with_curated_roster_populates_arg_mode() {
         let popup = arg_popup("model", "");
         assert!(popup.is_visible());
-        assert!(matches!(popup.mode(), Some(PopupMode::Arg { cmd }) if cmd == "model"));
+        assert!(matches!(popup.mode(), Some(PopupMode::Arg { name }) if name == "model"));
         // Roster is non-empty for /model.
         assert!(!popup.rows.is_empty());
     }

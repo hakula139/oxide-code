@@ -299,14 +299,9 @@ impl InputArea {
                 self.popup_complete_to_buffer();
                 PopupKey::Consumed
             }
-            KeyCode::Enter if modifiers.is_empty() => {
-                if self.popup_acts_as_picker()
-                    && let Some(action) = self.popup_submit_selected()
-                {
-                    return PopupKey::Action(action);
-                }
-                PopupKey::Pass
-            }
+            KeyCode::Enter if modifiers.is_empty() => self
+                .popup_submit_selected()
+                .map_or(PopupKey::Pass, PopupKey::Action),
             _ => PopupKey::Pass,
         }
     }
@@ -319,33 +314,19 @@ impl InputArea {
         self.refresh_popup();
     }
 
-    /// Tab-insertion text. Name mode → `/{name} `; arg mode → `/{cmd} {value} `.
     fn popup_completion_text(&self) -> Option<String> {
         let row = self.popup.selected()?;
         Some(match self.popup.mode()? {
             PopupMode::Name => format!("/{} ", row.value),
-            PopupMode::Arg { cmd } => format!("/{cmd} {} ", row.value),
+            PopupMode::Arg { name } => format!("/{name} {} ", row.value),
         })
-    }
-
-    /// Picker mode: Enter commits the popup row. Suggester mode (arg with non-empty prefix):
-    /// Enter passes through to literal submit.
-    fn popup_acts_as_picker(&self) -> bool {
-        let [single] = self.textarea.lines() else {
-            return false;
-        };
-        match popup_state(single) {
-            Some(PopupState::Name(_)) => true,
-            Some(PopupState::Arg { prefix, .. }) => prefix.is_empty(),
-            None => false,
-        }
     }
 
     fn popup_submit_selected(&mut self) -> Option<UserAction> {
         let row = self.popup.selected()?;
         let submission = match self.popup.mode()? {
             PopupMode::Name => format!("/{}", row.value),
-            PopupMode::Arg { cmd } => format!("/{cmd} {}", row.value),
+            PopupMode::Arg { name } => format!("/{name} {}", row.value),
         };
         self.textarea.select_all();
         self.textarea.cut();
@@ -1084,8 +1065,6 @@ mod tests {
 
     #[test]
     fn handle_event_popup_tab_in_arg_mode_inserts_cmd_value_and_space() {
-        // Tab keeps the `/effort` prefix and substitutes the picked value plus a trailing space
-        // — `/{cmd} {value} `, not `/{value} ` (which would drop cmd context).
         let mut input = test_input();
         type_text(&mut input, "/effort ");
         input.refresh_popup();
@@ -1124,20 +1103,38 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_popup_enter_in_arg_mode_with_typed_prefix_submits_buffer_literally() {
-        // Typed buffer wins over popup highlight; Tab is the explicit "promote popup pick" key.
+    fn handle_event_popup_enter_with_typed_arg_prefix_still_commits_picked_row() {
         let mut input = test_input();
         type_text(&mut input, "/model claude-opus-4");
         input.refresh_popup();
         assert!(input.popup_visible());
-        assert_ne!(selected_value(&input), "claude-opus-4");
+        let picked = selected_value(&input);
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt(format!("/model {picked}"))),
+        );
+        assert!(input.textarea.is_empty());
+        assert!(!input.popup_visible());
+    }
+
+    #[test]
+    fn handle_event_popup_esc_then_enter_submits_typed_buffer_literally() {
+        // Popup is always a picker; Esc is the seam for submitting custom text. Mirrors the
+        // direct-id paths users want for retired or custom model ids.
+        let mut input = test_input();
+        type_text(&mut input, "/model claude-opus-4");
+        input.refresh_popup();
+        assert!(input.popup_visible());
+
+        input.handle_event(&key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!input.popup_visible());
+
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             action,
             Some(UserAction::SubmitPrompt("/model claude-opus-4".to_owned())),
         );
-        assert!(input.textarea.is_empty());
-        assert!(!input.popup_visible());
     }
 
     // ── ghost_text ──
