@@ -47,6 +47,7 @@ MMIX
 mplan
 mpsc
 mtimes
+nucleo
 MULT
 nonewline
 onig
@@ -80,6 +81,7 @@ tokio
 toks
 toolu
 tracing
+usize
 unmaterialized
 unresumable
 unrotated

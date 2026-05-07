@@ -17,6 +17,7 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | ----------------------------- | ------------------------------------------------------------------ |
 | [Commands](slash/commands.md) | Registry, dispatch, popup, per-command notes                       |
 | [Modal UI](slash/modals.md)   | `Modal` trait, `ModalStack`, `ListPicker`, model + effort + status |
+| [Resume](slash/resume.md)     | `/resume` picker, `SearchableList` primitive, `roll_into` re-init  |
 
 ## Tools
 
