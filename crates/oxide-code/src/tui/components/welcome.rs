@@ -56,8 +56,8 @@ const NARROW_MIN: u16 = 25;
 
 // ── Snapshot ──
 
-/// Projection of [`LiveSessionInfo`] consumed by [`paint`]. Randomized fields (`starters`, `tip`)
-/// are picked once per construction so a given paint stays stable across re-renders within a frame.
+/// Projection of [`LiveSessionInfo`] consumed by [`paint`]; randomized fields are stable per
+/// construction.
 pub(crate) struct WelcomeSnapshot {
     pub(crate) version: &'static str,
     pub(crate) model_label: String,
@@ -114,15 +114,12 @@ fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'s
     push_identity(&mut lines, theme, snap, full);
     lines.push(Line::raw(""));
 
-    // Pad body rows to a shared column width so they share one left edge under
-    // `Paragraph::alignment(Center)`. Without the pad, each row centers on its own width and
-    // floats independently ("ransom note" stack).
+    // Shared column width keeps centered rows on one left edge instead of each row floating.
     let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
     let cwd = cwd_text(max_body, snap, with_starters);
     let starter_rows = with_starters.then(|| starter_rows(&snap.starters));
     let tip_text = with_starters.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
-    // Clamp column_width to area.width — a wider column would overflow centering and clip on the
-    // right edge of the pane.
+    // Clamp to area.width — wider columns clip on the right under center alignment.
     let column_width =
         column_width(&env, &cwd, starter_rows.as_deref(), tip_text.as_deref()).min(max_body);
 
@@ -171,8 +168,7 @@ fn push_identity(
 }
 
 fn environment_text(snap: &WelcomeSnapshot, full: bool, with_starters: bool) -> String {
-    // Below COLLAPSED_MIN drops the " effort" suffix so the line fits at 25 cols; the suffix is
-    // verbose redundancy once the value is visible.
+    // Drop the " effort" suffix below COLLAPSED_MIN so the line fits at NARROW_MIN.
     let suffix = if with_starters { " effort" } else { "" };
     let mut text = format!("{} · {}{}", snap.model_label, snap.effort_label, suffix);
     if full {
@@ -275,7 +271,7 @@ fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, co
 fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
     let n = STARTER_POOL.len();
     debug_assert!(n >= STARTER_PICK);
-    // PCG-style LCG seeded from time. Not cryptographic; just enough variety per launch.
+    // PCG-style LCG; not cryptographic, just enough spread per session.
     let mut state = seed | 1;
     let mut deck: Vec<usize> = (0..n).collect();
     for i in (1..n).rev() {
@@ -300,7 +296,7 @@ fn pick_tip(seed: u64) -> &'static str {
 }
 
 fn hash_seed(s: &str) -> u64 {
-    // FNV-1a 64-bit. Cheap, dependency-free, good enough to spread short ids across the picks.
+    // FNV-1a 64-bit — cheap and dependency-free.
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
     })

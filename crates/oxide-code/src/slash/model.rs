@@ -42,8 +42,6 @@ impl SlashCommand for ModelCmd {
     }
 
     fn echoes_input(&self, args: &str) -> bool {
-        // Bare form opens a modal with no chat output; typed form swaps in place and the echo
-        // pairs with the swap-confirmation system message.
         !args.trim().is_empty()
     }
 
@@ -224,7 +222,7 @@ mod tests {
     // ── ModelCmd::echoes_input ──
 
     #[test]
-    fn echoes_input_splits_on_args_so_bare_modal_does_not_orphan_typed_swap_keeps_pair() {
+    fn echoes_input_only_when_args_present() {
         assert!(!ModelCmd.echoes_input(""));
         assert!(!ModelCmd.echoes_input("   "));
         assert!(ModelCmd.echoes_input("opus"));

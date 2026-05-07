@@ -66,9 +66,8 @@ pub(crate) trait SlashCommand: Sync {
         Vec::new()
     }
 
-    /// Whether the typed `/foo` line should echo into chat. Default true.
-    /// Override to false for modal-only forms where the modal IS the response —
-    /// otherwise the echo orphans in history once the user dismisses the modal.
+    /// Whether the typed `/foo` line should echo into chat. Default true; override to false for
+    /// modal-only forms where the modal IS the response and the echo would otherwise orphan.
     fn echoes_input(&self, _args: &str) -> bool {
         true
     }
