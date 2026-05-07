@@ -10,6 +10,7 @@ atuin
 catppuccin
 Catppuccin
 claudemd
+Clawd
 clippy
 cmark
 codex

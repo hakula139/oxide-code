@@ -4,11 +4,12 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+Nine built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/model` swaps the active model mid-session via `Client::set_model`.
 - `/effort` sets an explicit effort tier.
+- `/theme` swaps the TUI palette mid-session; bare opens a live-preview list picker.
 - `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
 - `/config`, `/diff`, `/help`, `/status` are read-only.
 
@@ -34,6 +35,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 - **`/init`** — Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 - **`/model`** — Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring; `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
 - **`/effort`** — Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)); two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers — no `auto` state.
+- **`/theme`** — Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes; Up / Down repaints the TUI in the candidate, Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
 - **`/status`** — Bare opens the read-only overview modal ([modals.md](modals.md)). No args, no chat output. Esc / Enter both dismiss.
 
 ## Sources
@@ -45,6 +47,7 @@ Eight built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mo
 - `crates/oxide-code/src/slash/init.rs` — `InitCmd`, `PROMPT`.
 - `crates/oxide-code/src/slash/model.rs` — `ModelCmd`, resolver.
 - `crates/oxide-code/src/slash/effort.rs` — `EffortCmd`, level parser.
+- `crates/oxide-code/src/slash/theme.rs` — `ThemeCmd`, picker open + typed-arg validator.
 - `crates/oxide-code/src/slash/picker.rs` — combined model + effort picker modal.
 - `crates/oxide-code/src/slash/effort_slider.rs` — bare `/effort` Speed ↔ Intelligence slider modal.
 - `crates/oxide-code/src/slash/status_modal.rs` — `/status` overview modal.

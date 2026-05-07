@@ -10,7 +10,7 @@ A modal is a self-contained UI that takes keyboard focus, owns its render, emits
 
 Three things drove the abstraction:
 
-1. **Live preview.** A future `/theme` command needs to swap palettes as the user arrows through choices and snap back on Esc.
+1. **Live preview.** `/theme` swaps palettes as the user arrows through choices and snaps back on Esc — the original motivating case for the trait shape.
 2. **Multi-step interaction.** The combined `/model + /effort` picker. Plan approval. MCP server pick-then-configure.
 3. **Agent-driven prompts.** When a tool wants permission, the agent must surface a prompt and route the user's decision back. Today there is no UI seam for this; the modal trait is shaped to support it later.
 
@@ -41,10 +41,11 @@ pub(crate) enum ModalAction {
 
 [`crates/oxide-code/src/tui/modal.rs`](../../../crates/oxide-code/src/tui/modal.rs) defines the trait, key outcome, and `ModalStack` manager. [`crates/oxide-code/src/tui/modal/list_picker.rs`](../../../crates/oxide-code/src/tui/modal/list_picker.rs) is the generic primitive that concrete pickers embed.
 
-Three concrete modals ship today:
+Four concrete modals ship today:
 
 - [`crates/oxide-code/src/slash/picker.rs`](../../../crates/oxide-code/src/slash/picker.rs) — combined `/model + /effort` picker.
 - [`crates/oxide-code/src/slash/effort_slider.rs`](../../../crates/oxide-code/src/slash/effort_slider.rs) — bare `/effort` Speed ↔ Intelligence slider.
+- [`crates/oxide-code/src/slash/theme.rs`](../../../crates/oxide-code/src/slash/theme.rs) — `/theme` live-preview palette picker.
 - [`crates/oxide-code/src/slash/status_modal.rs`](../../../crates/oxide-code/src/slash/status_modal.rs) — `/status` overview.
 
 App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: an active modal sees every key before any other component, then `apply_modal_action` dispatches the result through the same path as a keyboard `UserAction`.
@@ -58,13 +59,14 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 5. **Layout band sized by `ModalStack::height(width)`.** Zero rows when empty (existing layout unchanged); displaces the chat upward when active, just like the slash popup.
 6. **Modals open via `SlashContext::open_modal`, not a new `SlashOutcome` variant.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`). The dispatcher harvests the slot after `execute` and pushes onto the App's stack — same shape as `chat: &mut ChatView` for write-effects.
 7. **Bare `/model` and bare `/effort` open separate modals — combined picker vs. slider.** `/model` keeps the multi-axis combined picker (model and effort cycle together); `/effort` gets its own single-axis slider. Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
-8. **Generic [`ListPicker<T: PickerItem>`] is _not_ a `Modal`.** It is a state + render primitive that concrete pickers embed and forward keys to. This separates "list selection state" from "what does Enter dispatch", which avoids the boxed-callback pattern while staying broadly reusable (`/model + /effort` today; future `/theme`, future approval prompts).
+8. **Generic [`ListPicker<T: PickerItem>`] is _not_ a `Modal`.** It is a state + render primitive that concrete pickers embed and forward keys to. This separates "list selection state" from "what does Enter dispatch", which avoids the boxed-callback pattern while staying broadly reusable — `/model + /effort` and `/theme` both build on it today; future approval prompts will too.
 9. **`/status` on Esc and Enter both dismiss.** Read-only overview — there's nothing to "confirm". The dual binding makes the close gesture muscle-memory-friendly across users coming from different conventions.
 
 ## Per-Modal Notes
 
 - **Combined `/model + /effort` picker** — [`ModelEffortPicker`](../../../crates/oxide-code/src/slash/picker.rs) wraps `ListPicker<ModelRow>` and tracks the effort axis separately. Effort row hides on no-tier models; Left / Right cycles only through tiers the highlighted model supports, recomputed per cursor move so the display never claims a tier the next request would clamp. Submit emits one `UserAction::SwapConfig { model, effort }` with `Option` axes — only changed axes populated; Enter on a no-op cancels.
 - **`/effort` slider** — [`EffortSlider`](../../../crates/oxide-code/src/slash/effort_slider.rs) is a horizontal Speed ↔ Intelligence visual. Lists only tiers the active model accepts; seeds the cursor at the resolved active effort. Tiers render with uniform `●` / `○` glyphs plus per-tier ANSI color along blue → red — color encodes identity, BOLD encodes the active pick. ANSI-named colors decouple the gradient from theme TOML so the user's terminal palette supplies the actual rendering.
+- **`/theme` picker** — [`ThemePicker`](../../../crates/oxide-code/src/slash/theme.rs) wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `UserAction::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`; Enter promotes the preview to a `SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 - **`/status` overview** — [`StatusModal`](../../../crates/oxide-code/src/slash/status_modal.rs) renders a kv-table of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking). Single panel today; will grow a tab bar when `/usage` and `/stats` land.
 
 ## Out of Scope / Deferred
@@ -81,6 +83,7 @@ App owns `ModalStack` and runs the key gate first in `handle_crossterm_event`: a
 - `crates/oxide-code/src/tui/modal/list_picker.rs` — generic `ListPicker<T: PickerItem>`.
 - `crates/oxide-code/src/slash/picker.rs` — model + effort picker.
 - `crates/oxide-code/src/slash/effort_slider.rs` — `/effort` slider.
+- `crates/oxide-code/src/slash/theme.rs` — `/theme` live-preview picker (`ThemeCmd` + `ThemePicker`).
 - `crates/oxide-code/src/slash/status_modal.rs` — status overview.
 - `crates/oxide-code/src/slash/context.rs` — `SlashContext::open_modal` / `take_modal`.
 - `crates/oxide-code/src/tui/app.rs` — `App::handle_crossterm_event` modal gate, `apply_modal_action`, layout band.

@@ -6,27 +6,28 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 
 ## Session
 
-| Document                                              | Description                                             |
-| ----------------------------------------------------- | ------------------------------------------------------- |
-| [Persistence](session/persistence.md)                 | JSONL format, actor-owned writes, resume semantics      |
-| [File Change Tracking](session/file-tracking.md)      | Read-before-Edit gate, staleness detection, persistence |
+| Document                                         | Description                                             |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| [Persistence](session/persistence.md)            | JSONL format, actor-owned writes, resume semantics      |
+| [File Change Tracking](session/file-tracking.md) | Read-before-Edit gate, staleness detection, persistence |
 
 ## Slash Commands
 
-| Document                                              | Description                                                          |
-| ----------------------------------------------------- | -------------------------------------------------------------------- |
-| [Commands](slash/commands.md)                         | Registry, dispatch, popup, per-command notes                         |
-| [Modal UI](slash/modals.md)                           | `Modal` trait, `ModalStack`, `ListPicker`, model + effort + status   |
+| Document                      | Description                                                        |
+| ----------------------------- | ------------------------------------------------------------------ |
+| [Commands](slash/commands.md) | Registry, dispatch, popup, per-command notes                       |
+| [Modal UI](slash/modals.md)   | `Modal` trait, `ModalStack`, `ListPicker`, model + effort + status |
 
 ## Tools
 
-| Document                                              | Description                                          |
-| ----------------------------------------------------- | ---------------------------------------------------- |
-| [Output Truncation](tools/truncation.md)              | Per-tool view-shape caps + centralized byte-budget   |
+| Document                                 | Description                                        |
+| ---------------------------------------- | -------------------------------------------------- |
+| [Output Truncation](tools/truncation.md) | Per-tool view-shape caps + centralized byte-budget |
 
 ## Terminal UI
 
-| Document                                              | Description                                            |
-| ----------------------------------------------------- | ------------------------------------------------------ |
-| [Overview](tui/overview.md)                           | Core stack, rendering strategy, streaming architecture |
-| [Cancellation and Queued Input](tui/cancellation.md)  | Cancel, exit, and mid-turn queued prompts              |
+| Document                                             | Description                                            |
+| ---------------------------------------------------- | ------------------------------------------------------ |
+| [Overview](tui/overview.md)                          | Core stack, rendering strategy, streaming architecture |
+| [Cancellation and Queued Input](tui/cancellation.md) | Cancel, exit, and mid-turn queued prompts              |
+| [Welcome Screen](tui/welcome.md)                     | Empty-state renderer, `WelcomeSnapshot`, width ladder  |
