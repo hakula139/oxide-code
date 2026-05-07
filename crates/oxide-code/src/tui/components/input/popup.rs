@@ -292,7 +292,6 @@ mod tests {
 
     #[test]
     fn set_state_name_empty_query_lists_full_registry_in_presentation_order() {
-        // Empty query is what the user sees right after typing `/`.
         let popup = name_popup("");
         assert!(popup.is_visible());
         assert_eq!(popup.mode(), Some(&PopupMode::Name));
@@ -308,8 +307,7 @@ mod tests {
 
     #[test]
     fn set_state_clamps_selection_when_row_count_shrinks() {
-        // Empty query → full list; park selection on the last row, then narrow to a single match
-        // — selection must clamp so render() doesn't index past the end.
+        // Park selection past the surviving row count — must clamp instead of indexing past end.
         let mut popup = name_popup("");
         let n = popup.rows.len();
         for _ in 0..n - 1 {
@@ -324,9 +322,7 @@ mod tests {
 
     #[test]
     fn set_state_resets_selection_on_mode_transition() {
-        // Park selection on a non-zero name-mode row, then transition to arg mode — the new
-        // mode's roster is unrelated, so selection must drop back to row 0 instead of pointing
-        // at whichever index happens to survive the clamp.
+        // Mode transition resets selection — new roster is unrelated.
         let mut popup = name_popup("");
         popup.select_next();
         popup.select_next();
@@ -342,8 +338,6 @@ mod tests {
 
     #[test]
     fn set_state_intra_mode_query_change_preserves_selection_via_clamp() {
-        // Twin to the mode-transition test: within the same mode, selection sticks (clamped
-        // to the new row count) so a refining keystroke doesn't yank the cursor back to row 0.
         let mut popup = name_popup("");
         popup.select_next();
         let parked = popup.selected;

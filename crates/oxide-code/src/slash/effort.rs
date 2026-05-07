@@ -109,15 +109,6 @@ mod tests {
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
-    // ── EffortCmd::echoes_input ──
-
-    #[test]
-    fn echoes_input_only_when_args_present() {
-        assert!(!EffortCmd.echoes_input(""));
-        assert!(!EffortCmd.echoes_input("   "));
-        assert!(EffortCmd.echoes_input("xhigh"));
-    }
-
     // ── EffortCmd::complete_arg ──
 
     fn arg_values(prefix: &str) -> Vec<String> {
@@ -189,7 +180,6 @@ mod tests {
 
     #[test]
     fn execute_no_args_on_no_tier_model_errors_with_recovery_hint() {
-        // Slider can't render zero tiers — error before opening the modal.
         let (chat, outcome) = run_execute_with_model("claude-haiku-4-5", "");
         let msg = outcome.expect_err("must error");
         assert!(

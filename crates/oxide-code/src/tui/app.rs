@@ -2400,10 +2400,8 @@ mod tests {
     fn render_repaints_when_chat_content_grows_past_viewport() {
         use std::fmt::Write as _;
 
-        // Regression: pre-fix, content pushed in the same handler tick landed below the
-        // viewport until the user scrolled — the post-paint `update_layout` re-clamp
-        // arrived too late for the same frame. /help used to drive this through slash dispatch;
-        // it now opens a modal, so we exercise the same invariant via a long system message.
+        // Regression: content pushed in the same handler tick used to land below the viewport
+        // because the post-paint `update_layout` re-clamp arrived too late for the same frame.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let mut body = String::new();
         for i in 0..40 {

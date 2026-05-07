@@ -280,6 +280,44 @@ mod tests {
         assert_eq!(chat.last_error_text(), Some("/boom: explicit failure"));
     }
 
+    // ── echoes_input ──
+
+    #[test]
+    fn echoes_input_modal_only_commands_suppress_their_typed_line() {
+        for name in ["status", "config", "help"] {
+            let parsed = Parsed {
+                name: name.to_owned(),
+                args: String::new(),
+            };
+            assert!(!echoes_input(&parsed), "/{name} must not echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_picker_or_typed_commands_split_on_args() {
+        for name in ["effort", "model", "theme"] {
+            let bare = Parsed {
+                name: name.to_owned(),
+                args: String::new(),
+            };
+            assert!(!echoes_input(&bare), "bare /{name} must not echo");
+            let typed = Parsed {
+                name: name.to_owned(),
+                args: "x".to_owned(),
+            };
+            assert!(echoes_input(&typed), "typed /{name} must echo");
+        }
+    }
+
+    #[test]
+    fn echoes_input_unknown_command_echoes_so_error_block_has_context() {
+        let parsed = Parsed {
+            name: "no-such-thing".to_owned(),
+            args: String::new(),
+        };
+        assert!(echoes_input(&parsed));
+    }
+
     // ── classify ──
 
     #[test]

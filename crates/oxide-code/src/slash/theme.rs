@@ -328,8 +328,6 @@ mod tests {
 
     #[test]
     fn down_and_j_emit_preview_for_next_row_without_popping() {
-        // Down arrow and `j` (vi binding) share an arm; both must advance to the next row and
-        // emit a preview without popping the modal.
         for code in [KeyCode::Down, KeyCode::Char('j')] {
             let mut p = picker_with_active("mocha");
             let outcome = p.handle_key(&key(code));
@@ -344,8 +342,7 @@ mod tests {
 
     #[test]
     fn up_and_k_emit_preview_for_prev_row_without_popping() {
-        // Up arrow and `k` (vi binding) share an arm; both must cycle to the previous row and
-        // emit a preview. From the first row they wrap to the last via `select_prev`.
+        // From the first row they wrap to the last via `select_prev`.
         for code in [KeyCode::Up, KeyCode::Char('k')] {
             let mut p = picker_with_active("mocha");
             let outcome = p.handle_key(&key(code));
@@ -376,8 +373,7 @@ mod tests {
 
     #[test]
     fn numeric_jump_past_roster_is_a_consumed_noop() {
-        // Out-of-range digits stay Consumed so the App doesn't repaint for nothing. Use the
-        // first digit past the curated count so the test survives roster growth.
+        // Out-of-range digits stay Consumed — first digit past the count survives roster growth.
         let past_end = char::from_digit(u32::try_from(LISTED_THEMES.len()).unwrap() + 1, 10)
             .expect("roster fits in a single digit");
         let mut p = picker_with_active("mocha");
@@ -453,15 +449,6 @@ mod tests {
         assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
     }
 
-    // ── ThemeCmd::echoes_input ──
-
-    #[test]
-    fn echoes_input_only_when_args_present() {
-        assert!(!ThemeCmd.echoes_input(""));
-        assert!(!ThemeCmd.echoes_input("   "));
-        assert!(ThemeCmd.echoes_input("latte"));
-    }
-
     // ── ThemeCmd::complete_arg ──
 
     fn arg_values(prefix: &str) -> Vec<String> {
@@ -483,14 +470,11 @@ mod tests {
 
     #[test]
     fn complete_arg_prefix_filter_narrows_to_matching_themes() {
-        // `m` prefixes mocha, macchiato, material; matters that all three surface and roster
-        // order is preserved.
         assert_eq!(arg_values("m"), vec!["mocha", "macchiato", "material"]);
     }
 
     #[test]
     fn complete_arg_substring_match_below_prefix_tier() {
-        // `te` is a substring of `latte` and `material`; preserves declared order.
         assert_eq!(arg_values("te"), vec!["latte", "material"]);
     }
 
