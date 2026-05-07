@@ -7,13 +7,13 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 | Command                             | Description                                                                          |
 | ----------------------------------- | ------------------------------------------------------------------------------------ |
 | `/clear` (aliases `/new`, `/reset`) | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
-| `/config`                           | Show the resolved configuration and the file paths it merged.                        |
-| `/diff`                             | Show `git diff HEAD` plus untracked files, capped at 64 KB.                          |
+| `/config`                           | Open the resolved configuration and its layered file paths in a read-only modal.     |
+| `/diff`                             | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
 | `/effort [<level>]`                 | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
-| `/help`                             | List available commands.                                                             |
+| `/help`                             | Open a read-only modal listing available commands.                                   |
 | `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
 | `/model [<id>]`                     | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
-| `/status`                           | Show model, effort, working directory, version, auth, session id.                    |
+| `/status`                           | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
 | `/theme [<name>]`                   | Open the theme picker (live preview), or swap directly to a built-in theme.          |
 
 ## Autocomplete Popup

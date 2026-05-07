@@ -11,7 +11,7 @@ Nine built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mod
 - `/effort` sets an explicit effort tier.
 - `/theme` swaps the TUI palette mid-session; bare opens a live-preview list picker.
 - `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
-- `/config`, `/diff`, `/help`, `/status` are read-only.
+- `/config`, `/help`, `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer — output can be 100s of lines, scrollback value beats modal cropping.
 
 ## Design Decisions
 
@@ -23,11 +23,12 @@ Nine built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mod
 6. **Slash commands never write user config files.** Session-only state. Restart returns to config.toml values. Deliberate rejection of Claude Code's silent mega-file writes.
 7. **Aliases resolve to canonical but display by surface.** `/clear` is canonical; `/new` and `/reset` are aliases. The popup shows only the alias the user typed.
 8. **No `/quit` or `/exit`.** Ctrl+C x2 / Ctrl+D already exit.
-9. **`/config` is read-only in v1.** Prints resolved effective config + layered file paths.
+9. **Read-only kv views go through one shared modal primitive.** `/status`, `/config`, and `/help` all open a [`KvOverview`](modals.md) — title + sectioned label-value rows + footer. The modal is the response; the typed `> /foo` line stays out of chat history (see decision 14).
 10. **Built-in only in v1.** The trait registry leaves room for `~/.config/ox/commands/*.md` discovery later.
 11. **Read-only commands fast-path the busy turn.** `classify` defaults to `SlashKind::ReadOnly`; dispatcher runs them client-side even when input is disabled. State-mutating commands override to `SlashKind::Mutating` and refuse mid-turn.
 12. **Two command kinds, one trait return: `SlashOutcome { Done, Forward(UserAction) }`.** `Done` covers read-only commands. `Forward(_)` is state-mutating: handed back to the App, which forwards to the agent loop.
 13. **Modals open via a `SlashContext` side-channel, not a third `SlashOutcome` variant.** Commands set `ctx.open_modal(Box::new(...))` and return `Done`; the dispatcher harvests the slot after `execute` and pushes onto the App's modal stack. Keeps `SlashOutcome` derive-clean. See [modals.md](modals.md) for the full modal design.
+14. **Modal-only commands suppress their own echo.** `SlashCommand::echoes_input(args) -> bool` defaults to true; modal-only commands (`/status`, `/config`, `/help`, plus the bare forms of `/effort` / `/model` / `/theme`) override to false. Otherwise the typed `> /foo` line orphans in history once the modal closes — the modal IS the response, and a printer-style echo has nothing to anchor. Typed forms keep echoing because the swap-confirmation system message anchors the pair.
 
 ## Per-Command Notes
 
@@ -36,7 +37,10 @@ Nine built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mod
 - **`/model`** — Bare opens the combined picker ([modals.md](modals.md)). `/model <arg>` resolves via alias → exact / dated id → unique suffix → unique substring; `[1m]` is an opt-in tag (strip → resolve → reattach). Both forms emit `UserAction::SwapConfig` and re-clamp current effort against the new model.
 - **`/effort`** — Bare opens the Speed ↔ Intelligence slider ([modals.md](modals.md)); two-axis picker would force users through models they didn't mean to change. `/effort <level>` accepts the five concrete tiers — no `auto` state.
 - **`/theme`** — Bare opens a live-preview list picker ([modals.md](modals.md)) over the built-in palettes; Up / Down repaints the TUI in the candidate, Esc snaps back. `/theme <name>` validates against the curated roster and swaps directly. Custom file-path themes aren't accepted via the slash form.
-- **`/status`** — Bare opens the read-only overview modal ([modals.md](modals.md)). No args, no chat output. Esc / Enter both dismiss.
+- **`/status`** — Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Enter both dismiss.
+- **`/config`** — Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config and the layered TOML source paths it was assembled from. Path discovery runs per-invocation so mid-session edits surface immediately.
+- **`/help`** — Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases parenthesize after the canonical name; `usage()` placeholder appends.
+- **`/diff`** — The lone printer. Pushes `git diff HEAD` + untracked into chat as a system message, capped at 64 KB on a UTF-8 boundary. Modal'd output would crop without scrollback; the diff genuinely earns its place in transcript.
 
 ## Sources
 
@@ -50,8 +54,11 @@ Nine built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/mod
 - `crates/oxide-code/src/slash/theme.rs` — `ThemeCmd`, picker open + typed-arg validator.
 - `crates/oxide-code/src/slash/picker.rs` — combined model + effort picker modal.
 - `crates/oxide-code/src/slash/effort_slider.rs` — bare `/effort` Speed ↔ Intelligence slider modal.
-- `crates/oxide-code/src/slash/status_modal.rs` — `/status` overview modal.
-- `crates/oxide-code/src/tui/app.rs` — `dispatch_user_action`, `apply_action_locally`, modal gate.
+- `crates/oxide-code/src/slash/status.rs` — `/status` row builder + `KvOverview` constructor.
+- `crates/oxide-code/src/slash/config.rs` — `/config` row builder + sectioned `KvOverview` constructor.
+- `crates/oxide-code/src/slash/help.rs` — `/help` row builder + `KvOverview` constructor.
+- `crates/oxide-code/src/tui/app.rs` — `dispatch_user_action`, `apply_action_locally`, modal gate, echo gate.
 - `crates/oxide-code/src/tui/modal.rs` — `Modal` trait, `ModalStack`, key routing.
+- `crates/oxide-code/src/tui/modal/kv_overview.rs` — generic `KvOverview` / `KvSection` primitive.
 - `crates/oxide-code/src/tui/modal/list_picker.rs` — generic `ListPicker` primitive.
 - `crates/oxide-code/src/agent.rs` — `agent_turn` Clear and SwapConfig arms.

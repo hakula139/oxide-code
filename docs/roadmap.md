@@ -65,7 +65,7 @@ The direction is simple:
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
 - Mid-session swap: `/model`, `/effort`, and `/theme`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status` opens a read-only kv overview. Esc / Ctrl+C cancel any modal universally.
+- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status`, `/config`, and `/help` open read-only kv overviews. Esc / Ctrl+C cancel any modal universally.
 
 ### Authentication & Configuration
 
