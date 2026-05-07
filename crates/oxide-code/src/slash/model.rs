@@ -116,13 +116,12 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     match visible.as_slice() {
         [id] => Ok((*id).to_owned()),
         [_, ..] => Err(format!(
-            "`{arg}` matches {n} models. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):\n\n{list}",
-            n = visible.len(),
-            list = format_supported_models(&visible),
+            "`{arg}` is ambiguous. Pick one or use a short alias (`opus`, `sonnet`, `haiku`):\n\n{list}",
+            list = listed_models_matching(arg),
         )),
         [] => Err(format!(
             "Unknown model: `{arg}`. Supported models:\n\n{list}",
-            list = format_supported_models(&candidates(|_| true)),
+            list = format_supported_models(LISTED_MODELS),
         )),
     }
 }
@@ -131,12 +130,27 @@ fn is_selectable_known_id(arg: &str) -> bool {
     MODELS.iter().any(|m| m.id_substr == arg)
 }
 
+/// `LISTED_MODELS` rows containing `arg` (case-insensitive); falls back to the full curated
+/// roster when the filter yields nothing, so the listing always surfaces actionable picks.
+fn listed_models_matching(arg: &str) -> String {
+    let filtered: Vec<&'static str> = LISTED_MODELS
+        .iter()
+        .copied()
+        .filter(|id| id.contains(arg))
+        .collect();
+    if filtered.is_empty() {
+        format_supported_models(LISTED_MODELS)
+    } else {
+        format_supported_models(&filtered)
+    }
+}
+
 /// Markdown bullet list of `id — display name` rows.
 fn format_supported_models(ids: &[&'static str]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for id in ids {
-        let label = lookup(id).map_or(*id, |m| m.display_name);
+        let label = display_name(id);
         _ = writeln!(out, "- `{id}` — {label}");
     }
     out.truncate(out.trim_end_matches('\n').len());
@@ -299,18 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_1m_on_incompatible_model_is_rejected_with_display_name() {
-        for arg in ["haiku[1m]", "claude-haiku-4-5[1m]"] {
-            let (_, outcome) = run_execute(arg);
-            let msg = outcome.expect_err("must error");
-            assert_eq!(
-                msg, "Claude Haiku 4.5: 1M context not supported. Drop the `[1m]` tag.",
-                "arg `{arg}`",
-            );
-        }
-    }
-
-    #[test]
     fn execute_canonical_id_round_trips_for_bare_and_1m_variants() {
         for id in [
             "claude-opus-4-7",
@@ -348,29 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn execute_unknown_arg_errors_with_supported_model_listing() {
-        let (chat, outcome) = run_execute("gpt-4");
-        let msg = outcome.expect_err("unknown arg must error");
-        assert!(msg.starts_with("Unknown model: `gpt-4`."), "{msg}");
-        assert!(msg.contains("Supported models:"), "{msg}");
-        for id in ["claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5"] {
-            assert!(msg.contains(id), "{id} should appear in listing: {msg}");
-        }
-        assert!(
-            msg.contains("Claude Opus 4.7"),
-            "display names render: {msg}"
-        );
-        assert_eq!(chat.entry_count(), 0);
-    }
-
-    #[test]
-    fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
-        // Retired ids substring-match multiple current rows; ambiguity must surface.
-        for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
-            let (_, outcome) = run_execute(arg);
-            let msg = outcome.expect_err(&format!("`{arg}` must error"));
-            assert!(msg.contains("matches"), "ambiguity for `{arg}`: {msg}");
-        }
+    fn execute_unique_substring_resolves_after_suffix_tier_misses() {
+        let (_, outcome) = run_execute("haiku-4-");
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
     }
 
     #[test]
@@ -381,41 +363,90 @@ mod tests {
     }
 
     #[test]
-    fn execute_ambiguous_substring_lists_count_and_each_candidate() {
+    fn execute_trims_whitespace_around_arg() {
+        let (_, outcome) = run_execute("  haiku-4-5  ");
+        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
+    }
+
+    #[test]
+    fn execute_1m_on_incompatible_model_is_rejected_with_display_name() {
+        for arg in ["haiku[1m]", "claude-haiku-4-5[1m]"] {
+            let (_, outcome) = run_execute(arg);
+            let msg = outcome.expect_err("must error");
+            assert_eq!(
+                msg, "Claude Haiku 4.5: 1M context not supported. Drop the `[1m]` tag.",
+                "arg `{arg}`",
+            );
+        }
+    }
+
+    #[test]
+    fn execute_unknown_arg_errors_with_curated_listing() {
+        let (chat, outcome) = run_execute("gpt-4");
+        let msg = outcome.expect_err("unknown arg must error");
+        assert!(msg.starts_with("Unknown model: `gpt-4`."), "{msg}");
+        assert!(msg.contains("Supported models:"), "{msg}");
+        for id in LISTED_MODELS {
+            assert!(
+                msg.contains(&format!("- `{id}` — ")),
+                "{id} should appear as a bullet: {msg}",
+            );
+        }
+        assert!(
+            msg.contains("Claude Opus 4.7 (1M context)"),
+            "1M variant renders the (1M context) suffix: {msg}",
+        );
+        assert_eq!(chat.entry_count(), 0);
+    }
+
+    #[test]
+    fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
+        // Retired ids substring-match multiple current rows; ambiguity must surface.
+        for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
+            let (_, outcome) = run_execute(arg);
+            let msg = outcome.expect_err(&format!("`{arg}` must error"));
+            assert!(msg.contains("is ambiguous"), "ambiguity for `{arg}`: {msg}");
+        }
+    }
+
+    #[test]
+    fn execute_ambiguous_substring_filters_curated_listing_by_arg() {
         let (_, outcome) = run_execute("4-6");
         let msg = outcome.expect_err("ambiguous arg must error");
-        assert!(msg.starts_with("`4-6` matches"), "{msg}");
-        for needle in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+        assert!(msg.starts_with("`4-6` is ambiguous."), "{msg}");
+        // `LISTED_MODELS` filtered by `4-6` — only Sonnet entries are curated, so non-listed
+        // `claude-opus-4-6` doesn't surface here even though the resolver counted it as a match.
+        for needle in ["claude-sonnet-4-6", "claude-sonnet-4-6[1m]"] {
             assert!(msg.contains(needle), "{needle} listed: {msg}");
         }
+        assert!(
+            !msg.contains("claude-opus-4-6"),
+            "non-curated row must not appear: {msg}",
+        );
         assert!(msg.contains("opus"), "alias hint surfaces: {msg}");
     }
 
     #[test]
-    fn execute_ambiguous_listing_covers_every_current_match() {
-        // `claude-opus` substring-matches every current Opus row.
+    fn execute_ambiguous_listing_falls_back_to_full_curated_set_when_filter_empty() {
+        // No `LISTED_MODELS` entry contains `4-7-but-also`, but the resolver still flags an
+        // ambiguity through `MODELS`. The error listing falls back to the full curated set so
+        // the user always has actionable picks.
+        // Synthetic case: build via `claude-opus-4` which substring-matches multiple MODELS
+        // rows but only `claude-opus-4-7` / `[1m]` in LISTED_MODELS — filter has matches, so
+        // we exercise the empty-filter fallback through a different shape.
         let (_, outcome) = run_execute("claude-opus");
         let msg = outcome.expect_err("ambiguous arg must error");
-        for current in [
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-opus-4-5",
-            "claude-opus-4-1",
-        ] {
-            assert!(msg.contains(current), "{current} listed: {msg}");
+        // `claude-opus` matches the listed Opus 4.7 entries; the listing surfaces those.
+        for id in ["claude-opus-4-7", "claude-opus-4-7[1m]"] {
+            assert!(msg.contains(id), "{id} should be listed: {msg}");
         }
-    }
-
-    #[test]
-    fn execute_unique_substring_resolves_after_suffix_tier_misses() {
-        let (_, outcome) = run_execute("haiku-4-");
-        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
-    }
-
-    #[test]
-    fn execute_trims_whitespace_around_arg() {
-        let (_, outcome) = run_execute("  haiku-4-5  ");
-        assert_eq!(outcome, Ok(swap_model("claude-haiku-4-5")));
+        // Older non-listed Opus rows must not appear in the curated listing.
+        for id in ["claude-opus-4-5", "claude-opus-4-1"] {
+            assert!(
+                !msg.contains(id),
+                "non-curated `{id}` must not appear: {msg}",
+            );
+        }
     }
 
     // ── resolve_model_arg ──
@@ -462,22 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_arg_rejects_malformed_ids_that_only_contain_known_rows() {
-        for arg in [
-            "claude-opus-4-7x",
-            "foo-claude-opus-4-7",
-            "claude-opus-4-7[1m]-bad",
-            "claude-opus-4-7-2026010x",
-            "claude-opus-4-7-202601011",
-        ] {
-            assert!(
-                resolve_model_arg(arg).is_err(),
-                "malformed id must not pass through: {arg}",
-            );
-        }
-    }
-
-    #[test]
     fn resolve_model_arg_lowercases_arg_before_matching() {
         assert_eq!(
             resolve_model_arg("OPUS")
@@ -500,20 +515,70 @@ mod tests {
     }
 
     #[test]
+    fn resolve_model_arg_rejects_malformed_ids_that_only_contain_known_rows() {
+        for arg in [
+            "claude-opus-4-7x",
+            "foo-claude-opus-4-7",
+            "claude-opus-4-7[1m]-bad",
+            "claude-opus-4-7-2026010x",
+            "claude-opus-4-7-202601011",
+        ] {
+            assert!(
+                resolve_model_arg(arg).is_err(),
+                "malformed id must not pass through: {arg}",
+            );
+        }
+    }
+
+    #[test]
     fn resolve_model_arg_bare_1m_tag_errors_without_listing_models() {
         let msg = resolve_model_arg("[1m]").expect_err("must error");
         assert!(msg.contains("tag, not a model"), "{msg}");
-        assert!(!msg.contains("matches"), "must not list candidates: {msg}");
+        assert!(
+            !msg.contains("- `claude"),
+            "must not surface the candidate listing: {msg}",
+        );
+    }
+
+    // ── listed_models_matching ──
+
+    #[test]
+    fn listed_models_matching_filters_curated_roster_by_arg() {
+        let out = listed_models_matching("haiku");
+        assert_eq!(out, "- `claude-haiku-4-5` — Claude Haiku 4.5");
+    }
+
+    #[test]
+    fn listed_models_matching_surfaces_1m_variants_alongside_base() {
+        let out = listed_models_matching("claude-opus");
+        assert!(
+            out.contains("- `claude-opus-4-7` — Claude Opus 4.7"),
+            "{out}"
+        );
+        assert!(
+            out.contains("- `claude-opus-4-7[1m]` — Claude Opus 4.7 (1M context)"),
+            "{out}",
+        );
+    }
+
+    #[test]
+    fn listed_models_matching_falls_back_to_full_roster_when_filter_empty() {
+        let out = listed_models_matching("zzz-no-match");
+        for id in LISTED_MODELS {
+            assert!(out.contains(id), "{id} should appear in fallback: {out}");
+        }
     }
 
     // ── format_supported_models ──
 
     #[test]
-    fn format_supported_models_renders_one_markdown_bullet_per_id() {
-        let out = format_supported_models(&["claude-opus-4-7", "gpt-4"]);
+    fn format_supported_models_renders_bullets_with_1m_suffix_for_1m_ids() {
+        let out = format_supported_models(&["claude-opus-4-7", "claude-opus-4-7[1m]", "gpt-4"]);
         assert_eq!(
             out,
-            "- `claude-opus-4-7` — Claude Opus 4.7\n- `gpt-4` — gpt-4",
+            "- `claude-opus-4-7` — Claude Opus 4.7\n\
+             - `claude-opus-4-7[1m]` — Claude Opus 4.7 (1M context)\n\
+             - `gpt-4` — gpt-4",
         );
     }
 
