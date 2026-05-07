@@ -9,7 +9,7 @@ use super::matcher::rank_by_prefix;
 use super::registry::{ArgCompletion, SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::config::Effort;
-use crate::model::{capabilities_for, marketing_or_id};
+use crate::model::{capabilities_for, display_name};
 
 pub(super) struct EffortCmd;
 
@@ -70,7 +70,7 @@ impl SlashCommand for EffortCmd {
 fn no_effort_tier_msg(model_id: &str) -> String {
     format!(
         "{} has no effort tier. Pick an effort-capable model first with /model (e.g. /model opus, /model sonnet).",
-        marketing_or_id(model_id),
+        display_name(model_id),
     )
 }
 

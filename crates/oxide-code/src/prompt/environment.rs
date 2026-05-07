@@ -5,7 +5,7 @@ use std::path::Path;
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
-use crate::model::marketing_name;
+use crate::model::lookup;
 use crate::util::env;
 
 const UNKNOWN_MARKER: &str = "(unknown)";
@@ -49,11 +49,11 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
-        let model_bullet = match marketing_name(&self.model) {
-            Some(name) => format!(
-                "- You are powered by the model named {name}. \
+        let model_bullet = match lookup(&self.model) {
+            Some(info) => format!(
+                "- You are powered by the model named {}. \
                 The exact model ID is {}.",
-                self.model
+                info.display_name, self.model,
             ),
             None => format!("- You are powered by the model {}.", self.model),
         };
@@ -85,7 +85,7 @@ impl Environment {
 // ── Model Metadata ──
 
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
-    crate::model::lookup(model).and_then(|info| info.cutoff)
+    lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
