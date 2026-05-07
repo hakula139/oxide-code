@@ -3,7 +3,7 @@
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::display_effort;
+use crate::config::{display_bool, display_effort};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
 pub(super) struct StatusCmd;
@@ -42,18 +42,14 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         ),
         (
             "Show Thinking".to_owned(),
-            on_off(info.config.show_thinking).to_owned(),
+            display_bool(info.config.show_thinking).to_owned(),
         ),
         (
             "Show Welcome".to_owned(),
-            on_off(info.config.show_welcome).to_owned(),
+            display_bool(info.config.show_welcome).to_owned(),
         ),
     ];
     KvOverview::new("Status", vec![KvSection::new(rows)])
-}
-
-fn on_off(flag: bool) -> &'static str {
-    if flag { "on" } else { "off" }
 }
 
 #[cfg(test)]
@@ -77,7 +73,6 @@ mod tests {
 
     #[test]
     fn echoes_input_is_false_so_the_typed_line_does_not_orphan_after_dismiss() {
-        // Modal IS the response — echoing would leave `> /status` alone in chat once dismissed.
         assert!(!StatusCmd.echoes_input(""));
     }
 
@@ -105,13 +100,5 @@ mod tests {
         let m = build_modal(&info);
         // Title + blank + 9 rows + blank + footer = 13.
         assert_eq!(m.height(80), 13);
-    }
-
-    // ── on_off ──
-
-    #[test]
-    fn on_off_renders_the_two_flag_states() {
-        assert_eq!(on_off(true), "on");
-        assert_eq!(on_off(false), "off");
     }
 }

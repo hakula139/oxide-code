@@ -316,6 +316,10 @@ pub(crate) fn display_effort(effort: Option<Effort>) -> String {
     effort.map_or_else(|| "(no effort tier)".to_owned(), |e| e.to_string())
 }
 
+pub(crate) fn display_bool(flag: bool) -> &'static str {
+    if flag { "on" } else { "off" }
+}
+
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
     match effort {
         Some(Effort::Xhigh | Effort::Max) => 64_000,
@@ -911,6 +915,14 @@ mod tests {
     fn display_effort_names_effective_tier_or_no_tier() {
         assert_eq!(display_effort(Some(Effort::High)), "high");
         assert_eq!(display_effort(None), "(no effort tier)");
+    }
+
+    // ── display_bool ──
+
+    #[test]
+    fn display_bool_names_the_two_flag_states() {
+        assert_eq!(display_bool(true), "on");
+        assert_eq!(display_bool(false), "off");
     }
 
     // ── default_max_tokens ──

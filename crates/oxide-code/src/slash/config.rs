@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_effort, file};
+use crate::config::{display_bool, display_effort, file};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
 
@@ -54,7 +54,10 @@ fn build_modal(
             "Prompt Cache TTL".to_owned(),
             cfg.prompt_cache_ttl.to_string(),
         ),
-        ("Show Thinking".to_owned(), yes_no(cfg.show_thinking)),
+        (
+            "Show Thinking".to_owned(),
+            display_bool(cfg.show_thinking).to_owned(),
+        ),
     ];
     let files = vec![
         ("User".to_owned(), display_path(user_path)),
@@ -67,10 +70,6 @@ fn build_modal(
             KvSection::new(files).with_heading("Source Files"),
         ],
     )
-}
-
-fn yes_no(flag: bool) -> String {
-    if flag { "yes" } else { "no" }.to_owned()
 }
 
 /// `(not configured)` when unresolved; `~/...` plus ` (not found)` when missing.
@@ -109,7 +108,6 @@ mod tests {
 
     #[test]
     fn echoes_input_is_false_so_the_typed_line_does_not_orphan_after_dismiss() {
-        // Modal IS the response — echoing would leave `> /config` alone in chat once dismissed.
         assert!(!ConfigCmd.echoes_input(""));
     }
 
@@ -161,13 +159,5 @@ mod tests {
         let got = display_path(Some(&here));
         assert!(!got.contains("(not found)"), "{got}");
         assert!(!got.contains("(not configured)"), "{got}");
-    }
-
-    // ── yes_no ──
-
-    #[test]
-    fn yes_no_renders_the_two_flag_states() {
-        assert_eq!(yes_no(true), "yes");
-        assert_eq!(yes_no(false), "no");
     }
 }
