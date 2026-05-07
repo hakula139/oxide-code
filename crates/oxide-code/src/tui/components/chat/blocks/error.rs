@@ -86,7 +86,7 @@ mod tests {
         // Joining them at render time would collapse the bullets into one wrapped line.
         let theme = Theme::default();
         let block = ErrorBlock::new(indoc! {"
-            Unknown model: `ab`. Supported models:
+            Unknown model: `gpt-4`. Supported models:
 
             - `claude-opus-4-7` — Claude Opus 4.7
             - `claude-haiku-4-5` — Claude Haiku 4.5"
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(
             bodies,
             vec![
-                "Unknown model: `ab`. Supported models:",
+                "Unknown model: `gpt-4`. Supported models:",
                 "",
                 "- `claude-opus-4-7` — Claude Opus 4.7",
                 "- `claude-haiku-4-5` — Claude Haiku 4.5",
