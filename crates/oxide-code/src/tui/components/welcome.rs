@@ -19,15 +19,15 @@ const STARTERS: &[(&str, &str)] = &[
     ("/diff", "show staged changes"),
 ];
 
+const WORDMARK: &str = "oxide-code";
+const RIBBON_FLANK: &str = "━━━━";
 const STARTER_HEADER: &str = "Try one of:";
 const STARTER_GAP: &str = "    ";
-const TRAILER: &str = "Or type / to browse all commands.";
+const TRAILER: &str = "tip — press / to browse all commands.";
 
 const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
-
-const BOX_HORIZONTAL_PAD: usize = 5;
 
 /// Self-contained projection of the bits the welcome paints. Keeps the renderer decoupled from
 /// `LiveSessionInfo` evolution and makes test fixtures cheap.
@@ -101,31 +101,27 @@ fn push_identity(
     snap: &WelcomeSnapshot,
     full: bool,
 ) {
-    let title = format!("ox v{}", snap.version);
+    let dim = theme.dim();
+    let accent_bold = theme.accent().add_modifier(Modifier::BOLD);
+    let version = format!("v{}", snap.version);
     if full {
-        let inner_width = title.chars().count() + 2 * BOX_HORIZONTAL_PAD;
-        let dim = theme.dim();
-        let accent_bold = theme.accent().add_modifier(Modifier::BOLD);
-        lines.push(Line::from(Span::styled(
-            format!("┌{}┐", "─".repeat(inner_width)),
-            dim,
-        )));
+        // Editorial ribbon: heavy rules flanking the wordmark form a single-line identity that
+        // anchors the welcome without the chrome of a four-side box.
         lines.push(Line::from(vec![
-            Span::styled("│", dim),
-            Span::raw(" ".repeat(BOX_HORIZONTAL_PAD)),
-            Span::styled(title, accent_bold),
-            Span::raw(" ".repeat(BOX_HORIZONTAL_PAD)),
-            Span::styled("│", dim),
+            Span::styled(RIBBON_FLANK, dim),
+            Span::raw(" "),
+            Span::styled(WORDMARK, accent_bold),
+            Span::raw(" "),
+            Span::styled(version, dim),
+            Span::raw(" "),
+            Span::styled(RIBBON_FLANK, dim),
         ]));
-        lines.push(Line::from(Span::styled(
-            format!("└{}┘", "─".repeat(inner_width)),
-            dim,
-        )));
     } else {
-        lines.push(Line::from(Span::styled(
-            title,
-            theme.accent().add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(WORDMARK, accent_bold),
+            Span::raw(" "),
+            Span::styled(version, dim),
+        ]));
     }
 }
 

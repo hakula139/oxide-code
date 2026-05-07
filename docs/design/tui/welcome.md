@@ -22,9 +22,7 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 ## Layout
 
 ```text
-                              ┌───────────────────┐
-                              │     ox v0.1.0     │
-                              └───────────────────┘
+                          ━━━━ oxide-code v0.1.0 ━━━━
 
                      Claude Opus 4.7 (1M) · xhigh effort · OAuth
                      ~/github/oxide-code
@@ -34,25 +32,25 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
                        /init    author or update AGENTS.md
                        /diff    show staged changes
 
-                     Or type / to browse all commands.
+                     tip — press / to browse all commands.
 ```
 
-Sections: identity (boxed, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)` — without that pad each line floats to its own visual center and the welcome reads as a "ransom note" stack. The box is centered as its own unit above the body column.
+Sections: identity ribbon (single line, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)` — without that pad each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit above the body column.
 
 ### Width ladder
 
-| Cols  | Identity             | Environment         | Cwd                         | Starter list | Trailer hint |
-| ----- | -------------------- | ------------------- | --------------------------- | ------------ | ------------ |
-| ≥60   | boxed `ox v{ver}`    | full line           | tildified, full             | 3 rows       | yes          |
-| 40-59 | one-line `ox v{ver}` | full line           | tildified, full             | 3 rows       | yes          |
-| 25-39 | one-line             | model + effort only | tildified, center-truncated | hidden       | hidden       |
-| <25   | suppressed           | suppressed          | suppressed                  | suppressed   | suppressed   |
+| Cols  | Identity                  | Environment         | Cwd                         | Starter list | Trailer hint |
+| ----- | ------------------------- | ------------------- | --------------------------- | ------------ | ------------ |
+| ≥60   | ribbon `━━━━ oxide-code…` | full line           | tildified, full             | 3 rows       | yes          |
+| 40-59 | wordmark `oxide-code v…`  | full line           | tildified, full             | 3 rows       | yes          |
+| 25-39 | wordmark                  | model + effort only | tildified, center-truncated | hidden       | hidden       |
+| <25   | suppressed                | suppressed          | suppressed                  | suppressed   | suppressed   |
 
 Below 25 cols nothing paints — the terminal is too narrow to read the welcome cleanly; let the input field anchor the empty session.
 
 ### Theme slots
 
-`accent` for the `ox v{ver}` token. `text` for environment + starter command names. `dim` for descriptions, the trailer hint, and the box border. No new theme slots — reuses the palette `/status` already paints with.
+`accent` (bold) for the `oxide-code` wordmark and starter command names. `text` for the environment line. `dim` for the version, ribbon flanks, cwd, starter descriptions, and trailer hint. No new theme slots — reuses the palette `/status` already paints with.
 
 ## Design Decisions
 
@@ -61,7 +59,7 @@ Below 25 cols nothing paints — the terminal is too narrow to read the welcome 
 3. **`WelcomeSnapshot` is a small projection, not the full `LiveSessionInfo`.** Keeping the shape narrow (model display, effort, auth label, cwd, version, starter rows) lets snapshot tests build fixtures cheaply and decouples the welcome from `LiveSessionInfo` evolution.
 4. **Starter rows source from a curated 3-tuple, not all of `BUILT_INS`.** The full registry has nine entries; advertising all of them defeats the point of "try one of." The three rows are `/help`, `/init`, `/diff` — discovery, onboarding, repo-state. The trailer hint (`Or type / to browse all commands.`) covers everything else.
 5. **Curated rows live alongside the welcome (in `welcome.rs`), not as a method on `SlashCommand`.** Adding `is_starter() -> bool` to the trait would push welcome-specific concern into every command. The welcome's curation is the welcome's responsibility.
-6. **Static text logo (`ox v{ver}` boxed); no ASCII mark, no animation.** Reference projects span no-art (Codex header) → static mascot (Claude Code) → two-tone ASCII (opencode). All three came across as outsized lift for the value; static box reads as professional and is theme-agnostic.
+6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` — no ASCII mark, no animation.** A four-side box reads as generic CLI chrome; an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark — typographic identity rather than container chrome. Wordmark is `oxide-code` (project name, the brand a migrator searches for) rather than `ox` (binary command).
 7. **Two-tier width ladder, not three.** Codex / Claude Code lean on truncate-and-reflow; opencode leans on flex-shrink. For a fixed-content welcome a coarse ladder (full / collapsed / suppressed) is simpler than tuning per-element shrink behavior.
 8. **Body lines pad to one shared column width; box centers independently.** `Paragraph::alignment(Center)` aligns each line on its own visual center, so a naive layout has every line floating to its own indent ("ransom note"). Padding env / cwd / starters / trailer to one common width forces a single shared left edge. The identity box stays centered as its own unit, anchoring the screen above the body column.
 9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape (TOML option + env, empty-is-absent). When false, the chat region is blank — the input field anchors the empty session.
