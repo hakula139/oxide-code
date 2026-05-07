@@ -17,25 +17,25 @@ use crate::util::text::{center_truncate_to_width, truncate_to_width};
 type Starter = (&'static str, &'static str);
 
 const STARTER_POOL: &[Starter] = &[
+    ("/clear", "reset conversation"),
+    ("/diff", "show staged changes"),
+    ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),
-    ("/diff", "show staged changes"),
-    ("/status", "session at a glance"),
     ("/model", "switch model"),
-    ("/effort", "tune Speed ↔ Intelligence"),
+    ("/status", "session at a glance"),
     ("/theme", "switch theme"),
-    ("/clear", "reset conversation"),
 ];
 
 const TIP_POOL: &[&str] = &[
-    "press / to browse all commands",
-    "press Enter to send, Shift+Enter for newline",
-    "press Ctrl+C twice to exit",
-    "ox --continue resumes your last session",
-    "ox --list shows recent sessions",
     "/clear starts a fresh conversation",
     "/effort tunes Speed ↔ Intelligence",
     "/theme previews live as you scroll",
+    "ox --continue resumes your last session",
+    "ox --list shows recent sessions",
+    "press / to browse all commands",
+    "press Ctrl+C twice to exit",
+    "press Enter to send, Shift+Enter for newline",
 ];
 
 const STARTER_PICK: usize = 3;
