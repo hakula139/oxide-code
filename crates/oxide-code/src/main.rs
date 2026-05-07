@@ -79,6 +79,10 @@ struct Cli {
     /// Widen `--list` / `--continue` from the current cwd to every project.
     #[arg(short, long, requires = "scope")]
     all: bool,
+
+    /// Cap `--list` to the N most-recent sessions. `0` disables the cap (legacy behavior).
+    #[arg(long, value_name = "N", requires = "list", default_value_t = 30)]
+    limit: usize,
 }
 
 fn main() -> Result<()> {
@@ -99,7 +103,7 @@ async fn async_main() -> Result<()> {
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
     if cli.list {
-        return list_sessions(cli.all);
+        return list_sessions(cli.all, cli.limit);
     }
 
     let config = Config::load().await?;
@@ -158,16 +162,18 @@ async fn async_main() -> Result<()> {
 
 // ── Session Helpers ──
 
-fn list_sessions(all: bool) -> Result<()> {
+fn list_sessions(all: bool, limit: usize) -> Result<()> {
     let store = SessionStore::open()?;
     let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
     let term_width = detect_terminal_width();
+    let cap = (limit > 0).then_some(limit);
     render_list(
         &mut std::io::stdout().lock(),
         &store,
         all,
         local_offset,
         term_width,
+        cap,
     )
 }
 

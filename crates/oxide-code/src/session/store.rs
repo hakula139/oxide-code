@@ -31,6 +31,14 @@ pub(crate) struct SessionStore {
     project_dir: PathBuf,
 }
 
+/// A paginated slice of [`Self::list_paged`]'s output. `total` is the count before truncation,
+/// so renderers can display `... and N more` footers without re-walking the directory.
+#[derive(Debug)]
+pub(crate) struct ListPage {
+    pub(crate) sessions: Vec<SessionInfo>,
+    pub(crate) total: usize,
+}
+
 impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
@@ -98,16 +106,51 @@ impl SessionStore {
         load_session_data_from_path(&path)
     }
 
-    /// List sessions for the current project, most recently active first.
+    /// List sessions for the current project, most recently active first. Wrapper around
+    /// [`Self::list_paged`] for callers that don't need a cap.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        let mut sessions = read_sessions_in_dir(&self.project_dir)?;
-        sort_sessions_recent_first(&mut sessions);
-        Ok(sessions)
+        Ok(self.list_paged(None, false)?.sessions)
     }
 
-    /// List sessions across every project subdirectory.
+    /// List sessions across every project subdirectory. Wrapper around [`Self::list_paged`].
     pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
-        let mut sessions = Vec::new();
+        Ok(self.list_paged(None, true)?.sessions)
+    }
+
+    /// List the `limit` most-recently-active sessions and report the total available so callers
+    /// can render a "and N more" footer. `None` is unbounded; `Some(n)` parses at most `n`
+    /// files past the cheap stat-only pre-sort. `all` widens from the home project to every
+    /// project subdir.
+    pub(crate) fn list_paged(&self, limit: Option<usize>, all: bool) -> Result<ListPage> {
+        let mut paths = if all {
+            self.collect_paths_all_projects()?
+        } else {
+            collect_session_paths(&self.project_dir)?
+        };
+        sort_paths_recent_first(&mut paths);
+        let total = paths.len();
+        if let Some(cap) = limit {
+            paths.truncate(cap);
+        }
+        let sessions = paths
+            .into_iter()
+            .filter_map(|(path, _)| match read_session_info(&path) {
+                Ok(info) => Some(info),
+                Err(e) => {
+                    warn!("skipping unreadable session file {}: {e}", path.display());
+                    None
+                }
+            })
+            .collect();
+        Ok(ListPage { sessions, total })
+    }
+
+    /// Cheap pre-listing scan across every project subdirectory — returns
+    /// (path, mtime) pairs without parsing JSONL bodies. Exposed via
+    /// [`Self::list_paged`] so the caller can apply a limit before paying the
+    /// per-file parse cost.
+    fn collect_paths_all_projects(&self) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+        let mut out = Vec::new();
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
         {
@@ -119,14 +162,13 @@ impl SessionStore {
                 }
             };
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                match read_sessions_in_dir(&entry.path()) {
-                    Ok(mut s) => sessions.append(&mut s),
+                match collect_session_paths(&entry.path()) {
+                    Ok(mut paths) => out.append(&mut paths),
                     Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
                 }
             }
         }
-        sort_sessions_recent_first(&mut sessions);
-        Ok(sessions)
+        Ok(out)
     }
 
     /// Finds a session file by suffix match, checking the home project first.
@@ -314,7 +356,10 @@ fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
+/// Stat-only scan of one project subdirectory: returns `.jsonl` files paired with mtime so the
+/// caller can sort and truncate before paying the per-file JSONL parse cost in
+/// [`read_session_info`].
+fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     Ok(entries
         .filter_map(|entry| match entry {
@@ -325,23 +370,20 @@ fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
             }
         })
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|e| match read_session_info(&e.path()) {
-            Ok(info) => Some(info),
-            Err(e) => {
-                warn!("skipping unreadable session file: {e}");
-                None
-            }
+        .map(|e| {
+            let path = e.path();
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map_or(OffsetDateTime::UNIX_EPOCH, OffsetDateTime::from);
+            (path, mtime)
         })
         .collect())
 }
 
-fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
-    sessions.sort_by_key(|s| {
-        (
-            std::cmp::Reverse(s.last_active_at),
-            std::cmp::Reverse(s.session_id.clone()),
-        )
-    });
+fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
+    paths
+        .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
 }
 
 // ── SessionWriter ──
@@ -1317,6 +1359,68 @@ mod tests {
         let sessions = store.list().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "own");
+    }
+
+    // ── list_paged ──
+
+    /// Helper: builds `count` finished sessions in monotonically increasing mtime order.
+    fn seed_n_sessions(store: &SessionStore, count: usize) {
+        for i in 0..count {
+            let id = format!("session-{i:04}");
+            let offset = i64::try_from(i).expect("test count fits i64");
+            let mut writer = store
+                .create(&Entry::Header {
+                    session_id: id.clone(),
+                    cwd: "/work/project".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-15 10:00:00 UTC)
+                        + time::Duration::seconds(offset),
+                    version: CURRENT_VERSION,
+                })
+                .unwrap();
+            writer
+                .append(&sample_title_entry(&format!("Title {i}")))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_paged_caps_at_limit_keeping_most_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 10);
+
+        let page = store.list_paged(Some(3), false).unwrap();
+        assert_eq!(page.sessions.len(), 3, "cap honored");
+        assert_eq!(page.total, 10, "total reflects pre-cap count");
+        // mtime descends in seed order; newest three are the last three created.
+        assert_eq!(page.sessions[0].session_id, "session-0009");
+        assert_eq!(page.sessions[2].session_id, "session-0007");
+    }
+
+    #[tokio::test]
+    async fn list_paged_unbounded_returns_total_equal_to_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 4);
+
+        let page = store.list_paged(None, false).unwrap();
+        assert_eq!(page.sessions.len(), 4);
+        assert_eq!(page.total, 4, "no cap → total equals returned len");
+    }
+
+    #[tokio::test]
+    async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
+        // `--limit 0` is the unbounded sentinel at the CLI; the store's `Some(0)` means
+        // "parse no rows" which is what happens if we faithfully apply the cap. Pin the
+        // contract so the CLI translation layer (limit=0 → None) is the documented seam.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+
+        let page = store.list_paged(Some(0), false).unwrap();
+        assert!(page.sessions.is_empty());
+        assert_eq!(page.total, 3, "total still reflects what's on disk");
     }
 
     // ── list_all ──
