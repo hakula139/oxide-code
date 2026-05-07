@@ -444,8 +444,6 @@ impl App {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
                 self.chat.clear_history();
-                self.chat
-                    .push_system_message("Conversation cleared. Next message starts fresh.");
             }
             AgentEvent::ConfigChanged {
                 model_id,
@@ -1955,14 +1953,9 @@ mod tests {
             app.status_bar.title().is_none(),
             "stale AI title must be cleared on roll",
         );
-        assert_eq!(
-            app.chat.entry_count(),
-            1,
-            "only the confirmation message remains after clear",
-        );
-        assert_eq!(
-            app.chat.last_system_text(),
-            Some("Conversation cleared. Next message starts fresh."),
+        assert!(
+            app.chat.is_empty(),
+            "clear must drain the chat so the welcome can repaint",
         );
         assert!(app.dirty);
     }
