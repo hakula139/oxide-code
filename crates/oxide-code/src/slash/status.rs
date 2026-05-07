@@ -73,6 +73,14 @@ mod tests {
         assert!(!StatusCmd.description().is_empty());
     }
 
+    // ── StatusCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_is_false_so_the_typed_line_does_not_orphan_after_dismiss() {
+        // Modal IS the response — echoing would leave `> /status` alone in chat once dismissed.
+        assert!(!StatusCmd.echoes_input(""));
+    }
+
     // ── StatusCmd::execute ──
 
     #[test]

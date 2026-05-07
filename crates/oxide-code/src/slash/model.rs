@@ -221,6 +221,15 @@ mod tests {
         assert_eq!(ModelCmd.classify("claude-opus-4-7"), SlashKind::Mutating);
     }
 
+    // ── ModelCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_splits_on_args_so_bare_modal_does_not_orphan_typed_swap_keeps_pair() {
+        assert!(!ModelCmd.echoes_input(""));
+        assert!(!ModelCmd.echoes_input("   "));
+        assert!(ModelCmd.echoes_input("opus"));
+    }
+
     // ── ModelCmd::complete_arg ──
 
     fn arg_rows(prefix: &str) -> Vec<(String, String)> {

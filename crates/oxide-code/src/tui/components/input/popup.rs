@@ -548,6 +548,31 @@ mod tests {
     }
 
     #[test]
+    fn render_with_only_chrome_room_paints_the_border_and_skips_rows() {
+        // When the layout reserves exactly CHROME_ROWS, the inner area has zero height — the
+        // border still paints, but the row loop is skipped.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let popup = name_popup("");
+        let width: u16 = 60;
+        let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();
+        terminal
+            .draw(|frame| popup.render(frame, Rect::new(0, 0, width, CHROME_ROWS)))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        for x in 0..width {
+            assert_eq!(
+                buf.cell(ratatui::layout::Position::new(x, 0))
+                    .unwrap()
+                    .symbol(),
+                "─",
+                "chrome row must be a continuous border at col {x}",
+            );
+        }
+    }
+
+    #[test]
     fn render_hidden_popup_emits_nothing() {
         // The hidden-popup early-return in render() is otherwise unreached — App's draw method
         // gates by height(), so the function only fires when the popup chose to be visible.

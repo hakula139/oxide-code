@@ -112,6 +112,15 @@ mod tests {
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 
+    // ── EffortCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_splits_on_args_so_bare_modal_does_not_orphan_typed_swap_keeps_pair() {
+        assert!(!EffortCmd.echoes_input(""));
+        assert!(!EffortCmd.echoes_input("   "));
+        assert!(EffortCmd.echoes_input("xhigh"));
+    }
+
     // ── EffortCmd::complete_arg ──
 
     fn arg_values(prefix: &str) -> Vec<String> {

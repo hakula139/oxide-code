@@ -456,6 +456,15 @@ mod tests {
         assert_eq!(ThemeCmd.classify("latte"), SlashKind::Mutating);
     }
 
+    // ── ThemeCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_splits_on_args_so_bare_modal_does_not_orphan_typed_swap_keeps_pair() {
+        assert!(!ThemeCmd.echoes_input(""));
+        assert!(!ThemeCmd.echoes_input("   "));
+        assert!(ThemeCmd.echoes_input("latte"));
+    }
+
     // ── ThemeCmd::complete_arg ──
 
     fn arg_values(prefix: &str) -> Vec<String> {

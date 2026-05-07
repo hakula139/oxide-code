@@ -105,6 +105,14 @@ mod tests {
         assert!(!ConfigCmd.description().is_empty());
     }
 
+    // ── ConfigCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_is_false_so_the_typed_line_does_not_orphan_after_dismiss() {
+        // Modal IS the response — echoing would leave `> /config` alone in chat once dismissed.
+        assert!(!ConfigCmd.echoes_input(""));
+    }
+
     // ── ConfigCmd::execute ──
 
     #[test]

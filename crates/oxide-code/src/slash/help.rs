@@ -66,6 +66,14 @@ mod tests {
         assert!(!HelpCmd.description().is_empty());
     }
 
+    // ── HelpCmd::echoes_input ──
+
+    #[test]
+    fn echoes_input_is_false_so_the_typed_line_does_not_orphan_after_dismiss() {
+        // Modal IS the response — echoing would leave `> /help` alone in chat once dismissed.
+        assert!(!HelpCmd.echoes_input(""));
+    }
+
     // ── HelpCmd::execute ──
 
     #[test]
