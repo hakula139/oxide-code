@@ -208,8 +208,8 @@ pub(crate) fn capabilities_for(model: &str) -> Capabilities {
         .unwrap_or_default()
 }
 
-/// Human-facing label: marketing name + ` (1M context)` suffix on `[1m]` ids; raw id when the
-/// model is unknown.
+/// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
+/// `[1m]` ids; the raw id when the model is unknown.
 pub(crate) fn display_name(model: &str) -> Cow<'_, str> {
     let base = lookup(model).map_or(Cow::Borrowed(model), |info| {
         Cow::Borrowed(info.display_name)
@@ -501,7 +501,7 @@ mod tests {
     // ── display_name ──
 
     #[test]
-    fn display_name_known_plain_id_renders_marketing_name() {
+    fn display_name_known_plain_id_renders_row_label() {
         for (id, expected) in [
             ("claude-opus-4-7", "Claude Opus 4.7"),
             ("claude-opus-4-6", "Claude Opus 4.6"),

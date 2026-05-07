@@ -182,7 +182,7 @@ mod tests {
         let msg = outcome.expect_err("must error");
         assert!(
             msg.contains("Claude Haiku 4.5") && msg.contains("/model"),
-            "marketing name + recovery hint: {msg}",
+            "display name + recovery hint: {msg}",
         );
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }
@@ -215,7 +215,7 @@ mod tests {
         let msg = outcome.expect_err("must error");
         assert!(
             msg.contains("Claude Haiku 4.5") && msg.contains("/model"),
-            "marketing name + recovery hint: {msg}",
+            "display name + recovery hint: {msg}",
         );
         assert_eq!(chat.entry_count(), 0, "execute must not push on Err");
     }

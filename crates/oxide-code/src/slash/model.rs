@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_1m_on_incompatible_model_is_rejected_with_marketing_name() {
+    fn execute_1m_on_incompatible_model_is_rejected_with_display_name() {
         for arg in ["haiku[1m]", "claude-haiku-4-5[1m]"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err("must error");
@@ -358,7 +358,7 @@ mod tests {
         }
         assert!(
             msg.contains("Claude Opus 4.7"),
-            "marketing names render: {msg}"
+            "display names render: {msg}"
         );
         assert_eq!(chat.entry_count(), 0);
     }

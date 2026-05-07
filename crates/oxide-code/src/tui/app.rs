@@ -725,8 +725,8 @@ mod tests {
     }
 
     fn test_session_info() -> LiveSessionInfo {
-        // `test-model` is intentionally unknown so `marketing_or_id` falls back to the
-        // literal id, keeping insta snapshots stable.
+        // `test-model` is intentionally unknown so `display_name` falls back to the literal
+        // id, keeping insta snapshots stable.
         use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
         LiveSessionInfo {
@@ -1750,7 +1750,7 @@ mod tests {
     fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
-        // confirmation block. Marketing name is derived locally from `model_id`.
+        // confirmation block. Display name is derived locally from `model_id`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: "claude-sonnet-4-6".to_owned(),

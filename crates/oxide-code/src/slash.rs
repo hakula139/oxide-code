@@ -112,7 +112,7 @@ fn classify_in(commands: &[&dyn registry::SlashCommand], parsed: &Parsed) -> Sla
 pub(crate) fn test_session_info() -> LiveSessionInfo {
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
-    // Real MODELS row so `display_name()` resolves to a known marketing name.
+    // Real MODELS row so `display_name()` resolves to a known label.
     LiveSessionInfo {
         cwd: "~/test".to_owned(),
         version: "0.0.0-test",
