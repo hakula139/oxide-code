@@ -29,10 +29,9 @@ const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
 
-/// Self-contained projection of the bits the welcome paints. Keeps the renderer decoupled from
-/// `LiveSessionInfo` evolution and makes test fixtures cheap.
+/// Projection of [`LiveSessionInfo`] consumed by [`paint`].
 pub(crate) struct WelcomeSnapshot {
-    pub(crate) version: String,
+    pub(crate) version: &'static str,
     pub(crate) model_label: String,
     pub(crate) effort_label: String,
     pub(crate) auth_label: &'static str,
@@ -42,7 +41,7 @@ pub(crate) struct WelcomeSnapshot {
 impl WelcomeSnapshot {
     pub(crate) fn from_live(info: &LiveSessionInfo) -> Self {
         Self {
-            version: info.version.to_owned(),
+            version: info.version,
             model_label: info.display_name().into_owned(),
             effort_label: display_effort(info.config.effort),
             auth_label: info.config.auth_label,
@@ -149,14 +148,17 @@ fn cwd_text(max_body: usize, snap: &WelcomeSnapshot, with_starters: bool) -> Str
 }
 
 fn starter_rows() -> Vec<(String, String)> {
-    let name_width = STARTERS
+    let name_col_width = STARTERS
         .iter()
-        .map(|(name, _)| name.len())
+        .map(|(name, _)| name.width())
         .max()
         .unwrap_or(0);
     STARTERS
         .iter()
-        .map(|(name, desc)| (format!("  {name:<name_width$}"), (*desc).to_owned()))
+        .map(|(name, desc)| {
+            let pad = " ".repeat(name_col_width.saturating_sub(name.width()));
+            (format!("  {name}{pad}"), (*desc).to_owned())
+        })
         .collect()
 }
 
