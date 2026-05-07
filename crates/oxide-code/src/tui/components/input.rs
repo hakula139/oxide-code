@@ -299,10 +299,14 @@ impl InputArea {
                 self.popup_complete_to_buffer();
                 PopupKey::Consumed
             }
-            KeyCode::Enter if modifiers.is_empty() => match self.popup_submit_selected() {
-                Some(action) => PopupKey::Action(action),
-                None => PopupKey::Consumed,
-            },
+            KeyCode::Enter if modifiers.is_empty() => {
+                if self.popup_acts_as_picker()
+                    && let Some(action) = self.popup_submit_selected()
+                {
+                    return PopupKey::Action(action);
+                }
+                PopupKey::Pass
+            }
             _ => PopupKey::Pass,
         }
     }
@@ -312,19 +316,29 @@ impl InputArea {
             return;
         };
         self.set_text(&replacement);
-        // Reclassify against the new buffer: name-mode Tab on a curated-roster command chains
-        // into arg mode; arg-mode Tab leaves `/cmd value ` (no match), so the popup hides.
         self.refresh_popup();
     }
 
-    /// Mode-aware Tab insertion. Name mode replaces the buffer with `/{name} `; arg mode keeps
-    /// the typed `/cmd ` and substitutes the prefix with the picked value plus a trailing space.
+    /// Tab-insertion text. Name mode → `/{name} `; arg mode → `/{cmd} {value} `.
     fn popup_completion_text(&self) -> Option<String> {
         let row = self.popup.selected()?;
         Some(match self.popup.mode()? {
             PopupMode::Name => format!("/{} ", row.value),
             PopupMode::Arg { cmd } => format!("/{cmd} {} ", row.value),
         })
+    }
+
+    /// Picker mode: Enter commits the popup row. Suggester mode (arg with non-empty prefix):
+    /// Enter passes through to literal submit.
+    fn popup_acts_as_picker(&self) -> bool {
+        let [single] = self.textarea.lines() else {
+            return false;
+        };
+        match popup_state(single) {
+            Some(PopupState::Name(_)) => true,
+            Some(PopupState::Arg { prefix, .. }) => prefix.is_empty(),
+            None => false,
+        }
     }
 
     fn popup_submit_selected(&mut self) -> Option<UserAction> {
@@ -419,6 +433,7 @@ impl InputArea {
         self.textarea.select_all();
         self.textarea.cut();
         self.scroll_top.set(0);
+        self.popup.set_state(None);
 
         Some(UserAction::SubmitPrompt(trimmed))
     }
@@ -1083,8 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_event_popup_enter_in_name_mode_submits_slash_name() {
-        // Enter on a name-mode row submits `/{name}` (no trailing space — submission is final).
+    fn handle_event_popup_enter_in_name_mode_commits_picked_row() {
         let mut input = input_with_popup();
         let selected = selected_value(&input);
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
@@ -1092,13 +1106,11 @@ mod tests {
             action,
             Some(UserAction::SubmitPrompt(format!("/{selected}")))
         );
-        assert!(input.textarea.is_empty(), "buffer clears on submit");
+        assert!(input.textarea.is_empty());
     }
 
     #[test]
-    fn handle_event_popup_enter_in_arg_mode_submits_cmd_value() {
-        // Enter on an arg-mode row submits `/{cmd} {value}` so the dispatcher receives the
-        // full typed-arg form, not just the picked value.
+    fn handle_event_popup_enter_in_arg_mode_with_empty_prefix_commits_picked_row() {
         let mut input = test_input();
         type_text(&mut input, "/effort ");
         input.refresh_popup();
@@ -1106,9 +1118,26 @@ mod tests {
         let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             action,
-            Some(UserAction::SubmitPrompt(format!("/effort {picked}"))),
+            Some(UserAction::SubmitPrompt(format!("/effort {picked}")))
         );
-        assert!(input.textarea.is_empty(), "buffer clears on submit");
+        assert!(input.textarea.is_empty());
+    }
+
+    #[test]
+    fn handle_event_popup_enter_in_arg_mode_with_typed_prefix_submits_buffer_literally() {
+        // Typed buffer wins over popup highlight; Tab is the explicit "promote popup pick" key.
+        let mut input = test_input();
+        type_text(&mut input, "/model claude-opus-4");
+        input.refresh_popup();
+        assert!(input.popup_visible());
+        assert_ne!(selected_value(&input), "claude-opus-4");
+        let action = input.handle_event(&key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            action,
+            Some(UserAction::SubmitPrompt("/model claude-opus-4".to_owned())),
+        );
+        assert!(input.textarea.is_empty());
+        assert!(!input.popup_visible());
     }
 
     // ── ghost_text ──
