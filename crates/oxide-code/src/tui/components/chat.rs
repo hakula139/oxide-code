@@ -2532,4 +2532,32 @@ mod tests {
             assert_eq!(s.cached_width(), 80);
         }
     }
+
+    // ── is_empty ──
+
+    #[test]
+    fn is_empty_true_for_fresh_chat() {
+        assert!(test_chat().is_empty());
+    }
+
+    #[test]
+    fn is_empty_false_with_committed_block() {
+        let mut chat = test_chat();
+        chat.push_user_message("hi".to_owned());
+        assert!(!chat.is_empty());
+    }
+
+    #[test]
+    fn is_empty_false_with_in_flight_streaming_buffer() {
+        let mut chat = test_chat();
+        chat.append_stream_token("partial");
+        assert!(!chat.is_empty());
+    }
+
+    #[test]
+    fn is_empty_false_with_pending_thinking_buffer() {
+        let mut chat = test_chat();
+        chat.append_thinking_token("musing");
+        assert!(!chat.is_empty());
+    }
 }
