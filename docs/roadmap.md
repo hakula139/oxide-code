@@ -14,6 +14,7 @@ The direction is simple:
 
 - Streaming output with markdown rendering and syntax-highlighted code blocks.
 - Multi-line input with a prompt marker, dynamic placeholder hints, and a status bar showing model, working directory, and run state.
+- Welcome surface on empty chat: identity ribbon, model + effort + auth, cwd, randomized starter list, randomized tip. Re-shows after `/clear`; suppressed by `[tui] show_welcome = false` or `OX_SHOW_WELCOME=0`.
 - Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, structured glob lists, and bash output.
 - Themable via runtime-loaded TOML — 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) with per-slot overrides.
 - Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
@@ -122,10 +123,10 @@ Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only;
 - Auth slash commands: `/login`, `/logout`.
 - Configurable instruction directories beyond `.claude/`.
 
-### Welcome Screen
+### Status Bar Redesign
 
-- Richer first-impression banner for empty sessions — name + version, active model and effort, working directory, and starter slash commands.
-- Pairs with Slash Commands (the welcome is where they get advertised); not blocking anything else.
+- Current bar packs model + status + (optional) title + cwd into a single line; layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
+- Direction: a richer, possibly multi-segment surface — token / cost meter, queued-prompt indicator, session id glance, theme indicator. Likely needs a layout rethink rather than incremental slot additions.
 
 ## Not the Goal Right Now
 

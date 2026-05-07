@@ -1,7 +1,5 @@
 //! Welcome surface painted into the chat region while the chat is empty.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -72,7 +70,9 @@ pub(crate) struct WelcomeSnapshot {
 
 impl WelcomeSnapshot {
     pub(crate) fn from_live(info: &LiveSessionInfo) -> Self {
-        Self::from_live_with_seed(info, now_seed())
+        // Derive seed from session id: the same welcome paints across re-renders within a session
+        // but `/clear` (which rolls the session) and fresh launches get a new pick.
+        Self::from_live_with_seed(info, hash_seed(&info.session_id))
     }
 
     fn from_live_with_seed(info: &LiveSessionInfo, seed: u64) -> Self {
@@ -299,10 +299,10 @@ fn pick_tip(seed: u64) -> &'static str {
     TIP_POOL[idx]
 }
 
-fn now_seed() -> u64 {
-    // Mask to u64; any low bits suffice as LCG seed and 64 bits of nanos cover ~584 years.
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        u64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(0)
+fn hash_seed(s: &str) -> u64 {
+    // FNV-1a 64-bit. Cheap, dependency-free, good enough to spread short ids across the picks.
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
 

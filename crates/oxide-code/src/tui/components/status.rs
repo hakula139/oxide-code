@@ -109,8 +109,6 @@ impl StatusBar {
 
         let core = vec![
             Span::raw("  "),
-            Span::styled("ox", self.theme.accent()),
-            sep.clone(),
             Span::styled(self.model.as_str(), self.theme.text()),
             sep.clone(),
             self.status_span(),
@@ -508,7 +506,6 @@ mod tests {
     fn render_empty_cwd_drops_cwd_slot_entirely() {
         let mut bar = StatusBar::new(&Theme::default(), "test-model".to_owned(), String::new());
         let output = render_top_row(&mut bar, 120);
-        assert!(output.contains("ox"));
         assert!(output.contains("test-model"));
         assert!(output.contains("Ready"));
         assert!(
