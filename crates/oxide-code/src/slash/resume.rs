@@ -11,12 +11,12 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use time::UtcOffset;
+use unicode_width::UnicodeWidthStr;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::session::entry::SessionInfo;
-use crate::session::store::SessionStore;
+use crate::session::store::{SessionInfo, SessionStore};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -36,6 +36,13 @@ const TIMESTAMP_WIDTH: usize = 16;
 const ID_WIDTH: usize = 8;
 /// Padding between the columns laid out by [`SessionRow::render_row`].
 const COLUMN_GAP: usize = 2;
+/// `— ` separator before the project column. Display width 2 (em dash + space).
+const SEPARATOR: &str = "— ";
+const SEPARATOR_WIDTH: usize = 2;
+/// Cap on the rendered project column so a deep path never starves the title column.
+const PROJECT_CAP: usize = 32;
+/// Floor on the title column so narrow terminals still get a truncated label.
+const TITLE_FLOOR: usize = 8;
 
 // ── SessionRow ──
 
@@ -63,7 +70,7 @@ impl SessionRow {
             .format(time::macros::format_description!(
                 "[year]-[month]-[day] [hour]:[minute]"
             ))
-            .unwrap_or_default();
+            .expect("YYYY-MM-DD HH:MM is always representable for OffsetDateTime");
         let title = info
             .title
             .as_ref()
@@ -94,13 +101,19 @@ impl SearchableItem for SessionRow {
             theme.dim()
         };
 
+        // Compute column widths in DISPLAY width (CJK paths render double-wide), capped so a
+        // deep path can't starve the title column. Title budget is whatever's left after the
+        // fixed prefix + project + separator; floors at TITLE_FLOOR so narrow terminals still
+        // show a truncated label.
         let total = usize::from(width);
         let fixed = ID_WIDTH + COLUMN_GAP + TIMESTAMP_WIDTH + COLUMN_GAP;
+        let project_width = UnicodeWidthStr::width(self.project.as_str()).min(PROJECT_CAP);
         let title_budget = total
             .saturating_sub(fixed)
-            .saturating_sub(self.project.chars().count() + COLUMN_GAP + 2);
-        let title = truncate_to_width(&self.title, title_budget.max(8));
-        let project = truncate_to_width(&self.project, 32);
+            .saturating_sub(COLUMN_GAP + SEPARATOR_WIDTH + project_width)
+            .max(TITLE_FLOOR);
+        let title = truncate_to_width(&self.title, title_budget);
+        let project = truncate_to_width(&self.project, project_width);
 
         Line::from(vec![
             Span::styled(format!("{:<ID_WIDTH$}", self.id_prefix), accent_style),
@@ -111,8 +124,8 @@ impl SearchableItem for SessionRow {
             ),
             Span::styled(" ".repeat(COLUMN_GAP), body_style),
             Span::styled(title, body_style),
-            Span::styled("  ".to_owned(), theme.dim()),
-            Span::styled(format!("— {project}"), theme.dim()),
+            Span::styled(" ".repeat(COLUMN_GAP), theme.dim()),
+            Span::styled(format!("{SEPARATOR}{project}"), theme.dim()),
         ])
     }
 }
@@ -125,12 +138,15 @@ pub(super) struct ResumePicker {
     /// Scope toggle — false=current project, true=every project.
     all: bool,
     local_offset: UtcOffset,
-    /// Pre-toggle row count so the footer can show `(N sessions)`.
+    /// Live session id — filtered out of every reload so the user can't pick "themselves" and
+    /// trigger a `roll_into` onto the open append-writer.
+    live_session_id: String,
+    /// Total rows in the current scope; refreshed on every reload (Tab or open).
     total: usize,
 }
 
 impl ResumePicker {
-    pub(super) fn new(store: SessionStore) -> Self {
+    pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
         let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
         let mut picker = Self {
             store,
@@ -138,6 +154,7 @@ impl ResumePicker {
                 .with_description(PICKER_DESCRIPTION),
             all: false,
             local_offset,
+            live_session_id,
             total: 0,
         };
         picker.reload();
@@ -152,13 +169,16 @@ impl ResumePicker {
                 total: 0,
             }
         });
-        self.total = page.total;
         let local_offset = self.local_offset;
+        let live_id = self.live_session_id.as_str();
         let rows: Vec<SessionRow> = page
             .sessions
             .into_iter()
+            .filter(|info| info.session_id != live_id)
             .map(|info| SessionRow::from_info(info, local_offset))
             .collect();
+        // `total` reflects post-filter rows so the footer matches what the user sees.
+        self.total = rows.len();
         self.list.replace_items(rows);
     }
 
@@ -272,12 +292,11 @@ impl SlashCommand for ResumeCmd {
         "Resume a previous session — `/resume` for the picker, `/resume <id-prefix>` to jump"
     }
 
-    fn classify(&self, args: &str) -> SlashKind {
-        if args.trim().is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Mutating
-        }
+    fn classify(&self, _args: &str) -> SlashKind {
+        // Mutating in both forms: bare opens a picker that submits a Resume action; typed-arg
+        // forwards Resume directly. The agent loop drops mid-turn user actions, so even the
+        // picker form must wait for idle.
+        SlashKind::Mutating
     }
 
     fn echoes_input(&self, args: &str) -> bool {
@@ -293,7 +312,10 @@ impl SlashCommand for ResumeCmd {
         let store =
             SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
         if arg.is_empty() {
-            ctx.open_modal(Box::new(ResumePicker::new(store)));
+            ctx.open_modal(Box::new(ResumePicker::new(
+                store,
+                ctx.info.session_id.clone(),
+            )));
             return Ok(SlashOutcome::Done);
         }
         let session_id = resolve_prefix(&store, arg, ctx.info.session_id.as_str())?;
@@ -301,8 +323,9 @@ impl SlashCommand for ResumeCmd {
     }
 }
 
-/// Match `prefix` against current-project sessions first; widen to all projects on no match so
-/// users don't have to type `--all`. Excludes the live session — resuming yourself is a no-op.
+/// Match `prefix` against current-project sessions first; widen to all projects on no match so a
+/// session from another cwd still resolves by id-prefix. Excludes the live session id — resuming
+/// yourself is a no-op (and would race the open append-writer).
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
     let scoped = match_in_scope(store, prefix, live_id, false)?;
     if let Some(id) = scoped {
@@ -351,14 +374,12 @@ fn match_in_scope(
 mod tests {
     use std::path::PathBuf;
 
-    use indoc::formatdoc;
     use temp_env::with_var;
     use time::OffsetDateTime;
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::entry::TitleInfo;
-    use crate::session::store::{seed_test_session, test_store};
+    use crate::session::store::{TitleInfo, seed_test_session, test_store};
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
 
@@ -399,35 +420,45 @@ mod tests {
 
     // ── SessionRow ──
 
-    #[test]
-    fn from_info_truncates_id_prefix_and_falls_back_to_untitled() {
-        let info = SessionInfo {
-            session_id: stamped_id(0xab),
-            cwd: "/work/oxide".to_owned(),
-            last_active_at: datetime!(2026-04-18 09:00:00 UTC),
-            title: None,
+    fn raw_session_info(
+        session_id: String,
+        cwd: &str,
+        title: Option<&str>,
+        last_active_at: time::OffsetDateTime,
+    ) -> SessionInfo {
+        SessionInfo {
+            session_id,
+            cwd: cwd.to_owned(),
+            last_active_at,
+            title: title.map(|t| TitleInfo {
+                title: t.to_owned(),
+                updated_at: last_active_at,
+            }),
             exit: None,
-        };
-        let row = SessionRow::from_info(info, UtcOffset::UTC);
+        }
+    }
+
+    #[test]
+    fn from_info_handles_title_present_and_absent() {
+        let absent = raw_session_info(
+            stamped_id(0xab),
+            "/work/oxide",
+            None,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(absent, UtcOffset::UTC);
         assert_eq!(row.id_prefix.len(), ID_WIDTH);
         assert_eq!(row.title, UNTITLED_MARKER);
         assert!(row.haystack.contains(&row.session_id));
         assert!(row.haystack.contains("/work/oxide"));
-    }
 
-    #[test]
-    fn from_info_uses_provided_title_in_haystack_and_display() {
-        let info = SessionInfo {
-            session_id: stamped_id(0xcd),
-            cwd: "/work/oxide".to_owned(),
-            last_active_at: datetime!(2026-04-18 09:00:00 UTC),
-            title: Some(TitleInfo {
-                title: "Fix auth bug".to_owned(),
-                updated_at: datetime!(2026-04-18 09:01:00 UTC),
-            }),
-            exit: None,
-        };
-        let row = SessionRow::from_info(info, UtcOffset::UTC);
+        let present = raw_session_info(
+            stamped_id(0xcd),
+            "/work/oxide",
+            Some("Fix auth bug"),
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(present, UtcOffset::UTC);
         assert_eq!(row.title, "Fix auth bug");
         assert!(row.haystack.contains("Fix auth bug"));
     }
@@ -451,7 +482,7 @@ mod tests {
             5,
             datetime!(2026-04-18 09:05:00 UTC),
         );
-        let picker = ResumePicker::new(store);
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert_eq!(
             picker.total, 2,
             "both seeded sessions should populate the list",
@@ -468,7 +499,7 @@ mod tests {
             3,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Enter));
         match outcome {
             ModalKey::Submitted(ModalAction::User(UserAction::Resume { session_id })) => {
@@ -481,7 +512,7 @@ mod tests {
     #[test]
     fn enter_with_no_rows_cancels() {
         let (_dir, store) = isolated_store();
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert!(matches!(
             picker.handle_key(&key(KeyCode::Enter)),
             ModalKey::Cancelled,
@@ -505,7 +536,7 @@ mod tests {
             5,
             datetime!(2026-04-18 09:05:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "auth".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
@@ -522,7 +553,7 @@ mod tests {
             3,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "zzz".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
@@ -546,7 +577,7 @@ mod tests {
                 datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
             );
         }
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         // Most-recent-first: cursor starts on the latest row (i=2).
         assert_eq!(picker.list.cursor_index(), 0);
         picker.handle_key(&key(KeyCode::Down));
@@ -573,7 +604,7 @@ mod tests {
             1,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         for c in "ab".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
@@ -591,13 +622,81 @@ mod tests {
             1,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert!(!picker.all);
         picker.handle_key(&key(KeyCode::Tab));
         assert!(picker.all, "Tab flips scope to all-projects");
         assert!(picker.footer_text().contains("all projects"));
         picker.handle_key(&key(KeyCode::Tab));
         assert!(!picker.all, "second Tab flips back");
+    }
+
+    #[test]
+    fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
+        // Two projects, one session each — bare picker shows only the home-project session;
+        // Tab widens to show both. Filter survives the toggle so the user's typing isn't lost.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("local"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        seed_session(
+            &other,
+            &stamped_id(0x22),
+            Some("foreign"),
+            1,
+            datetime!(2026-04-18 09:01:00 UTC),
+        );
+
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert_eq!(picker.total, 1, "scoped: only the home project");
+        for c in "11".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(picker.list.query(), "11");
+        picker.handle_key(&key(KeyCode::Tab));
+        assert_eq!(picker.total, 2, "Tab widens to all projects");
+        assert_eq!(
+            picker.list.query(),
+            "11",
+            "Tab must not reset the user's filter",
+        );
+    }
+
+    #[test]
+    fn picker_filters_out_live_session_to_block_self_resume() {
+        // Critical invariant: the live session id never appears as a row, so the user can't
+        // submit a Resume that would race the open append-writer.
+        let (_dir, store) = isolated_store();
+        let live_id = stamped_id(0x11);
+        seed_session(
+            &store,
+            &live_id,
+            Some("live"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_session(
+            &store,
+            &stamped_id(0x22),
+            Some("other"),
+            1,
+            datetime!(2026-04-18 09:01:00 UTC),
+        );
+        let picker = ResumePicker::new(store, live_id.clone());
+        assert_eq!(picker.total, 1, "live session must be filtered out");
+        let visible_id = picker
+            .list
+            .selected()
+            .expect("one row remaining")
+            .session_id
+            .clone();
+        assert_ne!(visible_id, live_id);
     }
 
     #[test]
@@ -610,7 +709,7 @@ mod tests {
             1,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Insert));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert_eq!(picker.list.query(), "");
@@ -628,7 +727,7 @@ mod tests {
             1,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let mut picker = ResumePicker::new(store);
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let mut event = KeyEvent::from(KeyCode::Char('a'));
         event.modifiers = KeyModifiers::CONTROL;
         picker.handle_key(&event);
@@ -648,7 +747,7 @@ mod tests {
             3,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let picker = ResumePicker::new(store);
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
         let theme = Theme::default();
         for width in [60_u16, 100, 140] {
             let h = picker.height(width).min(40);
@@ -670,9 +769,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_on_args() {
-        assert_eq!(ResumeCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(ResumeCmd.classify("   "), SlashKind::ReadOnly);
+    fn classify_is_always_mutating() {
+        // Both forms reach the agent loop (typed-arg → Forward; picker → modal-submitted Resume),
+        // and mid-turn user actions get dropped, so neither may run while busy.
+        assert_eq!(ResumeCmd.classify(""), SlashKind::Mutating);
+        assert_eq!(ResumeCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(ResumeCmd.classify("ab"), SlashKind::Mutating);
     }
 
@@ -706,6 +807,34 @@ mod tests {
             let mut ctx = SlashContext::new(&mut chat, &info);
             let err = ResumeCmd.execute("zzz1234", &mut ctx).unwrap_err();
             assert!(err.contains("no session matching"), "{err}");
+        });
+    }
+
+    #[test]
+    fn execute_typed_arg_unique_match_emits_forward_with_resolved_id() {
+        // Pin the success branch: a typed prefix that resolves uniquely returns
+        // SlashOutcome::Forward(Resume { session_id: full_id }).
+        with_isolated_xdg(|_dir| {
+            let store = SessionStore::open().unwrap();
+            let target_id = stamped_id(0xab);
+            seed_session(
+                &store,
+                &target_id,
+                Some("only"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let mut chat = ChatView::new(&Theme::default(), false);
+            let info = test_session_info();
+            let mut ctx = SlashContext::new(&mut chat, &info);
+            // 4-char prefix is enough to pin a single session in the seeded store.
+            let outcome = ResumeCmd.execute(&target_id[..4], &mut ctx).unwrap();
+            match outcome {
+                SlashOutcome::Forward(UserAction::Resume { session_id }) => {
+                    assert_eq!(session_id, target_id);
+                }
+                other => panic!("expected Forward(Resume), got {other:?}"),
+            }
         });
     }
 
@@ -748,6 +877,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefix_full_id_match_is_unique() {
+        // Pasting a full session id is the common power-user case — must round-trip cleanly
+        // and not be confused with an ambiguous prefix.
+        let (_dir, store) = isolated_store();
+        let id = stamped_id(0x11);
+        seed_session(
+            &store,
+            &id,
+            Some("a"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_session(
+            &store,
+            &stamped_id(0x22),
+            Some("b"),
+            1,
+            datetime!(2026-04-18 09:00:01 UTC),
+        );
+        assert_eq!(resolve_prefix(&store, &id, "other").unwrap(), id);
+    }
+
+    #[test]
     fn resolve_prefix_ambiguous_lists_short_ids_in_error() {
         let (_dir, store) = isolated_store();
         // Same first 2 hex digits → both ids start with `aaaa`.
@@ -777,6 +929,8 @@ mod tests {
 
     #[test]
     fn footer_text_singular_plural_and_scope_label() {
+        // Three permutations: 1 + current_project (singular + scoped), 0 + all_projects after
+        // Tab (zero plural + widened), 2 + current_project (plural + scoped).
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -785,11 +939,35 @@ mod tests {
             3,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let picker = ResumePicker::new(store);
-        let footer = picker.footer_text();
-        let expected = formatdoc!(
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert_eq!(
+            picker.footer_text(),
             "1 session · scope: current project · Tab to toggle · Enter to resume · Esc to cancel",
         );
-        assert_eq!(footer, expected);
+
+        let (_dir2, empty_store) = isolated_store();
+        let mut empty = ResumePicker::new(empty_store, "live-session-id".to_owned());
+        empty.handle_key(&key(KeyCode::Tab));
+        assert_eq!(
+            empty.footer_text(),
+            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · Esc to cancel",
+        );
+
+        let (_dir3, two_store) = isolated_store();
+        for byte in [0x11_u8, 0x22] {
+            seed_session(
+                &two_store,
+                &stamped_id(byte),
+                Some("t"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let picker_two = ResumePicker::new(two_store, "live-session-id".to_owned());
+        assert!(
+            picker_two
+                .footer_text()
+                .starts_with("2 sessions · scope: current project")
+        );
     }
 }

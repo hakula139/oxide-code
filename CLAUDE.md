@@ -82,7 +82,7 @@ ox                                          # Start an interactive session
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
-│   ├── resume.rs                           # /resume (alias /continue) — bare opens the picker (project / all toggle, search); `/resume <id-prefix>` resolves directly via roll_into
+│   ├── resume.rs                           # /resume (alias /continue) — bare opens a searchable session picker (Tab toggles current-project ↔ all-projects); `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
@@ -134,7 +134,7 @@ ox                                          # Start an interactive session
 │   ├── modal/
 │   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection — read-only sectioned kv-table modal used by /status, /config, /help
 │   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
-│   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem> — substring filter + scrollable viewport powering /resume's picker
+│   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem> — substring filter + scrollable viewport for searchable pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default

@@ -18,27 +18,19 @@ use crate::util::text::truncate_to_width;
 
 /// One row in a [`SearchableList`].
 pub(crate) trait SearchableItem {
-    /// Composite haystack used by substring search. Should include every field the user might
-    /// want to filter against (title, id, project, branch).
+    /// Composite haystack used by substring search. Include every field the user might want to
+    /// filter against (title, id, project, branch).
     fn haystack(&self) -> Cow<'_, str>;
 
-    /// Render the row's content into a single line at the given column budget. The primitive
-    /// paints the cursor gutter and numeric mnemonic; the implementation paints columns to the
-    /// right of it.
+    /// Render the row body into a single line at the given column budget — the primitive owns
+    /// the cursor gutter, so the impl paints content to the right of it.
     fn render_row(&self, width: u16, is_cursor: bool, theme: &Theme) -> Line<'static>;
-
-    /// Single-character mnemonic for jump-to-row (`'1'`–`'9'`). Indexed against the visible
-    /// (filtered) row list — the first matching visible row gets `'1'`, etc.
-    fn key_hint(&self) -> Option<char> {
-        None
-    }
 }
 
 // ── SearchableList ──
 
 const CURSOR_MARKER: &str = "> ";
 const CURSOR_MARKER_WIDTH: u16 = 2;
-const HINT_WIDTH: u16 = 3;
 const SEARCH_PROMPT: &str = "/ ";
 const SEARCH_PROMPT_WIDTH: u16 = 2;
 const TITLE_ROW_HEIGHT: u16 = 1;
@@ -167,20 +159,6 @@ impl<T: SearchableItem> SearchableList<T> {
         self.scroll_into_view();
     }
 
-    /// Jump cursor to the row whose `key_hint` matches `c` among the **visible** (filtered)
-    /// rows. Returns whether a jump happened.
-    #[cfg(test)]
-    pub(crate) fn select_by_hint(&mut self, c: char) -> bool {
-        for (vi, &item_idx) in self.visible.iter().enumerate() {
-            if self.items[item_idx].key_hint() == Some(c) {
-                self.cursor = vi;
-                self.scroll_into_view();
-                return true;
-            }
-        }
-        false
-    }
-
     fn recompute_visible(&mut self) {
         let needle = self.query.to_lowercase();
         self.visible.clear();
@@ -232,7 +210,7 @@ impl<T: SearchableItem> SearchableList<T> {
         lines.push(self.render_search_row(area.width, theme));
         lines.push(Line::default());
 
-        let row_width = area.width.saturating_sub(CURSOR_MARKER_WIDTH + HINT_WIDTH);
+        let row_width = area.width.saturating_sub(CURSOR_MARKER_WIDTH);
         let viewport_h = usize::from(self.viewport_height);
         let take = self
             .visible
@@ -283,6 +261,7 @@ impl<T: SearchableItem> SearchableList<T> {
         body_width: u16,
         theme: &Theme,
     ) -> Line<'static> {
+        let _ = visible_idx;
         let cursor_span = Span::styled(
             if is_cursor {
                 CURSOR_MARKER.to_owned()
@@ -291,19 +270,9 @@ impl<T: SearchableItem> SearchableList<T> {
             },
             theme.accent(),
         );
-
-        let hint_span = match item.key_hint() {
-            Some(c) if visible_idx < 9 => Span::styled(
-                format!("{c}. "),
-                if is_cursor { theme.text() } else { theme.dim() },
-            ),
-            _ => Span::raw(" ".repeat(usize::from(HINT_WIDTH))),
-        };
-
         let body = item.render_row(body_width, is_cursor, theme);
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(2 + body.spans.len());
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(1 + body.spans.len());
         spans.push(cursor_span);
-        spans.push(hint_span);
         spans.extend(body.spans);
         Line::from(spans)
     }
@@ -315,19 +284,14 @@ mod tests {
 
     // ── Test fixture ──
 
-    /// Minimal `SearchableItem` covering all trait methods so tests can pin behavior without
-    /// coupling to any concrete picker.
+    /// Minimal `SearchableItem` for behavior tests, without coupling to any concrete picker.
     struct FakeItem {
         haystack: &'static str,
-        hint: Option<char>,
     }
 
     impl FakeItem {
         fn new(haystack: &'static str) -> Self {
-            Self {
-                haystack,
-                hint: None,
-            }
+            Self { haystack }
         }
     }
 
@@ -339,10 +303,6 @@ mod tests {
         fn render_row(&self, width: u16, _is_cursor: bool, theme: &Theme) -> Line<'static> {
             let trimmed = truncate_to_width(self.haystack, usize::from(width));
             Line::from(Span::styled(trimmed, theme.text()))
-        }
-
-        fn key_hint(&self) -> Option<char> {
-            self.hint
         }
     }
 
@@ -429,6 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn navigation_on_empty_visible_set_is_silent_noop() {
+        // Filter out everything → all four navigation guards must short-circuit. Without the
+        // is_empty checks, `% self.visible.len()` would panic.
+        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+        l.set_query("zzz".to_owned());
+        assert_eq!(l.visible_len(), 0);
+        l.select_next();
+        l.select_prev();
+        l.page_down();
+        l.page_up();
+        assert_eq!(l.cursor_index(), 0);
+    }
+
+    #[test]
     fn select_prev_wraps_at_zero() {
         let mut l = list(vec![FakeItem::new("a"), FakeItem::new("b")]);
         l.select_prev();
@@ -483,34 +457,6 @@ mod tests {
     fn item_label(i: usize) -> &'static str {
         // Leak owned strings for &'static str; fine in tests.
         Box::leak(format!("item-{i}").into_boxed_str())
-    }
-
-    // ── select_by_hint ──
-
-    #[test]
-    fn select_by_hint_jumps_to_visible_row_with_matching_hint() {
-        let mut l = list(vec![
-            FakeItem {
-                hint: Some('1'),
-                ..FakeItem::new("a")
-            },
-            FakeItem {
-                hint: Some('2'),
-                ..FakeItem::new("b")
-            },
-        ]);
-        assert!(l.select_by_hint('2'));
-        assert_eq!(l.cursor_index(), 1);
-    }
-
-    #[test]
-    fn select_by_hint_unknown_key_returns_false() {
-        let mut l = list(vec![FakeItem {
-            hint: Some('1'),
-            ..FakeItem::new("a")
-        }]);
-        assert!(!l.select_by_hint('9'));
-        assert_eq!(l.cursor_index(), 0);
     }
 
     // ── replace_items ──

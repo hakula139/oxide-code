@@ -4,18 +4,18 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 
 ## Built-in Commands
 
-| Command                                 | Description                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------ |
-| `/clear` (aliases `/new`, `/reset`)     | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
-| `/config`                               | Open the resolved configuration and its layered file paths in a read-only modal.     |
-| `/diff`                                 | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
-| `/effort [<level>]`                     | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
-| `/help`                                 | Open a read-only modal listing available commands.                                   |
-| `/init`                                 | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
-| `/model [<id>]`                         | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
-| `/resume [<id-prefix>]` (`/continue`)   | Open the session picker (search, project / all toggle), or jump by id prefix.        |
-| `/status`                               | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
-| `/theme [<name>]`                       | Open the theme picker (live preview), or swap directly to a built-in theme.          |
+| Command                                     | Description                                                                          |
+| ------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
+| `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
+| `/diff`                                     | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
+| `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
+| `/help`                                     | Open a read-only modal listing available commands.                                   |
+| `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
+| `/model [<id>]`                             | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
+| `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, project / all toggle), or jump by id prefix.        |
+| `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
+| `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.          |
 
 ## Autocomplete Popup
 
@@ -36,7 +36,7 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/model` / `/effort` / `/resume` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`, `/resume <id-prefix>`, `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
+Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/effort` / `/model` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/effort <level>`, `/init`, `/model <id>`, `/resume` — both bare and `<id-prefix>` — and `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
 
 ## Model and Effort
 

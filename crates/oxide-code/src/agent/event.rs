@@ -51,8 +51,8 @@ pub(crate) enum AgentEvent {
     SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — a new session UUID is now active.
     SessionRolled { id: String },
-    /// `/resume <id>` swapped the live session in place — App reloads chat history, title, tool
-    /// metadata, and pending-call state from the target session's transcript.
+    /// `/resume` swapped to an existing session in place — payload carries the target's
+    /// transcript so the UI can rebuild chat without restarting the process.
     SessionResumed {
         id: String,
         title: Option<String>,
@@ -79,7 +79,7 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
-    /// `/resume <id>` (or modal pick): swap to an existing session in place.
+    /// `/resume <id-prefix>` or picker selection: swap to an existing session in place.
     Resume {
         session_id: String,
     },

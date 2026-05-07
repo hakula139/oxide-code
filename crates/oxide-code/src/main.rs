@@ -400,18 +400,24 @@ async fn agent_loop_task(
                     .await
                 {
                     Ok(outcome) => {
-                        sink.session_write_error(outcome.finalize_failure.as_deref());
                         let new_id = session.session_id().to_owned();
                         client.set_session_id(new_id.clone());
-                        messages.clone_from(&outcome.resumed.messages);
+                        // Move once: keep the agent loop's local `messages` in sync with the
+                        // resumed transcript, then ship the same vec into the event.
+                        messages = outcome.messages;
                         if let Err(e) = sink.send(AgentEvent::SessionResumed {
                             id: new_id,
-                            title: outcome.resumed.title,
-                            messages: outcome.resumed.messages,
-                            tool_metadata: outcome.resumed.tool_result_metadata,
+                            title: outcome.title,
+                            messages: messages.clone(),
+                            tool_metadata: outcome.tool_result_metadata,
                         }) {
-                            warn!("session-resumed event dropped: {e}");
+                            // Channel closed mid-resume leaves the TUI on the OLD chat. Surface
+                            // at error level so the log file pinpoints the desync.
+                            tracing::error!("session-resumed event dropped: {e}");
                         }
+                        // Emit the OLD-session finalize failure AFTER SessionResumed so the
+                        // chat-clear in `apply_session_resumed` doesn't wipe it.
+                        sink.session_write_error(outcome.finalize_failure.as_deref());
                     }
                     Err(e) => {
                         _ = sink.send(AgentEvent::Error(format!(

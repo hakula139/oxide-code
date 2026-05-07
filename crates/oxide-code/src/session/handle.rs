@@ -263,35 +263,51 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resumed session payload + finalize failure from the old session; mirrors [`RollOutcome`] for
-/// the resume-into-existing path used by `/resume`.
+/// Resumed transcript + finalize failure from the old session; mirrors [`RollOutcome`] for the
+/// resume-into-existing path. The handle is moved into the caller's `&mut SessionHandle` rather
+/// than carried here, so this struct only describes the *payload* the UI needs to repaint.
+#[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
-    pub(crate) resumed: ResumedSession,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) title: Option<String>,
+    pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) finalize_failure: Option<String>,
 }
 
-/// Mid-session re-init: finalize the old session, load and sanitize the target session, swap
-/// the handle in place. Same shape as [`roll`] but loading from disk instead of starting fresh.
+/// Mid-session re-init: load + sanitize the target session, swap the handle in place, then
+/// finalize the old. Same shape as [`roll`] but loading from disk instead of starting fresh.
 ///
-/// Returns `Err` _without swapping_ when the target session can't be loaded (missing file,
-/// empty after sanitize) — caller stays on the old session and surfaces the error.
+/// Bails _without swapping_ when the target id matches the live session (would race the
+/// in-flight append-writer) or can't be loaded (missing file, parse error, empty after sanitize,
+/// open-append failure) — caller stays on the old session and surfaces the error.
 pub(crate) async fn roll_into(
     session: &mut SessionHandle,
     store: &SessionStore,
     file_tracker: &FileTracker,
     target_session_id: &str,
 ) -> Result<RollIntoOutcome> {
+    if target_session_id == session.session_id() {
+        bail!("already resumed: target id matches the live session");
+    }
     // Load + sanitize FIRST so a target-load error leaves the live session untouched.
-    let mut resumed = resume(store, target_session_id)?;
+    let ResumedSession {
+        handle: target_handle,
+        messages,
+        title,
+        tool_result_metadata,
+        file_snapshots,
+    } = resume(store, target_session_id)?;
 
     let old_snapshots = file_tracker.snapshot_all();
     file_tracker.clear();
-    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+    file_tracker.restore_verified(file_snapshots);
 
-    let old_session = std::mem::replace(session, resumed.handle.clone());
+    let old_session = std::mem::replace(session, target_handle);
     let finalize_failure = old_session.finalize(old_snapshots).await;
     Ok(RollIntoOutcome {
-        resumed,
+        messages,
+        title,
+        tool_result_metadata,
         finalize_failure,
     })
 }
@@ -1022,7 +1038,7 @@ mod tests {
             "handle now points at target"
         );
         assert_eq!(
-            outcome.resumed.messages.len(),
+            outcome.messages.len(),
             2,
             "resumed payload carries the target's transcript",
         );
@@ -1044,6 +1060,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
+        // Seed a tracker snapshot so we can pin that load failure preserves it.
+        let seed = dir.path().join("seed.txt");
+        std::fs::write(&seed, b"hello").unwrap();
+        crate::file_tracker::testing::seed_full_read(&tracker, &seed);
+        let snapshot_count_before = tracker.snapshot_all().len();
+
         let mut session = start(&store, "test-model");
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
@@ -1055,6 +1077,31 @@ mod tests {
             original_id,
             "live session id unchanged after failure",
         );
+        assert_eq!(
+            tracker.snapshot_all().len(),
+            snapshot_count_before,
+            "load failure must leave tracker untouched (clear-before-error would wipe snapshots)",
+        );
+    }
+
+    #[tokio::test]
+    async fn roll_into_rejects_resuming_into_live_session_id() {
+        // Same-id resume would race the in-flight append-writer; guard short-circuits.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let mut session = start(&store, "test-model");
+        let live_id = session.session_id().to_owned();
+        session.record_message(Message::user("live")).await;
+
+        let err = roll_into(&mut session, &store, &tracker, &live_id)
+            .await
+            .expect_err("self-resume must be rejected");
+        assert!(
+            err.to_string().contains("already resumed"),
+            "error must mention same-id, got: {err:#}",
+        );
+        assert_eq!(session.session_id(), live_id, "live session unchanged");
     }
 
     #[tokio::test]

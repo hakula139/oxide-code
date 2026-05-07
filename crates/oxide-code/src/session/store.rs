@@ -11,8 +11,11 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::ChainBuilder;
-use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::entry::{CURRENT_VERSION, Entry, ExitInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
+// `entry` is module-private; re-export the listing-side types here so cross-module callers
+// (e.g., `slash::resume`) reach for `session::store::{SessionInfo, TitleInfo}`.
+pub(crate) use super::entry::{SessionInfo, TitleInfo};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
@@ -194,7 +197,7 @@ impl SessionStore {
     }
 
     #[cfg(test)]
-    pub(super) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
+    pub(crate) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         let project_dir = sessions_dir.join(project_name);
         fs::create_dir_all(&project_dir)?;
@@ -540,8 +543,9 @@ pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
-/// Seed one finished session for cross-module tests — `last_active_at` derives from
-/// `created_at`, and the title / exit are written when their args are non-`None`.
+/// Seed a session for cross-module tests. `last_active_at` derives from `created_at`. Title and
+/// summary are written only when their args are `Some`; with `message_count: None` the session
+/// is left unfinished. Title source is hard-coded to `UserProvided`.
 #[cfg(test)]
 pub(crate) fn seed_test_session(
     store: &SessionStore,

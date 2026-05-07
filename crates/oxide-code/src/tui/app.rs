@@ -297,7 +297,14 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::Resume { .. } | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::Resume { .. } => {
+                // Disable input until the SessionResumed event fires — otherwise a typed prompt
+                // in the gap between forward and event would push into chat, then get wiped by
+                // `apply_session_resumed`'s `clear_history`.
+                self.input.set_enabled(false);
+                true
+            }
             UserAction::PreviewTheme { name } => {
                 if let Some(preview) = super::theme::load_builtin(name) {
                     if self.preview_theme_snapshot.is_none() {
@@ -1991,6 +1998,72 @@ mod tests {
             "clear must drain the chat so the welcome can repaint",
         );
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_resumed_swaps_id_replays_transcript_and_clears_pending_state() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
+        app.chat.push_user_message("live prompt".to_owned());
+        app.pending_prompts.push_back("queued".to_owned());
+        let pending_call_id = "pending-1".to_owned();
+        app.pending_calls.insert(
+            pending_call_id.clone(),
+            PendingCall {
+                label: "Bash(...)".to_owned(),
+                name: "bash".to_owned(),
+                input: serde_json::json!({}),
+            },
+        );
+        let original_id = app.session_info.session_id.clone();
+
+        let messages = vec![
+            Message::user("resumed user"),
+            Message::assistant("resumed assistant"),
+        ];
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed-session".to_owned(),
+            title: Some("Resumed title".to_owned()),
+            messages,
+            tool_metadata: HashMap::new(),
+        });
+
+        assert_eq!(app.session_info.session_id, "resumed-session");
+        assert_ne!(app.session_info.session_id, original_id);
+        assert_eq!(app.status_bar.title(), Some("Resumed title"));
+        assert_eq!(
+            app.chat.entry_count(),
+            2,
+            "chat must reflect the resumed transcript, not the live prompt",
+        );
+        assert_eq!(
+            app.pending_calls.len(),
+            0,
+            "pending tool calls must drop on resume",
+        );
+        _ = pending_call_id;
+        assert!(
+            app.pending_prompts.is_empty(),
+            "queued prompts must drop on resume",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled(), "resume returns to idle input");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_resumed_with_no_title_clears_stale_chrome() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            messages: Vec::new(),
+            tool_metadata: HashMap::new(),
+        });
+        assert!(
+            app.status_bar.title().is_none(),
+            "Some(None) title must clear the chrome",
+        );
+        assert!(app.chat.is_empty());
     }
 
     #[test]
