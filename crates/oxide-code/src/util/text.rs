@@ -37,9 +37,9 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
 /// Truncates `s` to `max_width` columns by removing characters from the middle, replacing the
 /// excised run with [`ELLIPSIS`].
 ///
-/// Preserves the head and tail, useful for paths where both `~/` and the leaf project name carry
-/// signal. Falls back to right-truncation when `max_width <= ELLIPSIS_WIDTH` since centering can't
-/// fit any context around the ellipsis.
+/// Preserves head and tail context. Falls back to right-truncation when the budget is too small
+/// for any context on either side (`max_width < ELLIPSIS_WIDTH`, or both halves drop their first
+/// CJK char).
 pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_owned();
@@ -48,33 +48,42 @@ pub(crate) fn center_truncate_to_width(s: &str, max_width: usize) -> String {
         return truncate_to_width(s, max_width);
     }
     let budget = max_width - ELLIPSIS_WIDTH;
-    let head_budget = budget / 2;
-    let tail_budget = budget - head_budget;
+    let head = take_head(s, budget / 2);
+    let tail = take_tail(s, budget - budget / 2);
+    // Both halves dropped their first char (e.g., a 2-col CJK head into a 1-col half-budget).
+    // Right-truncate so we surface at least the leading context.
+    if head.is_empty() && tail.is_empty() {
+        return truncate_to_width(s, max_width);
+    }
+    format!("{head}{ELLIPSIS}{tail}")
+}
 
-    let mut head = String::new();
-    let mut head_used = 0;
+fn take_head(s: &str, budget: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
     for ch in s.chars() {
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if head_used + w > head_budget {
+        if used + w > budget {
             break;
         }
-        head.push(ch);
-        head_used += w;
+        out.push(ch);
+        used += w;
     }
+    out
+}
 
-    let mut tail_chars: Vec<char> = Vec::new();
-    let mut tail_used = 0;
+fn take_tail(s: &str, budget: usize) -> String {
+    let mut chars: Vec<char> = Vec::new();
+    let mut used = 0;
     for ch in s.chars().rev() {
         let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if tail_used + w > tail_budget {
+        if used + w > budget {
             break;
         }
-        tail_chars.push(ch);
-        tail_used += w;
+        chars.push(ch);
+        used += w;
     }
-    let tail: String = tail_chars.into_iter().rev().collect();
-
-    format!("{head}{ELLIPSIS}{tail}")
+    chars.into_iter().rev().collect()
 }
 
 #[cfg(test)]
@@ -144,5 +153,12 @@ mod tests {
         // 测试文本编辑 = 6 chars × 2 cols = 12 cols; budget 9 = 3 head + 3 tail around `...`. Only
         // one CJK char fits each side at 2 cols.
         assert_eq!(center_truncate_to_width("测试文本编辑", 9), "测...辑");
+    }
+
+    #[test]
+    fn center_truncate_to_width_falls_back_to_right_truncate_when_cjk_overflows_both_halves() {
+        // 中文测试 = 8 cols; max=5 → budget=2, half=1 — neither side fits a 2-col char. Centering
+        // would yield bare "..." (3 cols of 5), so fall back to right-truncate ("中...", 5 cols).
+        assert_eq!(center_truncate_to_width("中文测试", 5), "中...");
     }
 }
