@@ -1,6 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/welcome.rs
-expression: "render(50, 12, &snap)"
+expression: "render(50, 14, &snap)"
 ---
 "                                                  "
 "                 oxide-code v0.1.0                "
@@ -9,8 +9,10 @@ expression: "render(50, 12, &snap)"
 "       ~/github/oxide-code                        "
 "                                                  "
 "       Try one of:                                "
-"         /help    list commands                   "
-"         /init    author or update AGENTS.md      "
-"         /diff    show staged changes             "
 "                                                  "
-"       tip — press / to browse all commands.      "
+"         /clear    reset conversation             "
+"         /theme    switch theme                   "
+"         /diff     show staged changes            "
+"                                                  "
+"       Tip — press / to browse all commands       "
+"                                                  "

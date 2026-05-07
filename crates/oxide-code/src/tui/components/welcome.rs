@@ -1,5 +1,6 @@
-//! First-paint surface for an empty chat. Stateless [`paint`] over a [`WelcomeSnapshot`] derived
-//! from `&LiveSessionInfo`; width-ladder between full / collapsed / suppressed.
+//! Welcome surface painted into the chat region while the chat is empty.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -13,44 +14,83 @@ use crate::slash::LiveSessionInfo;
 use crate::tui::theme::Theme;
 use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
-const STARTERS: &[(&str, &str)] = &[
+// ── Content pools ──
+
+type Starter = (&'static str, &'static str);
+
+const STARTER_POOL: &[Starter] = &[
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),
     ("/diff", "show staged changes"),
+    ("/status", "session at a glance"),
+    ("/model", "switch model"),
+    ("/effort", "tune Speed ↔ Intelligence"),
+    ("/theme", "switch theme"),
+    ("/clear", "reset conversation"),
 ];
+
+const TIP_POOL: &[&str] = &[
+    "press / to browse all commands",
+    "press Enter to send, Shift+Enter for newline",
+    "press Ctrl+C twice to exit",
+    "ox --continue resumes your last session",
+    "ox --list shows recent sessions",
+    "/clear starts a fresh conversation",
+    "/effort tunes Speed ↔ Intelligence",
+    "/theme previews live as you scroll",
+];
+
+const STARTER_PICK: usize = 3;
+
+// ── Layout constants ──
 
 const WORDMARK: &str = "oxide-code";
 const RIBBON_FLANK: &str = "━━━━";
 const STARTER_HEADER: &str = "Try one of:";
 const STARTER_GAP: &str = "    ";
-const TRAILER: &str = "tip — press / to browse all commands.";
+const TIP_LABEL: &str = "Tip";
+const TIP_SEP: &str = " — ";
 
+/// Width thresholds for the layout ladder. Below `NARROW_MIN` the welcome paints nothing.
 const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
 
-/// Projection of [`LiveSessionInfo`] consumed by [`paint`].
+// ── Snapshot ──
+
+/// Projection of [`LiveSessionInfo`] consumed by [`paint`]. Randomized fields (`starters`, `tip`)
+/// are picked once per construction so a given paint stays stable across re-renders within a frame.
 pub(crate) struct WelcomeSnapshot {
     pub(crate) version: &'static str,
     pub(crate) model_label: String,
     pub(crate) effort_label: String,
     pub(crate) auth_label: &'static str,
     pub(crate) cwd: String,
+    pub(crate) starters: [Starter; STARTER_PICK],
+    pub(crate) tip: &'static str,
 }
 
 impl WelcomeSnapshot {
     pub(crate) fn from_live(info: &LiveSessionInfo) -> Self {
+        Self::from_live_with_seed(info, now_seed())
+    }
+
+    fn from_live_with_seed(info: &LiveSessionInfo, seed: u64) -> Self {
         Self {
             version: info.version,
             model_label: info.display_name().into_owned(),
             effort_label: display_effort(info.config.effort),
             auth_label: info.config.auth_label,
             cwd: info.cwd.clone(),
+            starters: pick_starters(seed),
+            tip: pick_tip(seed),
         }
     }
 }
 
-/// No-op when `area.width < NARROW_MIN` or `area.height == 0` — too narrow to read cleanly.
+// ── Paint ──
+
+/// No-op when `area.width < NARROW_MIN` or `area.height == 0`.
 pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &WelcomeSnapshot) {
     if area.width < NARROW_MIN || area.height == 0 {
         return;
@@ -61,6 +101,8 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &Wel
         .style(theme.surface());
     frame.render_widget(paragraph, area);
 }
+
+// ── Line builders ──
 
 fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'static>> {
     let max_body = usize::from(width);
@@ -77,10 +119,12 @@ fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'s
     // floats independently ("ransom note" stack).
     let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
     let cwd = cwd_text(max_body, snap, with_starters);
-    let starter_rows = with_starters.then(starter_rows);
+    let starter_rows = with_starters.then(|| starter_rows(&snap.starters));
+    let tip_text = with_starters.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
     // Clamp column_width to area.width — a wider column would overflow centering and clip on the
     // right edge of the pane.
-    let column_width = column_width(&env, &cwd, starter_rows.as_deref()).min(max_body);
+    let column_width =
+        column_width(&env, &cwd, starter_rows.as_deref(), tip_text.as_deref()).min(max_body);
 
     push_padded(&mut lines, &env, theme.text(), column_width);
     push_padded(&mut lines, &cwd, theme.dim(), column_width);
@@ -88,11 +132,12 @@ fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'s
     if let Some(rows) = starter_rows {
         lines.push(Line::raw(""));
         push_padded(&mut lines, STARTER_HEADER, theme.dim(), column_width);
+        lines.push(Line::raw(""));
         for (name, desc) in &rows {
             push_starter_row(&mut lines, name, desc, theme, column_width);
         }
         lines.push(Line::raw(""));
-        push_padded(&mut lines, TRAILER, theme.dim(), column_width);
+        push_tip(&mut lines, theme, snap.tip, column_width);
     }
     lines
 }
@@ -107,8 +152,6 @@ fn push_identity(
     let accent_bold = theme.accent().add_modifier(Modifier::BOLD);
     let version = format!("v{}", snap.version);
     if full {
-        // Editorial ribbon: heavy rules flanking the wordmark form a single-line identity that
-        // anchors the welcome without the chrome of a four-side box.
         lines.push(Line::from(vec![
             Span::styled(RIBBON_FLANK, dim),
             Span::raw(" "),
@@ -128,8 +171,8 @@ fn push_identity(
 }
 
 fn environment_text(snap: &WelcomeSnapshot, full: bool, with_starters: bool) -> String {
-    // Below COLLAPSED_MIN (i.e., narrow tier) drops the " effort" suffix so the line fits at
-    // 25 cols; the suffix is verbose redundancy once the value is visible.
+    // Below COLLAPSED_MIN drops the " effort" suffix so the line fits at 25 cols; the suffix is
+    // verbose redundancy once the value is visible.
     let suffix = if with_starters { " effort" } else { "" };
     let mut text = format!("{} · {}{}", snap.model_label, snap.effort_label, suffix);
     if full {
@@ -147,13 +190,13 @@ fn cwd_text(max_body: usize, snap: &WelcomeSnapshot, with_starters: bool) -> Str
     }
 }
 
-fn starter_rows() -> Vec<(String, String)> {
-    let name_col_width = STARTERS
+fn starter_rows(picked: &[Starter; STARTER_PICK]) -> Vec<(String, String)> {
+    let name_col_width = picked
         .iter()
         .map(|(name, _)| name.width())
         .max()
         .unwrap_or(0);
-    STARTERS
+    picked
         .iter()
         .map(|(name, desc)| {
             let pad = " ".repeat(name_col_width.saturating_sub(name.width()));
@@ -169,13 +212,20 @@ fn starter_row_width(rows: &[(String, String)]) -> usize {
         .unwrap_or(0)
 }
 
-fn column_width(env: &str, cwd: &str, starter_rows: Option<&[(String, String)]>) -> usize {
+fn column_width(
+    env: &str,
+    cwd: &str,
+    starter_rows: Option<&[(String, String)]>,
+    tip_text: Option<&str>,
+) -> usize {
     let mut max_width = env.width().max(cwd.width());
     if let Some(rows) = starter_rows {
         max_width = max_width
             .max(STARTER_HEADER.width())
-            .max(starter_row_width(rows))
-            .max(TRAILER.width());
+            .max(starter_row_width(rows));
+    }
+    if let Some(tip) = tip_text {
+        max_width = max_width.max(tip.width());
     }
     max_width
 }
@@ -207,6 +257,55 @@ fn push_starter_row(
     ]));
 }
 
+fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, column_width: usize) {
+    let prefix_width = TIP_LABEL.width() + TIP_SEP.width();
+    let body_budget = column_width.saturating_sub(prefix_width);
+    let body = truncate_to_width(tip, body_budget);
+    let pad = column_width.saturating_sub(prefix_width + body.width());
+    lines.push(Line::from(vec![
+        Span::styled(TIP_LABEL, theme.accent()),
+        Span::styled(TIP_SEP, theme.dim()),
+        Span::styled(body, theme.text()),
+        Span::raw(" ".repeat(pad)),
+    ]));
+}
+
+// ── Random picks ──
+
+fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
+    let n = STARTER_POOL.len();
+    debug_assert!(n >= STARTER_PICK);
+    // PCG-style LCG seeded from time. Not cryptographic; just enough variety per launch.
+    let mut state = seed | 1;
+    let mut deck: Vec<usize> = (0..n).collect();
+    for i in (1..n).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let span = u64::try_from(i + 1).unwrap_or(u64::MAX);
+        let j = usize::try_from((state >> 33) % span).unwrap_or(0);
+        deck.swap(i, j);
+    }
+    [
+        STARTER_POOL[deck[0]],
+        STARTER_POOL[deck[1]],
+        STARTER_POOL[deck[2]],
+    ]
+}
+
+fn pick_tip(seed: u64) -> &'static str {
+    let n = u64::try_from(TIP_POOL.len()).unwrap_or(1);
+    let idx = usize::try_from(seed.rotate_right(17) % n).unwrap_or(0);
+    TIP_POOL[idx]
+}
+
+fn now_seed() -> u64 {
+    // Mask to u64; any low bits suffice as LCG seed and 64 bits of nanos cover ~584 years.
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
+        u64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
@@ -215,6 +314,8 @@ mod tests {
     use super::*;
     use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
     use crate::slash::LiveSessionInfo;
+
+    const TEST_SEED: u64 = 0x00C0_FFEE;
 
     fn fixture() -> LiveSessionInfo {
         LiveSessionInfo {
@@ -235,6 +336,10 @@ mod tests {
         }
     }
 
+    fn snap_for(info: &LiveSessionInfo) -> WelcomeSnapshot {
+        WelcomeSnapshot::from_live_with_seed(info, TEST_SEED)
+    }
+
     fn render(width: u16, height: u16, snap: &WelcomeSnapshot) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let theme = Theme::default();
@@ -251,7 +356,7 @@ mod tests {
     #[test]
     fn from_live_projects_display_name_and_effort() {
         let info = fixture();
-        let snap = WelcomeSnapshot::from_live(&info);
+        let snap = snap_for(&info);
         assert_eq!(snap.version, "0.1.0");
         assert_eq!(snap.model_label, "Claude Opus 4.7");
         assert_eq!(snap.effort_label, "xhigh");
@@ -259,49 +364,83 @@ mod tests {
         assert_eq!(snap.cwd, "~/github/oxide-code");
     }
 
+    #[test]
+    fn from_live_picks_distinct_starters_from_the_pool() {
+        let info = fixture();
+        let snap = snap_for(&info);
+        let names: Vec<&str> = snap.starters.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), STARTER_PICK);
+        // No duplicates: shuffle gives distinct picks.
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            STARTER_PICK,
+            "picked starters must be distinct"
+        );
+        // Each picked entry is from STARTER_POOL.
+        for picked in &snap.starters {
+            assert!(STARTER_POOL.contains(picked));
+        }
+    }
+
+    #[test]
+    fn from_live_picks_tip_from_the_pool() {
+        let info = fixture();
+        let snap = snap_for(&info);
+        assert!(TIP_POOL.contains(&snap.tip));
+    }
+
+    #[test]
+    fn from_live_with_seed_is_deterministic() {
+        let info = fixture();
+        let a = WelcomeSnapshot::from_live_with_seed(&info, 7);
+        let b = WelcomeSnapshot::from_live_with_seed(&info, 7);
+        assert_eq!(a.starters, b.starters);
+        assert_eq!(a.tip, b.tip);
+    }
+
     // ── paint / width ladder ──
 
     #[test]
     fn paint_below_narrow_min_is_a_no_op() {
-        // Anything narrower than NARROW_MIN should leave the buffer untouched.
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         let backend = render(NARROW_MIN - 1, 12, &snap);
-        let buf = backend.buffer();
-        for cell in &buf.content {
+        for cell in &backend.buffer().content {
             assert_eq!(cell.symbol(), " ", "every cell must remain blank");
         }
     }
 
     #[test]
     fn paint_full_width_renders_box_environment_starters_and_trailer() {
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         insta::assert_snapshot!(render(80, 14, &snap));
     }
 
     #[test]
     fn paint_60_col_minimum_full_layout_still_includes_starters() {
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         insta::assert_snapshot!(render(60, 14, &snap));
     }
 
     #[test]
     fn paint_collapsed_drops_box_but_keeps_starters() {
-        let snap = WelcomeSnapshot::from_live(&fixture());
-        insta::assert_snapshot!(render(50, 12, &snap));
+        let snap = snap_for(&fixture());
+        insta::assert_snapshot!(render(50, 14, &snap));
     }
 
     #[test]
     fn paint_narrow_drops_starters_and_truncates_cwd_in_the_middle() {
         let mut info = fixture();
         info.cwd = "~/very/long/working/directory/path/oxide-code".to_owned();
-        let snap = WelcomeSnapshot::from_live(&info);
+        let snap = snap_for(&info);
         insta::assert_snapshot!(render(30, 8, &snap));
     }
 
     #[test]
     fn paint_at_narrow_min_does_not_clip_environment_text() {
-        // env at the narrow tier is "Claude Opus 4.7 · xhigh" (23 cols), fitting NARROW_MIN.
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         let backend = render(NARROW_MIN, 8, &snap);
         let row: String = (0..NARROW_MIN)
             .map(|x| {
@@ -311,16 +450,12 @@ mod tests {
                     .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
             })
             .collect();
-        assert!(
-            row.contains("xhigh"),
-            "narrow env must end without clipping: {row:?}"
-        );
+        assert!(row.contains("xhigh"), "narrow env must not clip: {row:?}");
     }
 
     #[test]
     fn paint_just_below_collapsed_min_drops_starters() {
-        // 39 cols (COLLAPSED_MIN - 1) must hide the starter list and trailer.
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         let backend = render(COLLAPSED_MIN - 1, 12, &snap);
         let body: String = backend
             .buffer()
@@ -330,18 +465,14 @@ mod tests {
             .collect();
         assert!(
             !body.contains(STARTER_HEADER),
-            "starter header must disappear at narrow tier"
+            "starter header must disappear"
         );
-        assert!(
-            !body.contains("press / to browse"),
-            "trailer must disappear at narrow tier"
-        );
+        assert!(!body.contains(TIP_LABEL), "tip row must disappear");
     }
 
     #[test]
     fn paint_just_below_full_min_drops_ribbon() {
-        // 59 cols (FULL_MIN - 1) must show the wordmark only — no ribbon flanks.
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         let backend = render(FULL_MIN - 1, 14, &snap);
         let body: String = backend
             .buffer()
@@ -350,19 +481,16 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(body.contains(WORDMARK), "wordmark must still render");
-        assert!(
-            !body.contains(RIBBON_FLANK),
-            "ribbon flanks must disappear below FULL_MIN"
-        );
+        assert!(!body.contains(RIBBON_FLANK), "ribbon flanks must disappear");
     }
 
     #[test]
     fn paint_zero_height_is_a_no_op() {
-        let snap = WelcomeSnapshot::from_live(&fixture());
+        let snap = snap_for(&fixture());
         let backend = render(80, 0, &snap);
         assert!(
             backend.buffer().content.is_empty(),
-            "zero-height area paints nothing"
+            "zero-height area paints nothing",
         );
     }
 }
