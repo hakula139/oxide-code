@@ -82,6 +82,7 @@ ox                                          # Start an interactive session
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
+│   ├── resume.rs                           # /resume (alias /continue) — bare opens the picker (project / all toggle, search); `/resume <id-prefix>` resolves directly via roll_into
 │   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
@@ -132,7 +133,8 @@ ox                                          # Start an interactive session
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack — focus-grabbing UI overlays
 │   ├── modal/
 │   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection — read-only sectioned kv-table modal used by /status, /config, /help
-│   │   └── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
+│   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
+│   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem> — substring filter + scrollable viewport powering /resume's picker
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default

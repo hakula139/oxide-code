@@ -4,17 +4,18 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 
 ## Built-in Commands
 
-| Command                             | Description                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------------ |
-| `/clear` (aliases `/new`, `/reset`) | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
-| `/config`                           | Open the resolved configuration and its layered file paths in a read-only modal.     |
-| `/diff`                             | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
-| `/effort [<level>]`                 | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
-| `/help`                             | Open a read-only modal listing available commands.                                   |
-| `/init`                             | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
-| `/model [<id>]`                     | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
-| `/status`                           | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
-| `/theme [<name>]`                   | Open the theme picker (live preview), or swap directly to a built-in theme.          |
+| Command                                 | Description                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------ |
+| `/clear` (aliases `/new`, `/reset`)     | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
+| `/config`                               | Open the resolved configuration and its layered file paths in a read-only modal.     |
+| `/diff`                                 | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
+| `/effort [<level>]`                     | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
+| `/help`                                 | Open a read-only modal listing available commands.                                   |
+| `/init`                                 | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
+| `/model [<id>]`                         | Open the model + effort picker, or swap directly (alias / substring / exact id).     |
+| `/resume [<id-prefix>]` (`/continue`)   | Open the session picker (search, project / all toggle), or jump by id prefix.        |
+| `/status`                               | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
+| `/theme [<name>]`                       | Open the theme picker (live preview), or swap directly to a built-in theme.          |
 
 ## Autocomplete Popup
 
@@ -35,13 +36,21 @@ To send a message that _starts_ with a slash without invoking a command, double 
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/model` / `/effort` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`, `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
+Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/model` / `/effort` / `/resume` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/init`, `/model <id>`, `/effort <level>`, `/resume <id-prefix>`, `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
 
 ## Model and Effort
 
 Bare `/model` opens the combined model + effort picker; bare `/effort` opens a Speed ↔ Intelligence slider. Both apply on Enter and cancel on Esc.
 
 `/model <id>` resolves in four tiers: alias (`opus`, `sonnet`, `haiku`, with optional `[1m]` for the 1M-context variants) → exact / dated id → unique suffix → unique substring. Swapping clamps the current effort to the new model's caps; `/effort` on a model without effort (Haiku 4.5) errors with a recovery hint. See [Configuration](configuration.md) for the full tier reference and per-model defaults.
+
+## Resuming a Session
+
+Bare `/resume` (alias `/continue`) opens an in-place session picker. Type to filter by id, title, or project; Up / Down or PageUp / PageDown navigate; Tab toggles between the current project and all projects; Enter resumes the highlighted session; Esc cancels. Switching session preserves the running TUI — chat repopulates from the resumed transcript and the next prompt continues that thread.
+
+`/resume <id-prefix>` resolves the prefix against the current project first and widens to all projects if there's no in-project match. Ambiguous prefixes list the candidates with their 8-character ids.
+
+`/resume` mid-session is the in-app equivalent of `ox -c <id-prefix>` at launch — both call the same load + sanitize path. The CLI launcher is unchanged.
 
 ## Switching the Theme
 

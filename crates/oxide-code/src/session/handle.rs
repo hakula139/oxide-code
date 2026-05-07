@@ -263,6 +263,39 @@ pub(crate) async fn roll(
     }
 }
 
+/// Resumed session payload + finalize failure from the old session; mirrors [`RollOutcome`] for
+/// the resume-into-existing path used by `/resume`.
+pub(crate) struct RollIntoOutcome {
+    pub(crate) resumed: ResumedSession,
+    pub(crate) finalize_failure: Option<String>,
+}
+
+/// Mid-session re-init: finalize the old session, load and sanitize the target session, swap
+/// the handle in place. Same shape as [`roll`] but loading from disk instead of starting fresh.
+///
+/// Returns `Err` _without swapping_ when the target session can't be loaded (missing file,
+/// empty after sanitize) — caller stays on the old session and surfaces the error.
+pub(crate) async fn roll_into(
+    session: &mut SessionHandle,
+    store: &SessionStore,
+    file_tracker: &FileTracker,
+    target_session_id: &str,
+) -> Result<RollIntoOutcome> {
+    // Load + sanitize FIRST so a target-load error leaves the live session untouched.
+    let mut resumed = resume(store, target_session_id)?;
+
+    let old_snapshots = file_tracker.snapshot_all();
+    file_tracker.clear();
+    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+
+    let old_session = std::mem::replace(session, resumed.handle.clone());
+    let finalize_failure = old_session.finalize(old_snapshots).await;
+    Ok(RollIntoOutcome {
+        resumed,
+        finalize_failure,
+    })
+}
+
 /// Resume by session ID — loads, sanitizes, opens for append, spawns the actor.
 pub(crate) fn resume(store: &SessionStore, session_id: &str) -> Result<ResumedSession> {
     let data = store.load_session_data(session_id)?;
@@ -953,6 +986,126 @@ mod tests {
         assert!(
             old_jsonl.contains("seed.txt"),
             "snapshot survived into old JSONL: {old_jsonl}",
+        );
+    }
+
+    // ── roll_into ──
+
+    #[tokio::test]
+    async fn roll_into_swaps_to_target_and_finalizes_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+
+        // Seed a target session on disk.
+        let target = start(&store, "test-model");
+        let target_id = target.session_id().to_owned();
+        target.record_message(Message::user("target prompt")).await;
+        target
+            .record_message(Message::assistant("target reply"))
+            .await;
+        target.finish(Vec::new()).await;
+        drop(target);
+
+        // Live session — swap into target.
+        let mut session = start(&store, "test-model");
+        let original_id = session.session_id().to_owned();
+        session.record_message(Message::user("live")).await;
+
+        let outcome = roll_into(&mut session, &store, &tracker, &target_id)
+            .await
+            .expect("roll_into must succeed for healthy target");
+
+        assert_eq!(
+            session.session_id(),
+            target_id,
+            "handle now points at target"
+        );
+        assert_eq!(
+            outcome.resumed.messages.len(),
+            2,
+            "resumed payload carries the target's transcript",
+        );
+        assert!(
+            outcome.finalize_failure.is_none(),
+            "healthy roll_into reports no finalize failure",
+        );
+
+        let live_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
+            .expect("old (live) session file lands on disk");
+        assert!(
+            live_jsonl.contains(r#""type":"summary""#),
+            "old JSONL gets a summary: {live_jsonl}",
+        );
+    }
+
+    #[tokio::test]
+    async fn roll_into_target_load_failure_keeps_live_session_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+        let mut session = start(&store, "test-model");
+        let original_id = session.session_id().to_owned();
+        session.record_message(Message::user("live")).await;
+
+        let result = roll_into(&mut session, &store, &tracker, "missing-target-id").await;
+        assert!(result.is_err(), "missing target id must error");
+        assert_eq!(
+            session.session_id(),
+            original_id,
+            "live session id unchanged after failure",
+        );
+    }
+
+    #[tokio::test]
+    async fn roll_into_swaps_tracker_snapshots_between_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let tracker = FileTracker::default();
+
+        // Target session: persist a tracker snapshot via finish so resume restores it.
+        let target = start(&store, "test-model");
+        let target_id = target.session_id().to_owned();
+        target.record_message(Message::user("target")).await;
+        let target_seed = dir.path().join("target.txt");
+        std::fs::write(&target_seed, b"target body").unwrap();
+        let target_tracker = FileTracker::default();
+        crate::file_tracker::testing::seed_full_read(&target_tracker, &target_seed);
+        let target_snapshots = target_tracker.snapshot_all();
+        target.finish(target_snapshots).await;
+        drop(target);
+
+        // Live session with a distinct snapshot already in the tracker.
+        let live_seed = dir.path().join("live.txt");
+        std::fs::write(&live_seed, b"live body").unwrap();
+        crate::file_tracker::testing::seed_full_read(&tracker, &live_seed);
+        let mut session = start(&store, "test-model");
+        let original_id = session.session_id().to_owned();
+        session.record_message(Message::user("live")).await;
+
+        roll_into(&mut session, &store, &tracker, &target_id)
+            .await
+            .expect("roll_into must succeed");
+
+        // Old (live) JSONL should carry the live snapshot; tracker should now reflect target's.
+        let old_jsonl = std::fs::read_to_string(test_session_file(dir.path(), &original_id))
+            .expect("old session file persists");
+        assert!(
+            old_jsonl.contains("live.txt"),
+            "live tracker snapshot drains into old JSONL: {old_jsonl}",
+        );
+        let restored: Vec<_> = tracker
+            .snapshot_all()
+            .into_iter()
+            .map(|s| s.path.clone())
+            .collect();
+        assert!(
+            restored.iter().any(|p| p.ends_with("target.txt")),
+            "target's snapshots restored into tracker; got {restored:?}",
+        );
+        assert!(
+            !restored.iter().any(|p| p.ends_with("live.txt")),
+            "live snapshot should NOT remain in tracker after swap; got {restored:?}",
         );
     }
 

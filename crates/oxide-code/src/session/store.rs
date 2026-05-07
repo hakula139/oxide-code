@@ -540,6 +540,44 @@ pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
+/// Seed one finished session for cross-module tests — `last_active_at` derives from
+/// `created_at`, and the title / exit are written when their args are non-`None`.
+#[cfg(test)]
+pub(crate) fn seed_test_session(
+    store: &SessionStore,
+    session_id: &str,
+    title: Option<&str>,
+    message_count: Option<u32>,
+    created_at: time::OffsetDateTime,
+) {
+    let mut writer = store
+        .create(&Entry::Header {
+            session_id: session_id.to_owned(),
+            cwd: "/work/proj".to_owned(),
+            model: "claude-opus-4-7".to_owned(),
+            created_at,
+            version: CURRENT_VERSION,
+        })
+        .unwrap();
+    if let Some(t) = title {
+        writer
+            .append(&Entry::Title {
+                title: t.to_owned(),
+                source: super::entry::TitleSource::UserProvided,
+                updated_at: created_at,
+            })
+            .unwrap();
+    }
+    if let Some(count) = message_count {
+        writer
+            .append(&Entry::Summary {
+                message_count: count,
+                updated_at: created_at,
+            })
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
     let project_dir = test_project_dir(dir);

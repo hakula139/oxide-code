@@ -6,6 +6,7 @@
 
 pub(crate) mod kv_overview;
 pub(crate) mod list_picker;
+pub(crate) mod searchable_list;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;

@@ -264,6 +264,7 @@ where
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
+                    | UserAction::Resume { .. }
                     | UserAction::SwapConfig { .. }
                     | UserAction::PreviewTheme { .. }
                     | UserAction::SwapTheme { .. }),

@@ -395,6 +395,32 @@ async fn agent_loop_task(
                     warn!("session-rolled event dropped: {e}");
                 }
             }
+            UserAction::Resume { session_id } => {
+                match session::handle::roll_into(&mut session, &store, &file_tracker, &session_id)
+                    .await
+                {
+                    Ok(outcome) => {
+                        sink.session_write_error(outcome.finalize_failure.as_deref());
+                        let new_id = session.session_id().to_owned();
+                        client.set_session_id(new_id.clone());
+                        messages.clone_from(&outcome.resumed.messages);
+                        if let Err(e) = sink.send(AgentEvent::SessionResumed {
+                            id: new_id,
+                            title: outcome.resumed.title,
+                            messages: outcome.resumed.messages,
+                            tool_metadata: outcome.resumed.tool_result_metadata,
+                        }) {
+                            warn!("session-resumed event dropped: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        _ = sink.send(AgentEvent::Error(format!(
+                            "Resume failed (still on session {}): {e:#}",
+                            session.session_id(),
+                        )));
+                    }
+                }
+            }
             UserAction::SwapConfig { model, effort } => {
                 apply_swap_config(&mut client, &sink, model, effort);
             }

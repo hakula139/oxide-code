@@ -297,7 +297,7 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear | UserAction::Resume { .. } | UserAction::SwapConfig { .. } => true,
             UserAction::PreviewTheme { name } => {
                 if let Some(preview) = super::theme::load_builtin(name) {
                     if self.preview_theme_snapshot.is_none() {
@@ -449,6 +449,12 @@ impl App {
                 self.status_bar.set_title(None);
                 self.chat.clear_history();
             }
+            AgentEvent::SessionResumed {
+                id,
+                title,
+                messages,
+                tool_metadata,
+            } => self.apply_session_resumed(id, title, &messages, &tool_metadata),
             AgentEvent::ConfigChanged {
                 model_id,
                 effort,
@@ -481,6 +487,26 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        self.finalize_idle();
+    }
+
+    /// Mid-session resume: rebinds the session, repopulates the chat from the target's transcript,
+    /// and discards in-flight UI state. Pairs with `roll_into` on the agent loop.
+    fn apply_session_resumed(
+        &mut self,
+        id: String,
+        title: Option<String>,
+        messages: &[Message],
+        tool_metadata: &HashMap<String, ToolMetadata>,
+    ) {
+        self.session_info.session_id = id;
+        self.status_bar.set_title(title);
+        self.chat.clear_history();
+        self.chat
+            .load_history(messages, tool_metadata, self.tools.as_ref());
+        self.pending_calls.clear();
+        self.pending_prompts.clear();
+        self.sync_input_queue_hint();
         self.finalize_idle();
     }
 
