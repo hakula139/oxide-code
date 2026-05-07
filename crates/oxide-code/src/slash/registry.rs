@@ -35,8 +35,7 @@ pub(crate) enum SlashKind {
     Unknown,
 }
 
-/// One row in the typed-arg autocomplete popup. `description` may be empty. `Cow` so static
-/// rosters borrow and dynamic ones (e.g., `[1m]` suffixed model names) own.
+/// One row in the typed-arg autocomplete popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArgCompletion {
     pub(crate) value: Cow<'static, str>,
@@ -62,8 +61,7 @@ pub(crate) trait SlashCommand: Sync {
         None
     }
 
-    /// Curated arg suggestions, prefix-filtered and ranked. Empty vec → no autocomplete; the
-    /// popup falls back to the [`Self::usage`] placeholder ghost-text.
+    /// Curated arg suggestions, prefix-filtered and ranked. Empty → no autocomplete.
     fn complete_arg(&self, _prefix: &str) -> Vec<ArgCompletion> {
         Vec::new()
     }

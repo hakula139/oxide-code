@@ -49,7 +49,7 @@ pub(super) struct PopupRow {
 /// Slash-command autocomplete overlay. Empty `rows` means hidden.
 pub(crate) struct SlashPopup {
     theme: Theme,
-    /// `Some` when visible. Mode discriminates which Tab-insertion shape applies.
+    /// `Some` when visible.
     mode: Option<PopupMode>,
     rows: Vec<PopupRow>,
     selected: usize,
@@ -188,8 +188,7 @@ impl SlashPopup {
         self.selected.saturating_sub(pad).min(max_offset)
     }
 
-    /// Mode-aware left-column label. `None` arm is a defensive fallback — `render` gates on
-    /// non-empty `rows`, which keeps `mode` `Some`.
+    /// Mode-aware left-column label; `None` arm unreachable in practice.
     fn label(&self, row: &PopupRow) -> String {
         match &self.mode {
             Some(PopupMode::Name) => match row.matched_alias {

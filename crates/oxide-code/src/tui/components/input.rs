@@ -344,9 +344,7 @@ impl InputArea {
         self.popup.set_state(state.as_ref());
     }
 
-    /// Dim placeholder token (`[id]`, `[level]`, `[name]`) painted at the cursor in arg mode with
-    /// an empty prefix. Coexists with the popup — the popup lists curated picks, the hint
-    /// confirms the slot's shape.
+    /// Dim placeholder painted at the cursor in arg-mode with an empty prefix.
     fn ghost_text(&self) -> Option<String> {
         let [single] = self.textarea.lines() else {
             return None;
@@ -422,8 +420,7 @@ impl InputArea {
 
 // ── Free Functions ──
 
-/// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface; coexists with the
-/// popup (no visibility gate).
+/// Fires only in `Arg` mode with an empty prefix and a `usage()` to surface.
 fn ghost_text_from_state(state: &PopupState<'_>, usage: Option<&str>) -> Option<String> {
     let PopupState::Arg { prefix, .. } = state else {
         return None;
@@ -765,8 +762,6 @@ mod tests {
 
     #[test]
     fn render_paints_ghost_text_at_cursor_in_arg_mode_with_empty_prefix() {
-        // `/model ` puts the input in arg mode with an empty prefix; the dim `[id]` placeholder
-        // must paint into the rendered buffer (covers the per-render Paragraph paint).
         let mut input = test_input();
         type_text(&mut input, "/model ");
         input.refresh_popup();
@@ -780,7 +775,6 @@ mod tests {
 
     #[test]
     fn render_omits_ghost_text_once_user_types_arg_prefix() {
-        // Pins the suppression branch: any non-empty arg prefix hides the placeholder.
         let mut input = test_input();
         type_text(&mut input, "/model claude-");
         input.refresh_popup();

@@ -23,7 +23,7 @@ pub(crate) struct ModelInfo {
 /// effort picker (renders only the supported ladder).
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "each flag maps 1:1 to a separate upstream `modelSupports*` predicate or per-version allowlist; bitflags add indirection without expressiveness"
+    reason = "each flag is an independent capability gate"
 )]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Capabilities {
@@ -39,7 +39,7 @@ pub(crate) struct Capabilities {
 
 // ── MODELS ──
 
-/// Most-specific substring first. No inheritance between rows.
+/// Most-specific substring first.
 pub(crate) const MODELS: &[ModelInfo] = &[
     ModelInfo {
         id_substr: "claude-opus-4-7",

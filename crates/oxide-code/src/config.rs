@@ -102,8 +102,7 @@ impl Effort {
         }
     }
 
-    /// One-line UX hint for the typed-arg popup. Behavior-focused so it stays consistent across
-    /// the ladder; per-tier model-availability checks live in the executor.
+    /// One-line UX hint for the typed-arg popup.
     pub(crate) const fn description(self) -> &'static str {
         match self {
             Self::Low => "Fastest, shallow reasoning",

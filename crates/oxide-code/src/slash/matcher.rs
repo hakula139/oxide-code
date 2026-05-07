@@ -70,8 +70,8 @@ fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option
         .find(|alias| pred(&alias.to_ascii_lowercase()))
 }
 
-/// Two-tier prefix-then-substring rank over a curated roster, preserving declared order within
-/// each tier. Empty `query` returns every item in declared order. Lower-cased internally.
+/// Two-tier prefix-then-substring rank over a curated roster, case-insensitive, preserving
+/// declared order within each tier. Empty `query` returns every item in declared order.
 pub(super) fn rank_by_prefix<'a, T>(
     items: &'a [T],
     query: &str,

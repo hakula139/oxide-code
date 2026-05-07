@@ -158,8 +158,6 @@ mod tests {
 
     #[test]
     fn popup_state_trailing_space_after_name_switches_to_empty_arg() {
-        // The empty-prefix case is the trigger for the placeholder ghost-text — we have to be
-        // able to distinguish it from `Name`, otherwise the popup never opens for arg mode.
         assert_eq!(popup_state("/clear "), Some(arg("clear", "")));
     }
 
@@ -171,8 +169,6 @@ mod tests {
 
     #[test]
     fn popup_state_inner_whitespace_in_args_is_kept_for_free_form_commands() {
-        // /init takes a free-form sentence — the popup is hidden via empty `complete_arg`, but
-        // the parser still classifies it as Arg with the full remainder as prefix.
         assert_eq!(
             popup_state("/init please write CLAUDE.md"),
             Some(arg("init", "please write CLAUDE.md")),
@@ -196,14 +192,11 @@ mod tests {
     fn popup_state_invalid_name_chars_reject_the_buffer() {
         assert!(popup_state("/foo🦀").is_none());
         assert!(popup_state("/foo!").is_none());
-        // Disallowed-char names also fail in arg form so the popup doesn't show stale completions.
         assert!(popup_state("/foo! arg").is_none());
     }
 
     #[test]
     fn popup_state_empty_name_rejects_buffer() {
-        // `/` followed by whitespace has no name to dispatch — must not parse as `Arg { name: "" }`,
-        // which would route empty-string lookups through `complete_arg_for` / `arg_placeholder_for`.
         assert!(popup_state("/ ").is_none());
         assert!(popup_state("/    ").is_none());
         assert!(popup_state("/  arg").is_none());

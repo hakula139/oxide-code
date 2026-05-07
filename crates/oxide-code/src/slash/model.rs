@@ -229,9 +229,7 @@ mod tests {
 
     #[test]
     fn complete_arg_appends_1m_context_suffix_only_for_1m_variants() {
-        // The `[1m]` rows must surface the `(1M context)` marker so users can tell variants
-        // apart; the bare row must NOT carry the suffix (mutation that always-appends would
-        // otherwise survive).
+        // `[1m]` variants get the marker; bare row must not.
         let rows = arg_rows("claude-opus-4-7");
         let one_m = rows
             .iter()
@@ -367,8 +365,7 @@ mod tests {
 
     #[test]
     fn execute_retired_or_legacy_id_falls_through_to_ambiguity() {
-        // Retired Opus 4 / Sonnet 4 ids and the loose `opus-4` form substring-match multiple
-        // current descendants — must error with the candidate listing, not silently pick one.
+        // Retired ids substring-match multiple current rows; ambiguity must surface.
         for arg in ["opus-4", "claude-opus-4", "claude-sonnet-4"] {
             let (_, outcome) = run_execute(arg);
             let msg = outcome.expect_err(&format!("`{arg}` must error"));
