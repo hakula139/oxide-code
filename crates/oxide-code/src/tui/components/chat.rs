@@ -443,8 +443,7 @@ impl ChatView {
             .is_some_and(|b| b.continues_assistant_turn())
     }
 
-    /// `true` when no committed blocks, no in-flight streaming buffer, and no pending thinking
-    /// buffer. App reads this to decide whether to paint the welcome surface in the chat region.
+    /// True when the chat has no content for the user to see (committed, streaming, or thinking).
     pub(crate) fn is_empty(&self) -> bool {
         self.blocks.is_empty() && self.streaming.is_none() && self.thinking_buffer.is_empty()
     }
@@ -2173,20 +2172,16 @@ mod tests {
         let mut chat = test_chat();
         chat.push_user_message("hi".to_owned());
         render_chat(&mut chat, 80, 24);
-        assert!(
-            chat.content_height.get() > 0,
-            "non-empty chat reports content height"
-        );
+        assert_eq!(chat.content_height.get(), 2);
     }
 
     #[test]
     fn render_empty_paints_blank_chat_region() {
-        // Empty chats now defer the welcome to App::draw_frame; ChatView's job is to paint the
-        // surface bg so the blank region inherits the theme.
+        // ChatView paints only the surface background; App::draw_frame layers the welcome.
         let mut chat = test_chat();
         let backend = render_chat(&mut chat, 60, 8);
         for cell in &backend.buffer().content {
-            assert_eq!(cell.symbol(), " ", "cell painted unexpected glyph");
+            assert_eq!(cell.symbol(), " ");
         }
     }
 

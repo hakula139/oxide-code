@@ -43,6 +43,10 @@ impl StatusModal {
     }
 }
 
+fn on_off(flag: bool) -> String {
+    if flag { "on" } else { "off" }.to_owned()
+}
+
 impl Modal for StatusModal {
     fn height(&self, _width: u16) -> u16 {
         let body = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
@@ -85,10 +89,6 @@ impl Modal for StatusModal {
             _ => ModalKey::Consumed,
         }
     }
-}
-
-fn on_off(flag: bool) -> String {
-    if flag { "on" } else { "off" }.to_owned()
 }
 
 #[cfg(test)]
