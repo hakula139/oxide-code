@@ -268,18 +268,24 @@ fn push_tip(lines: &mut Vec<Line<'static>>, theme: &Theme, tip: &'static str, co
 
 // ── Random picks ──
 
+// Knuth's MMIX LCG constants — not cryptographic, just enough spread per session.
+const LCG_MULT: u64 = 6_364_136_223_846_793_005;
+const LCG_INC: u64 = 1_442_695_040_888_963_407;
+
+fn lcg_step(state: u64) -> u64 {
+    state.wrapping_mul(LCG_MULT).wrapping_add(LCG_INC)
+}
+
 fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
     let n = STARTER_POOL.len();
     debug_assert!(n >= STARTER_PICK);
-    // PCG-style LCG; not cryptographic, just enough spread per session.
+    // Partial Fisher-Yates: STARTER_PICK swaps from a length-n deck draws k distinct indices.
     let mut state = seed | 1;
     let mut deck: Vec<usize> = (0..n).collect();
-    for i in (1..n).rev() {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        let span = u64::try_from(i + 1).unwrap_or(u64::MAX);
-        let j = usize::try_from((state >> 33) % span).unwrap_or(0);
+    for i in 0..STARTER_PICK {
+        state = lcg_step(state);
+        let span = u64::try_from(n - i).unwrap_or(u64::MAX);
+        let j = i + usize::try_from((state >> 33) % span).unwrap_or(0);
         deck.swap(i, j);
     }
     [
@@ -290,8 +296,9 @@ fn pick_starters(seed: u64) -> [Starter; STARTER_PICK] {
 }
 
 fn pick_tip(seed: u64) -> &'static str {
+    let state = lcg_step(seed | 1);
     let n = u64::try_from(TIP_POOL.len()).unwrap_or(1);
-    let idx = usize::try_from(seed.rotate_right(17) % n).unwrap_or(0);
+    let idx = usize::try_from((state >> 33) % n).unwrap_or(0);
     TIP_POOL[idx]
 }
 
@@ -397,7 +404,7 @@ mod tests {
         assert_eq!(a.tip, b.tip);
     }
 
-    // ── paint / width ladder ──
+    // ── paint ──
 
     #[test]
     fn paint_below_narrow_min_is_a_no_op() {
