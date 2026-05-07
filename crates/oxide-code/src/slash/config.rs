@@ -39,7 +39,7 @@ fn render_config(
     let max_tokens = cfg.max_tokens.to_string();
     let cache_ttl = cfg.prompt_cache_ttl.to_string();
     let thinking = if cfg.show_thinking { "yes" } else { "no" };
-    let model = info.marketing_name();
+    let model = info.display_name();
     let resolved: [(&str, &str); 8] = [
         ("Model", &model),
         ("Model ID", &cfg.model_id),
@@ -118,7 +118,7 @@ mod tests {
     fn render_config_includes_every_resolved_field_value() {
         let info = test_session_info();
         let cfg = &info.config;
-        let model = info.marketing_name();
+        let model = info.display_name();
         let body = render_config(&info, None, None);
         let effort = cfg
             .effort

@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use crate::config::ConfigSnapshot;
-use crate::model::{display_name, marketing_or_id};
+use crate::model::display_name;
 use crate::tui::components::chat::ChatView;
 use crate::tui::modal::Modal;
 
@@ -20,11 +20,6 @@ pub(crate) struct LiveSessionInfo {
 }
 
 impl LiveSessionInfo {
-    pub(crate) fn marketing_name(&self) -> Cow<'_, str> {
-        marketing_or_id(&self.config.model_id)
-    }
-
-    /// Human-facing label including `(1M context)` suffix for `[1m]` models.
     pub(crate) fn display_name(&self) -> Cow<'_, str> {
         display_name(&self.config.model_id)
     }

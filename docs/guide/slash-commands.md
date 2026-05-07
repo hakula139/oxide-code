@@ -21,11 +21,13 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 When you type `/`, a two-column popup appears above the input:
 
 - **Up / Down** navigate the rows.
-- **Tab** completes the selected command (`/<name>` plus a trailing space).
+- **Tab** completes the selected row. In name mode it inserts `/<name>` plus a trailing space; in arg mode it replaces the typed prefix with the picked value.
 - **Enter** submits the current line.
 - **Esc** dismisses the popup.
 
 Matches are ranked by tier: name-prefix > alias-prefix > name-substring > alias-substring. Aliases display inline in the canonical row (`/clear (new, reset)`); typing any alias routes to the same impl.
+
+After `/<name>` plus a trailing space, the popup switches to **arg mode** for commands with a curated argument roster (`/model`, `/effort`, `/theme`): rows show valid values with descriptions, prefix-filtered as you type.
 
 ## Sending a Literal `/foo`
 

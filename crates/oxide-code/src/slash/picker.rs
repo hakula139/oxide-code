@@ -19,8 +19,9 @@ use crate::tui::theme::Theme;
 
 // ── Constants ──
 
-/// Curated roster shown in the picker; `/model <id>` resolves against the full `MODELS` table.
-const LISTED_MODELS: &[&str] = &[
+/// Curated roster shown in the picker AND in `/model`'s typed-arg autocomplete; `/model <id>`
+/// still resolves against the full `MODELS` table.
+pub(super) const LISTED_MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-7[1m]",
     "claude-sonnet-4-6",
@@ -134,7 +135,7 @@ impl ModelEffortPicker {
             return;
         };
         let caps = capabilities_for(row.id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return;
         }
         let supported: Vec<Effort> = Effort::ALL
@@ -186,7 +187,7 @@ impl ModelEffortPicker {
     fn render_effort_row(&self, theme: &Theme) -> Option<Line<'static>> {
         let row = self.list.selected()?;
         let caps = capabilities_for(row.id);
-        if !caps.effort {
+        if !caps.has_effort() {
             return None;
         }
         let level = self.effort_or_active()?;
@@ -296,13 +297,13 @@ enum Direction {
 }
 
 fn has_effort_tier(row: &ModelRow) -> bool {
-    capabilities_for(row.id).effort
+    capabilities_for(row.id).has_effort()
 }
 
 fn effort_for_highlighted(list: &ListPicker<ModelRow>, fallback: Option<Effort>) -> Option<Effort> {
     let row = list.selected()?;
     let caps = capabilities_for(row.id);
-    if !caps.effort {
+    if !caps.has_effort() {
         return None;
     }
     Some(caps.resolve_effort(fallback).unwrap_or(Effort::High))

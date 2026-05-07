@@ -5,7 +5,7 @@ use std::path::Path;
 use indoc::formatdoc;
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 
-use crate::model::marketing_name;
+use crate::model::lookup;
 use crate::util::env;
 
 const UNKNOWN_MARKER: &str = "(unknown)";
@@ -49,11 +49,11 @@ impl Environment {
     }
 
     pub(super) fn render(&self) -> String {
-        let model_bullet = match marketing_name(&self.model) {
-            Some(name) => format!(
-                "- You are powered by the model named {name}. \
+        let model_bullet = match lookup(&self.model) {
+            Some(info) => format!(
+                "- You are powered by the model named {}. \
                 The exact model ID is {}.",
-                self.model
+                info.display_name, self.model,
             ),
             None => format!("- You are powered by the model {}.", self.model),
         };
@@ -85,7 +85,7 @@ impl Environment {
 // ── Model Metadata ──
 
 fn knowledge_cutoff(model: &str) -> Option<&'static str> {
-    crate::model::lookup(model).and_then(|info| info.cutoff)
+    lookup(model).and_then(|info| info.cutoff)
 }
 
 // ── Platform Detection ──
@@ -252,16 +252,17 @@ mod tests {
 
     #[test]
     fn knowledge_cutoff_known_models() {
-        assert_eq!(knowledge_cutoff("claude-opus-4-7"), Some("January 2026"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4-6"), Some("August 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-6"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-5"), Some("May 2025"));
-        assert_eq!(knowledge_cutoff("claude-haiku-4-5"), Some("February 2025"));
-        assert_eq!(knowledge_cutoff("claude-haiku-4"), Some("February 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4-1"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-opus-4"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4-5"), Some("January 2025"));
-        assert_eq!(knowledge_cutoff("claude-sonnet-4"), Some("January 2025"));
+        for (id, expected) in [
+            ("claude-opus-4-7", "January 2026"),
+            ("claude-sonnet-4-6", "August 2025"),
+            ("claude-opus-4-6", "May 2025"),
+            ("claude-opus-4-5", "May 2025"),
+            ("claude-haiku-4-5", "February 2025"),
+            ("claude-opus-4-1", "January 2025"),
+            ("claude-sonnet-4-5", "January 2025"),
+        ] {
+            assert_eq!(knowledge_cutoff(id), Some(expected), "{id}");
+        }
     }
 
     #[test]

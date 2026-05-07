@@ -62,7 +62,7 @@ The direction is simple:
 ### Slash Commands
 
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
-- Autocomplete popup on typing `/`, with ranked filter and Tab completion.
+- Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
 - Mid-session swap: `/model`, `/effort`, and `/theme`. Session-only — no slash command writes user config files.
 - Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status` opens a read-only kv overview. Esc / Ctrl+C cancel any modal universally.
 
@@ -89,8 +89,7 @@ The direction is simple:
 Remaining surface beyond Working Today:
 
 - Session: `/resume`.
-- Inline argument placeholder — dim ghost-text hint (e.g. `[id]`) after a slash command's trailing space.
-- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow, argument-aware popup completion.
+- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
 

@@ -453,9 +453,7 @@ impl App {
             } => {
                 let model_changed = model_id != self.session_info.config.model_id;
                 let prev_effort = self.session_info.config.effort;
-                let marketing = crate::model::marketing_or_id(&model_id);
                 let confirmation = format_config_change(
-                    &marketing,
                     &model_id,
                     model_changed,
                     prev_effort,
@@ -632,7 +630,6 @@ fn preview_line(prompt: &str, theme: &Theme, body_width: usize) -> Line<'static>
 
 /// `AgentEvent::ConfigChanged` confirmation, surfacing silent effort shifts.
 fn format_config_change(
-    marketing: &str,
     model_id: &str,
     model_changed: bool,
     prev_effort: Option<crate::config::Effort>,
@@ -650,7 +647,10 @@ fn format_config_change(
             (None, _) => "Config unchanged.".to_owned(),
         };
     }
-    let head = format!("Switched to {marketing} ({model_id})");
+    let head = format!(
+        "Switched to {} ({model_id})",
+        crate::model::display_name(model_id)
+    );
     match (requested_effort, prev_effort, new_effort) {
         (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
         (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
@@ -725,8 +725,8 @@ mod tests {
     }
 
     fn test_session_info() -> LiveSessionInfo {
-        // `test-model` is intentionally unknown so `marketing_or_id` falls back to the
-        // literal id, keeping insta snapshots stable.
+        // `test-model` is intentionally unknown so `display_name` falls back to the literal
+        // id, keeping insta snapshots stable.
         use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
 
         LiveSessionInfo {
@@ -1750,7 +1750,7 @@ mod tests {
     fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
-        // confirmation block. Marketing name is derived locally from `model_id`.
+        // confirmation block. Display name is derived locally from `model_id`.
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: "claude-sonnet-4-6".to_owned(),
@@ -1799,14 +1799,7 @@ mod tests {
     fn format_config_change_swap_both_none_omits_effort_clause() {
         // Pin: no `effort` substring at all, never a stray "none"
         // word. Mutation that prints `effort none.` would surface here.
-        let s = format_config_change(
-            "Claude Haiku 4.5",
-            "claude-haiku-4-5",
-            true,
-            None,
-            None,
-            None,
-        );
+        let s = format_config_change("claude-haiku-4-5", true, None, None, None);
         assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
     }
 
@@ -1815,7 +1808,6 @@ mod tests {
         // User had a tier; new model has none. Surface the change so
         // the user knows their effort just disappeared.
         let s = format_config_change(
-            "Claude Haiku 4.5",
             "claude-haiku-4-5",
             true,
             Some(crate::config::Effort::Xhigh),
@@ -1834,7 +1826,6 @@ mod tests {
         // distinguishing this from "user's pick survived" prevents
         // the user from thinking they chose this tier.
         let s = format_config_change(
-            "Claude Opus 4.7",
             "claude-opus-4-7",
             true,
             None,
@@ -1851,7 +1842,6 @@ mod tests {
     fn format_config_change_swap_marks_clamp_when_new_effort_below_previous() {
         // The effective tier changed; surface the temporary clamp.
         let s = format_config_change(
-            "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
             true,
             Some(crate::config::Effort::Xhigh),
@@ -1869,7 +1859,6 @@ mod tests {
         // Same tier survives — no clamp / default annotation. Pin
         // exact format so a stray suffix (`(unchanged)`) would fail.
         let s = format_config_change(
-            "Claude Opus 4.7",
             "claude-opus-4-7",
             true,
             Some(crate::config::Effort::High),
@@ -1887,7 +1876,6 @@ mod tests {
         // Combined picker case: user asks for xhigh on Sonnet (caps at
         // high). Surface that the *requested* tier was clamped — not the previous-effort delta.
         let s = format_config_change(
-            "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
             true,
             Some(crate::config::Effort::Medium),
@@ -1903,7 +1891,6 @@ mod tests {
     #[test]
     fn format_config_change_effort_explicit_pick_matches_resolution() {
         let s = format_config_change(
-            "Claude Opus 4.7",
             "claude-opus-4-7",
             false,
             Some(crate::config::Effort::High),
@@ -1916,7 +1903,6 @@ mod tests {
     #[test]
     fn format_config_change_effort_clamp_surfaces_what_user_asked_for() {
         let s = format_config_change(
-            "Claude Sonnet 4.6",
             "claude-sonnet-4-6",
             false,
             Some(crate::config::Effort::Medium),
@@ -1931,7 +1917,6 @@ mod tests {
         // The slash command preflight stops this through /effort, but
         // client-driven flows could still emit it.
         let s = format_config_change(
-            "Claude Haiku 4.5",
             "claude-haiku-4-5",
             false,
             None,

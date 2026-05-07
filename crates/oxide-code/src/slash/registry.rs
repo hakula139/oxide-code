@@ -1,5 +1,7 @@
 //! Slash-command trait and built-in registry. Adding a command: one file + one [`BUILT_INS`] entry.
 
+use std::borrow::Cow;
+
 use super::clear::ClearCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
@@ -33,6 +35,13 @@ pub(crate) enum SlashKind {
     Unknown,
 }
 
+/// One row in the typed-arg autocomplete popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArgCompletion {
+    pub(crate) value: Cow<'static, str>,
+    pub(crate) description: Cow<'static, str>,
+}
+
 /// Locally-dispatched `/name args` command. Each impl owns its display metadata.
 pub(crate) trait SlashCommand: Sync {
     fn name(&self) -> &'static str;
@@ -50,6 +59,11 @@ pub(crate) trait SlashCommand: Sync {
 
     fn usage(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Curated arg suggestions, prefix-filtered and ranked. Empty → no autocomplete.
+    fn complete_arg(&self, _prefix: &str) -> Vec<ArgCompletion> {
+        Vec::new()
     }
 
     /// `Err(msg)` renders as an `ErrorBlock`.

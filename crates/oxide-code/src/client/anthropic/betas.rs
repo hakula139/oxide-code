@@ -47,7 +47,7 @@ pub(super) fn compute_betas(
             out.push(CONTEXT_MANAGEMENT_BETA_HEADER);
         }
         out.push(PROMPT_CACHING_SCOPE_BETA_HEADER);
-        if caps.effort {
+        if caps.has_effort() {
             out.push(EFFORT_BETA_HEADER);
         }
     }

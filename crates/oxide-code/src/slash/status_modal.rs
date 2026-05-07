@@ -27,7 +27,7 @@ pub(super) struct StatusModal {
 
 impl StatusModal {
     pub(super) fn new(info: &LiveSessionInfo) -> Self {
-        let model = format!("{} ({})", info.marketing_name(), info.config.model_id);
+        let model = format!("{} ({})", info.display_name(), info.config.model_id);
         let show_thinking = if info.config.show_thinking {
             "on".to_owned()
         } else {
