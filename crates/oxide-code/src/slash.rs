@@ -46,6 +46,13 @@ pub(crate) fn arg_placeholder_for(cmd_name: &str) -> Option<&'static str> {
     registry::lookup_in(registry::BUILT_INS, cmd_name).and_then(registry::SlashCommand::usage)
 }
 
+/// Whether the typed `/foo args` line should echo into chat history. Unknown commands echo
+/// so the dispatcher's error block has the original line for context.
+pub(crate) fn echoes_input(parsed: &Parsed) -> bool {
+    registry::lookup_in(registry::BUILT_INS, &parsed.name)
+        .is_none_or(|cmd| cmd.echoes_input(&parsed.args))
+}
+
 /// Resolves and runs `parsed` against the built-in registry.
 pub(crate) fn dispatch(
     parsed: &Parsed,
@@ -150,10 +157,16 @@ mod tests {
             name: "help".to_owned(),
             args: String::new(),
         };
-        let outcome = dispatch(&parsed, &mut SlashContext::new(&mut chat, &info));
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        let outcome = dispatch(&parsed, &mut ctx);
         assert!(outcome.is_none(), "/help is Done, not Forward");
+        assert!(ctx.take_modal().is_some(), "/help opens a modal");
         assert!(!chat.last_is_error());
-        assert_eq!(chat.entry_count(), 1);
+        assert_eq!(
+            chat.entry_count(),
+            0,
+            "modal-only commands push no chat blocks"
+        );
         assert_eq!(chat.last_error_text(), None);
     }
 

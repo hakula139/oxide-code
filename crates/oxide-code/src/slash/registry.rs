@@ -66,6 +66,13 @@ pub(crate) trait SlashCommand: Sync {
         Vec::new()
     }
 
+    /// Whether the typed `/foo` line should echo into chat. Default true.
+    /// Override to false for modal-only forms where the modal IS the response —
+    /// otherwise the echo orphans in history once the user dismisses the modal.
+    fn echoes_input(&self, _args: &str) -> bool {
+        true
+    }
+
     /// `Err(msg)` renders as an `ErrorBlock`.
     fn execute(&self, args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String>;
 }

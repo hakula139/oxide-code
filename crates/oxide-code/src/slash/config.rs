@@ -21,6 +21,10 @@ impl SlashCommand for ConfigCmd {
         "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
     }
 
+    fn echoes_input(&self, _args: &str) -> bool {
+        false
+    }
+
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         let user = file::user_config_path();
         let project = file::find_project_config();

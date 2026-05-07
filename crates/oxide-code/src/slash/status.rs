@@ -17,6 +17,10 @@ impl SlashCommand for StatusCmd {
         "Show session info: model, effort, version, working directory, auth source, and session ID"
     }
 
+    fn echoes_input(&self, _args: &str) -> bool {
+        false
+    }
+
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
         ctx.open_modal(Box::new(build_modal(ctx.info)));
         Ok(SlashOutcome::Done)

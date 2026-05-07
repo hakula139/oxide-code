@@ -330,7 +330,9 @@ impl App {
     fn handle_submit_prompt(&mut self, text: &str) -> bool {
         if self.input.is_enabled() {
             if let Some(parsed) = slash::parse_slash(text) {
-                self.chat.push_user_message(text.to_owned());
+                if slash::echoes_input(&parsed) {
+                    self.chat.push_user_message(text.to_owned());
+                }
                 let (synthesized, modal) = {
                     let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
                     let action = slash::dispatch(&parsed, &mut ctx);
@@ -358,7 +360,9 @@ impl App {
             return true;
         }
         if let Some(parsed) = slash::parse_slash(text) {
-            self.chat.push_user_message(text.to_owned());
+            if slash::echoes_input(&parsed) {
+                self.chat.push_user_message(text.to_owned());
+            }
             match slash::classify(&parsed) {
                 SlashKind::ReadOnly | SlashKind::Unknown => {
                     let modal = {
@@ -1205,10 +1209,11 @@ mod tests {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
 
+        assert!(app.modals.is_active(), "/help opens a modal");
         assert_eq!(
             app.chat.entry_count(),
-            2,
-            "user-message + system-message blocks expected",
+            0,
+            "modal-only commands push no chat blocks and suppress their own echo",
         );
         assert!(
             app.input.is_enabled(),
@@ -1418,8 +1423,10 @@ mod tests {
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "slash command must not forward to user_tx",
         );
-        assert_eq!(app.chat.entry_count(), 3);
+        // Only the original "active" prompt: /help is modal-only and suppresses its own echo.
+        assert_eq!(app.chat.entry_count(), 1);
         assert!(!app.chat.last_is_error());
+        assert!(app.modals.is_active(), "/help opens a modal");
     }
 
     #[tokio::test]
@@ -2390,17 +2397,23 @@ mod tests {
     }
 
     #[test]
-    fn render_repaints_when_slash_dispatch_grows_content_past_viewport() {
-        // Regression: pre-fix, slash output landed below the viewport
-        // until the user scrolled — the post-paint `update_layout`
-        // re-clamp arrived too late for the same frame.
+    fn render_repaints_when_chat_content_grows_past_viewport() {
+        use std::fmt::Write as _;
+
+        // Regression: pre-fix, content pushed in the same handler tick landed below the
+        // viewport until the user scrolled — the post-paint `update_layout` re-clamp
+        // arrived too late for the same frame. /help used to drive this through slash dispatch;
+        // it now opens a modal, so we exercise the same invariant via a long system message.
         let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("/help".to_owned()));
-        // Tight viewport guarantees /help overflows.
+        let mut body = String::new();
+        for i in 0..40 {
+            _ = writeln!(body, "line {i:02} of a long system block");
+        }
+        app.chat.push_system_message(body);
         let text = rendered_text(&mut app, 60, 12);
         assert!(
-            text.contains("//etc/hosts"),
-            "tail of /help body must be in the viewport after the first render, got:\n{text}",
+            text.contains("line 39"),
+            "tail of overflowing block must be in the viewport after the first render, got:\n{text}",
         );
     }
 

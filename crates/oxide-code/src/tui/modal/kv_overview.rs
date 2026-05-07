@@ -161,7 +161,7 @@ mod tests {
     // ── KvOverview::height ──
 
     #[test]
-    fn height_for_single_unheaded_section_counts_title_blank_rows_blank_footer() {
+    fn height_for_single_section_without_heading_counts_title_blank_rows_blank_footer() {
         // 2 rows + (title + blank) + (blank + footer) = 6.
         assert_eq!(flat_overview().height(80), 6);
     }

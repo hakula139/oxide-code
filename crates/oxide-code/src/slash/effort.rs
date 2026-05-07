@@ -30,6 +30,12 @@ impl SlashCommand for EffortCmd {
         }
     }
 
+    fn echoes_input(&self, args: &str) -> bool {
+        // Bare form opens a modal with no chat output; typed form swaps in place and the echo
+        // pairs with the swap-confirmation system message.
+        !args.trim().is_empty()
+    }
+
     fn usage(&self) -> Option<&'static str> {
         Some("[<level>]")
     }
