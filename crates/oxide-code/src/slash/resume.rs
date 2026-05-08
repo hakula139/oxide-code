@@ -47,11 +47,9 @@ const TITLE_FLOOR: usize = 8;
 
 // ── SessionRow ──
 
-/// One row in the resume picker — flattens [`SessionInfo`] into the strings the row renderer
-/// shows + a search haystack covering id, title, and project path.
+/// Row payload for the resume picker — display strings + a search haystack.
 struct SessionRow {
     session_id: String,
-    id_prefix: String,
     last_active: String,
     title: String,
     project: String,
@@ -60,11 +58,6 @@ struct SessionRow {
 
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset) -> Self {
-        let id_prefix = info
-            .session_id
-            .get(..ID_WIDTH)
-            .unwrap_or(&info.session_id)
-            .to_owned();
         let last_active = info
             .last_active_at
             .to_offset(local_offset)
@@ -77,15 +70,20 @@ impl SessionRow {
             .as_ref()
             .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
         let project = tildify(Path::new(&info.cwd));
-        let haystack = format!("{} {} {} {}", info.session_id, id_prefix, title, project);
+        // `session_id` already prefixes the haystack, so the displayed 8-char slice doesn't need
+        // its own slot — every prefix char is a substring match.
+        let haystack = format!("{} {} {}", info.session_id, title, project);
         Self {
             session_id: info.session_id,
-            id_prefix,
             last_active,
             title,
             project,
             haystack,
         }
+    }
+
+    fn id_prefix(&self) -> &str {
+        self.session_id.get(..ID_WIDTH).unwrap_or(&self.session_id)
     }
 }
 
@@ -117,7 +115,7 @@ impl SearchableItem for SessionRow {
         let project = truncate_to_width(&self.project, project_width);
 
         Line::from(vec![
-            Span::styled(format!("{:<ID_WIDTH$}", self.id_prefix), accent_style),
+            Span::styled(format!("{:<ID_WIDTH$}", self.id_prefix()), accent_style),
             Span::styled(" ".repeat(COLUMN_GAP), body_style),
             Span::styled(
                 format!("{:<TIMESTAMP_WIDTH$}", self.last_active),
@@ -471,7 +469,7 @@ mod tests {
             datetime!(2026-04-18 09:00:00 UTC),
         );
         let row = SessionRow::from_info(absent, UtcOffset::UTC);
-        assert_eq!(row.id_prefix.len(), ID_WIDTH);
+        assert_eq!(row.id_prefix().len(), ID_WIDTH);
         assert_eq!(row.title, UNTITLED_MARKER);
         assert!(row.haystack.contains(&row.session_id));
         assert!(row.haystack.contains("/work/oxide"));
