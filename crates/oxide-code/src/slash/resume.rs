@@ -173,16 +173,13 @@ impl ResumePicker {
             Err(err) => {
                 tracing::warn!("resume picker: list_paged failed: {err:#}");
                 self.load_error = Some(format!("failed to load sessions: {err:#}"));
-                crate::session::store::ListPage {
-                    sessions: Vec::new(),
-                    total: 0,
-                }
+                crate::session::store::ListPage::default()
             }
         };
         let local_offset = self.local_offset;
         let live_id = self.live_session_id.as_str();
         let rows: Vec<SessionRow> = page
-            .sessions
+            .into_sessions()
             .into_iter()
             .filter(|info| info.session_id != live_id)
             .map(|info| SessionRow::from_info(info, local_offset))
@@ -372,7 +369,7 @@ fn match_in_scope(
         .list_paged(None, all)
         .map_err(|e| format!("list sessions: {e:#}"))?;
     let matches: Vec<String> = page
-        .sessions
+        .into_sessions()
         .into_iter()
         .map(|s| s.session_id)
         .filter(|id| id != live_id && id.starts_with(prefix))

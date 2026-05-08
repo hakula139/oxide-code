@@ -33,10 +33,32 @@ pub(crate) struct SessionStore {
 
 /// A paginated slice of [`Self::list_paged`]'s output. `total` is the count before truncation,
 /// so renderers can display `... and N more` footers without re-walking the directory.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ListPage {
-    pub(crate) sessions: Vec<SessionInfo>,
-    pub(crate) total: usize,
+    sessions: Vec<SessionInfo>,
+    total: usize,
+}
+
+impl ListPage {
+    pub(crate) fn new(sessions: Vec<SessionInfo>, total: usize) -> Self {
+        debug_assert!(
+            total >= sessions.len(),
+            "ListPage total must include the materialised sessions",
+        );
+        Self { sessions, total }
+    }
+
+    pub(crate) fn sessions(&self) -> &[SessionInfo] {
+        &self.sessions
+    }
+
+    pub(crate) fn into_sessions(self) -> Vec<SessionInfo> {
+        self.sessions
+    }
+
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
 }
 
 impl SessionStore {
@@ -109,12 +131,12 @@ impl SessionStore {
     /// List sessions for the current project, most recently active first. Wrapper around
     /// [`Self::list_paged`] for callers that don't need a cap.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, false)?.sessions)
+        Ok(self.list_paged(None, false)?.into_sessions())
     }
 
     /// List sessions across every project subdirectory. Wrapper around [`Self::list_paged`].
     pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
-        Ok(self.list_paged(None, true)?.sessions)
+        Ok(self.list_paged(None, true)?.into_sessions())
     }
 
     /// List the `limit` most-recently-active sessions and report the total available so callers
@@ -142,7 +164,7 @@ impl SessionStore {
                 }
             })
             .collect();
-        Ok(ListPage { sessions, total })
+        Ok(ListPage::new(sessions, total))
     }
 
     /// Cheap pre-listing scan across every project subdirectory — returns
@@ -1430,11 +1452,11 @@ mod tests {
         seed_n_sessions(&store, 10);
 
         let page = store.list_paged(Some(3), false).unwrap();
-        assert_eq!(page.sessions.len(), 3, "cap honored");
-        assert_eq!(page.total, 10, "total reflects pre-cap count");
+        assert_eq!(page.sessions().len(), 3, "cap honored");
+        assert_eq!(page.total(), 10, "total reflects pre-cap count");
         // mtime descends in seed order; newest three are the last three created.
-        assert_eq!(page.sessions[0].session_id, "session-0009");
-        assert_eq!(page.sessions[2].session_id, "session-0007");
+        assert_eq!(page.sessions()[0].session_id, "session-0009");
+        assert_eq!(page.sessions()[2].session_id, "session-0007");
     }
 
     #[tokio::test]
@@ -1444,8 +1466,8 @@ mod tests {
         seed_n_sessions(&store, 4);
 
         let page = store.list_paged(None, false).unwrap();
-        assert_eq!(page.sessions.len(), 4);
-        assert_eq!(page.total, 4, "no cap → total equals returned len");
+        assert_eq!(page.sessions().len(), 4);
+        assert_eq!(page.total(), 4, "no cap → total equals returned len");
     }
 
     #[tokio::test]
@@ -1458,8 +1480,8 @@ mod tests {
         seed_n_sessions(&store, 3);
 
         let page = store.list_paged(Some(0), false).unwrap();
-        assert!(page.sessions.is_empty());
-        assert_eq!(page.total, 3, "total still reflects what's on disk");
+        assert!(page.sessions().is_empty());
+        assert_eq!(page.total(), 3, "total still reflects what's on disk");
     }
 
     // ── list_all ──

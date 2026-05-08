@@ -52,7 +52,7 @@ fn render_sessions(
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> Result<()> {
-    let sessions = page.sessions.as_slice();
+    let sessions = page.sessions();
     if sessions.is_empty() {
         let scope = if all { "" } else { " in this project" };
         writeln!(out, "No sessions found{scope}.").context("write list output")?;
@@ -130,7 +130,7 @@ fn render_sessions(
                 .context("write list row")?;
         }
     }
-    let hidden = page.total.saturating_sub(sessions.len());
+    let hidden = page.total().saturating_sub(sessions.len());
     if hidden > 0 {
         writeln!(
             out,
@@ -161,11 +161,11 @@ mod tests {
 
     fn page(sessions: Vec<SessionInfo>) -> ListPage {
         let total = sessions.len();
-        ListPage { sessions, total }
+        ListPage::new(sessions, total)
     }
 
     fn page_with_total(sessions: Vec<SessionInfo>, total: usize) -> ListPage {
-        ListPage { sessions, total }
+        ListPage::new(sessions, total)
     }
 
     fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
