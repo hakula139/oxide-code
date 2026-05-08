@@ -84,7 +84,16 @@ async fn generate_and_record(
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
     let outcome = session.append_ai_title(title.clone()).await;
-    sink.session_write_error(outcome.failure.as_deref());
+    if let Some(failure) = outcome.failure.as_deref() {
+        if session.is_actor_alive() {
+            sink.session_write_error(Some(failure));
+        } else {
+            // Session was finalized (e.g., /clear or /resume) before this background task
+            // returned. Warn-log; surfacing into the next session's UI would mislead the user.
+            tracing::warn!("title-gen append after session shutdown: {failure}");
+            return Ok(());
+        }
+    }
 
     _ = sink.send(AgentEvent::SessionTitleUpdated {
         session_id: session.session_id().to_owned(),
@@ -360,9 +369,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_write_failure_emits_error_and_title_events() {
-        // A write failure surfaces an Error to the sink but must not
-        // skip the SessionTitleUpdated event — UI keeps updating.
+    async fn generate_and_record_post_finalize_actor_gone_is_silent() {
+        // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
+        // background task returned must not surface "Session write failed" into the UI of the
+        // *next* session. Warn-log only; no Error and no title event.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -383,16 +393,14 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed"))),
-            "Error event expected for write failure: {events:?}",
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "post-finalize actor-gone must not surface as Error: {events:?}",
         );
         assert!(
-            events
+            !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix auth")),
-            "SessionTitleUpdated expected even after write failure: {events:?}",
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+            "post-finalize must skip SessionTitleUpdated — title belongs to the dead session: {events:?}",
         );
     }
 

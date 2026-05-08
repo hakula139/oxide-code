@@ -101,6 +101,13 @@ impl SessionHandle {
         &self.session_id
     }
 
+    /// `true` once the actor has shut down (after `finalize` / `roll` / `roll_into`). Lets
+    /// background best-effort tasks (title generator) suppress actor-gone failures that follow a
+    /// session swap — those aren't real I/O errors the user needs to see.
+    pub(crate) fn is_actor_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
     /// Record a conversation message. Returns after the batch flush completes.
     pub(crate) async fn record_message(&self, msg: Message) -> RecordOutcome {
         let (ack, rx) = oneshot::channel();
