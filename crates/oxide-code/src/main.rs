@@ -402,22 +402,29 @@ async fn agent_loop_task(
                     Ok(outcome) => {
                         let new_id = session.session_id().to_owned();
                         client.set_session_id(new_id.clone());
-                        // Move once: keep the agent loop's local `messages` in sync with the
-                        // resumed transcript, then ship the same vec into the event.
+                        // The event takes the canonical owned vec; the agent loop keeps a clone so
+                        // subsequent turns continue from the resumed transcript.
+                        let messages_for_event = outcome.messages.clone();
                         messages = outcome.messages;
                         if let Err(e) = sink.send(AgentEvent::SessionResumed {
                             id: new_id,
                             title: outcome.title,
-                            messages: messages.clone(),
+                            messages: messages_for_event,
                             tool_metadata: outcome.tool_result_metadata,
                         }) {
                             // Channel closed mid-resume leaves the TUI on the OLD chat. Surface
                             // at error level so the log file pinpoints the desync.
                             tracing::error!("session-resumed event dropped: {e}");
                         }
-                        // Emit the OLD-session finalize failure AFTER SessionResumed so the
-                        // chat-clear in `apply_session_resumed` doesn't wipe it.
-                        sink.session_write_error(outcome.finalize_failure.as_deref());
+                        // Surface the OLD-session finalize failure AFTER SessionResumed so the
+                        // chat-clear in `apply_session_resumed` doesn't wipe it. Phrase as a
+                        // distinct event (not session_write_error, which reads as a *current*
+                        // writer fault).
+                        if let Some(failure) = outcome.finalize_failure.as_deref() {
+                            _ = sink.send(AgentEvent::Error(format!(
+                                "Previous session failed to finalize cleanly: {failure}",
+                            )));
+                        }
                     }
                     Err(e) => {
                         _ = sink.send(AgentEvent::Error(format!(
