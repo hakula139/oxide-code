@@ -21,8 +21,20 @@ pub(crate) trait SearchableItem {
     /// project, etc).
     fn haystack(&self) -> Cow<'_, str>;
 
-    /// Paint the row body to the right of the cursor gutter (owned by the primitive).
-    fn render_row(&self, width: u16, is_cursor: bool, theme: &Theme) -> Line<'static>;
+    /// Paint the item body to the right of the cursor gutter (owned by the primitive). Multi-line
+    /// returns let layouts split across rows (e.g. title row + dim metadata row); the primitive
+    /// places the gutter marker on the first line and pads subsequent lines with blanks for
+    /// alignment. Length must equal [`Self::row_height`] for every instance.
+    fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>>;
+
+    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance — the
+    /// list primitive treats this as a layout invariant when sizing its viewport.
+    fn row_height() -> u16
+    where
+        Self: Sized,
+    {
+        1
+    }
 }
 
 // ── SearchableList ──
@@ -202,7 +214,8 @@ impl<T: SearchableItem> SearchableList<T> {
 
     /// Total rows the list occupies. Caller adds footer / borders.
     pub(crate) fn height(&self, _width: u16) -> u16 {
-        self.chrome_height().saturating_add(self.viewport_height)
+        self.chrome_height()
+            .saturating_add(self.viewport_height.saturating_mul(T::row_height()))
     }
 
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -232,7 +245,7 @@ impl<T: SearchableItem> SearchableList<T> {
             let is_cursor = vi == self.cursor;
             let item_idx = self.visible[vi];
             let item = &self.items[item_idx];
-            lines.push(Self::render_row(item, is_cursor, row_width, theme));
+            Self::push_item_lines(&mut lines, item, is_cursor, row_width, theme);
         }
 
         if self.visible.is_empty() && !self.query.is_empty() {
@@ -285,20 +298,31 @@ impl<T: SearchableItem> SearchableList<T> {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 
-    fn render_row(item: &T, is_cursor: bool, body_width: u16, theme: &Theme) -> Line<'static> {
-        let cursor_span = Span::styled(
-            if is_cursor {
-                CURSOR_MARKER.to_owned()
+    fn push_item_lines(
+        lines: &mut Vec<Line<'static>>,
+        item: &T,
+        is_cursor: bool,
+        body_width: u16,
+        theme: &Theme,
+    ) {
+        let blank_gutter = " ".repeat(usize::from(CURSOR_MARKER_WIDTH));
+        let cursor_marker = if is_cursor {
+            CURSOR_MARKER.to_owned()
+        } else {
+            blank_gutter.clone()
+        };
+        let body_lines = item.render(body_width, is_cursor, theme);
+        for (idx, body) in body_lines.into_iter().enumerate() {
+            let gutter = if idx == 0 {
+                cursor_marker.clone()
             } else {
-                " ".repeat(usize::from(CURSOR_MARKER_WIDTH))
-            },
-            theme.accent(),
-        );
-        let body = item.render_row(body_width, is_cursor, theme);
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(1 + body.spans.len());
-        spans.push(cursor_span);
-        spans.extend(body.spans);
-        Line::from(spans)
+                blank_gutter.clone()
+            };
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(1 + body.spans.len());
+            spans.push(Span::styled(gutter, theme.accent()));
+            spans.extend(body.spans);
+            lines.push(Line::from(spans));
+        }
     }
 }
 
@@ -324,9 +348,9 @@ mod tests {
             Cow::Borrowed(self.haystack)
         }
 
-        fn render_row(&self, width: u16, _is_cursor: bool, theme: &Theme) -> Line<'static> {
+        fn render(&self, width: u16, _is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
             let trimmed = truncate_to_width(self.haystack, usize::from(width));
-            Line::from(Span::styled(trimmed, theme.text()))
+            vec![Line::from(Span::styled(trimmed, theme.text()))]
         }
     }
 

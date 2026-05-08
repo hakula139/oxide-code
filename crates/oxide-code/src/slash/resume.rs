@@ -11,7 +11,6 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use time::UtcOffset;
-use unicode_width::UnicodeWidthStr;
 
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
@@ -29,52 +28,51 @@ use crate::util::text::truncate_to_width;
 const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str =
     "Pick a session to resume in place. Tab toggles current-project ↔ all projects.";
-const VIEWPORT_HEIGHT: u16 = 12;
+const VIEWPORT_HEIGHT: u16 = 6;
 const UNTITLED_MARKER: &str = "(untitled)";
 const ID_WIDTH: usize = 8;
-/// Column count for the `YYYY-MM-DD HH:MM` slot.
-const TIMESTAMP_WIDTH: usize = 16;
-const COLUMN_GAP: usize = 2;
-const FIXED_PREFIX_WIDTH: usize = ID_WIDTH + COLUMN_GAP + TIMESTAMP_WIDTH + COLUMN_GAP;
-/// Em dash + space (display width 2, not byte width).
-const SEPARATOR: &str = "— ";
-const SEPARATOR_WIDTH: usize = 2;
-/// Cap on the rendered project column so a deep path can't starve the title column.
-const PROJECT_CAP: usize = 32;
+/// Each row paints a title line + a metadata line (Claude Code-style two-line layout).
+const ROW_HEIGHT: u16 = 2;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
+/// Visual separator between metadata segments.
+const META_SEPARATOR: &str = " · ";
 
 // ── SessionRow ──
 
 /// Row payload for the resume picker — display strings + a search haystack.
 struct SessionRow {
     session_id: String,
-    last_active: String,
+    last_active_at: time::OffsetDateTime,
+    local_offset: UtcOffset,
     title: String,
-    project: String,
+    /// `Some` only when the picker scope is widened to all projects — the metadata column then
+    /// surfaces the project path so the user can disambiguate. Scoped picks already share a
+    /// project, so painting it would be noise.
+    project: Option<String>,
     haystack: String,
 }
 
 impl SessionRow {
-    fn from_info(info: SessionInfo, local_offset: UtcOffset) -> Self {
-        let last_active = info
-            .last_active_at
-            .to_offset(local_offset)
-            .format(time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]"
-            ))
-            .expect("YYYY-MM-DD HH:MM is always representable for OffsetDateTime");
+    fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
         let title = info
             .title
             .as_ref()
             .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
-        let project = tildify(Path::new(&info.cwd));
-        let haystack = format!("{} {} {}", info.session_id, title, project);
+        let project_path = tildify(Path::new(&info.cwd));
+        // Project name participates in search only when the user can see it; in scoped mode every
+        // row shares the same project, so substring-matching against it just confuses the filter.
+        let haystack = if show_project {
+            format!("{} {} {}", info.session_id, title, project_path)
+        } else {
+            format!("{} {}", info.session_id, title)
+        };
         Self {
             session_id: info.session_id,
-            last_active,
+            last_active_at: info.last_active_at,
+            local_offset,
             title,
-            project,
+            project: show_project.then_some(project_path),
             haystack,
         }
     }
@@ -89,37 +87,53 @@ impl SearchableItem for SessionRow {
         Cow::Borrowed(&self.haystack)
     }
 
-    fn render_row(&self, width: u16, is_cursor: bool, theme: &Theme) -> Line<'static> {
-        let body_style = if is_cursor { theme.text() } else { theme.dim() };
-        let accent_style = if is_cursor {
-            theme.accent()
+    fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
+        let title_style = if is_cursor {
+            theme.accent().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
-            theme.dim()
+            theme.text()
         };
+        let title_budget = usize::from(width).max(TITLE_FLOOR);
+        let title_line = Line::from(Span::styled(
+            truncate_to_width(&self.title, title_budget),
+            title_style,
+        ));
 
-        // Title budget = remainder after fixed prefix + project; clamped to TITLE_FLOOR so
-        // narrow terminals still show a label.
-        let total = usize::from(width);
-        let project_width = UnicodeWidthStr::width(self.project.as_str()).min(PROJECT_CAP);
-        let title_budget = total
-            .saturating_sub(FIXED_PREFIX_WIDTH)
-            .saturating_sub(COLUMN_GAP + SEPARATOR_WIDTH + project_width)
-            .max(TITLE_FLOOR);
-        let title = truncate_to_width(&self.title, title_budget);
-        let project = truncate_to_width(&self.project, project_width);
+        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
+        let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
+        let mut meta = format!("{} · {}", self.id_prefix(), when);
+        if let Some(project) = self.project.as_deref() {
+            meta.push_str(META_SEPARATOR);
+            meta.push_str(project);
+        }
+        let meta_line = Line::from(Span::styled(
+            truncate_to_width(&meta, usize::from(width)),
+            theme.dim(),
+        ));
 
-        Line::from(vec![
-            Span::styled(format!("{:<ID_WIDTH$}", self.id_prefix()), accent_style),
-            Span::styled(" ".repeat(COLUMN_GAP), body_style),
-            Span::styled(
-                format!("{:<TIMESTAMP_WIDTH$}", self.last_active),
-                body_style,
-            ),
-            Span::styled(" ".repeat(COLUMN_GAP), body_style),
-            Span::styled(title, body_style),
-            Span::styled(" ".repeat(COLUMN_GAP), theme.dim()),
-            Span::styled(format!("{SEPARATOR}{project}"), theme.dim()),
-        ])
+        vec![title_line, meta_line]
+    }
+
+    fn row_height() -> u16 {
+        ROW_HEIGHT
+    }
+}
+
+/// Coarse-grain "N seconds/minutes/hours/days ago"; falls back to ISO date for older sessions so
+/// "327 days ago" doesn't displace a more recognizable absolute reference.
+fn format_relative_time(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> String {
+    let secs = (now - ts).whole_seconds();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else if secs < 30 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        ts.format(time::macros::format_description!("[year]-[month]-[day]"))
+            .unwrap_or_else(|_| "unknown".to_owned())
     }
 }
 
@@ -170,11 +184,12 @@ impl ResumePicker {
         };
         let local_offset = self.local_offset;
         let live_id = self.live_session_id.as_str();
+        let show_project = self.all;
         let rows: Vec<SessionRow> = page
             .into_sessions()
             .into_iter()
             .filter(|info| info.session_id != live_id)
-            .map(|info| SessionRow::from_info(info, local_offset))
+            .map(|info| SessionRow::from_info(info, local_offset, show_project))
             .collect();
         self.total = rows.len();
         self.list.replace_items(rows);
@@ -451,7 +466,7 @@ mod tests {
             None,
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let row = SessionRow::from_info(absent, UtcOffset::UTC);
+        let row = SessionRow::from_info(absent, UtcOffset::UTC, true);
         assert_eq!(row.id_prefix().len(), ID_WIDTH);
         assert_eq!(row.title, UNTITLED_MARKER);
         assert!(row.haystack.contains(&row.session_id));
@@ -463,9 +478,84 @@ mod tests {
             Some("Fix auth bug"),
             datetime!(2026-04-18 09:00:00 UTC),
         );
-        let row = SessionRow::from_info(present, UtcOffset::UTC);
+        let row = SessionRow::from_info(present, UtcOffset::UTC, true);
         assert_eq!(row.title, "Fix auth bug");
         assert!(row.haystack.contains("Fix auth bug"));
+    }
+
+    #[test]
+    fn from_info_in_scoped_mode_omits_project_from_haystack_and_metadata() {
+        // scope=current means every visible row shares the project — surfacing it would be
+        // visual noise and would confuse the substring filter.
+        let info = raw_session_info(
+            stamped_id(0xab),
+            "/work/oxide",
+            Some("Fix auth"),
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(info, UtcOffset::UTC, false);
+        assert!(
+            row.project.is_none(),
+            "scoped rows must not carry a project"
+        );
+        assert!(
+            !row.haystack.contains("/work/oxide"),
+            "scoped haystack must not contain the project path: {}",
+            row.haystack,
+        );
+    }
+
+    // ── render ──
+
+    #[test]
+    fn render_paints_title_then_metadata_with_id_prefix_and_relative_time() {
+        let info = raw_session_info(
+            stamped_id(0xab),
+            "/work/oxide",
+            Some("Fix auth"),
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(info, UtcOffset::UTC, true);
+        let theme = Theme::default();
+        let lines = row.render(60, false, &theme);
+        assert_eq!(lines.len(), 2, "row must paint two terminal rows");
+        let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let meta_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(title_text.contains("Fix auth"), "title row: {title_text}");
+        assert!(meta_text.contains(row.id_prefix()), "meta row: {meta_text}");
+        assert!(
+            meta_text.contains(" ago") || meta_text.contains('-'),
+            "meta row must carry a relative time or ISO date: {meta_text}",
+        );
+    }
+
+    // ── format_relative_time ──
+
+    #[test]
+    fn format_relative_time_buckets_into_seconds_minutes_hours_days_then_iso_date() {
+        let now = datetime!(2026-05-08 12:00:00 UTC);
+        assert_eq!(
+            format_relative_time(now - time::Duration::seconds(3), now),
+            "3s ago"
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::minutes(2), now),
+            "2m ago"
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::hours(5), now),
+            "5h ago"
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::days(3), now),
+            "3d ago"
+        );
+        // ≥ 30 days falls back to the absolute ISO date.
+        let old = format_relative_time(now - time::Duration::days(60), now);
+        assert!(
+            old.starts_with("2026-") && old.contains('-'),
+            "30+ days falls back to ISO date: {old}",
+        );
     }
 
     // ── ResumePicker ──
