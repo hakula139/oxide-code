@@ -31,8 +31,7 @@ pub(super) enum SessionCmd {
         title: String,
         ack: oneshot::Sender<Outcome>,
     },
-    /// User-supplied title from `/rename`. Latches `manual_title_set` so any in-flight
-    /// `AppendAiTitle` becomes a silent no-op.
+    /// User-supplied title from `/rename`. Latches `manual_title_set` to suppress AI titles.
     SetManualTitle {
         title: String,
         ack: oneshot::Sender<Outcome>,
@@ -131,9 +130,7 @@ fn absorb(
             }
         }
         SessionCmd::AppendAiTitle { title, ack } => {
-            // Manual title wins. Latched at /rename time so a slow Haiku response can't overwrite
-            // it; the caller (title generator) also pre-checks the flag, but this defends against
-            // a flag flip after that pre-check.
+            // Defends against a manual-title flip between the title generator's pre-check and here.
             if state.manual_title_set() {
                 _ = ack.send(Outcome { failure: None });
                 return;
@@ -334,9 +331,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_set_manual_title_persists_user_provided_entry_and_blocks_subsequent_ai_title() {
-        // Two-prong assertion: the manual entry hits disk with the right source, AND a later
-        // AppendAiTitle on the same session is silently dropped (no second title entry, no
-        // overwrite). Pins both halves of the manual-title-wins contract in one fixture.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -362,8 +356,6 @@ mod tests {
             .lines()
             .filter(|l| l.contains(r#""type":"title""#))
             .collect();
-        // First-prompt title (from queue_message_entries) + the manual one. The AI append must
-        // not have produced a third title entry.
         assert_eq!(
             title_lines.len(),
             2,

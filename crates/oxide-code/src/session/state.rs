@@ -33,8 +33,7 @@ pub(super) struct SessionState {
     message_count: u32,
     /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
-    /// Latched on `/rename`. Suppresses any later [`SessionCmd::AppendAiTitle`] absorb so a slow
-    /// Haiku response cannot overwrite the user's manual title on disk.
+    /// Latched on `/rename`. Lets the `AppendAiTitle` absorb arm drop a late Haiku response.
     manual_title_set: bool,
     finished: bool,
 }

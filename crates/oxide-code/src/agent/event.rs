@@ -83,8 +83,7 @@ pub(crate) enum UserAction {
     Resume {
         session_id: String,
     },
-    /// `/rename <title>` or rename-modal submission: set the session's title manually. Suppresses
-    /// AI title generation for the rest of the session.
+    /// Manual title from `/rename` or its modal. Suppresses AI title generation for this session.
     Rename {
         title: String,
     },

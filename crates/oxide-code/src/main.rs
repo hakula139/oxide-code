@@ -490,8 +490,6 @@ fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
     )
 }
 
-/// Persists a manual title and refreshes the chrome. Latches `manual_title_set` on the actor so
-/// any in-flight Haiku response is silently dropped instead of overwriting the user's pick.
 async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: String) {
     let outcome = session.set_manual_title(title.clone()).await;
     sink.session_write_error(outcome.failure.as_deref());
@@ -502,7 +500,6 @@ async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: Stri
         session_id: session.session_id().to_owned(),
         title,
     }) {
-        // Same surfacing rationale as the SessionResumed / ConfigChanged dropped-event errors.
         tracing::error!("session-title-updated event dropped: {e}");
     }
 }

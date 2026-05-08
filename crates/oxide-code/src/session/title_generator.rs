@@ -83,9 +83,8 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
-    // The user may have run `/rename` while Haiku was thinking. The actor also drops a late
-    // AppendAiTitle for the same reason, but checking here saves the channel hop and prevents the
-    // status bar from briefly flashing the AI title.
+    // Skip if the user ran `/rename` while Haiku was thinking; otherwise the status bar would
+    // briefly flash the AI title before the actor drops it.
     if session.manual_title_set() {
         return Ok(());
     }
@@ -312,10 +311,6 @@ mod tests {
 
     #[tokio::test]
     async fn generate_and_record_skips_emit_when_manual_title_was_set_during_haiku_call() {
-        // Race window the plan calls out: user runs `/rename` while Haiku is still computing.
-        // The pre-check before `append_ai_title` must catch the latch and bail without emitting
-        // SessionTitleUpdated — otherwise the status bar would briefly show the AI title and
-        // overwrite the user's manual pick.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -328,8 +323,6 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = prepared_session(dir.path()).await;
-        // Latch the flag *before* generate_and_record runs — simulates `/rename` having been
-        // dispatched while the Haiku request was in flight.
         session.set_manual_title("User wins".to_owned()).await;
 
         let client = title_client(server.uri());
