@@ -7,7 +7,7 @@
 
 # Text hierarchy (M2 dark emphasis: 87% / 60% / 38% white)
 text = "#dedede"
-muted = "#999999"
+muted = "#c5c5c5"
 dim = "#616161"
 
 # Surfaces
