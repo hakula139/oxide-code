@@ -116,9 +116,15 @@ impl<T: SearchableItem> SearchableList<T> {
         self.cursor
     }
 
-    #[cfg(test)]
+    /// Number of rows currently passing the substring filter — for footers that show
+    /// "X / Y matching".
     pub(crate) fn visible_len(&self) -> usize {
         self.visible.len()
+    }
+
+    /// `true` when the user has typed a filter that excludes some rows.
+    pub(crate) fn is_filtered(&self) -> bool {
+        !self.query.is_empty()
     }
 
     pub(crate) fn select_next(&mut self) {

@@ -82,6 +82,12 @@ impl ModalStack {
         self.stack.push(modal);
     }
 
+    /// Drop every modal on the stack — used when a session swap discards in-flight UI state and
+    /// the picker / nested overlays are no longer meaningful in the new session.
+    pub(crate) fn clear(&mut self) {
+        self.stack.clear();
+    }
+
     /// Height above the input — top modal's body plus a one-row separator.
     pub(crate) fn height(&self, width: u16) -> u16 {
         self.stack

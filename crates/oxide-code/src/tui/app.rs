@@ -513,6 +513,9 @@ impl App {
             .load_history(messages, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
         self.pending_prompts.clear();
+        // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay (e.g.,
+        // a "confirm switch" prompt above the picker) would otherwise carry across the swap.
+        self.modals.clear();
         self.sync_input_queue_hint();
         self.finalize_idle();
     }

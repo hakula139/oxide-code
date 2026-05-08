@@ -143,6 +143,9 @@ pub(super) struct ResumePicker {
     live_session_id: String,
     /// Total rows in the current scope; refreshed on every reload (Tab or open).
     total: usize,
+    /// Last reload's failure message, surfaced inline so a permission / IO error doesn't
+    /// disguise itself as "no sessions found". Cleared on the next successful reload.
+    load_error: Option<String>,
 }
 
 impl ResumePicker {
@@ -156,19 +159,27 @@ impl ResumePicker {
             local_offset,
             live_session_id,
             total: 0,
+            load_error: None,
         };
         picker.reload();
         picker
     }
 
     fn reload(&mut self) {
-        let page = self.store.list_paged(None, self.all).unwrap_or_else(|err| {
-            tracing::warn!("resume picker: list_paged failed: {err:#}");
-            crate::session::store::ListPage {
-                sessions: Vec::new(),
-                total: 0,
+        let page = match self.store.list_paged(None, self.all) {
+            Ok(p) => {
+                self.load_error = None;
+                p
             }
-        });
+            Err(err) => {
+                tracing::warn!("resume picker: list_paged failed: {err:#}");
+                self.load_error = Some(format!("failed to load sessions: {err:#}"));
+                crate::session::store::ListPage {
+                    sessions: Vec::new(),
+                    total: 0,
+                }
+            }
+        };
         let local_offset = self.local_offset;
         let live_id = self.live_session_id.as_str();
         let rows: Vec<SessionRow> = page
@@ -177,7 +188,6 @@ impl ResumePicker {
             .filter(|info| info.session_id != live_id)
             .map(|info| SessionRow::from_info(info, local_offset))
             .collect();
-        // `total` reflects post-filter rows so the footer matches what the user sees.
         self.total = rows.len();
         self.list.replace_items(rows);
     }
@@ -187,7 +197,9 @@ impl ResumePicker {
             Some(row) => ModalKey::Submitted(ModalAction::User(UserAction::Resume {
                 session_id: row.session_id.clone(),
             })),
-            None => ModalKey::Cancelled,
+            // Stay open so the user can Tab the scope or Esc out — silent dismissal hides why
+            // nothing happened.
+            None => ModalKey::Consumed,
         }
     }
 
@@ -197,11 +209,20 @@ impl ResumePicker {
         } else {
             "current project"
         };
-        format!(
-            "{total} session{plural} · scope: {scope} · Tab to toggle · Enter to resume · Esc to cancel",
-            total = self.total,
-            plural = if self.total == 1 { "" } else { "s" },
-        )
+        let count = if self.list.is_filtered() {
+            format!(
+                "{matched} / {total} matching",
+                matched = self.list.visible_len(),
+                total = self.total,
+            )
+        } else {
+            format!(
+                "{total} session{plural}",
+                total = self.total,
+                plural = if self.total == 1 { "" } else { "s" },
+            )
+        };
+        format!("{count} · scope: {scope} · Tab to toggle · Enter to resume · Esc to cancel")
     }
 }
 
@@ -227,7 +248,13 @@ impl Modal for ResumePicker {
                 width: area.width,
                 height: 1,
             };
-            let footer = Line::from(Span::styled(self.footer_text(), theme.dim()));
+            // Load error owns the footer when present — failure must not silently hide behind the
+            // generic "0 sessions" footer.
+            let footer = if let Some(err) = &self.load_error {
+                Line::from(Span::styled(format!("! {err}"), theme.error()))
+            } else {
+                Line::from(Span::styled(self.footer_text(), theme.dim()))
+            };
             frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
         }
     }
@@ -325,7 +352,8 @@ impl SlashCommand for ResumeCmd {
 
 /// Match `prefix` against current-project sessions first; widen to all projects on no match so a
 /// session from another cwd still resolves by id-prefix. Excludes the live session id — resuming
-/// yourself is a no-op (and would race the open append-writer).
+/// yourself is a no-op (and would race the open append-writer). Session ids are hex, so the
+/// `starts_with` match is implicitly case-sensitive but in practice that's invisible.
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
     let scoped = match_in_scope(store, prefix, live_id, false)?;
     if let Some(id) = scoped {
@@ -344,27 +372,21 @@ fn match_in_scope(
     let page = store
         .list_paged(None, all)
         .map_err(|e| format!("list sessions: {e:#}"))?;
-    let mut matches = page
+    let matches: Vec<String> = page
         .sessions
         .into_iter()
         .map(|s| s.session_id)
-        .filter(|id| id != live_id && id.starts_with(prefix));
-    let first = matches.next();
-    let second = matches.next();
-    match (first, second) {
-        (None, _) => Ok(None),
-        (Some(only), None) => Ok(Some(only)),
-        (Some(a), Some(b)) => {
-            let rest: Vec<_> = matches.collect();
-            let preview = std::iter::once(a)
-                .chain(std::iter::once(b))
-                .chain(rest.iter().cloned())
-                .map(|id| id.get(..ID_WIDTH).unwrap_or(&id).to_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
+        .filter(|id| id != live_id && id.starts_with(prefix))
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        n => {
+            // Reuse the shared 5-id preview formatter so the typed-arg ambiguity message stays
+            // in lockstep with `ox -c <prefix>`.
+            let preview = crate::session::resolver::format_session_id_preview(matches);
             Err(format!(
-                "ambiguous prefix `{prefix}` matches {} sessions: {preview}",
-                2 + rest.len(),
+                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
             ))
         }
     }
@@ -510,12 +532,12 @@ mod tests {
     }
 
     #[test]
-    fn enter_with_no_rows_cancels() {
+    fn enter_with_no_rows_keeps_picker_open() {
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert!(matches!(
             picker.handle_key(&key(KeyCode::Enter)),
-            ModalKey::Cancelled,
+            ModalKey::Consumed,
         ));
     }
 
@@ -968,6 +990,61 @@ mod tests {
             picker_two
                 .footer_text()
                 .starts_with("2 sessions · scope: current project")
+        );
+    }
+
+    #[test]
+    fn footer_text_shows_filtered_over_total_when_query_active() {
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [
+            (0x11_u8, "auth fix"),
+            (0x22, "ui tweak"),
+            (0x33, "ai title"),
+        ] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "fix".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            picker.footer_text().starts_with("1 / 3 matching · scope:"),
+            "filter `fix` should narrow to one title but keep `total` visible: {}",
+            picker.footer_text(),
+        );
+    }
+
+    // ── load_error surfacing ──
+
+    #[test]
+    fn render_surfaces_load_error_in_footer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (_dir, store) = isolated_store();
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        picker.load_error = Some("permission denied".to_owned());
+
+        let theme = Theme::default();
+        let h = picker.height(60);
+        let mut terminal = Terminal::new(TestBackend::new(60, h)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, h), &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let dump: String = (0..h)
+            .flat_map(|y| (0..60_u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+            .collect();
+        assert!(
+            dump.contains("permission denied"),
+            "load error should appear inline: {dump}"
         );
     }
 }
