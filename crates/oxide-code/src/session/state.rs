@@ -607,36 +607,20 @@ mod tests {
     // ── parse_git_branch ──
 
     #[test]
-    fn parse_git_branch_strips_trailing_newline_on_happy_path() {
-        // git appends a newline; the metadata column would render it as a literal `\n` otherwise.
+    fn parse_git_branch_keeps_branch_names_and_drops_everything_else() {
+        // Happy path: trim git's trailing newline so the metadata column doesn't render `\n`.
         assert_eq!(
             parse_git_branch(true, b"feat/login\n"),
             Some("feat/login".to_owned())
         );
-    }
-
-    #[test]
-    fn parse_git_branch_failed_status_returns_none() {
-        // Non-zero exit (`fatal: not a git repository`, missing git, etc.) collapses to `None`.
+        // Non-zero exit (`fatal: not a git repository`, missing git, ...) collapses to None.
         assert_eq!(parse_git_branch(false, b"main\n"), None);
-    }
-
-    #[test]
-    fn parse_git_branch_invalid_utf8_returns_none() {
-        // git output should always be UTF-8, but ref names with bad bytes shouldn't panic.
+        // Non-UTF-8 stdout collapses to None instead of panicking.
         assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
-    }
-
-    #[test]
-    fn parse_git_branch_empty_output_returns_none() {
-        // Defensive: a successful exit with empty stdout shouldn't render `· `.
+        // Empty / whitespace-only stdout would render `· ` — drop it.
         assert_eq!(parse_git_branch(true, b""), None);
         assert_eq!(parse_git_branch(true, b"   \n"), None);
-    }
-
-    #[test]
-    fn parse_git_branch_detached_head_collapses_to_none() {
-        // `HEAD` is the rev-parse output for detached HEAD — useless in the picker, so drop it.
+        // `HEAD` is rev-parse's detached-HEAD output — useless in the picker.
         assert_eq!(parse_git_branch(true, b"HEAD\n"), None);
     }
 

@@ -327,6 +327,9 @@ impl<T: SearchableItem> SearchableList<T> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
 
     // ── Test fixture ──
@@ -527,10 +530,7 @@ mod tests {
     // ── render ──
 
     #[test]
-    fn render_runs_at_minimum_width_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
+    fn render_at_minimum_width_does_not_panic() {
         let l = list(vec![FakeItem::new("a long-ish entry"), FakeItem::new("b")]);
         let theme = Theme::default();
         let h = l.height(20);
@@ -541,64 +541,40 @@ mod tests {
     }
 
     #[test]
-    fn render_anchors_terminal_cursor_after_prompt_when_query_is_empty() {
-        // Regression: bare picker used to paint a `▏` glyph after the placeholder text, which left
-        // the visual cursor at the wrong column AND with a non-blinking shape. Now we delegate to
-        // `frame.set_cursor_position` so the terminal-native cursor sits at the prompt column.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
+    fn render_places_cursor_at_prompt_plus_visible_query_width() {
+        // Empty query → cursor sits at the prompt column with no `▏` glyph painted into the buffer
+        // (the search row delegates to `frame.set_cursor_position`, not a fake painted cursor).
+        // After `set_query("ab")` the cursor advances by the display width of the visible query.
+        let theme = Theme::default();
+        let h = list(vec![FakeItem::new("alpha")]).height(40);
+        let row_y = TITLE_ROW_HEIGHT + SECTION_GAP;
 
         let l = list(vec![FakeItem::new("alpha")]);
-        let theme = Theme::default();
-        let h = l.height(40);
         let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
         terminal
             .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
             .expect("render must not panic");
-        let (cx, cy) = terminal.get_cursor_position().unwrap().into();
-        assert_eq!(
-            (cx, cy),
-            (SEARCH_PROMPT_WIDTH, TITLE_ROW_HEIGHT + SECTION_GAP),
-            "cursor sits at the prompt column on the search row when query is empty",
-        );
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (SEARCH_PROMPT_WIDTH, row_y));
         let buf = terminal.backend().buffer();
         let dump: String = (0..h)
             .flat_map(|y| (0..40).map(move |x| (x, y)))
             .map(|(x, y)| buf[(x, y)].symbol().to_owned())
             .collect();
-        assert!(
-            !dump.contains('▏'),
-            "no painted cursor glyph should remain in the buffer: {dump}",
-        );
-    }
-
-    #[test]
-    fn render_anchors_terminal_cursor_past_visible_query_when_typing() {
-        // Cursor must follow the typed query — sitting at prompt + display-width(query).
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
+        assert!(!dump.contains('▏'), "no painted cursor glyph: {dump}");
 
         let mut l = list(vec![FakeItem::new("alpha")]);
         l.set_query("ab".to_owned());
-        let theme = Theme::default();
-        let h = l.height(40);
         let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
         terminal
             .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
             .expect("render must not panic");
-        let (cx, cy) = terminal.get_cursor_position().unwrap().into();
-        assert_eq!(
-            (cx, cy),
-            (SEARCH_PROMPT_WIDTH + 2, TITLE_ROW_HEIGHT + SECTION_GAP),
-            "cursor advances by the display width of the visible query (`ab` = 2 cells)",
-        );
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (SEARCH_PROMPT_WIDTH + 2, row_y));
     }
 
     #[test]
     fn render_shows_no_match_line_when_filter_excludes_everything() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
         l.set_query("zzz".to_owned());
 
@@ -621,13 +597,10 @@ mod tests {
     }
 
     #[test]
-    fn place_terminal_cursor_skips_when_area_is_shorter_than_search_row_offset() {
+    fn place_terminal_cursor_skips_when_area_too_short_for_search_row() {
         // Defensive guard: when the host shrinks the modal to fewer rows than `title + gap +
         // search-row` requires, `place_terminal_cursor` returns early instead of placing the
         // cursor outside the area. The render call must still complete without panicking.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let l = list(vec![FakeItem::new("alpha")]);
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
