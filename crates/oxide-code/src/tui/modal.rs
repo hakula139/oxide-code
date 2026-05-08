@@ -6,6 +6,7 @@
 
 pub(crate) mod kv_overview;
 pub(crate) mod list_picker;
+pub(crate) mod searchable_list;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -79,6 +80,12 @@ impl ModalStack {
     /// it submits or cancels; the previous top resumes.
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
+    }
+
+    /// Drop every modal on the stack — used when a session swap discards in-flight UI state and
+    /// the picker / nested overlays are no longer meaningful in the new session.
+    pub(crate) fn clear(&mut self) {
+        self.stack.clear();
     }
 
     /// Height above the input — top modal's body plus a one-row separator.

@@ -84,7 +84,15 @@ async fn generate_and_record(
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
     let outcome = session.append_ai_title(title.clone()).await;
-    sink.session_write_error(outcome.failure.as_deref());
+    if let Some(failure) = outcome.failure.as_deref() {
+        if !session.is_actor_alive() {
+            // Session was finalized (e.g., /clear or /resume) before this background task
+            // returned. Warn-log; surfacing into the next session's UI would mislead the user.
+            warn!("title-gen append after session shutdown: {failure}");
+            return Ok(());
+        }
+        sink.session_write_error(Some(failure));
+    }
 
     _ = sink.send(AgentEvent::SessionTitleUpdated {
         session_id: session.session_id().to_owned(),
@@ -360,9 +368,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_and_record_write_failure_emits_error_and_title_events() {
-        // A write failure surfaces an Error to the sink but must not
-        // skip the SessionTitleUpdated event — UI keeps updating.
+    async fn generate_and_record_alive_session_writer_failure_surfaces_as_error() {
+        // Counterpart to the post-finalize-silent test below: when the actor is still alive but
+        // its append_ai_title ack carries a `failure`, the user IS seeing the live session, so the
+        // failure must be surfaced as a normal session-write error.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let session = super::super::handle::testing::acks_append_ai_title_with_failure(
+            "live-session",
+            "disk full",
+        );
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error(msg) if msg.contains("disk full")
+            )),
+            "writer-failure on live session must surface as Error: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_post_finalize_actor_gone_is_silent() {
+        // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
+        // background task returned must not surface "Session write failed" into the UI of the
+        // *next* session. Warn-log only; no Error and no title event.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/v1/messages"))
@@ -383,16 +428,14 @@ mod tests {
 
         let events = sink.events();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Error(m) if m.contains("Session write failed"))),
-            "Error event expected for write failure: {events:?}",
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "post-finalize actor-gone must not surface as Error: {events:?}",
         );
         assert!(
-            events
+            !events
                 .iter()
-                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix auth")),
-            "SessionTitleUpdated expected even after write failure: {events:?}",
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+            "post-finalize must skip SessionTitleUpdated — title belongs to the dead session: {events:?}",
         );
     }
 

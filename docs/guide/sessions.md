@@ -9,8 +9,10 @@ Sessions are stored under `$XDG_DATA_HOME/ox/sessions/` (default: `~/.local/shar
 ## Listing Sessions
 
 ```bash
-ox --list        # sessions in the current project
-ox -la           # same, across every project
+ox --list                # 30 most recent sessions in the current project
+ox -la                   # same, across every project
+ox --list --limit 100    # raise the cap for one run
+ox --list --limit 0      # unbounded (the original behavior)
 ```
 
 Prints a table of recent sessions (most recently active first, local time):
@@ -30,6 +32,8 @@ a1b2c3d4   2026-04-18 09:20    12     ~/work/oxide     Fix authentication bug
 ```
 
 Titles that overflow the terminal width are truncated with `...`. When output is piped, titles render untruncated so downstream tools can wrap at their own width.
+
+By default the listing caps at 30 rows so a long-running project doesn't dump hundreds of sessions on every invocation. When the cap clips the result, the trailing line tells you the hidden count and how to widen it (`--limit N` or `--limit 0`).
 
 ## Resuming a Session
 
@@ -61,6 +65,10 @@ ox -c /home/me/archive/2026-04/session.jsonl
 ```
 
 On resume, oxide-code loads the full history and appends new messages to the same file, so the session keeps its original ID.
+
+### Mid-Session Resume
+
+Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project; Tab toggles current-project ↔ all projects; Enter resumes the highlighted session in place. Skip the picker with `/resume <id-prefix>` to jump directly. The mid-session resume reuses the same load + sanitize pipeline as `ox -c`, so behavior is identical between launch-time and in-session.
 
 ## Titles
 

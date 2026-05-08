@@ -23,6 +23,7 @@ const STARTER_POOL: &[Starter] = &[
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),
     ("/model", "switch model"),
+    ("/resume", "switch to another session"),
     ("/status", "session at a glance"),
     ("/theme", "switch theme"),
 ];
@@ -30,6 +31,7 @@ const STARTER_POOL: &[Starter] = &[
 const TIP_POOL: &[&str] = &[
     "/clear starts a fresh conversation",
     "/effort tunes Speed ↔ Intelligence",
+    "/resume opens the session picker",
     "/theme previews live as you scroll",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",

@@ -82,6 +82,7 @@ ox                                          # Start an interactive session
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
+│   ├── resume.rs                           # /resume (alias /continue) — bare opens a searchable session picker (Tab toggles current-project ↔ all-projects); `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
@@ -123,6 +124,7 @@ ox                                          # Start an interactive session
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   ├── status.rs                       # Status bar (model, spinner, status, working directory)
 │   │   └── welcome.rs                      # Empty-state welcome screen — identity ribbon + body column, themed via `accent`/`text`/`dim`
+│   ├── cursor.rs                           # `place_clamped` — shared right-edge-clamp cursor placement for input surfaces
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)
@@ -132,7 +134,8 @@ ox                                          # Start an interactive session
 │   ├── modal.rs                            # Modal trait, ModalKey, ModalAction, ModalStack — focus-grabbing UI overlays
 │   ├── modal/
 │   │   ├── kv_overview.rs                  # Generic KvOverview / KvSection — read-only sectioned kv-table modal used by /status, /config, /help
-│   │   └── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
+│   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem> — cursor + render primitive used by concrete pickers
+│   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem> — substring filter + scrollable viewport for searchable pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
@@ -148,7 +151,8 @@ ox                                          # Start an interactive session
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     ├── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
-    └── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
+    ├── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
+    └── time.rs                             # Process-wide local-offset cache (`init_local_offset` at startup, `local_offset` reads)
 ```
 
 ## Documentation

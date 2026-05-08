@@ -31,6 +31,36 @@ pub(crate) struct SessionStore {
     project_dir: PathBuf,
 }
 
+/// A paginated slice of [`Self::list_paged`]'s output. `total` is the count before truncation,
+/// so renderers can display `... and N more` footers without re-walking the directory.
+#[derive(Debug, Default)]
+pub(crate) struct ListPage {
+    sessions: Vec<SessionInfo>,
+    total: usize,
+}
+
+impl ListPage {
+    pub(crate) fn new(sessions: Vec<SessionInfo>, total: usize) -> Self {
+        debug_assert!(
+            total >= sessions.len(),
+            "ListPage total must include the materialised sessions",
+        );
+        Self { sessions, total }
+    }
+
+    pub(crate) fn sessions(&self) -> &[SessionInfo] {
+        &self.sessions
+    }
+
+    pub(crate) fn into_sessions(self) -> Vec<SessionInfo> {
+        self.sessions
+    }
+
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
+}
+
 impl SessionStore {
     pub(crate) fn open() -> Result<Self> {
         let sessions_dir = xdg_dir(
@@ -98,16 +128,48 @@ impl SessionStore {
         load_session_data_from_path(&path)
     }
 
-    /// List sessions for the current project, most recently active first.
+    /// List sessions for the current project, most recently active first. Wrapper around
+    /// [`Self::list_paged`] for callers that don't need a cap.
     pub(crate) fn list(&self) -> Result<Vec<SessionInfo>> {
-        let mut sessions = read_sessions_in_dir(&self.project_dir)?;
-        sort_sessions_recent_first(&mut sessions);
-        Ok(sessions)
+        Ok(self.list_paged(None, false)?.into_sessions())
     }
 
-    /// List sessions across every project subdirectory.
+    /// List sessions across every project subdirectory. Wrapper around [`Self::list_paged`].
     pub(crate) fn list_all(&self) -> Result<Vec<SessionInfo>> {
-        let mut sessions = Vec::new();
+        Ok(self.list_paged(None, true)?.into_sessions())
+    }
+
+    /// List the `limit` most-recently-active sessions and report the total available so callers
+    /// can render a "and N more" footer. `None` is unbounded; `Some(n)` parses at most `n`
+    /// files past the cheap stat-only pre-sort. `all` widens from the home project to every
+    /// project subdir.
+    pub(crate) fn list_paged(&self, limit: Option<usize>, all: bool) -> Result<ListPage> {
+        let mut paths = if all {
+            self.collect_paths_all_projects()?
+        } else {
+            collect_session_paths(&self.project_dir)?
+        };
+        sort_paths_recent_first(&mut paths);
+        let total = paths.len();
+        if let Some(cap) = limit {
+            paths.truncate(cap);
+        }
+        let sessions = paths
+            .into_iter()
+            .filter_map(|(path, _)| match read_session_info(&path) {
+                Ok(info) => Some(info),
+                Err(e) => {
+                    warn!("skipping unreadable session file {}: {e}", path.display());
+                    None
+                }
+            })
+            .collect();
+        Ok(ListPage::new(sessions, total))
+    }
+
+    /// Stat-only walk across every project subdir; defers JSONL parsing to the caller's cap.
+    fn collect_paths_all_projects(&self) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
+        let mut out = Vec::new();
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
         {
@@ -119,14 +181,13 @@ impl SessionStore {
                 }
             };
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                match read_sessions_in_dir(&entry.path()) {
-                    Ok(mut s) => sessions.append(&mut s),
+                match collect_session_paths(&entry.path()) {
+                    Ok(mut paths) => out.append(&mut paths),
                     Err(e) => warn!("skipping project dir {}: {e}", entry.path().display()),
                 }
             }
         }
-        sort_sessions_recent_first(&mut sessions);
-        Ok(sessions)
+        Ok(out)
     }
 
     /// Finds a session file by suffix match, checking the home project first.
@@ -138,8 +199,12 @@ impl SessionStore {
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
         {
-            let Ok(entry) = entry else {
-                continue;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping directory entry while resolving {session_id}: {e}");
+                    continue;
+                }
             };
             if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
@@ -152,7 +217,7 @@ impl SessionStore {
     }
 
     #[cfg(test)]
-    pub(super) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
+    pub(crate) fn open_at(sessions_dir: PathBuf, project_name: &str) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         let project_dir = sessions_dir.join(project_name);
         fs::create_dir_all(&project_dir)?;
@@ -314,7 +379,11 @@ fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
+/// Stat-only scan of one project subdirectory: returns `.jsonl` files paired with mtime so the
+/// caller can sort and truncate before paying the per-file JSONL parse cost in
+/// [`read_session_info`]. Stat failures warn-skip — bucketing them at `UNIX_EPOCH` would silently
+/// sort them out of any cap window.
+fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     Ok(entries
         .filter_map(|entry| match entry {
@@ -325,23 +394,22 @@ fn read_sessions_in_dir(dir: &Path) -> Result<Vec<SessionInfo>> {
             }
         })
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|e| match read_session_info(&e.path()) {
-            Ok(info) => Some(info),
-            Err(e) => {
-                warn!("skipping unreadable session file: {e}");
-                None
-            }
+        .filter_map(|e| {
+            let path = e.path();
+            e.metadata()
+                .and_then(|m| m.modified())
+                .inspect_err(|err| {
+                    warn!("skipping session {} (stat failed): {err}", path.display());
+                })
+                .ok()
+                .map(|t| (path, OffsetDateTime::from(t)))
         })
         .collect())
 }
 
-fn sort_sessions_recent_first(sessions: &mut [SessionInfo]) {
-    sessions.sort_by_key(|s| {
-        (
-            std::cmp::Reverse(s.last_active_at),
-            std::cmp::Reverse(s.session_id.clone()),
-        )
-    });
+fn sort_paths_recent_first(paths: &mut [(PathBuf, OffsetDateTime)]) {
+    paths
+        .sort_by(|(p1, m1), (p2, m2)| m2.cmp(m1).then_with(|| p2.file_name().cmp(&p1.file_name())));
 }
 
 // ── SessionWriter ──
@@ -416,11 +484,15 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
 
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
+    if first_line.trim().is_empty() {
+        bail!("session file is empty (no header)");
+    }
     let header: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
     let Entry::Header {
         session_id,
         cwd,
         created_at,
+        git_branch,
         ..
     } = header
     else {
@@ -467,10 +539,16 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         }
     }
 
-    let last_active_at = metadata
-        .modified()
-        .ok()
-        .map_or(created_at, OffsetDateTime::from);
+    let last_active_at = match metadata.modified() {
+        Ok(t) => OffsetDateTime::from(t),
+        Err(e) => {
+            warn!(
+                "cannot read mtime of {} (falling back to created_at): {e}",
+                path.display()
+            );
+            created_at
+        }
+    };
 
     Ok(SessionInfo {
         session_id,
@@ -478,6 +556,7 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         last_active_at,
         title,
         exit,
+        git_branch,
     })
 }
 
@@ -498,6 +577,46 @@ pub(crate) fn test_store(dir: &Path) -> SessionStore {
     SessionStore::open_at(dir.to_path_buf(), TEST_PROJECT).unwrap()
 }
 
+/// Seed a session for cross-module tests. `last_active_at` derives from `created_at`. Title and
+/// summary are written only when their args are `Some`; with `message_count: None` the session
+/// is left unfinished. Title source is hard-coded to `UserProvided`.
+#[cfg(test)]
+pub(crate) fn seed_test_session(
+    store: &SessionStore,
+    session_id: &str,
+    title: Option<&str>,
+    message_count: Option<u32>,
+    created_at: time::OffsetDateTime,
+) {
+    let mut writer = store
+        .create(&Entry::Header {
+            session_id: session_id.to_owned(),
+            cwd: "/work/proj".to_owned(),
+            model: "claude-opus-4-7".to_owned(),
+            created_at,
+            version: CURRENT_VERSION,
+            git_branch: None,
+        })
+        .unwrap();
+    if let Some(t) = title {
+        writer
+            .append(&Entry::Title {
+                title: t.to_owned(),
+                source: super::entry::TitleSource::UserProvided,
+                updated_at: created_at,
+            })
+            .unwrap();
+    }
+    if let Some(count) = message_count {
+        writer
+            .append(&Entry::Summary {
+                message_count: count,
+                updated_at: created_at,
+            })
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
     let project_dir = test_project_dir(dir);
@@ -507,7 +626,7 @@ pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-pub(super) fn test_project_dir(dir: &Path) -> PathBuf {
+pub(crate) fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
 }
 
@@ -531,6 +650,7 @@ mod tests {
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
+            git_branch: None,
         }
     }
 
@@ -1116,6 +1236,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         wa.append(&sample_title_entry("Older")).unwrap();
@@ -1128,6 +1249,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         wb.append(&sample_title_entry("Newer")).unwrap();
@@ -1153,6 +1275,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-01-01 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         w_old.append(&sample_title_entry("Old")).unwrap();
@@ -1165,6 +1288,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-17 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         w_new.append(&sample_title_entry("New")).unwrap();
@@ -1336,6 +1460,69 @@ mod tests {
         let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["foreign", "own"]);
+    }
+
+    // ── list_paged ──
+
+    /// Helper: builds `count` finished sessions in monotonically increasing mtime order.
+    fn seed_n_sessions(store: &SessionStore, count: usize) {
+        for i in 0..count {
+            let id = format!("session-{i:04}");
+            let offset = i64::try_from(i).expect("test count fits i64");
+            let mut writer = store
+                .create(&Entry::Header {
+                    session_id: id.clone(),
+                    cwd: "/work/project".to_owned(),
+                    model: "m".to_owned(),
+                    created_at: datetime!(2026-04-15 10:00:00 UTC)
+                        + time::Duration::seconds(offset),
+                    version: CURRENT_VERSION,
+                    git_branch: None,
+                })
+                .unwrap();
+            writer
+                .append(&sample_title_entry(&format!("Title {i}")))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_paged_caps_at_limit_keeping_most_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 10);
+
+        let page = store.list_paged(Some(3), false).unwrap();
+        assert_eq!(page.sessions().len(), 3, "cap honored");
+        assert_eq!(page.total(), 10, "total reflects pre-cap count");
+        // mtime descends in seed order; newest three are the last three created.
+        assert_eq!(page.sessions()[0].session_id, "session-0009");
+        assert_eq!(page.sessions()[2].session_id, "session-0007");
+    }
+
+    #[tokio::test]
+    async fn list_paged_unbounded_returns_total_equal_to_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 4);
+
+        let page = store.list_paged(None, false).unwrap();
+        assert_eq!(page.sessions().len(), 4);
+        assert_eq!(page.total(), 4, "no cap → total equals returned len");
+    }
+
+    #[tokio::test]
+    async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
+        // `--limit 0` is the unbounded sentinel at the CLI; the store's `Some(0)` means
+        // "parse no rows" which is what happens if we faithfully apply the cap. Pin the
+        // contract so the CLI translation layer (limit=0 → None) is the documented seam.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_n_sessions(&store, 3);
+
+        let page = store.list_paged(Some(0), false).unwrap();
+        assert!(page.sessions().is_empty());
+        assert_eq!(page.total(), 3, "total still reflects what's on disk");
     }
 
     // ── find_session_path ──

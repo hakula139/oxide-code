@@ -127,7 +127,7 @@ fn looks_like_path(arg: &str) -> bool {
 }
 
 /// Renders up to `MATCH_PREVIEW_LIMIT` IDs (truncated to 8 chars), with `, ...` for overflow.
-fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
+pub(crate) fn format_session_id_preview(ids: impl IntoIterator<Item = String>) -> String {
     const MATCH_PREVIEW_LIMIT: usize = 5;
     let mut iter = ids.into_iter();
     let first_batch: Vec<String> = iter

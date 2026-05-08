@@ -298,6 +298,13 @@ impl App {
                 true
             }
             UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::Resume { .. } => {
+                // Disable input until the SessionResumed event fires — otherwise a typed prompt
+                // in the gap between forward and event would push into chat, then get wiped by
+                // `apply_session_resumed`'s `clear_history`.
+                self.input.set_enabled(false);
+                true
+            }
             UserAction::PreviewTheme { name } => {
                 if let Some(preview) = super::theme::load_builtin(name) {
                     if self.preview_theme_snapshot.is_none() {
@@ -449,6 +456,12 @@ impl App {
                 self.status_bar.set_title(None);
                 self.chat.clear_history();
             }
+            AgentEvent::SessionResumed {
+                id,
+                title,
+                messages,
+                tool_metadata,
+            } => self.apply_session_resumed(id, title, &messages, &tool_metadata),
             AgentEvent::ConfigChanged {
                 model_id,
                 effort,
@@ -481,6 +494,39 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        self.finalize_idle();
+    }
+
+    /// Mid-session resume: rebinds the session, repopulates the chat from the target's transcript,
+    /// and discards in-flight UI state. Pairs with `roll_into` on the agent loop.
+    fn apply_session_resumed(
+        &mut self,
+        id: String,
+        title: Option<String>,
+        messages: &[Message],
+        tool_metadata: &HashMap<String, ToolMetadata>,
+    ) {
+        self.session_info.session_id = id;
+        self.status_bar.set_title(title);
+        self.chat.clear_history();
+        self.chat
+            .load_history(messages, tool_metadata, self.tools.as_ref());
+        self.pending_calls.clear();
+        // Drop queued prompts (they belong to the previous thread); surface the count so the
+        // user knows their Enter-committed work didn't carry over. `/clear` (SessionRolled)
+        // keeps them — same identity, just a fresh slate.
+        let dropped = self.pending_prompts.len();
+        self.pending_prompts.clear();
+        if dropped > 0 {
+            self.chat.push_system_message(format!(
+                "{dropped} queued prompt{plural} discarded — typed for the previous session.",
+                plural = if dropped == 1 { "" } else { "s" },
+            ));
+        }
+        // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
+        // would otherwise carry across the swap.
+        self.modals.clear();
+        self.sync_input_queue_hint();
         self.finalize_idle();
     }
 
@@ -1381,6 +1427,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_resume_forwards_to_agent_and_disables_input_until_event() {
+        // Pin: between forwarding `Resume` and the SessionResumed event landing, input must be
+        // gated so a typed prompt doesn't push into chat just before `apply_session_resumed`'s
+        // `clear_history` wipes it. Re-enable comes from `finalize_idle` inside the resumed handler.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let action = UserAction::Resume {
+            session_id: "resume-target".to_owned(),
+        };
+        app.dispatch_user_action(action.clone());
+
+        let forwarded = rx.recv().await.expect("Resume must reach the agent loop");
+        assert_eq!(forwarded, action);
+        assert!(
+            !app.input.is_enabled(),
+            "input must be gated until the resume event lands",
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: forwarding a submit during cancel could let it
         // slip ahead of `pending_prompts`. Hold locally until `Cancelled`, then drain.
@@ -1965,6 +2030,86 @@ mod tests {
             "clear must drain the chat so the welcome can repaint",
         );
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_resumed_swaps_id_replays_transcript_and_clears_pending_state() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
+        app.chat.push_user_message("live prompt".to_owned());
+        app.pending_prompts.push_back("queued".to_owned());
+        app.pending_calls.insert(
+            "pending-1".to_owned(),
+            PendingCall {
+                label: "Bash(...)".to_owned(),
+                name: "bash".to_owned(),
+                input: serde_json::json!({}),
+            },
+        );
+        let original_id = app.session_info.session_id.clone();
+
+        let messages = vec![
+            Message::user("resumed user"),
+            Message::assistant("resumed assistant"),
+        ];
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed-session".to_owned(),
+            title: Some("Resumed title".to_owned()),
+            messages,
+            tool_metadata: HashMap::new(),
+        });
+
+        assert_eq!(app.session_info.session_id, "resumed-session");
+        assert_ne!(app.session_info.session_id, original_id);
+        assert_eq!(app.status_bar.title(), Some("Resumed title"));
+        assert_eq!(
+            app.chat.entry_count(),
+            3,
+            "chat must reflect the resumed transcript + the queued-prompt-discarded notice",
+        );
+        assert_eq!(
+            app.pending_calls.len(),
+            0,
+            "pending tool calls must drop on resume",
+        );
+        assert!(
+            app.pending_prompts.is_empty(),
+            "queued prompts must drop on resume",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled(), "resume returns to idle input");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_resumed_with_no_queued_prompts_is_silent() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            messages: vec![Message::user("only msg")],
+            tool_metadata: HashMap::new(),
+        });
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "no queued prompts → no discarded-prompts notice",
+        );
+    }
+
+    #[test]
+    fn handle_session_resumed_with_no_title_clears_stale_chrome() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            messages: Vec::new(),
+            tool_metadata: HashMap::new(),
+        });
+        assert!(
+            app.status_bar.title().is_none(),
+            "Some(None) title must clear the chrome",
+        );
+        assert!(app.chat.is_empty());
     }
 
     #[test]

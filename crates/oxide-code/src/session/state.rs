@@ -192,14 +192,50 @@ impl SessionState {
 
 fn new_header(model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
+    let cwd = current_dir_string();
+    // Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't
+    // depend on the working tree's branch — every test site that needs a non-`None` branch
+    // supplies its own fixture via direct `Entry::Header` construction.
+    let git_branch = if cfg!(test) {
+        None
+    } else {
+        current_git_branch(&cwd)
+    };
     let header = Entry::Header {
         session_id: session_id.clone(),
-        cwd: current_dir_string(),
+        cwd,
         model: model.to_owned(),
         created_at: OffsetDateTime::now_utc(),
         version: CURRENT_VERSION,
+        git_branch,
     };
     (session_id, header)
+}
+
+/// Best-effort branch name via `git rev-parse --abbrev-ref HEAD`. Returns `None` when not in a
+/// repo, when git is missing, or when HEAD is detached (returned as the literal `HEAD` — surfaced
+/// as `None` so the metadata column doesn't show a useless `· HEAD`).
+fn current_git_branch(cwd: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_git_branch(output.status.success(), &output.stdout)
+}
+
+/// Pure parser for `git rev-parse --abbrev-ref HEAD` output. Split out from the shell-out so the
+/// success / detached-HEAD / invalid-UTF-8 branches can be exercised without a fixture repo.
+fn parse_git_branch(success: bool, stdout: &[u8]) -> Option<String> {
+    if !success {
+        return None;
+    }
+    let branch = std::str::from_utf8(stdout).ok()?.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    Some(branch.to_owned())
 }
 
 fn current_dir_string() -> String {
@@ -520,6 +556,72 @@ mod tests {
             matches!(state.writer_status, WriterStatus::Pending { .. }),
             "create failure must leave Pending intact for next-batch retry",
         );
+    }
+
+    // ── current_git_branch ──
+
+    #[test]
+    fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
+        // End-to-end: spin up a temp git repo, make a commit (rev-parse otherwise returns the
+        // literal `HEAD` for an empty repo), and verify the branch name round-trips. Skipped
+        // silently if `git` isn't on PATH so CI without git doesn't fail — the production path
+        // correctly returns `None` in that case.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let Ok(status) = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "fixture-branch"])
+            .current_dir(cwd)
+            .status()
+        else {
+            return;
+        };
+        if !status.success() {
+            return;
+        }
+        for args in [
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+            ["config", "commit.gpgsign", "false"].as_slice(),
+            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+        }
+        assert_eq!(
+            current_git_branch(cwd),
+            Some("fixture-branch".to_owned()),
+            "branch should round-trip after the initial commit on the requested branch"
+        );
+    }
+
+    #[test]
+    fn current_git_branch_outside_a_repo_returns_none() {
+        // Plain temp dir — git rev-parse exits non-zero; parse should collapse to None.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_git_branch(dir.path().to_str().unwrap()), None);
+    }
+
+    // ── parse_git_branch ──
+
+    #[test]
+    fn parse_git_branch_keeps_branch_names_and_drops_everything_else() {
+        // Happy path: trim git's trailing newline so the metadata column doesn't render `\n`.
+        assert_eq!(
+            parse_git_branch(true, b"feat/login\n"),
+            Some("feat/login".to_owned())
+        );
+        // Non-zero exit (`fatal: not a git repository`, missing git, ...) collapses to None.
+        assert_eq!(parse_git_branch(false, b"main\n"), None);
+        // Non-UTF-8 stdout collapses to None instead of panicking.
+        assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
+        // Empty / whitespace-only stdout would render `· ` — drop it.
+        assert_eq!(parse_git_branch(true, b""), None);
+        assert_eq!(parse_git_branch(true, b"   \n"), None);
+        // `HEAD` is rev-parse's detached-HEAD output — useless in the picker.
+        assert_eq!(parse_git_branch(true, b"HEAD\n"), None);
     }
 
     // ── format_current_dir ──

@@ -40,9 +40,6 @@ use tool::{
 };
 use util::path::tildify;
 
-// Captured before the tokio runtime starts — `now_local()` is unsound under multi-threaded.
-static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
-
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
 #[command(group(
@@ -51,13 +48,9 @@ static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock:
         .multiple(true),
 ))]
 struct Cli {
-    /// Disable the TUI and use a bare REPL instead.
-    #[arg(long)]
-    no_tui: bool,
-
-    /// Run in headless mode: send a single prompt and print the response.
-    #[arg(short, long, value_name = "PROMPT")]
-    prompt: Option<String>,
+    /// Widen `--list` / `--continue` from the current cwd to every project.
+    #[arg(short, long, requires = "scope")]
+    all: bool,
 
     /// Resume a session: bare flag picks the most recent, an ID prefix picks a specific one.
     #[expect(
@@ -72,19 +65,25 @@ struct Cli {
     )]
     r#continue: Option<Option<String>>,
 
+    /// Cap `--list` to the N most-recent sessions. `0` disables the cap.
+    #[arg(long, value_name = "N", requires = "list", default_value_t = 30)]
+    limit: usize,
+
     /// List recent sessions and exit.
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
-    /// Widen `--list` / `--continue` from the current cwd to every project.
-    #[arg(short, long, requires = "scope")]
-    all: bool,
+    /// Disable the TUI and use a bare REPL instead.
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Run in headless mode: send a single prompt and print the response.
+    #[arg(short, long, value_name = "PROMPT")]
+    prompt: Option<String>,
 }
 
 fn main() -> Result<()> {
-    LOCAL_OFFSET
-        .set(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
-        .ok();
+    util::time::init_local_offset();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -99,7 +98,7 @@ async fn async_main() -> Result<()> {
     let _log_guard = util::log::init_tracing(tui_mode)?;
 
     if cli.list {
-        return list_sessions(cli.all);
+        return list_sessions(cli.all, cli.limit);
     }
 
     let config = Config::load().await?;
@@ -111,7 +110,13 @@ async fn async_main() -> Result<()> {
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::default());
     let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+    let drifted = file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+    if !drifted.is_empty() {
+        warn!(
+            "{} tracked file(s) drifted on disk since this session ran; re-Read needed before Edit",
+            drifted.len(),
+        );
+    }
 
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
@@ -158,16 +163,18 @@ async fn async_main() -> Result<()> {
 
 // ── Session Helpers ──
 
-fn list_sessions(all: bool) -> Result<()> {
+fn list_sessions(all: bool, limit: usize) -> Result<()> {
     let store = SessionStore::open()?;
-    let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
+    let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
+    let cap = (limit > 0).then_some(limit);
     render_list(
         &mut std::io::stdout().lock(),
         &store,
         all,
         local_offset,
         term_width,
+        cap,
     )
 }
 
@@ -386,8 +393,22 @@ async fn agent_loop_task(
                 client.set_session_id(outcome.new_id.clone());
                 messages.clear();
                 if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
-                    warn!("session-rolled event dropped: {e}");
+                    // /clear succeeded server-side but the TUI never sees the new id — surfaces as
+                    // a stuck "old session" header. Error-level so the log makes it findable.
+                    tracing::error!("session-rolled event dropped: {e}");
                 }
+            }
+            UserAction::Resume { session_id } => {
+                apply_resume(
+                    &mut session,
+                    &mut client,
+                    &mut messages,
+                    &store,
+                    &file_tracker,
+                    &sink,
+                    &session_id,
+                )
+                .await;
             }
             UserAction::SwapConfig { model, effort } => {
                 apply_swap_config(&mut client, &sink, model, effort);
@@ -397,6 +418,73 @@ async fn agent_loop_task(
     }
 
     Ok(())
+}
+
+/// Drives the mid-session resume: swap the handle, repaint the chat, surface previous-session
+/// finalize failures and tracker drift as distinct events so the user sees their source.
+async fn apply_resume(
+    session: &mut SessionHandle,
+    client: &mut Client,
+    messages: &mut Vec<Message>,
+    store: &SessionStore,
+    file_tracker: &FileTracker,
+    sink: &dyn AgentSink,
+    target_id: &str,
+) {
+    let outcome = match session::handle::roll_into(session, store, file_tracker, target_id).await {
+        Ok(o) => o,
+        Err(e) => {
+            _ = sink.send(AgentEvent::Error(format!(
+                "Resume failed (still on session {}): {e:#}",
+                session.session_id(),
+            )));
+            return;
+        }
+    };
+    let new_id = session.session_id().to_owned();
+    client.set_session_id(new_id.clone());
+    messages.clone_from(&outcome.messages);
+    if let Err(e) = sink.send(AgentEvent::SessionResumed {
+        id: new_id,
+        title: outcome.title,
+        messages: outcome.messages,
+        tool_metadata: outcome.tool_result_metadata,
+    }) {
+        // Channel closed mid-resume leaves the TUI on the OLD chat. Pinpoint the desync.
+        tracing::error!("session-resumed event dropped: {e}");
+    }
+    // Emit OLD-session finalize failure AFTER SessionResumed so the chat-clear doesn't wipe it.
+    // Distinct phrasing (not session_write_error) so the user doesn't read it as a current-writer
+    // fault.
+    if let Some(failure) = outcome.finalize_failure.as_deref() {
+        _ = sink.send(AgentEvent::Error(format!(
+            "Previous session failed to finalize cleanly: {failure}",
+        )));
+    }
+    if !outcome.drifted_paths.is_empty() {
+        _ = sink.send(AgentEvent::Error(format_drift_warning(
+            &outcome.drifted_paths,
+        )));
+    }
+}
+
+fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
+    const PREVIEW_CAP: usize = 3;
+    let preview: Vec<String> = drifted
+        .iter()
+        .take(PREVIEW_CAP)
+        .map(|p| p.display().to_string())
+        .collect();
+    let suffix = if drifted.len() > preview.len() {
+        format!(", and {} more", drifted.len() - preview.len())
+    } else {
+        String::new()
+    };
+    format!(
+        "{} tracked file(s) drifted on disk since the resumed session — re-Read before Edit: {}{suffix}",
+        drifted.len(),
+        preview.join(", "),
+    )
 }
 
 /// Order matters: model swap re-clamps effort before the explicit pick is applied.
@@ -418,7 +506,10 @@ fn apply_swap_config(
         effort: resolved,
         requested_effort: effort,
     }) {
-        warn!("config-changed event dropped: {e}");
+        // Dropping this leaves the status bar showing the previous model / effort even though the
+        // client has already swapped — error-level so it stands out in the log when the TUI looks
+        // wrong after a /model or /effort swap.
+        tracing::error!("config-changed event dropped: {e}");
     }
 }
 

@@ -51,7 +51,8 @@ The direction is simple:
 ### Session Persistence
 
 - Every conversation saved as JSONL under `$XDG_DATA_HOME/ox/sessions/{project}/`.
-- `ox --list` browses recent sessions; `ox -c` resumes by recency, prefix, or path.
+- `ox --list` browses recent sessions (capped at 30 by default; `--limit N` / `--limit 0` overrides). `ox -c` resumes by recency, prefix, or path.
+- Mid-session `/resume` (alias `/continue`) opens an in-place picker (substring search, Tab toggles current-project ↔ all projects). `/resume <id-prefix>` jumps directly.
 - AI-generated 3-7-word titles land shortly after the first prompt.
 
 ### File-Change Tracking
@@ -62,10 +63,10 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/resume` (alias `/continue`), `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
-- Mid-session swap: `/model`, `/effort`, and `/theme`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status`, `/config`, and `/help` open read-only kv overviews. Esc / Ctrl+C cancel any modal universally.
+- Mid-session swap: `/model`, `/effort`, `/resume`, and `/theme`. Session-only — no slash command writes user config files.
+- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/resume` opens a searchable session picker; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status`, `/config`, and `/help` open read-only kv overviews. Esc / Ctrl+C cancel any modal universally.
 
 ### Authentication & Configuration
 
@@ -89,8 +90,7 @@ The direction is simple:
 
 Remaining surface beyond Working Today:
 
-- Session: `/resume`.
-- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
+- Deferred: `/compact`, `/cost`, `/login` / `/logout`, `/rename` (manual session-title override), custom user commands, `/init` multi-phase flow.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
 

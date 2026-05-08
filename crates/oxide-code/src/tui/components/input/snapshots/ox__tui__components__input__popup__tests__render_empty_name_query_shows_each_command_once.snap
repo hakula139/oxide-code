@@ -1,5 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
+assertion_line: 467
 expression: "render_to_backend(&popup, 60)"
 ---
 "────────────────────────────────────────────────────────────"
@@ -10,4 +11,4 @@ expression: "render_to_backend(&popup, 60)"
 "/help    List the available slash commands and their usag..."
 "/init    Generate or update the project's `AGENTS.md` / `..."
 "/model   Open the model picker or switch directly with `/..."
-"/status  Show session info: model, effort, version, worki..."
+"/resume  Resume a previous session — `/resume` for the pi..."

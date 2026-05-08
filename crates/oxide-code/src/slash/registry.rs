@@ -10,6 +10,7 @@ use super::effort::EffortCmd;
 use super::help::HelpCmd;
 use super::init::InitCmd;
 use super::model::ModelCmd;
+use super::resume::ResumeCmd;
 use super::status::StatusCmd;
 use super::theme::ThemeCmd;
 use crate::agent::event::UserAction;
@@ -78,8 +79,8 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Alphabetical for stable `/help` and empty-query popup ordering.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &StatusCmd,
-    &ThemeCmd,
+    &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &ResumeCmd,
+    &StatusCmd, &ThemeCmd,
 ];
 
 /// Resolves `name` against canonical names first, then aliases.

@@ -25,6 +25,10 @@ pub(crate) enum Entry {
         created_at: OffsetDateTime,
         #[serde(default = "default_version")]
         version: u32,
+        /// Captured at session start so the resume picker can disambiguate sibling sessions by
+        /// branch context. Older files predate the field — `serde(default)` resolves to `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git_branch: Option<String>,
     },
     Message {
         uuid: Uuid,
@@ -92,6 +96,9 @@ pub(crate) struct SessionInfo {
     pub(crate) last_active_at: OffsetDateTime,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) exit: Option<ExitInfo>,
+    /// Branch the session started on. `None` for older files predating the field or for sessions
+    /// started outside a git repo.
+    pub(crate) git_branch: Option<String>,
 }
 
 #[cfg(test)]
@@ -112,6 +119,7 @@ mod tests {
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
+            git_branch: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["type"], "header");
@@ -124,6 +132,7 @@ mod tests {
             model,
             created_at,
             version,
+            git_branch,
         } = parsed
         else {
             panic!("expected Header");
@@ -133,6 +142,7 @@ mod tests {
         assert_eq!(model, "claude-opus-4-6");
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
         assert_eq!(version, CURRENT_VERSION);
+        assert!(git_branch.is_none());
     }
 
     #[test]

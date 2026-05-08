@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use time::UtcOffset;
 use unicode_width::UnicodeWidthStr;
 
-use super::entry::SessionInfo;
 use super::store::SessionStore;
 use crate::util::path::tildify;
 use crate::util::text::truncate_to_width;
@@ -29,31 +28,31 @@ const PROJECT_COL_MAX: usize = 40;
 const UNTITLED_MARKER: &str = "(untitled)";
 
 /// Render `--list` output to `out`. `all=true` spans every project; `term_width=None` skips
-/// title truncation (use when output is piped or width is unknown).
+/// title truncation (use when output is piped or width is unknown). `limit` caps the number of
+/// rows printed; `None` is unbounded (the original behavior, retained via `--limit 0`).
 pub(crate) fn render_list(
     out: &mut dyn Write,
     store: &SessionStore,
     all: bool,
     local_offset: UtcOffset,
     term_width: Option<usize>,
+    limit: Option<usize>,
 ) -> Result<()> {
-    let sessions = if all {
-        store.list_all()?
-    } else {
-        store.list()?
-    };
-    render_sessions(out, &sessions, all, local_offset, term_width)
+    let page = store.list_paged(limit, all)?;
+    render_sessions(out, &page, all, local_offset, term_width)
 }
 
 /// Pure formatter — split from [`render_list`] so tests can skip building a real store. `all`
-/// inserts a `Project` column to disambiguate cross-project rows.
+/// inserts a `Project` column to disambiguate cross-project rows. Appends a `... and N more`
+/// footer when `page.total` exceeds the rendered slice.
 fn render_sessions(
     out: &mut dyn Write,
-    sessions: &[SessionInfo],
+    page: &super::store::ListPage,
     all: bool,
     local_offset: UtcOffset,
     term_width: Option<usize>,
 ) -> Result<()> {
+    let sessions = page.sessions();
     if sessions.is_empty() {
         let scope = if all { "" } else { " in this project" };
         writeln!(out, "No sessions found{scope}.").context("write list output")?;
@@ -131,6 +130,14 @@ fn render_sessions(
                 .context("write list row")?;
         }
     }
+    let hidden = page.total().saturating_sub(sessions.len());
+    if hidden > 0 {
+        writeln!(
+            out,
+            "... and {hidden} more (use `--limit N` or `--limit 0` to disable the cap)",
+        )
+        .context("write list footer")?;
+    }
     Ok(())
 }
 
@@ -138,7 +145,8 @@ fn render_sessions(
 mod tests {
     use time::macros::datetime;
 
-    use super::super::entry::{ExitInfo, TitleInfo};
+    use super::super::entry::{ExitInfo, SessionInfo, TitleInfo};
+    use super::super::store::ListPage;
     use super::*;
 
     fn session(session_id: &str, last_active_at: time::OffsetDateTime) -> SessionInfo {
@@ -148,7 +156,17 @@ mod tests {
             last_active_at,
             title: None,
             exit: None,
+            git_branch: None,
         }
+    }
+
+    fn page(sessions: Vec<SessionInfo>) -> ListPage {
+        let total = sessions.len();
+        ListPage::new(sessions, total)
+    }
+
+    fn page_with_total(sessions: Vec<SessionInfo>, total: usize) -> ListPage {
+        ListPage::new(sessions, total)
     }
 
     fn render_to_string(sessions: &[SessionInfo], all: bool) -> String {
@@ -157,7 +175,14 @@ mod tests {
 
     fn render_with_width(sessions: &[SessionInfo], all: bool, term_width: Option<usize>) -> String {
         let mut buf = Vec::new();
-        render_sessions(&mut buf, sessions, all, UtcOffset::UTC, term_width).unwrap();
+        render_sessions(
+            &mut buf,
+            &page(sessions.to_vec()),
+            all,
+            UtcOffset::UTC,
+            term_width,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -169,15 +194,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = super::super::store::test_store(dir.path());
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, false, UtcOffset::UTC, None).unwrap();
+        render_list(&mut buf, &store, false, UtcOffset::UTC, None, None).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "No sessions found in this project.\n",
         );
 
         let mut buf = Vec::new();
-        render_list(&mut buf, &store, true, UtcOffset::UTC, None).unwrap();
+        render_list(&mut buf, &store, true, UtcOffset::UTC, None, None).unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "No sessions found.\n",);
+    }
+
+    #[test]
+    fn render_list_appends_more_footer_when_capped() {
+        // `total > sessions.len()` is the only signal `render_sessions` has that the cap clipped
+        // — pin it via a constructed `ListPage`.
+        let mut buf = Vec::new();
+        render_sessions(
+            &mut buf,
+            &page_with_total(
+                vec![session("aaaa1234", datetime!(2026-04-18 09:00:00 UTC))],
+                7,
+            ),
+            false,
+            UtcOffset::UTC,
+            None,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("... and 6 more"), "got: {out}");
+        assert!(out.contains("--limit"), "got: {out}");
+    }
+
+    #[test]
+    fn render_list_omits_more_footer_when_total_equals_rendered() {
+        let mut buf = Vec::new();
+        render_sessions(
+            &mut buf,
+            &page(vec![session(
+                "aaaa1234",
+                datetime!(2026-04-18 09:00:00 UTC),
+            )]),
+            false,
+            UtcOffset::UTC,
+            None,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains("more"), "got: {out}");
     }
 
     // ── render_sessions ──

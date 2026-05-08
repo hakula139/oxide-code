@@ -1,5 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/welcome.rs
+assertion_line: 423
 expression: "render(80, 14, &snap)"
 ---
 "                                                                                "
@@ -10,9 +11,9 @@ expression: "render(80, 14, &snap)"
 "                                                                                "
 "                    Try one of:                                                 "
 "                                                                                "
-"                      /clear     reset conversation                             "
-"                      /effort    tune Speed ↔ Intelligence                      "
-"                      /theme     switch theme                                   "
+"                      /help     list commands                                   "
+"                      /diff     show staged changes                             "
+"                      /model    switch model                                    "
 "                                                                                "
-"                    Tip — /clear starts a fresh conversation                    "
+"                    Tip — /theme previews live as you scroll                    "
 "                                                                                "

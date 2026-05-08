@@ -237,7 +237,6 @@ impl InputArea {
         self.scroll_top.set(top);
 
         let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
-        let cursor_x = raw_cursor_x.min(textarea_area.right().saturating_sub(1));
         let cursor_y = textarea_area.y + cursor_row - top;
 
         if let Some(token) = self.ghost_text() {
@@ -253,7 +252,7 @@ impl InputArea {
             }
         }
 
-        frame.set_cursor_position((cursor_x, cursor_y));
+        crate::tui::cursor::place_clamped(frame, raw_cursor_x, cursor_y, textarea_area);
     }
 }
 

@@ -49,6 +49,7 @@ mpsc
 mtimes
 MULT
 nonewline
+nucleo
 onig
 pgid
 println
@@ -84,6 +85,7 @@ unmaterialized
 unresumable
 unrotated
 urandom
+usize
 venv
 vtable
 writeln

@@ -51,6 +51,14 @@ pub(crate) enum AgentEvent {
     SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — a new session UUID is now active.
     SessionRolled { id: String },
+    /// `/resume` swapped to an existing session in place — payload carries the target's
+    /// transcript so the UI can rebuild chat without restarting the process.
+    SessionResumed {
+        id: String,
+        title: Option<String>,
+        messages: Vec<crate::message::Message>,
+        tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
+    },
     /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
     /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
@@ -71,6 +79,10 @@ pub(crate) enum AgentEvent {
 pub(crate) enum UserAction {
     SubmitPrompt(String),
     Clear,
+    /// `/resume <id-prefix>` or picker selection: swap to an existing session in place.
+    Resume {
+        session_id: String,
+    },
     /// Symmetric model + effort swap. At least one field must be `Some`; `None` leaves that axis
     /// as-is. Modal pickers and typed-arg `/model <id>` / `/effort <tier>` both flow through here.
     SwapConfig {
@@ -177,6 +189,7 @@ impl StdioSink {
             AgentEvent::PromptDrained(_)
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
+            | AgentEvent::SessionResumed { .. }
             | AgentEvent::ConfigChanged { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;
