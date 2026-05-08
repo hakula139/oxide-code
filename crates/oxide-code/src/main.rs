@@ -48,13 +48,9 @@ use util::path::tildify;
         .multiple(true),
 ))]
 struct Cli {
-    /// Disable the TUI and use a bare REPL instead.
-    #[arg(long)]
-    no_tui: bool,
-
-    /// Run in headless mode: send a single prompt and print the response.
-    #[arg(short, long, value_name = "PROMPT")]
-    prompt: Option<String>,
+    /// Widen `--list` / `--continue` from the current cwd to every project.
+    #[arg(short, long, requires = "scope")]
+    all: bool,
 
     /// Resume a session: bare flag picks the most recent, an ID prefix picks a specific one.
     #[expect(
@@ -69,17 +65,21 @@ struct Cli {
     )]
     r#continue: Option<Option<String>>,
 
+    /// Cap `--list` to the N most-recent sessions. `0` disables the cap.
+    #[arg(long, value_name = "N", requires = "list", default_value_t = 30)]
+    limit: usize,
+
     /// List recent sessions and exit.
     #[arg(short, long, conflicts_with_all = ["prompt", "continue"])]
     list: bool,
 
-    /// Widen `--list` / `--continue` from the current cwd to every project.
-    #[arg(short, long, requires = "scope")]
-    all: bool,
+    /// Disable the TUI and use a bare REPL instead.
+    #[arg(long)]
+    no_tui: bool,
 
-    /// Cap `--list` to the N most-recent sessions. `0` disables the cap (legacy behavior).
-    #[arg(long, value_name = "N", requires = "list", default_value_t = 30)]
-    limit: usize,
+    /// Run in headless mode: send a single prompt and print the response.
+    #[arg(short, long, value_name = "PROMPT")]
+    prompt: Option<String>,
 }
 
 fn main() -> Result<()> {

@@ -267,7 +267,7 @@ impl<T: SearchableItem> SearchableList<T> {
         spans.push(Span::styled(SEARCH_PROMPT.to_owned(), prompt_style));
         if self.query.is_empty() {
             spans.push(Span::styled(
-                "type to filter (substring match)".to_owned(),
+                "Type to filter (substring match)".to_owned(),
                 theme.dim(),
             ));
             (Line::from(spans), 0)
@@ -574,6 +574,22 @@ mod tests {
     }
 
     #[test]
+    fn place_terminal_cursor_skips_when_area_is_shorter_than_search_row_offset() {
+        // Defensive guard: when the host shrinks the modal to fewer rows than `title + gap +
+        // search-row` requires, `place_terminal_cursor` returns early instead of placing the
+        // cursor outside the area. The render call must still complete without panicking.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let l = list(vec![FakeItem::new("alpha")]);
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
+            .expect("render must not panic when area is too short for the search row");
+    }
+
+    #[test]
     fn render_anchors_terminal_cursor_past_visible_query_when_typing() {
         // Cursor must follow the typed query — sitting at prompt + display-width(query).
         use ratatui::Terminal;
@@ -593,22 +609,6 @@ mod tests {
             (SEARCH_PROMPT_WIDTH + 2, TITLE_ROW_HEIGHT + SECTION_GAP),
             "cursor advances by the display width of the visible query (`ab` = 2 cells)",
         );
-    }
-
-    #[test]
-    fn place_terminal_cursor_skips_when_area_is_shorter_than_search_row_offset() {
-        // Defensive guard: when the host shrinks the modal to fewer rows than `title + gap +
-        // search-row` requires, `place_terminal_cursor` returns early instead of placing the
-        // cursor outside the area. The render call must still complete without panicking.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let l = list(vec![FakeItem::new("alpha")]);
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
-            .expect("render must not panic when area is too short for the search row");
     }
 
     #[test]

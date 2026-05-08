@@ -26,8 +26,7 @@ use crate::util::text::truncate_to_width;
 // ── Constants ──
 
 const PICKER_TITLE: &str = "Resume session";
-const PICKER_DESCRIPTION: &str =
-    "Pick a session to resume in place. Tab toggles current-project ↔ all projects.";
+const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
 const UNTITLED_MARKER: &str = "(untitled)";
 const ID_WIDTH: usize = 8;
@@ -46,6 +45,10 @@ struct SessionRow {
     last_active_at: time::OffsetDateTime,
     local_offset: UtcOffset,
     title: String,
+    /// `0` when no `Summary` line was found (older sessions or sessions that never finalized).
+    /// Rendered as "N msgs" so the user can see session weight at a glance.
+    message_count: u32,
+    git_branch: Option<String>,
     /// `Some` only when the picker scope is widened to all projects — the metadata column then
     /// surfaces the project path so the user can disambiguate. Scoped picks already share a
     /// project, so painting it would be noise.
@@ -72,6 +75,8 @@ impl SessionRow {
             last_active_at: info.last_active_at,
             local_offset,
             title,
+            message_count: info.exit.as_ref().map_or(0, |e| e.message_count),
+            git_branch: info.git_branch,
             project: show_project.then_some(project_path),
             haystack,
         }
@@ -88,8 +93,11 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
+        // Match the /model picker: cursor row goes `text + bold`, non-cursor stays plain text. The
+        // `>` gutter marker already carries the accent color, so layering accent on the title
+        // duplicated the highlight.
         let title_style = if is_cursor {
-            theme.accent().add_modifier(ratatui::style::Modifier::BOLD)
+            theme.text().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
             theme.text()
         };
@@ -102,6 +110,19 @@ impl SearchableItem for SessionRow {
         let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
         let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
         let mut meta = format!("{} · {}", self.id_prefix(), when);
+        if self.message_count > 0 {
+            use std::fmt::Write as _;
+            let unit = if self.message_count == 1 {
+                "msg"
+            } else {
+                "msgs"
+            };
+            _ = write!(meta, "{META_SEPARATOR}{} {unit}", self.message_count);
+        }
+        if let Some(branch) = self.git_branch.as_deref() {
+            meta.push_str(META_SEPARATOR);
+            meta.push_str(branch);
+        }
         if let Some(project) = self.project.as_deref() {
             meta.push_str(META_SEPARATOR);
             meta.push_str(project);
@@ -119,21 +140,35 @@ impl SearchableItem for SessionRow {
     }
 }
 
-/// Coarse-grain "N seconds/minutes/hours/days ago"; falls back to ISO date for older sessions so
-/// "327 days ago" doesn't displace a more recognizable absolute reference.
+/// Coarse-grain "N seconds/minutes/hours/days ago"; falls back to ISO date past 30 days so "327
+/// days ago" doesn't displace a more recognizable absolute reference. Negative deltas (clock skew,
+/// future stamps from another machine) collapse to 0 to keep the singular/plural axis sane.
 fn format_relative_time(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> String {
-    let secs = (now - ts).whole_seconds();
+    let secs = (now - ts).whole_seconds().max(0);
     if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3_600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h ago", secs / 3_600)
-    } else if secs < 30 * 86_400 {
-        format!("{}d ago", secs / 86_400)
+        return format!("{secs} {} ago", pluralize(secs, "second"));
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins} {} ago", pluralize(mins, "minute"));
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours} {} ago", pluralize(hours, "hour"));
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format!("{days} {} ago", pluralize(days, "day"));
+    }
+    ts.format(time::macros::format_description!("[year]-[month]-[day]"))
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn pluralize(n: i64, unit: &str) -> String {
+    if n == 1 {
+        unit.to_owned()
     } else {
-        ts.format(time::macros::format_description!("[year]-[month]-[day]"))
-            .unwrap_or_else(|_| "unknown".to_owned())
+        format!("{unit}s")
     }
 }
 
@@ -456,6 +491,31 @@ mod tests {
                 updated_at: last_active_at,
             }),
             exit: None,
+            git_branch: None,
+        }
+    }
+
+    fn raw_session_info_full(
+        session_id: String,
+        cwd: &str,
+        title: Option<&str>,
+        last_active_at: time::OffsetDateTime,
+        message_count: u32,
+        git_branch: Option<&str>,
+    ) -> SessionInfo {
+        SessionInfo {
+            session_id,
+            cwd: cwd.to_owned(),
+            last_active_at,
+            title: title.map(|t| TitleInfo {
+                title: t.to_owned(),
+                updated_at: last_active_at,
+            }),
+            exit: Some(crate::session::entry::ExitInfo {
+                message_count,
+                updated_at: last_active_at,
+            }),
+            git_branch: git_branch.map(str::to_owned),
         }
     }
 
@@ -530,32 +590,106 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_metadata_includes_msg_count_and_git_branch_when_present() {
+        // The full picker row: id · time · N msgs · branch · project. Singular vs plural is
+        // exercised here too — `1 msg` vs `5 msgs`.
+        let info = raw_session_info_full(
+            stamped_id(0xab),
+            "/work/oxide",
+            Some("Fix auth"),
+            datetime!(2026-04-18 09:00:00 UTC),
+            14,
+            Some("feat/login"),
+        );
+        let row = SessionRow::from_info(info, UtcOffset::UTC, true);
+        let lines = row.render(80, false, &Theme::default());
+        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(meta.contains("14 msgs"), "plural msgs: {meta}");
+        assert!(meta.contains("feat/login"), "branch: {meta}");
+
+        let single = raw_session_info_full(
+            stamped_id(0xcd),
+            "/work/oxide",
+            Some("First turn"),
+            datetime!(2026-04-18 09:00:00 UTC),
+            1,
+            None,
+        );
+        let row = SessionRow::from_info(single, UtcOffset::UTC, false);
+        let lines = row.render(80, false, &Theme::default());
+        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(meta.contains("1 msg"), "singular: {meta}");
+        assert!(!meta.contains("1 msgs"), "no `1 msgs` plural slip: {meta}");
+    }
+
+    #[test]
+    fn render_metadata_omits_msg_count_when_session_never_finalized() {
+        // `exit: None` means no Summary line was found — surface no count rather than `0 msgs`.
+        let info = raw_session_info(
+            stamped_id(0xab),
+            "/work/oxide",
+            Some("Fix auth"),
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(info, UtcOffset::UTC, false);
+        let lines = row.render(60, false, &Theme::default());
+        let meta: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !meta.contains("msgs"),
+            "no count when exit is missing: {meta}"
+        );
+        assert!(!meta.contains("msg"), "no singular either: {meta}");
+    }
+
     // ── format_relative_time ──
 
     #[test]
-    fn format_relative_time_buckets_into_seconds_minutes_hours_days_then_iso_date() {
+    fn format_relative_time_pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
         let now = datetime!(2026-05-08 12:00:00 UTC);
+        // Singular at the 1-of-each boundary, plural everywhere else.
+        assert_eq!(
+            format_relative_time(now - time::Duration::seconds(1), now),
+            "1 second ago",
+        );
         assert_eq!(
             format_relative_time(now - time::Duration::seconds(3), now),
-            "3s ago"
+            "3 seconds ago",
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::minutes(1), now),
+            "1 minute ago",
         );
         assert_eq!(
             format_relative_time(now - time::Duration::minutes(2), now),
-            "2m ago"
+            "2 minutes ago",
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::hours(1), now),
+            "1 hour ago",
         );
         assert_eq!(
             format_relative_time(now - time::Duration::hours(5), now),
-            "5h ago"
+            "5 hours ago",
+        );
+        assert_eq!(
+            format_relative_time(now - time::Duration::days(1), now),
+            "1 day ago",
         );
         assert_eq!(
             format_relative_time(now - time::Duration::days(3), now),
-            "3d ago"
+            "3 days ago",
         );
-        // ≥ 30 days falls back to the absolute ISO date.
-        let old = format_relative_time(now - time::Duration::days(60), now);
-        assert!(
-            old.starts_with("2026-") && old.contains('-'),
-            "30+ days falls back to ISO date: {old}",
+        // 30+ days falls back to the absolute ISO date.
+        assert_eq!(
+            format_relative_time(now - time::Duration::days(60), now),
+            "2026-03-09",
+        );
+        // Negative delta (future stamp / clock skew) collapses to "0 seconds ago" rather than
+        // emitting "-30 seconds ago".
+        assert_eq!(
+            format_relative_time(now + time::Duration::seconds(30), now),
+            "0 seconds ago",
         );
     }
 

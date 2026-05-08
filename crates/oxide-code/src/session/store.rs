@@ -485,6 +485,7 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         session_id,
         cwd,
         created_at,
+        git_branch,
         ..
     } = header
     else {
@@ -542,6 +543,7 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         last_active_at,
         title,
         exit,
+        git_branch,
     })
 }
 
@@ -580,6 +582,7 @@ pub(crate) fn seed_test_session(
             model: "claude-opus-4-7".to_owned(),
             created_at,
             version: CURRENT_VERSION,
+            git_branch: None,
         })
         .unwrap();
     if let Some(t) = title {
@@ -634,6 +637,7 @@ mod tests {
             model: "claude-opus-4-6".to_owned(),
             created_at: datetime!(2026-04-16 12:00:00 UTC),
             version: CURRENT_VERSION,
+            git_branch: None,
         }
     }
 
@@ -1219,6 +1223,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-15 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         wa.append(&sample_title_entry("Older")).unwrap();
@@ -1231,6 +1236,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-16 12:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         wb.append(&sample_title_entry("Newer")).unwrap();
@@ -1256,6 +1262,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-01-01 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         w_old.append(&sample_title_entry("Old")).unwrap();
@@ -1268,6 +1275,7 @@ mod tests {
                 model: "m".to_owned(),
                 created_at: datetime!(2026-04-17 10:00:00 UTC),
                 version: CURRENT_VERSION,
+                git_branch: None,
             })
             .unwrap();
         w_new.append(&sample_title_entry("New")).unwrap();
@@ -1456,6 +1464,7 @@ mod tests {
                     created_at: datetime!(2026-04-15 10:00:00 UTC)
                         + time::Duration::seconds(offset),
                     version: CURRENT_VERSION,
+                    git_branch: None,
                 })
                 .unwrap();
             writer

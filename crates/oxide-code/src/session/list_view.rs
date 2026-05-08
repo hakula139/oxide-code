@@ -156,6 +156,7 @@ mod tests {
             last_active_at,
             title: None,
             exit: None,
+            git_branch: None,
         }
     }
 

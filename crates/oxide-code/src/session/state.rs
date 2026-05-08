@@ -192,14 +192,44 @@ impl SessionState {
 
 fn new_header(model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
+    let cwd = current_dir_string();
+    let git_branch = current_git_branch(&cwd);
     let header = Entry::Header {
         session_id: session_id.clone(),
-        cwd: current_dir_string(),
+        cwd,
         model: model.to_owned(),
         created_at: OffsetDateTime::now_utc(),
         version: CURRENT_VERSION,
+        git_branch,
     };
     (session_id, header)
+}
+
+/// Best-effort branch name via `git rev-parse --abbrev-ref HEAD`. Returns `None` when not in a
+/// repo, when git is missing, or when HEAD is detached (returned as the literal `HEAD` — surfaced
+/// as `None` so the metadata column doesn't show a useless `· HEAD`).
+///
+/// Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't depend
+/// on the working tree's branch — every test site that needs a non-`None` branch supplies its own
+/// fixture via direct `Entry::Header` construction.
+fn current_git_branch(cwd: &str) -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    Some(branch)
 }
 
 fn current_dir_string() -> String {
