@@ -238,6 +238,7 @@ pub(crate) fn start(store: &SessionStore, model: &str) -> SessionHandle {
 }
 
 /// New id plus any flush failure from finalizing the old session.
+#[derive(Debug)]
 pub(crate) struct RollOutcome {
     pub(crate) new_id: String,
     pub(crate) finalize_failure: Option<String>,
