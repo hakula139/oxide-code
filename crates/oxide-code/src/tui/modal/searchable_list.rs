@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::theme::Theme;
 use crate::util::text::truncate_to_width;
@@ -216,7 +217,8 @@ impl<T: SearchableItem> SearchableList<T> {
         }
         lines.push(Line::default());
 
-        lines.push(self.render_search_row(area.width, theme));
+        let (search_line, query_display_width) = self.render_search_row(area.width, theme);
+        lines.push(search_line);
         lines.push(Line::default());
 
         let row_width = area.width.saturating_sub(CURSOR_MARKER_WIDTH);
@@ -241,26 +243,46 @@ impl<T: SearchableItem> SearchableList<T> {
         }
 
         frame.render_widget(Paragraph::new(lines).style(theme.surface()), area);
+        self.place_terminal_cursor(frame, area, query_display_width);
     }
 
-    fn render_search_row(&self, area_width: u16, theme: &Theme) -> Line<'static> {
+    /// Paint the search prompt + query (or placeholder hint). Returns the rendered query's display
+    /// width so the caller can place the terminal-native cursor at the insertion point.
+    fn render_search_row(&self, area_width: u16, theme: &Theme) -> (Line<'static>, u16) {
         let prompt_style = theme.accent();
-        let cursor_glyph = "▏";
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
         spans.push(Span::styled(SEARCH_PROMPT.to_owned(), prompt_style));
         if self.query.is_empty() {
             spans.push(Span::styled(
                 "type to filter (substring match)".to_owned(),
                 theme.dim(),
             ));
-            spans.push(Span::styled(cursor_glyph.to_owned(), prompt_style));
+            (Line::from(spans), 0)
         } else {
             let budget = usize::from(area_width.saturating_sub(SEARCH_PROMPT_WIDTH + 1));
             let shown = truncate_to_width(&self.query, budget);
+            let width = u16::try_from(UnicodeWidthStr::width(shown.as_str())).unwrap_or(u16::MAX);
             spans.push(Span::styled(shown, theme.text()));
-            spans.push(Span::styled(cursor_glyph.to_owned(), prompt_style));
+            (Line::from(spans), width)
         }
-        Line::from(spans)
+    }
+
+    /// Anchor the terminal-native cursor at the search row's insertion point — matches the input
+    /// panel's cursor (terminal-themed shape, OS-blinking) instead of painting a static glyph at
+    /// the wrong column when the query is empty.
+    fn place_terminal_cursor(&self, frame: &mut Frame<'_>, area: Rect, query_display_width: u16) {
+        let search_y_offset =
+            TITLE_ROW_HEIGHT + u16::from(self.description.is_some()) + SECTION_GAP;
+        if search_y_offset >= area.height {
+            return;
+        }
+        let cursor_y = area.y.saturating_add(search_y_offset);
+        let raw_x = area
+            .x
+            .saturating_add(SEARCH_PROMPT_WIDTH)
+            .saturating_add(query_display_width);
+        let cursor_x = raw_x.min(area.right().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     fn render_row(item: &T, is_cursor: bool, body_width: u16, theme: &Theme) -> Line<'static> {
@@ -493,6 +515,60 @@ mod tests {
         terminal
             .draw(|frame| l.render(frame, Rect::new(0, 0, 20, h), &theme))
             .expect("render must not panic");
+    }
+
+    #[test]
+    fn render_anchors_terminal_cursor_after_prompt_when_query_is_empty() {
+        // Regression: bare picker used to paint a `▏` glyph after the placeholder text, which left
+        // the visual cursor at the wrong column AND with a non-blinking shape. Now we delegate to
+        // `frame.set_cursor_position` so the terminal-native cursor sits at the prompt column.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let l = list(vec![FakeItem::new("alpha")]);
+        let theme = Theme::default();
+        let h = l.height(40);
+        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
+        terminal
+            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
+            .expect("render must not panic");
+        let (cx, cy) = terminal.get_cursor_position().unwrap().into();
+        assert_eq!(
+            (cx, cy),
+            (SEARCH_PROMPT_WIDTH, TITLE_ROW_HEIGHT + SECTION_GAP),
+            "cursor sits at the prompt column on the search row when query is empty",
+        );
+        let buf = terminal.backend().buffer();
+        let dump: String = (0..h)
+            .flat_map(|y| (0..40).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+            .collect();
+        assert!(
+            !dump.contains('▏'),
+            "no painted cursor glyph should remain in the buffer: {dump}",
+        );
+    }
+
+    #[test]
+    fn render_anchors_terminal_cursor_past_visible_query_when_typing() {
+        // Cursor must follow the typed query — sitting at prompt + display-width(query).
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut l = list(vec![FakeItem::new("alpha")]);
+        l.set_query("ab".to_owned());
+        let theme = Theme::default();
+        let h = l.height(40);
+        let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
+        terminal
+            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, h), &theme))
+            .expect("render must not panic");
+        let (cx, cy) = terminal.get_cursor_position().unwrap().into();
+        assert_eq!(
+            (cx, cy),
+            (SEARCH_PROMPT_WIDTH + 2, TITLE_ROW_HEIGHT + SECTION_GAP),
+            "cursor advances by the display width of the visible query (`ab` = 2 cells)",
+        );
     }
 
     #[test]
