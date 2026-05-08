@@ -189,8 +189,8 @@ mod tests {
     use crate::message::Message;
     use crate::session::state::SessionState;
 
-    /// Run the actor against an in-memory state until the receiver
-    /// closes (caller drops `tx`), then return the final state for assertions on file contents.
+    /// Drives the actor against `cmds` until the receiver closes (we drop `tx` after sending),
+    /// returning `SharedState` so callers can assert flush-failure flags.
     async fn drive(state: SessionState, cmds: Vec<SessionCmd>) -> Arc<SharedState> {
         let shared = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel(cmds.len().max(1));
@@ -269,8 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_drains_burst_into_single_batch() {
-        // Three records queued at once must all land in the file in
-        // send order — single-batch coalescing is implicit.
+        // Three records queued at once must all reach disk in send order via one flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -327,8 +326,7 @@ mod tests {
 
         drive(state, vec![rec, ai_cmd, fin]).await;
 
-        // Tail scan picks the latest-updated_at title, so the AI
-        // title wins over the first-prompt title.
+        // Tail scan picks the latest-updated_at title — AI wins over first-prompt.
         let title = store
             .list()
             .unwrap()
@@ -341,9 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_shutdown_exits_loop_even_with_live_sender_clones() {
-        // The point of `SessionCmd::Shutdown` is to break out without
-        // waiting for every clone to drop — otherwise an orphaned
-        // title-generator's mid-HTTP clone keeps the actor alive through the whole HTTP timeout.
+        // Otherwise an orphaned title-generator's mid-HTTP clone would pin the actor through
+        // the full HTTP timeout.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store, "m");
@@ -365,8 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_shutdown_flushes_preceding_record_in_same_batch() {
-        // Pending writes ahead of Shutdown in the queue must reach
-        // disk; the actor only breaks after the batch flush.
+        // Pending writes ahead of Shutdown must reach disk; the actor only breaks after the
+        // batch flush.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -403,8 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_full_turn_produces_byte_compatible_jsonl() {
-        // Pins literal JSONL bytes (with UUIDs / timestamps / cwd
-        // masked for stability) so a stray field rename would fail.
+        // Pins literal JSONL bytes (UUIDs / timestamps / cwd masked) so a field rename would fail.
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");

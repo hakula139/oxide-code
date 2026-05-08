@@ -406,7 +406,6 @@ mod tests {
             panic!("deliberate poison");
         })
         .join();
-        // Mutex is now poisoned. record_flush_failure must recover.
         shared.record_flush_failure("disk full");
         assert_eq!(shared.last_flush_failure(), Some("disk full".to_owned()));
     }
@@ -414,7 +413,6 @@ mod tests {
     #[test]
     fn shared_state_last_flush_failure_recovers_from_poisoned_mutex() {
         let shared = Arc::new(SharedState::default());
-        // Poison by writing then panicking.
         let s = Arc::clone(&shared);
         _ = std::thread::spawn(move || {
             let mut guard = s.last_flush_failure.lock().unwrap();
@@ -478,8 +476,8 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_carries_underlying_flush_error() {
-        // The user should see the I/O cause, not the generic
-        // dropped-task fallback, when one is on record.
+        // User should see the I/O cause, not the generic dropped-task fallback, when one is on
+        // record.
         let handle = testing::dead("dead");
         handle
             .shared
@@ -496,8 +494,8 @@ mod tests {
 
     #[tokio::test]
     async fn record_message_actor_gone_surfaces_after_prior_flush_failure_was_surfaced() {
-        // The two sticky-once flags must be independent: a previously
-        // surfaced flush failure must not silence the actor-gone signal.
+        // The two sticky-once flags must be independent — a surfaced flush failure must not
+        // silence the actor-gone signal.
         let handle = testing::dead("dead");
         handle.shared.record_flush_failure("disk full");
         assert!(handle.shared.surface_first_flush_failure());
@@ -622,13 +620,10 @@ mod tests {
 
     #[tokio::test]
     async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
-        // Distinguishes the rx-await fallback in dispatch_outcome from
-        // the cmd_tx.send-failed early return: send succeeds and the
-        // actor receives the cmd, but drops the ack without responding
-        // (simulating a panic between recv and ack). The succeed=3
-        // header lets the same handle exercise the success arm on
-        // ToolMetadata / AppendAiTitle / Finish variants of the
-        // helper's or-pattern, then the drop arm on the 4th cmd.
+        // Distinguishes the rx-await fallback in dispatch_outcome from the cmd_tx.send-failed
+        // early return: send succeeds, actor receives the cmd, but drops the ack (simulates a
+        // panic between recv and ack). `succeed=3` exercises each ack-bearing variant of the
+        // helper's or-pattern healthy first, then the drop arm on the 4th cmd.
         let handle = testing::acks_then_drops("acks-then-drops", 3);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
@@ -655,8 +650,8 @@ mod tests {
             "dropped ack surfaces actor-gone",
         );
 
-        // Drain the actor task so its loop-exit is exercised — without
-        // shutdown, the test runtime tears the task down mid-recv.
+        // Drain the actor task so its loop-exit is exercised — without shutdown, the test
+        // runtime tears the task down mid-recv.
         handle.shutdown().await;
     }
 
@@ -771,9 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Three tracked files in → three FileSnapshot lines on disk
-        // with the right paths. Counting strings would pass even if
-        // every snapshot pointed at the same file; parse and assert the path set instead.
+        // Assert the path set so the test fails even if every snapshot points at the same file.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -814,7 +807,6 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_writes_summary_then_succeeds() {
-        // Pins the success contract: summary lands on disk and the returned failure is `None`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let handle = start(&store, "m");

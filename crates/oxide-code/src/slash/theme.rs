@@ -242,6 +242,9 @@ fn valid_names() -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
@@ -418,9 +421,6 @@ mod tests {
 
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let p = picker_with_active("mocha");
         let theme = Theme::default();
         for width in [40_u16, 80, 120] {

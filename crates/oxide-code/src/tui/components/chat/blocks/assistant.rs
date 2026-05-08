@@ -140,8 +140,8 @@ mod tests {
 
     #[test]
     fn assistant_text_fenced_code_preserves_highlight_style() {
-        // Regression: `prepend_markdown_prefix` used to drop `line.style`, silently losing the
-        // whole-line fg of unknown-lang fence blocks inside assistant replies.
+        // `prepend_markdown_prefix` must keep `line.style` so the whole-line fg of unknown-lang
+        // fence blocks survives into the assistant render.
         let theme = Theme::default();
         let block = AssistantText::new(indoc! {"
             ```

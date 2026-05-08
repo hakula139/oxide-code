@@ -311,6 +311,9 @@ fn effort_for_highlighted(list: &ListPicker<ModelRow>, fallback: Option<Effort>)
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
     use crate::slash::test_session_info;
 
@@ -487,9 +490,6 @@ mod tests {
 
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         // Two cursor positions: an effort-tier model (Opus 4.7) so the effort row renders, and
         // a no-tier model (Haiku 4.5) so the hide branch executes.

@@ -169,7 +169,7 @@ mod tests {
     // ── filter_and_rank ──
 
     #[test]
-    fn filter_and_rank_empty_query_yields_full_registry_in_declared_order() {
+    fn filter_and_rank_empty_query_is_full_registry_in_declared_order() {
         let rows = filter_and_rank("", &registry());
         assert_eq!(names(&rows), vec!["help", "clear", "status", "compact"]);
         assert!(rows.iter().all(|m| m.matched_alias.is_none()));

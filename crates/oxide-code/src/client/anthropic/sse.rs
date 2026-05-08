@@ -147,6 +147,8 @@ pub(super) fn parse_sse_frame(frame: &str) -> Result<Option<StreamEvent>> {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::client::anthropic::wire::Delta;
@@ -156,9 +158,6 @@ mod tests {
     #[tokio::test]
     async fn stream_sse_buffer_overflow_bails_when_frame_lacks_terminator() {
         // No `\n\n` separator would grow the buffer unbounded; the cap turns this into an error.
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
         let body = "a".repeat(MAX_SSE_FRAME_BYTES + 1024);
         Mock::given(method("POST"))
@@ -195,9 +194,6 @@ mod tests {
     #[tokio::test]
     async fn stream_sse_skips_invalid_utf8_frame_then_keeps_streaming() {
         // A non-UTF-8 frame must be skipped silently so it doesn't poison the rest of the stream.
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
         // 0xC3 0x28 is an invalid UTF-8 sequence (lone start byte).
         // The valid follow-up frame must still parse to Ping.
@@ -246,9 +242,6 @@ mod tests {
     #[tokio::test]
     async fn stream_sse_handles_data_less_frames_without_emitting_event() {
         // Frames with no `data:` (e.g., comment heartbeats) parse to Ok(None) and are skipped.
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
         let body = indoc! {r#"
             : heartbeat comment
@@ -293,9 +286,6 @@ mod tests {
     #[tokio::test]
     async fn stream_sse_succeeds_when_receiver_drops_before_send() {
         // Consumer cancellation must surface as graceful Ok(()), not an Err on the stream.
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
         let body = indoc! {r#"
             event: ping

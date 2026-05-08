@@ -409,7 +409,7 @@ mod tests {
     // ── paint ──
 
     #[test]
-    fn paint_below_narrow_min_is_a_no_op() {
+    fn paint_below_narrow_min_is_a_noop() {
         let snap = snap_for(&fixture());
         let backend = render(NARROW_MIN - 1, 12, &snap);
         for cell in &backend.buffer().content {
@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_zero_height_is_a_no_op() {
+    fn paint_zero_height_is_a_noop() {
         let snap = snap_for(&fixture());
         let backend = render(80, 0, &snap);
         assert!(

@@ -669,8 +669,6 @@ mod tests {
         );
     }
 
-    /// Regression: misplaced fields used to drop the whole config silently and surface as
-    /// "no credentials". Parse errors must propagate.
     #[tokio::test]
     async fn load_propagates_invalid_config_file() {
         let dir = tempfile::tempdir().unwrap();

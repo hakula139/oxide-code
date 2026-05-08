@@ -394,8 +394,8 @@ mod tests {
 
     #[test]
     fn finish_entries_pending_writer_is_empty_and_marks_finished() {
-        // Nothing recorded → nothing to summarize, but `finished` still
-        // latches so a later record cmd no-ops cleanly.
+        // Nothing recorded → nothing to summarize, but `finished` still latches so a later
+        // record cmd no-ops cleanly.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -408,9 +408,6 @@ mod tests {
 
     #[test]
     fn finish_entries_emits_one_file_snapshot_per_tracked_file() {
-        // Three snapshots in → three FileSnapshot entries out, ahead
-        // of the trailing Summary. The caller drains the tracker
-        // before sending the cmd; the actor only writes them to disk.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let tracker = FileTracker::default();
@@ -458,7 +455,7 @@ mod tests {
 
     #[test]
     fn finish_entries_skips_summary_on_empty_resume() {
-        // A summary per noisy resume would accumulate one line per cycle.
+        // Without this short-circuit, every noisy resume would append another summary line.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut original = SessionState::fresh(store.clone(), "m");
@@ -479,10 +476,8 @@ mod tests {
 
     // ── flush_entries ──
 
-    // `/dev/full` is the cheapest way to drive a real flush failure on
-    // an Active writer: open succeeds, every write returns ENOSPC. Linux
-    // exposes it; macOS and Windows do not, so the test gates on Linux
-    // rather than smuggling in a custom failing-writer trait.
+    // `/dev/full` drives a real ENOSPC on every write — Linux-only, so the test gates rather
+    // than smuggle in a failing-writer trait.
     #[cfg(target_os = "linux")]
     #[test]
     fn flush_entries_active_writer_flush_failure_transitions_to_broken() {
@@ -562,10 +557,9 @@ mod tests {
 
     #[test]
     fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
-        // End-to-end: spin up a temp git repo, make a commit (rev-parse otherwise returns the
-        // literal `HEAD` for an empty repo), and verify the branch name round-trips. Skipped
-        // silently if `git` isn't on PATH so CI without git doesn't fail — the production path
-        // correctly returns `None` in that case.
+        // Skipped silently if `git` isn't on PATH so CI without git doesn't fail — production
+        // path correctly returns `None` in that case. An empty repo's rev-parse would return the
+        // literal `HEAD`, so we make a commit first.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
         let Ok(status) = std::process::Command::new("git")
@@ -599,7 +593,6 @@ mod tests {
 
     #[test]
     fn current_git_branch_outside_a_repo_returns_none() {
-        // Plain temp dir — git rev-parse exits non-zero; parse should collapse to None.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(current_git_branch(dir.path().to_str().unwrap()), None);
     }
@@ -608,16 +601,14 @@ mod tests {
 
     #[test]
     fn parse_git_branch_keeps_branch_names_and_drops_everything_else() {
-        // Happy path: trim git's trailing newline so the metadata column doesn't render `\n`.
+        // Trailing newline trimmed so the metadata column doesn't render `\n`.
         assert_eq!(
             parse_git_branch(true, b"feat/login\n"),
             Some("feat/login".to_owned())
         );
-        // Non-zero exit (`fatal: not a git repository`, missing git, ...) collapses to None.
+        // Non-zero exit (not-a-repo, missing git, ...) collapses to None.
         assert_eq!(parse_git_branch(false, b"main\n"), None);
-        // Non-UTF-8 stdout collapses to None instead of panicking.
         assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
-        // Empty / whitespace-only stdout would render `· ` — drop it.
         assert_eq!(parse_git_branch(true, b""), None);
         assert_eq!(parse_git_branch(true, b"   \n"), None);
         // `HEAD` is rev-parse's detached-HEAD output — useless in the picker.
@@ -641,104 +632,64 @@ mod tests {
     // ── extract_user_text ──
 
     #[test]
-    fn extract_user_text_from_user_message() {
-        let msg = Message::user("hello");
-        assert_eq!(extract_user_text(&msg), Some("hello"));
-    }
-
-    #[test]
-    fn extract_user_text_skips_assistant() {
-        let msg = Message::assistant("hello");
-        assert_eq!(extract_user_text(&msg), None);
-    }
-
-    #[test]
-    fn extract_user_text_skips_empty() {
-        let msg = Message {
+    fn extract_user_text_returns_first_non_empty_text_from_user_role_only() {
+        let tool_result = ContentBlock::ToolResult {
+            tool_use_id: "t1".to_owned(),
+            content: "output".to_owned(),
+            is_error: false,
+        };
+        let user_with_only_blank = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "  ".to_owned(),
             }],
         };
-        assert_eq!(extract_user_text(&msg), None);
-    }
-
-    #[test]
-    fn extract_user_text_is_none_for_tool_result_only() {
-        let msg = Message {
+        let user_with_only_tool_result = Message {
             role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".to_owned(),
-                content: "output".to_owned(),
-                is_error: false,
-            }],
+            content: vec![tool_result.clone()],
         };
-        assert_eq!(extract_user_text(&msg), None);
-    }
-
-    #[test]
-    fn extract_user_text_finds_text_after_tool_result() {
-        let msg = Message {
+        let user_with_text_after_tool_result = Message {
             role: Role::User,
             content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "output".to_owned(),
-                    is_error: false,
-                },
+                tool_result,
                 ContentBlock::Text {
                     text: "follow-up".to_owned(),
                 },
             ],
         };
-        assert_eq!(extract_user_text(&msg), Some("follow-up"));
+
+        assert_eq!(extract_user_text(&Message::user("hello")), Some("hello"));
+        assert_eq!(extract_user_text(&Message::assistant("hello")), None);
+        assert_eq!(extract_user_text(&user_with_only_blank), None);
+        assert_eq!(extract_user_text(&user_with_only_tool_result), None);
+        assert_eq!(
+            extract_user_text(&user_with_text_after_tool_result),
+            Some("follow-up"),
+        );
     }
 
     // ── truncate_title ──
 
     #[test]
-    fn truncate_title_short_string_unchanged() {
+    fn truncate_title_returns_at_most_max_len_chars_after_first_line_trim() {
         assert_eq!(truncate_title("hello world", 60), "hello world");
-    }
+        assert_eq!(truncate_title("", 60), "");
+        assert_eq!(truncate_title("first line\nsecond line", 60), "first line");
+        assert_eq!(truncate_title("  padded  ", 60), "padded");
 
-    #[test]
-    fn truncate_title_exact_max_len_unchanged() {
-        let s = "a".repeat(60);
-        assert_eq!(truncate_title(&s, 60), s);
-    }
+        let exact = "a".repeat(60);
+        assert_eq!(truncate_title(&exact, 60), exact);
 
-    #[test]
-    fn truncate_title_long_string_adds_ellipsis() {
         let long = "a".repeat(100);
-        let result = truncate_title(&long, 20);
-        assert_eq!(result, format!("{}...", "a".repeat(17)));
+        assert_eq!(truncate_title(&long, 20), format!("{}...", "a".repeat(17)));
     }
 
     #[test]
     fn truncate_title_multibyte_respects_character_count() {
+        // Exact char count: 57 é + "..." = 60, not "<= 60".
         let s = "\u{00e9}".repeat(61);
         let result = truncate_title(&s, 60);
-        // Exact char count: 57 é + "..." = 60, not "<= 60".
         assert_eq!(result.chars().count(), 60);
-        assert_eq!(
-            result,
-            format!("{}...", "\u{00e9}".repeat(57)),
-            "truncated body should be 57 é followed by ellipsis",
-        );
-    }
-
-    #[test]
-    fn truncate_title_empty_string() {
-        assert_eq!(truncate_title("", 60), "");
-    }
-
-    #[test]
-    fn truncate_title_takes_first_line_only() {
-        assert_eq!(truncate_title("first line\nsecond line", 60), "first line");
-    }
-
-    #[test]
-    fn truncate_title_trims_whitespace() {
-        assert_eq!(truncate_title("  padded  ", 60), "padded");
+        assert_eq!(result, format!("{}...", "\u{00e9}".repeat(57)));
     }
 }

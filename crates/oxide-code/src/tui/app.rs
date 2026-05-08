@@ -735,6 +735,7 @@ mod tests {
 
     use super::*;
     use crate::tool::ToolRegistry;
+    use crate::tui::modal::testing::ScriptedModal;
 
     /// Idle `App` plus the `user_tx` consumer and an `agent_tx` kept alive so `agent_rx` stays
     /// open.
@@ -1120,9 +1121,6 @@ mod tests {
     #[tokio::test]
     async fn modal_gate_intercepts_keys_before_input_sees_them() {
         // While a modal is on screen, keys land on the modal only — never the input.
-        use crate::tui::modal::ModalAction;
-        use crate::tui::modal::testing::ScriptedModal;
-
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::User(
             UserAction::Cancel,
@@ -1147,9 +1145,6 @@ mod tests {
     #[test]
     fn modal_gate_cancel_closes_modal_without_dispatching() {
         // `ModalKey::Cancelled` pops the modal without dispatching; next key reaches input.
-        use crate::tui::modal::ModalAction;
-        use crate::tui::modal::testing::ScriptedModal;
-
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
         app.handle_crossterm_event(&key_event(KeyCode::Char('c'), KeyModifiers::NONE));
@@ -1654,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_cancel_without_snapshot_is_noop() {
+    fn modal_cancel_without_snapshot_is_a_noop() {
         // Modals that never previewed (e.g. /model picker) cancel through the same
         // ModalAction::None path; the rollback arm must skip cleanly with no snapshot.
         let (mut app, _rx, _agent_tx) = test_app(None);
@@ -1709,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_theme_with_unknown_name_is_silent_noop() {
+    async fn swap_theme_with_unknown_name_is_a_silent_noop() {
         // Roster drift between slash::theme::LISTED_THEMES and tui::theme::builtin::TABLE is a
         // dev bug, not user error — log via tracing and leave UI state untouched.
         let (mut app, _rx, _agent_tx) = test_app(None);
@@ -1758,9 +1753,8 @@ mod tests {
 
     #[test]
     fn slash_typed_swap_theme_routes_through_local_handler() {
-        // Regression: synthesized non-SubmitPrompt actions (e.g. `/theme latte`) used to be
-        // forwarded straight to the agent, which silently dropped them. They must now flow
-        // through dispatch_user_action so the local theme arm runs.
+        // Synthesized non-SubmitPrompt actions (e.g. `/theme latte`) must flow through
+        // dispatch_user_action so the local theme arm runs, not get forwarded to the agent.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("/theme latte".to_owned()));
 
@@ -2545,8 +2539,8 @@ mod tests {
     fn render_repaints_when_chat_content_grows_past_viewport() {
         use std::fmt::Write as _;
 
-        // Regression: content pushed in the same handler tick used to land below the viewport
-        // because the post-paint `update_layout` re-clamp arrived too late for the same frame.
+        // Content pushed in the same handler tick must land in the viewport on the first frame —
+        // a post-paint re-clamp would arrive too late.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let mut body = String::new();
         for i in 0..40 {
