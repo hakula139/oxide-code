@@ -31,10 +31,9 @@ const PICKER_DESCRIPTION: &str =
     "Pick a session to resume in place. Tab toggles current-project ↔ all projects.";
 const VIEWPORT_HEIGHT: u16 = 12;
 const UNTITLED_MARKER: &str = "(untitled)";
+const ID_WIDTH: usize = 8;
 /// Reserved column count for `last_active` (`YYYY-MM-DD HH:MM`).
 const TIMESTAMP_WIDTH: usize = 16;
-/// Reserved column count for the 8-char id prefix.
-const ID_WIDTH: usize = 8;
 /// Padding between the columns laid out by [`SessionRow::render_row`].
 const COLUMN_GAP: usize = 2;
 /// `— ` separator before the project column. Display width 2 (em dash + space).
@@ -777,6 +776,103 @@ mod tests {
         }
     }
 
+    #[test]
+    fn footer_text_singular_plural_and_scope_label() {
+        // Three permutations: 1 + current_project (singular + scoped), 0 + all_projects after
+        // Tab (zero plural + widened), 2 + current_project (plural + scoped).
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("only"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert_eq!(
+            picker.footer_text(),
+            "1 session · scope: current project · Tab to toggle · Enter to resume · Esc to cancel",
+        );
+
+        let (_dir2, empty_store) = isolated_store();
+        let mut empty = ResumePicker::new(empty_store, "live-session-id".to_owned());
+        empty.handle_key(&key(KeyCode::Tab));
+        assert_eq!(
+            empty.footer_text(),
+            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · Esc to cancel",
+        );
+
+        let (_dir3, two_store) = isolated_store();
+        for byte in [0x11_u8, 0x22] {
+            seed_session(
+                &two_store,
+                &stamped_id(byte),
+                Some("t"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let picker_two = ResumePicker::new(two_store, "live-session-id".to_owned());
+        assert!(
+            picker_two
+                .footer_text()
+                .starts_with("2 sessions · scope: current project")
+        );
+    }
+
+    #[test]
+    fn footer_text_shows_filtered_over_total_when_query_active() {
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [
+            (0x11_u8, "auth fix"),
+            (0x22, "ui tweak"),
+            (0x33, "ai title"),
+        ] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "fix".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert!(
+            picker.footer_text().starts_with("1 / 3 matching · scope:"),
+            "filter `fix` should narrow to one title but keep `total` visible: {}",
+            picker.footer_text(),
+        );
+    }
+
+    #[test]
+    fn render_surfaces_load_error_in_footer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (_dir, store) = isolated_store();
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        picker.load_error = Some("permission denied".to_owned());
+
+        let theme = Theme::default();
+        let h = picker.height(60);
+        let mut terminal = Terminal::new(TestBackend::new(60, h)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, h), &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let dump: String = (0..h)
+            .flat_map(|y| (0..60_u16).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
+            .collect();
+        assert!(
+            dump.contains("permission denied"),
+            "load error should appear inline: {dump}"
+        );
+    }
+
     // ── ResumeCmd ──
 
     #[test]
@@ -942,106 +1038,5 @@ mod tests {
         assert!(err.contains("ambiguous prefix"), "{err}");
         assert!(err.contains(&id_a[..ID_WIDTH]), "expected id_a in {err}");
         assert!(err.contains(&id_b[..ID_WIDTH]), "expected id_b in {err}");
-    }
-
-    // ── footer_text ──
-
-    #[test]
-    fn footer_text_singular_plural_and_scope_label() {
-        // Three permutations: 1 + current_project (singular + scoped), 0 + all_projects after
-        // Tab (zero plural + widened), 2 + current_project (plural + scoped).
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("only"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let picker = ResumePicker::new(store, "live-session-id".to_owned());
-        assert_eq!(
-            picker.footer_text(),
-            "1 session · scope: current project · Tab to toggle · Enter to resume · Esc to cancel",
-        );
-
-        let (_dir2, empty_store) = isolated_store();
-        let mut empty = ResumePicker::new(empty_store, "live-session-id".to_owned());
-        empty.handle_key(&key(KeyCode::Tab));
-        assert_eq!(
-            empty.footer_text(),
-            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · Esc to cancel",
-        );
-
-        let (_dir3, two_store) = isolated_store();
-        for byte in [0x11_u8, 0x22] {
-            seed_session(
-                &two_store,
-                &stamped_id(byte),
-                Some("t"),
-                1,
-                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-            );
-        }
-        let picker_two = ResumePicker::new(two_store, "live-session-id".to_owned());
-        assert!(
-            picker_two
-                .footer_text()
-                .starts_with("2 sessions · scope: current project")
-        );
-    }
-
-    #[test]
-    fn footer_text_shows_filtered_over_total_when_query_active() {
-        let (_dir, store) = isolated_store();
-        for (byte, title) in [
-            (0x11_u8, "auth fix"),
-            (0x22, "ui tweak"),
-            (0x33, "ai title"),
-        ] {
-            seed_session(
-                &store,
-                &stamped_id(byte),
-                Some(title),
-                1,
-                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
-            );
-        }
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        for c in "fix".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
-        }
-        assert!(
-            picker.footer_text().starts_with("1 / 3 matching · scope:"),
-            "filter `fix` should narrow to one title but keep `total` visible: {}",
-            picker.footer_text(),
-        );
-    }
-
-    // ── load_error surfacing ──
-
-    #[test]
-    fn render_surfaces_load_error_in_footer() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (_dir, store) = isolated_store();
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        picker.load_error = Some("permission denied".to_owned());
-
-        let theme = Theme::default();
-        let h = picker.height(60);
-        let mut terminal = Terminal::new(TestBackend::new(60, h)).unwrap();
-        terminal
-            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, h), &theme))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let dump: String = (0..h)
-            .flat_map(|y| (0..60_u16).map(move |x| (x, y)))
-            .map(|(x, y)| buf[(x, y)].symbol().to_owned())
-            .collect();
-        assert!(
-            dump.contains("permission denied"),
-            "load error should appear inline: {dump}"
-        );
     }
 }

@@ -1425,6 +1425,25 @@ mod tests {
         assert_eq!(sessions[0].session_id, "own");
     }
 
+    // ── list_all ──
+
+    #[tokio::test]
+    async fn list_all_spans_every_project_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _own = store.create(&sample_header("own")).unwrap();
+
+        let foreign_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
+        drop(foreign_store);
+
+        let all = store.list_all().unwrap();
+        let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["foreign", "own"]);
+    }
+
     // ── list_paged ──
 
     /// Helper: builds `count` finished sessions in monotonically increasing mtime order.
@@ -1485,25 +1504,6 @@ mod tests {
         let page = store.list_paged(Some(0), false).unwrap();
         assert!(page.sessions().is_empty());
         assert_eq!(page.total(), 3, "total still reflects what's on disk");
-    }
-
-    // ── list_all ──
-
-    #[tokio::test]
-    async fn list_all_spans_every_project_subdirectory() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let _own = store.create(&sample_header("own")).unwrap();
-
-        let foreign_store =
-            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        let _foreign = foreign_store.create(&sample_header("foreign")).unwrap();
-        drop(foreign_store);
-
-        let all = store.list_all().unwrap();
-        let mut ids: Vec<_> = all.iter().map(|s| s.session_id.as_str()).collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["foreign", "own"]);
     }
 
     // ── find_session_path ──

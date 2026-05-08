@@ -371,6 +371,24 @@ mod tests {
         assert_eq!(l.query(), "");
     }
 
+    // ── replace_items ──
+
+    #[test]
+    fn replace_items_resets_cursor_and_reapplies_filter() {
+        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("alphabet")]);
+        l.set_query("alpha".to_owned());
+        l.select_next();
+        assert_eq!(l.cursor_index(), 1);
+
+        l.replace_items(vec![FakeItem::new("alpine"), FakeItem::new("albatross")]);
+        assert_eq!(
+            l.visible_len(),
+            0,
+            "the prior `alpha` query no longer matches the new items",
+        );
+        assert_eq!(l.cursor_index(), 0, "replace_items must reset cursor");
+    }
+
     // ── select_next / select_prev ──
 
     #[test]
@@ -385,20 +403,6 @@ mod tests {
         l.select_next();
         l.select_next();
         assert_eq!(l.cursor_index(), 0, "wraps past last");
-    }
-
-    #[test]
-    fn navigation_on_empty_visible_set_is_silent_noop() {
-        // Filter out everything → all four navigation guards must short-circuit. Without the
-        // is_empty checks, `% self.visible.len()` would panic.
-        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
-        l.set_query("zzz".to_owned());
-        assert_eq!(l.visible_len(), 0);
-        l.select_next();
-        l.select_prev();
-        l.page_down();
-        l.page_up();
-        assert_eq!(l.cursor_index(), 0);
     }
 
     #[test]
@@ -453,26 +457,23 @@ mod tests {
         assert_eq!(l.cursor_index(), 0);
     }
 
+    #[test]
+    fn navigation_on_empty_visible_set_is_silent_noop() {
+        // Filter out everything → all four navigation guards must short-circuit. Without the
+        // is_empty checks, `% self.visible.len()` would panic.
+        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+        l.set_query("zzz".to_owned());
+        assert_eq!(l.visible_len(), 0);
+        l.select_next();
+        l.select_prev();
+        l.page_down();
+        l.page_up();
+        assert_eq!(l.cursor_index(), 0);
+    }
+
     fn item_label(i: usize) -> &'static str {
         // Leak owned strings for &'static str; fine in tests.
         Box::leak(format!("item-{i}").into_boxed_str())
-    }
-
-    // ── replace_items ──
-
-    #[test]
-    fn replace_items_resets_cursor_and_reapplies_filter() {
-        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("alphabet")]);
-        l.set_query("alpha".to_owned());
-        l.select_next();
-        assert_eq!(l.cursor_index(), 1);
-
-        l.replace_items(vec![FakeItem::new("alpine"), FakeItem::new("albatross")]);
-        assert_eq!(
-            l.visible_len(),
-            0,
-            "the prior `alpha` query no longer matches the new items",
-        );
     }
 
     // ── render ──
