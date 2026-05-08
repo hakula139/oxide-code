@@ -1649,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_cancel_without_snapshot_is_noop() {
+    fn modal_cancel_without_snapshot_is_a_noop() {
         // Modals that never previewed (e.g. /model picker) cancel through the same
         // ModalAction::None path; the rollback arm must skip cleanly with no snapshot.
         let (mut app, _rx, _agent_tx) = test_app(None);
@@ -1704,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_theme_with_unknown_name_is_silent_noop() {
+    async fn swap_theme_with_unknown_name_is_a_silent_noop() {
         // Roster drift between slash::theme::LISTED_THEMES and tui::theme::builtin::TABLE is a
         // dev bug, not user error — log via tracing and leave UI state untouched.
         let (mut app, _rx, _agent_tx) = test_app(None);

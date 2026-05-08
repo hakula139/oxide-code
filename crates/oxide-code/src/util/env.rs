@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn bool_unset_and_empty_are_absent() {
+    fn bool_unset_or_empty_is_absent() {
         temp_env::with_var_unset(KEY, || {
             assert_eq!(bool(KEY), None);
         });
