@@ -115,7 +115,13 @@ async fn async_main() -> Result<()> {
     let store = SessionStore::open()?;
     let file_tracker = Arc::new(FileTracker::default());
     let mut resumed = resolve_session(&store, &model, cli.r#continue.as_ref(), cli.all).await?;
-    file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+    let drifted = file_tracker.restore_verified(std::mem::take(&mut resumed.file_snapshots));
+    if !drifted.is_empty() {
+        warn!(
+            "{} tracked file(s) drifted on disk since this session ran; re-Read needed before Edit",
+            drifted.len(),
+        );
+    }
 
     let client = Client::new(config, Some(resumed.handle.session_id().to_owned()))?;
 
@@ -396,43 +402,16 @@ async fn agent_loop_task(
                 }
             }
             UserAction::Resume { session_id } => {
-                match session::handle::roll_into(&mut session, &store, &file_tracker, &session_id)
-                    .await
-                {
-                    Ok(outcome) => {
-                        let new_id = session.session_id().to_owned();
-                        client.set_session_id(new_id.clone());
-                        // The event takes the canonical owned vec; the agent loop keeps a clone so
-                        // subsequent turns continue from the resumed transcript.
-                        let messages_for_event = outcome.messages.clone();
-                        messages = outcome.messages;
-                        if let Err(e) = sink.send(AgentEvent::SessionResumed {
-                            id: new_id,
-                            title: outcome.title,
-                            messages: messages_for_event,
-                            tool_metadata: outcome.tool_result_metadata,
-                        }) {
-                            // Channel closed mid-resume leaves the TUI on the OLD chat. Surface
-                            // at error level so the log file pinpoints the desync.
-                            tracing::error!("session-resumed event dropped: {e}");
-                        }
-                        // Surface the OLD-session finalize failure AFTER SessionResumed so the
-                        // chat-clear in `apply_session_resumed` doesn't wipe it. Phrase as a
-                        // distinct event (not session_write_error, which reads as a *current*
-                        // writer fault).
-                        if let Some(failure) = outcome.finalize_failure.as_deref() {
-                            _ = sink.send(AgentEvent::Error(format!(
-                                "Previous session failed to finalize cleanly: {failure}",
-                            )));
-                        }
-                    }
-                    Err(e) => {
-                        _ = sink.send(AgentEvent::Error(format!(
-                            "Resume failed (still on session {}): {e:#}",
-                            session.session_id(),
-                        )));
-                    }
-                }
+                apply_resume(
+                    &mut session,
+                    &mut client,
+                    &mut messages,
+                    &store,
+                    &file_tracker,
+                    &sink,
+                    &session_id,
+                )
+                .await;
             }
             UserAction::SwapConfig { model, effort } => {
                 apply_swap_config(&mut client, &sink, model, effort);
@@ -442,6 +421,74 @@ async fn agent_loop_task(
     }
 
     Ok(())
+}
+
+/// Drives the mid-session resume: swap the handle, repaint the chat, surface previous-session
+/// finalize failures and tracker drift as distinct events so the user sees their source.
+async fn apply_resume(
+    session: &mut SessionHandle,
+    client: &mut Client,
+    messages: &mut Vec<Message>,
+    store: &SessionStore,
+    file_tracker: &FileTracker,
+    sink: &dyn AgentSink,
+    target_id: &str,
+) {
+    let outcome = match session::handle::roll_into(session, store, file_tracker, target_id).await {
+        Ok(o) => o,
+        Err(e) => {
+            _ = sink.send(AgentEvent::Error(format!(
+                "Resume failed (still on session {}): {e:#}",
+                session.session_id(),
+            )));
+            return;
+        }
+    };
+    let new_id = session.session_id().to_owned();
+    client.set_session_id(new_id.clone());
+    let messages_for_event = outcome.messages.clone();
+    *messages = outcome.messages;
+    if let Err(e) = sink.send(AgentEvent::SessionResumed {
+        id: new_id,
+        title: outcome.title,
+        messages: messages_for_event,
+        tool_metadata: outcome.tool_result_metadata,
+    }) {
+        // Channel closed mid-resume leaves the TUI on the OLD chat. Pinpoint the desync.
+        tracing::error!("session-resumed event dropped: {e}");
+    }
+    // Emit OLD-session finalize failure AFTER SessionResumed so the chat-clear doesn't wipe it.
+    // Distinct phrasing (not session_write_error) so the user doesn't read it as a current-writer
+    // fault.
+    if let Some(failure) = outcome.finalize_failure.as_deref() {
+        _ = sink.send(AgentEvent::Error(format!(
+            "Previous session failed to finalize cleanly: {failure}",
+        )));
+    }
+    if !outcome.drifted_paths.is_empty() {
+        _ = sink.send(AgentEvent::Error(format_drift_warning(
+            &outcome.drifted_paths,
+        )));
+    }
+}
+
+fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
+    const PREVIEW_CAP: usize = 3;
+    let preview: Vec<String> = drifted
+        .iter()
+        .take(PREVIEW_CAP)
+        .map(|p| p.display().to_string())
+        .collect();
+    let suffix = if drifted.len() > preview.len() {
+        format!(", and {} more", drifted.len() - preview.len())
+    } else {
+        String::new()
+    };
+    format!(
+        "{} tracked file(s) drifted on disk since the resumed session — re-Read before Edit: {}{suffix}",
+        drifted.len(),
+        preview.join(", "),
+    )
 }
 
 /// Order matters: model swap re-clamps effort before the explicit pick is applied.

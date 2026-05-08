@@ -197,18 +197,23 @@ impl FileTracker {
 
     /// Rehydrates from session JSONL on resume. Each snapshot must still match disk on (mtime,
     /// size) — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
-    /// duplicate paths the entry with the newer `recorded_at` wins.
-    pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) {
+    /// duplicate paths the entry with the newer `recorded_at` wins. Returns the dropped paths so
+    /// the caller can warn the user that those files need a fresh Read.
+    pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
         let mut by_path = self.lock();
+        let mut dropped = Vec::new();
         for snap in snapshots {
             let Ok(meta) = std::fs::metadata(&snap.path) else {
+                dropped.push(snap.path);
                 continue;
             };
             let Ok(current_mtime) = meta.modified() else {
+                dropped.push(snap.path);
                 continue;
             };
             let stored_mtime = SystemTime::from(snap.mtime);
             if meta.len() != snap.size || current_mtime != stored_mtime {
+                dropped.push(snap.path);
                 continue;
             }
             let keep = by_path
@@ -227,6 +232,7 @@ impl FileTracker {
                 );
             }
         }
+        dropped
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, FileState>> {
@@ -827,6 +833,54 @@ mod tests {
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap]);
         assert!(tracker.lock().is_empty());
+    }
+
+    #[test]
+    fn restore_verified_returns_paths_of_dropped_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept_path = dir.path().join("kept.rs");
+        let drifted_path = dir.path().join("drifted.rs");
+        std::fs::write(&kept_path, b"alpha").unwrap();
+        std::fs::write(&drifted_path, b"now larger").unwrap();
+        let kept_meta = std::fs::metadata(&kept_path).unwrap();
+        let drifted_meta = std::fs::metadata(&drifted_path).unwrap();
+        let missing_path = PathBuf::from("/nonexistent/x.rs");
+
+        let snaps = vec![
+            FileSnapshot {
+                path: kept_path.clone(),
+                content_hash: xxh64(b"alpha", HASH_SEED),
+                mtime: OffsetDateTime::from(kept_meta.modified().unwrap()),
+                size: kept_meta.len(),
+                last_view: LastView::Full,
+                recorded_at: OffsetDateTime::now_utc(),
+            },
+            FileSnapshot {
+                path: drifted_path.clone(),
+                content_hash: 0,
+                mtime: OffsetDateTime::from(drifted_meta.modified().unwrap()),
+                size: 3,
+                last_view: LastView::Full,
+                recorded_at: OffsetDateTime::now_utc(),
+            },
+            FileSnapshot {
+                path: missing_path.clone(),
+                content_hash: 0,
+                mtime: OffsetDateTime::UNIX_EPOCH,
+                size: 0,
+                last_view: LastView::Full,
+                recorded_at: OffsetDateTime::now_utc(),
+            },
+        ];
+
+        let tracker = FileTracker::default();
+        let dropped = tracker.restore_verified(snaps);
+        assert_eq!(
+            dropped,
+            vec![drifted_path, missing_path],
+            "both the size-drifted and the missing snapshots must be reported",
+        );
+        assert!(tracker.lock().contains_key(&kept_path));
     }
 
     #[test]

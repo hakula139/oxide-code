@@ -2,7 +2,7 @@
 //! actor's ack; callers never hold a lock across `await`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -272,6 +272,9 @@ pub(crate) struct RollIntoOutcome {
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) finalize_failure: Option<String>,
+    /// Tracker snapshots that drifted on disk between save and resume — caller surfaces these so
+    /// the user knows those files need a fresh Read before any Edit.
+    pub(crate) drifted_paths: Vec<PathBuf>,
 }
 
 /// Mid-session re-init: load + sanitize the target session, swap the handle in place, then
@@ -300,7 +303,7 @@ pub(crate) async fn roll_into(
 
     let old_snapshots = file_tracker.snapshot_all();
     file_tracker.clear();
-    file_tracker.restore_verified(file_snapshots);
+    let drifted_paths = file_tracker.restore_verified(file_snapshots);
 
     let old_session = std::mem::replace(session, target_handle);
     let finalize_failure = old_session.finalize(old_snapshots).await;
@@ -309,6 +312,7 @@ pub(crate) async fn roll_into(
         title,
         tool_result_metadata,
         finalize_failure,
+        drifted_paths,
     })
 }
 
