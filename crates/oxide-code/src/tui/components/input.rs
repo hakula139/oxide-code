@@ -236,7 +236,13 @@ impl InputArea {
         };
         self.scroll_top.set(top);
 
-        let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
+        // Empty buffer: ratatui_textarea reserves the first column as a phantom-cursor cell, so the
+        // placeholder text starts one column right. Anchor the visible cursor on the placeholder's
+        // first letter (matches the searchable-list search bar) rather than the phantom slot.
+        let raw_cursor_x = textarea_area
+            .x
+            .saturating_add(to_u16(sc.col))
+            .saturating_add(u16::from(self.is_empty()));
         let cursor_x = raw_cursor_x.min(textarea_area.right().saturating_sub(1));
         let cursor_y = textarea_area.y + cursor_row - top;
 
