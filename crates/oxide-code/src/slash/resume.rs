@@ -737,7 +737,7 @@ mod tests {
         );
     }
 
-    // ── ResumePicker ──
+    // ── ResumePicker::new ──
 
     #[test]
     fn new_loads_current_project_rows_into_searchable_list() {
@@ -762,6 +762,59 @@ mod tests {
             "both seeded sessions should populate the list",
         );
     }
+
+    #[test]
+    fn new_filters_out_live_session_to_block_self_resume() {
+        // Critical invariant: the live session id never appears as a row, so the user can't
+        // submit a Resume that would race the open append-writer.
+        let (_dir, store) = isolated_store();
+        let live_id = stamped_id(0x11);
+        seed_session(
+            &store,
+            &live_id,
+            Some("live"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_session(
+            &store,
+            &stamped_id(0x22),
+            Some("other"),
+            1,
+            datetime!(2026-04-18 09:01:00 UTC),
+        );
+        let picker = ResumePicker::new(store, live_id.clone());
+        assert_eq!(picker.total, 1, "live session must be filtered out");
+        let visible_id = picker
+            .list
+            .selected()
+            .expect("one row remaining")
+            .session_id
+            .clone();
+        assert_ne!(visible_id, live_id);
+    }
+
+    // ── ResumePicker::reload ──
+
+    #[test]
+    fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
+        // Pin the Err arm of `reload`: removing the project dir makes `list_paged` fail with
+        // ENOENT on `read_dir`. The picker must surface that as `load_error` (so the footer can
+        // distinguish "0 sessions" from "load failed") and zero out `total`.
+        let (dir, store) = isolated_store();
+        let project_dir = crate::session::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert!(
+            picker.load_error.is_some(),
+            "reload should surface list_paged failure: {:?}",
+            picker.load_error,
+        );
+        assert_eq!(picker.total, 0, "no rows materialise on the Err arm");
+    }
+
+    // ── ResumePicker::submit ──
 
     #[test]
     fn enter_with_selection_emits_resume_action() {
@@ -792,242 +845,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn typing_filters_rows_via_searchable_list() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("Auth fix"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &stamped_id(0x22),
-            Some("Refactor pass"),
-            5,
-            datetime!(2026-04-18 09:05:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        for c in "auth".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
-        }
-        assert_eq!(picker.list.visible_len(), 1, "only `Auth fix` should match");
-    }
-
-    #[test]
-    fn ctrl_u_clears_query() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("Auth"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        for c in "zzz".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
-        }
-        assert_eq!(picker.list.visible_len(), 0);
-        let mut event = KeyEvent::from(KeyCode::Char('u'));
-        event.modifiers = KeyModifiers::CONTROL;
-        picker.handle_key(&event);
-        assert_eq!(picker.list.query(), "");
-        assert_eq!(picker.list.visible_len(), 1);
-    }
-
-    #[test]
-    fn navigation_keys_move_cursor_within_visible_set() {
-        let (_dir, store) = isolated_store();
-        for i in 0..3 {
-            seed_session(
-                &store,
-                &stamped_id(0x10 + i),
-                Some(&format!("row-{i}")),
-                1,
-                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
-            );
-        }
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        assert_eq!(picker.list.cursor_index(), 0);
-        picker.handle_key(&key(KeyCode::Down));
-        assert_eq!(picker.list.cursor_index(), 1);
-        picker.handle_key(&key(KeyCode::Up));
-        assert_eq!(picker.list.cursor_index(), 0);
-        picker.handle_key(&key(KeyCode::PageDown));
-        assert_eq!(
-            picker.list.cursor_index(),
-            2,
-            "PageDown clamps at last visible row",
-        );
-        picker.handle_key(&key(KeyCode::PageUp));
-        assert_eq!(picker.list.cursor_index(), 0, "PageUp clamps at zero");
-    }
-
-    #[test]
-    fn backspace_pops_one_char_from_query() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("Auth"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        for c in "ab".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
-        }
-        picker.handle_key(&key(KeyCode::Backspace));
-        assert_eq!(picker.list.query(), "a");
-    }
-
-    #[test]
-    fn tab_toggles_scope_and_reloads_rows() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("only"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        assert!(!picker.all);
-        picker.handle_key(&key(KeyCode::Tab));
-        assert!(picker.all, "Tab flips scope to all-projects");
-        assert!(picker.footer_text().contains("all projects"));
-        picker.handle_key(&key(KeyCode::Tab));
-        assert!(!picker.all, "second Tab flips back");
-    }
-
-    #[test]
-    fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Bare picker stays scoped; Tab widens AND preserves the typed filter.
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("local"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
-        seed_session(
-            &other,
-            &stamped_id(0x22),
-            Some("foreign"),
-            1,
-            datetime!(2026-04-18 09:01:00 UTC),
-        );
-
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        assert_eq!(picker.total, 1, "scoped: only the home project");
-        for c in "11".chars() {
-            picker.handle_key(&key(KeyCode::Char(c)));
-        }
-        assert_eq!(picker.list.query(), "11");
-        picker.handle_key(&key(KeyCode::Tab));
-        assert_eq!(picker.total, 2, "Tab widens to all projects");
-        assert_eq!(
-            picker.list.query(),
-            "11",
-            "Tab must not reset the user's filter",
-        );
-    }
-
-    #[test]
-    fn picker_filters_out_live_session_to_block_self_resume() {
-        // Critical invariant: the live session id never appears as a row, so the user can't
-        // submit a Resume that would race the open append-writer.
-        let (_dir, store) = isolated_store();
-        let live_id = stamped_id(0x11);
-        seed_session(
-            &store,
-            &live_id,
-            Some("live"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        seed_session(
-            &store,
-            &stamped_id(0x22),
-            Some("other"),
-            1,
-            datetime!(2026-04-18 09:01:00 UTC),
-        );
-        let picker = ResumePicker::new(store, live_id.clone());
-        assert_eq!(picker.total, 1, "live session must be filtered out");
-        let visible_id = picker
-            .list
-            .selected()
-            .expect("one row remaining")
-            .session_id
-            .clone();
-        assert_ne!(visible_id, live_id);
-    }
-
-    #[test]
-    fn unhandled_keys_are_consumed_without_side_effects() {
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("only"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        let outcome = picker.handle_key(&key(KeyCode::Insert));
-        assert!(matches!(outcome, ModalKey::Consumed));
-        assert_eq!(picker.list.query(), "");
-        assert_eq!(picker.list.cursor_index(), 0);
-    }
-
-    #[test]
-    fn ctrl_other_chars_are_consumed_without_filtering() {
-        // Ctrl + non-`u` chars are absorbed silently — they must not push into the filter.
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("only"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        let mut event = KeyEvent::from(KeyCode::Char('a'));
-        event.modifiers = KeyModifiers::CONTROL;
-        picker.handle_key(&event);
-        assert_eq!(picker.list.query(), "");
-    }
-
-    #[test]
-    fn render_runs_at_typical_widths_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("Auth"),
-            3,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let picker = ResumePicker::new(store, "live-session-id".to_owned());
-        let theme = Theme::default();
-        for width in [60_u16, 100, 140] {
-            let h = picker.height(width).min(40);
-            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
-            terminal
-                .draw(|frame| picker.render(frame, Rect::new(0, 0, width, h), &theme))
-                .expect("render must not panic");
-        }
-    }
+    // ── ResumePicker::footer_text ──
 
     #[test]
     fn footer_text_singular_plural_and_scope_label() {
@@ -1100,6 +918,32 @@ mod tests {
         );
     }
 
+    // ── Modal::render ──
+
+    #[test]
+    fn render_runs_at_typical_widths_without_panicking() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Auth"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let theme = Theme::default();
+        for width in [60_u16, 100, 140] {
+            let h = picker.height(width).min(40);
+            let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+            terminal
+                .draw(|frame| picker.render(frame, Rect::new(0, 0, width, h), &theme))
+                .expect("render must not panic");
+        }
+    }
+
     #[test]
     fn render_skips_footer_when_area_too_short_for_two_rows_below_list() {
         // Defensive guard: if the parent allocates less than `list_h + 2` rows the picker drops
@@ -1114,24 +958,6 @@ mod tests {
         terminal
             .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, 1), &theme))
             .expect("render must not panic at height=1");
-    }
-
-    #[test]
-    fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
-        // Pin the Err arm of `reload`: removing the project dir makes `list_paged` fail with
-        // ENOENT on `read_dir`. The picker must surface that as `load_error` (so the footer can
-        // distinguish "0 sessions" from "load failed") and zero out `total`.
-        let (dir, store) = isolated_store();
-        let project_dir = crate::session::store::test_project_dir(dir.path());
-        std::fs::remove_dir_all(&project_dir).unwrap();
-
-        let picker = ResumePicker::new(store, "live-session-id".to_owned());
-        assert!(
-            picker.load_error.is_some(),
-            "reload should surface list_paged failure: {:?}",
-            picker.load_error,
-        );
-        assert_eq!(picker.total, 0, "no rows materialise on the Err arm");
     }
 
     #[test]
@@ -1158,6 +984,190 @@ mod tests {
             dump.contains("permission denied"),
             "load error should appear inline: {dump}"
         );
+    }
+
+    // ── Modal::handle_key ──
+
+    #[test]
+    fn typing_filters_rows_via_searchable_list() {
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Auth fix"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        seed_session(
+            &store,
+            &stamped_id(0x22),
+            Some("Refactor pass"),
+            5,
+            datetime!(2026-04-18 09:05:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "auth".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(picker.list.visible_len(), 1, "only `Auth fix` should match");
+    }
+
+    #[test]
+    fn backspace_pops_one_char_from_query() {
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Auth"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "ab".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        picker.handle_key(&key(KeyCode::Backspace));
+        assert_eq!(picker.list.query(), "a");
+    }
+
+    #[test]
+    fn ctrl_u_clears_query() {
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Auth"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        for c in "zzz".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(picker.list.visible_len(), 0);
+        let mut event = KeyEvent::from(KeyCode::Char('u'));
+        event.modifiers = KeyModifiers::CONTROL;
+        picker.handle_key(&event);
+        assert_eq!(picker.list.query(), "");
+        assert_eq!(picker.list.visible_len(), 1);
+    }
+
+    #[test]
+    fn navigation_keys_move_cursor_within_visible_set() {
+        let (_dir, store) = isolated_store();
+        for i in 0..3 {
+            seed_session(
+                &store,
+                &stamped_id(0x10 + i),
+                Some(&format!("row-{i}")),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(i)),
+            );
+        }
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert_eq!(picker.list.cursor_index(), 0);
+        picker.handle_key(&key(KeyCode::Down));
+        assert_eq!(picker.list.cursor_index(), 1);
+        picker.handle_key(&key(KeyCode::Up));
+        assert_eq!(picker.list.cursor_index(), 0);
+        picker.handle_key(&key(KeyCode::PageDown));
+        assert_eq!(
+            picker.list.cursor_index(),
+            2,
+            "PageDown clamps at last visible row",
+        );
+        picker.handle_key(&key(KeyCode::PageUp));
+        assert_eq!(picker.list.cursor_index(), 0, "PageUp clamps at zero");
+    }
+
+    #[test]
+    fn tab_toggles_scope_and_reloads_rows() {
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("only"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert!(!picker.all);
+        picker.handle_key(&key(KeyCode::Tab));
+        assert!(picker.all, "Tab flips scope to all-projects");
+        assert!(picker.footer_text().contains("all projects"));
+        picker.handle_key(&key(KeyCode::Tab));
+        assert!(!picker.all, "second Tab flips back");
+    }
+
+    #[test]
+    fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
+        // Bare picker stays scoped; Tab widens AND preserves the typed filter.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("local"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        seed_session(
+            &other,
+            &stamped_id(0x22),
+            Some("foreign"),
+            1,
+            datetime!(2026-04-18 09:01:00 UTC),
+        );
+
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert_eq!(picker.total, 1, "scoped: only the home project");
+        for c in "11".chars() {
+            picker.handle_key(&key(KeyCode::Char(c)));
+        }
+        assert_eq!(picker.list.query(), "11");
+        picker.handle_key(&key(KeyCode::Tab));
+        assert_eq!(picker.total, 2, "Tab widens to all projects");
+        assert_eq!(
+            picker.list.query(),
+            "11",
+            "Tab must not reset the user's filter",
+        );
+    }
+
+    #[test]
+    fn unhandled_keys_are_consumed_without_side_effects() {
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("only"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let outcome = picker.handle_key(&key(KeyCode::Insert));
+        assert!(matches!(outcome, ModalKey::Consumed));
+        assert_eq!(picker.list.query(), "");
+        assert_eq!(picker.list.cursor_index(), 0);
+    }
+
+    #[test]
+    fn ctrl_other_chars_are_consumed_without_filtering() {
+        // Ctrl + non-`u` chars are absorbed silently — they must not push into the filter.
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("only"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let mut event = KeyEvent::from(KeyCode::Char('a'));
+        event.modifiers = KeyModifiers::CONTROL;
+        picker.handle_key(&event);
+        assert_eq!(picker.list.query(), "");
     }
 
     // ── ResumeCmd ──

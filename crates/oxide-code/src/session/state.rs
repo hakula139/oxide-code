@@ -558,6 +558,88 @@ mod tests {
         );
     }
 
+    // ── current_git_branch ──
+
+    #[test]
+    fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
+        // End-to-end: spin up a temp git repo, make a commit (rev-parse otherwise returns the
+        // literal `HEAD` for an empty repo), and verify the branch name round-trips. Skipped
+        // silently if `git` isn't on PATH so CI without git doesn't fail — the production path
+        // correctly returns `None` in that case.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let Ok(status) = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "fixture-branch"])
+            .current_dir(cwd)
+            .status()
+        else {
+            return;
+        };
+        if !status.success() {
+            return;
+        }
+        for args in [
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+            ["config", "commit.gpgsign", "false"].as_slice(),
+            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+        }
+        assert_eq!(
+            current_git_branch(cwd),
+            Some("fixture-branch".to_owned()),
+            "branch should round-trip after the initial commit on the requested branch"
+        );
+    }
+
+    #[test]
+    fn current_git_branch_outside_a_repo_returns_none() {
+        // Plain temp dir — git rev-parse exits non-zero; parse should collapse to None.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(current_git_branch(dir.path().to_str().unwrap()), None);
+    }
+
+    // ── parse_git_branch ──
+
+    #[test]
+    fn parse_git_branch_strips_trailing_newline_on_happy_path() {
+        // git appends a newline; the metadata column would render it as a literal `\n` otherwise.
+        assert_eq!(
+            parse_git_branch(true, b"feat/login\n"),
+            Some("feat/login".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_git_branch_failed_status_returns_none() {
+        // Non-zero exit (`fatal: not a git repository`, missing git, etc.) collapses to `None`.
+        assert_eq!(parse_git_branch(false, b"main\n"), None);
+    }
+
+    #[test]
+    fn parse_git_branch_invalid_utf8_returns_none() {
+        // git output should always be UTF-8, but ref names with bad bytes shouldn't panic.
+        assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
+    }
+
+    #[test]
+    fn parse_git_branch_empty_output_returns_none() {
+        // Defensive: a successful exit with empty stdout shouldn't render `· `.
+        assert_eq!(parse_git_branch(true, b""), None);
+        assert_eq!(parse_git_branch(true, b"   \n"), None);
+    }
+
+    #[test]
+    fn parse_git_branch_detached_head_collapses_to_none() {
+        // `HEAD` is the rev-parse output for detached HEAD — useless in the picker, so drop it.
+        assert_eq!(parse_git_branch(true, b"HEAD\n"), None);
+    }
+
     // ── format_current_dir ──
 
     #[test]
@@ -674,87 +756,5 @@ mod tests {
     #[test]
     fn truncate_title_trims_whitespace() {
         assert_eq!(truncate_title("  padded  ", 60), "padded");
-    }
-
-    // ── parse_git_branch ──
-
-    #[test]
-    fn parse_git_branch_failed_status_returns_none() {
-        // Non-zero exit (`fatal: not a git repository`, missing git, etc.) collapses to `None`.
-        assert_eq!(parse_git_branch(false, b"main\n"), None);
-    }
-
-    #[test]
-    fn parse_git_branch_strips_trailing_newline_on_happy_path() {
-        // git appends a newline; the metadata column would render it as a literal `\n` otherwise.
-        assert_eq!(
-            parse_git_branch(true, b"feat/login\n"),
-            Some("feat/login".to_owned())
-        );
-    }
-
-    #[test]
-    fn parse_git_branch_detached_head_collapses_to_none() {
-        // `HEAD` is the rev-parse output for detached HEAD — useless in the picker, so drop it.
-        assert_eq!(parse_git_branch(true, b"HEAD\n"), None);
-    }
-
-    #[test]
-    fn parse_git_branch_empty_output_returns_none() {
-        // Defensive: a successful exit with empty stdout shouldn't render `· `.
-        assert_eq!(parse_git_branch(true, b""), None);
-        assert_eq!(parse_git_branch(true, b"   \n"), None);
-    }
-
-    #[test]
-    fn parse_git_branch_invalid_utf8_returns_none() {
-        // git output should always be UTF-8, but ref names with bad bytes shouldn't panic.
-        assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
-    }
-
-    // ── current_git_branch ──
-
-    #[test]
-    fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
-        // End-to-end: spin up a temp git repo, make a commit (rev-parse otherwise returns the
-        // literal `HEAD` for an empty repo), and verify the branch name round-trips. Skipped
-        // silently if `git` isn't on PATH so CI without git doesn't fail — the production path
-        // correctly returns `None` in that case.
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().to_str().unwrap();
-        let Ok(status) = std::process::Command::new("git")
-            .args(["init", "-q", "-b", "fixture-branch"])
-            .current_dir(cwd)
-            .status()
-        else {
-            return;
-        };
-        if !status.success() {
-            return;
-        }
-        for args in [
-            ["config", "user.email", "test@example.com"].as_slice(),
-            ["config", "user.name", "Test"].as_slice(),
-            ["config", "commit.gpgsign", "false"].as_slice(),
-            ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
-        ] {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .status()
-                .unwrap();
-        }
-        assert_eq!(
-            current_git_branch(cwd),
-            Some("fixture-branch".to_owned()),
-            "branch should round-trip after the initial commit on the requested branch"
-        );
-    }
-
-    #[test]
-    fn current_git_branch_outside_a_repo_returns_none() {
-        // Plain temp dir — git rev-parse exits non-zero; parse should collapse to None.
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(current_git_branch(dir.path().to_str().unwrap()), None);
     }
 }

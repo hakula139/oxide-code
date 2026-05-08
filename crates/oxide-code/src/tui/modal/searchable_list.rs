@@ -573,22 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn place_terminal_cursor_skips_when_area_is_shorter_than_search_row_offset() {
-        // Defensive guard: when the host shrinks the modal to fewer rows than `title + gap +
-        // search-row` requires, `place_terminal_cursor` returns early instead of placing the
-        // cursor outside the area. The render call must still complete without panicking.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let l = list(vec![FakeItem::new("alpha")]);
-        let theme = Theme::default();
-        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
-        terminal
-            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
-            .expect("render must not panic when area is too short for the search row");
-    }
-
-    #[test]
     fn render_anchors_terminal_cursor_past_visible_query_when_typing() {
         // Cursor must follow the typed query — sitting at prompt + display-width(query).
         use ratatui::Terminal;
@@ -634,5 +618,21 @@ mod tests {
             dump.contains("no matches"),
             "no-matches notice should render: {dump}",
         );
+    }
+
+    #[test]
+    fn place_terminal_cursor_skips_when_area_is_shorter_than_search_row_offset() {
+        // Defensive guard: when the host shrinks the modal to fewer rows than `title + gap +
+        // search-row` requires, `place_terminal_cursor` returns early instead of placing the
+        // cursor outside the area. The render call must still complete without panicking.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let l = list(vec![FakeItem::new("alpha")]);
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| l.render(frame, Rect::new(0, 0, 40, 1), &theme))
+            .expect("render must not panic when area is too short for the search row");
     }
 }
