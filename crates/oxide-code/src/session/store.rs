@@ -380,7 +380,8 @@ fn find_session_in(dir: &Path, session_id: &str) -> Result<Option<PathBuf>> {
 
 /// Stat-only scan of one project subdirectory: returns `.jsonl` files paired with mtime so the
 /// caller can sort and truncate before paying the per-file JSONL parse cost in
-/// [`read_session_info`].
+/// [`read_session_info`]. Stat failures warn-skip — bucketing them at `UNIX_EPOCH` would silently
+/// sort them out of any cap window.
 fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     Ok(entries
@@ -392,13 +393,15 @@ fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
             }
         })
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .map(|e| {
+        .filter_map(|e| {
             let path = e.path();
-            let mtime = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .map_or(OffsetDateTime::UNIX_EPOCH, OffsetDateTime::from);
-            (path, mtime)
+            match e.metadata().and_then(|m| m.modified()) {
+                Ok(t) => Some((path, OffsetDateTime::from(t))),
+                Err(err) => {
+                    warn!("skipping session {} (stat failed): {err}", path.display());
+                    None
+                }
+            }
         })
         .collect())
 }
