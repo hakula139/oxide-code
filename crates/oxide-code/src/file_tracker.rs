@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tracing::warn;
 use xxhash_rust::xxh64::xxh64;
 
 const HASH_SEED: u64 = 0;
@@ -203,14 +204,27 @@ impl FileTracker {
         let mut by_path = self.lock();
         let mut dropped = Vec::new();
         for snap in snapshots {
-            let Ok((current_size, current_mtime)) =
-                std::fs::metadata(&snap.path).and_then(|m| m.modified().map(|t| (m.len(), t)))
-            else {
-                dropped.push(snap.path);
-                continue;
+            let (current_size, current_mtime) = match std::fs::metadata(&snap.path)
+                .and_then(|m| m.modified().map(|t| (m.len(), t)))
+            {
+                Ok(stats) => stats,
+                Err(e) => {
+                    warn!(
+                        "dropping tracked file {} (stat failed, will require fresh Read): {e}",
+                        snap.path.display()
+                    );
+                    dropped.push(snap.path);
+                    continue;
+                }
             };
             let stored_mtime = SystemTime::from(snap.mtime);
             if current_size != snap.size || current_mtime != stored_mtime {
+                warn!(
+                    "dropping tracked file {} (drift: stored {}b/mtime vs current {}b/mtime)",
+                    snap.path.display(),
+                    snap.size,
+                    current_size,
+                );
                 dropped.push(snap.path);
                 continue;
             }

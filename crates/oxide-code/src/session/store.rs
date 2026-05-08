@@ -199,8 +199,12 @@ impl SessionStore {
         for entry in fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("cannot read {}", self.sessions_dir.display()))?
         {
-            let Ok(entry) = entry else {
-                continue;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping directory entry while resolving {session_id}: {e}");
+                    continue;
+                }
             };
             if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
@@ -480,6 +484,9 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
 
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
+    if first_line.trim().is_empty() {
+        bail!("session file is empty (no header)");
+    }
     let header: Entry = serde_json::from_str(first_line.trim()).context("invalid header line")?;
     let Entry::Header {
         session_id,

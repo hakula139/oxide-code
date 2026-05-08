@@ -161,7 +161,7 @@ fn format_relative_time(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> 
         return format!("{days} {} ago", pluralize(days, "day"));
     }
     ts.format(time::macros::format_description!("[year]-[month]-[day]"))
-        .unwrap_or_else(|_| "unknown".to_owned())
+        .expect("static `[year]-[month]-[day]` description never fails on a valid `OffsetDateTime`")
 }
 
 fn pluralize(n: i64, unit: &str) -> String {
