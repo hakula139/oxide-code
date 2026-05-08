@@ -11,11 +11,8 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::ChainBuilder;
-use super::entry::{CURRENT_VERSION, Entry, ExitInfo};
+use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
-// `entry` is module-private; re-export the listing-side types here so cross-module callers
-// (e.g., `slash::resume`) reach for `session::store::{SessionInfo, TitleInfo}`.
-pub(crate) use super::entry::{SessionInfo, TitleInfo};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;

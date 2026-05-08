@@ -12,7 +12,7 @@
 
 mod actor;
 mod chain;
-mod entry;
+pub(crate) mod entry;
 pub(crate) mod handle;
 pub(crate) mod history;
 pub(crate) mod list_view;

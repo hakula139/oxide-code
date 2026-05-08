@@ -16,7 +16,8 @@ use unicode_width::UnicodeWidthStr;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::session::store::{SessionInfo, SessionStore};
+use crate::session::entry::SessionInfo;
+use crate::session::store::SessionStore;
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -401,7 +402,8 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::session::store::{TitleInfo, seed_test_session, test_store};
+    use crate::session::entry::TitleInfo;
+    use crate::session::store::{seed_test_session, test_store};
     use crate::slash::test_session_info;
     use crate::tui::components::chat::ChatView;
 
