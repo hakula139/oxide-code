@@ -21,6 +21,44 @@ pub(crate) fn dead(session_id: &str) -> SessionHandle {
     }
 }
 
+/// Stand-in actor whose every ack reports a writer failure — exercises the alive-session-with-
+/// failure branch (e.g. background title-gen seeing `Outcome { failure: Some(_) }`). The channel
+/// stays open so `is_actor_alive` remains true.
+pub(crate) fn acks_with_failure(session_id: &str, message: &'static str) -> SessionHandle {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SessionCmd>(8);
+    let join = tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                SessionCmd::Record { ack, .. } => {
+                    _ = ack.send(RecordOutcome {
+                        ai_title_seed: None,
+                        failure: Some(message.to_owned()),
+                    });
+                }
+                SessionCmd::ToolMetadata { ack, .. }
+                | SessionCmd::AppendAiTitle { ack, .. }
+                | SessionCmd::Finish { ack, .. } => {
+                    _ = ack.send(Outcome {
+                        failure: Some(message.to_owned()),
+                    });
+                }
+                SessionCmd::Shutdown { ack } => {
+                    _ = ack.send(());
+                    break;
+                }
+                SessionCmd::Panic => panic!("deliberate actor panic for testing"),
+            }
+        }
+    });
+
+    SessionHandle {
+        cmd_tx,
+        session_id: Arc::from(session_id),
+        shared: Arc::new(SharedState::default()),
+        actor_join: Arc::new(std::sync::Mutex::new(Some(join))),
+    }
+}
+
 /// Stand-in actor that acks the first `succeed` non-Shutdown cmds, then drops cmds without
 /// acking — exercises the rx-await fallback when the actor stalls between receive and ack.
 /// Shutdown is always honoured so `handle.shutdown()` still returns.

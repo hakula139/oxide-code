@@ -369,6 +369,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_and_record_alive_session_writer_failure_surfaces_as_error() {
+        // Counterpart to the post-finalize-silent test below: when the actor is still alive but
+        // its append_ai_title ack carries a `failure`, the user IS seeing the live session, so the
+        // failure must be surfaced as a normal session-write error.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"Fix auth"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let session = super::super::handle::testing::acks_with_failure("live-session", "disk full");
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error(msg) if msg.contains("disk full")
+            )),
+            "writer-failure on live session must surface as Error: {events:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn generate_and_record_post_finalize_actor_gone_is_silent() {
         // Title-gen is best-effort: a session that finalized (`/clear`, `/resume`) before this
         // background task returned must not surface "Session write failed" into the UI of the

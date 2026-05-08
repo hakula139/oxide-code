@@ -20,3 +20,25 @@ pub(crate) fn init_local_offset() {
 pub(crate) fn local_offset() -> UtcOffset {
     LOCAL_OFFSET.get().copied().unwrap_or(UtcOffset::UTC)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── init_local_offset / local_offset ──
+
+    #[test]
+    fn init_is_idempotent_and_local_offset_returns_a_stable_cached_value() {
+        // OnceLock is process-global, so we can only assert the contract that holds regardless of
+        // OnceLock state: init must not panic when called more than once, and `local_offset` must
+        // return the same value across repeat reads.
+        init_local_offset();
+        init_local_offset();
+        let first = local_offset();
+        let second = local_offset();
+        assert_eq!(
+            first, second,
+            "local_offset must return a stable cached value across reads",
+        );
+    }
+}

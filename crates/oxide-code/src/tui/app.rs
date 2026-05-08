@@ -1427,6 +1427,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_resume_forwards_to_agent_and_disables_input_until_event() {
+        // Pin: between forwarding `Resume` and the SessionResumed event landing, input must be
+        // gated so a typed prompt doesn't push into chat just before `apply_session_resumed`'s
+        // `clear_history` wipes it. Re-enable comes from `finalize_idle` inside the resumed handler.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let action = UserAction::Resume {
+            session_id: "resume-target".to_owned(),
+        };
+        app.dispatch_user_action(action.clone());
+
+        let forwarded = rx.recv().await.expect("Resume must reach the agent loop");
+        assert_eq!(forwarded, action);
+        assert!(
+            !app.input.is_enabled(),
+            "input must be gated until the resume event lands",
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: forwarding a submit during cancel could let it
         // slip ahead of `pending_prompts`. Hold locally until `Cancelled`, then drain.
