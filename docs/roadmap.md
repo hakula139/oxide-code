@@ -90,7 +90,7 @@ The direction is simple:
 
 Remaining surface beyond Working Today:
 
-- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
+- Deferred: `/compact`, `/cost`, `/login` / `/logout`, `/rename` (manual session-title override), custom user commands, `/init` multi-phase flow.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
 
