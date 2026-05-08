@@ -150,7 +150,8 @@ ox                                          # Start an interactive session
     ├── lock.rs                             # Async retry helper for advisory locks (used by oauth)
     ├── log.rs                              # `tracing` subscriber init — file under $XDG_STATE_HOME in TUI mode, stderr otherwise
     ├── path.rs                             # Path display helpers (`tildify`: rewrite $HOME prefix as ~/)
-    └── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
+    ├── text.rs                             # Display-width-aware text helpers (`truncate_to_width`, `ELLIPSIS`)
+    └── time.rs                             # Process-wide local-offset cache (`init_local_offset` at startup, `local_offset` reads)
 ```
 
 ## Documentation

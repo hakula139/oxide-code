@@ -149,7 +149,7 @@ pub(super) struct ResumePicker {
 
 impl ResumePicker {
     pub(super) fn new(store: SessionStore, live_session_id: String) -> Self {
-        let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        let local_offset = crate::util::time::local_offset();
         let mut picker = Self {
             store,
             list: SearchableList::new(PICKER_TITLE, Vec::new(), VIEWPORT_HEIGHT)

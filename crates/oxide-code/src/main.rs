@@ -40,9 +40,6 @@ use tool::{
 };
 use util::path::tildify;
 
-// Captured before the tokio runtime starts — `now_local()` is unsound under multi-threaded.
-static LOCAL_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
-
 #[derive(Parser)]
 #[command(name = "ox", version, about = "A terminal-based AI coding assistant")]
 #[command(group(
@@ -86,9 +83,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    LOCAL_OFFSET
-        .set(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
-        .ok();
+    util::time::init_local_offset();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -170,7 +165,7 @@ async fn async_main() -> Result<()> {
 
 fn list_sessions(all: bool, limit: usize) -> Result<()> {
     let store = SessionStore::open()?;
-    let local_offset = *LOCAL_OFFSET.get().unwrap_or(&time::UtcOffset::UTC);
+    let local_offset = util::time::local_offset();
     let term_width = detect_terminal_width();
     let cap = (limit > 0).then_some(limit);
     render_list(
