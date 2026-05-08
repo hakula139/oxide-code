@@ -2018,9 +2018,8 @@ mod tests {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
         app.chat.push_user_message("live prompt".to_owned());
         app.pending_prompts.push_back("queued".to_owned());
-        let pending_call_id = "pending-1".to_owned();
         app.pending_calls.insert(
-            pending_call_id.clone(),
+            "pending-1".to_owned(),
             PendingCall {
                 label: "Bash(...)".to_owned(),
                 name: "bash".to_owned(),
@@ -2053,7 +2052,6 @@ mod tests {
             0,
             "pending tool calls must drop on resume",
         );
-        _ = pending_call_id;
         assert!(
             app.pending_prompts.is_empty(),
             "queued prompts must drop on resume",

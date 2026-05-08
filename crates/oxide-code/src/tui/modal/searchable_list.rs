@@ -1,7 +1,6 @@
-//! Searchable + scrollable list primitive for [`Modal`](super::Modal) impls. Sibling to
-//! [`ListPicker`](super::list_picker::ListPicker): adds a search input row, a scrollable
-//! viewport, and case-insensitive substring filtering. Concrete pickers own their submit
-//! semantics so the primitive stays callback-free.
+//! Searchable + scrollable list primitive for [`Modal`](super::Modal) impls. Adds a search
+//! input + scrollable viewport on top of the [`ListPicker`](super::list_picker::ListPicker)
+//! shape; concrete pickers own submit semantics.
 
 use std::borrow::Cow;
 
@@ -16,14 +15,12 @@ use crate::util::text::truncate_to_width;
 
 // ── SearchableItem ──
 
-/// One row in a [`SearchableList`].
 pub(crate) trait SearchableItem {
-    /// Composite haystack used by substring search. Include every field the user might want to
-    /// filter against (title, id, project, branch).
+    /// Composite haystack — include every field the user might filter against (title, id,
+    /// project, etc).
     fn haystack(&self) -> Cow<'_, str>;
 
-    /// Render the row body into a single line at the given column budget — the primitive owns
-    /// the cursor gutter, so the impl paints content to the right of it.
+    /// Paint the row body to the right of the cursor gutter (owned by the primitive).
     fn render_row(&self, width: u16, is_cursor: bool, theme: &Theme) -> Line<'static>;
 }
 
@@ -37,11 +34,8 @@ const TITLE_ROW_HEIGHT: u16 = 1;
 const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
 
-/// Selectable + searchable list with a scrollable viewport.
-///
-/// The cursor operates on the **filtered** index space (`visible`), so navigation skips
-/// out-of-filter rows. Filtering happens on every `set_query` / `push_char` / `pop_char`,
-/// case-insensitive substring on each item's [`SearchableItem::haystack`].
+/// Selectable + searchable list with a scrollable viewport. Cursor walks the **filtered** index
+/// space — out-of-filter rows are skipped by navigation.
 pub(crate) struct SearchableList<T: SearchableItem> {
     title: String,
     description: Option<String>,
@@ -49,11 +43,10 @@ pub(crate) struct SearchableList<T: SearchableItem> {
     query: String,
     /// Indices into `items` that pass the current `query`, in original item order.
     visible: Vec<usize>,
-    /// Cursor position into `visible`; clamped on filter changes.
+    /// Cursor into `visible`; resets to 0 on filter changes.
     cursor: usize,
-    /// First visible row painted in the viewport. Tracks `cursor` to keep it on screen.
+    /// First visible row painted; tracks `cursor` to stay on screen.
     viewport_offset: usize,
-    /// Target viewport height in rows — caller-supplied so the modal owns layout policy.
     viewport_height: u16,
 }
 
@@ -98,8 +91,7 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
-    /// Replace the underlying items (e.g., after a scope toggle reloads from the store) and
-    /// re-run the filter. Cursor + viewport reset to the top.
+    /// Replace all items and re-run the filter; cursor + viewport reset.
     pub(crate) fn replace_items(&mut self, items: Vec<T>) {
         self.items = items;
         self.recompute_visible();
@@ -116,13 +108,11 @@ impl<T: SearchableItem> SearchableList<T> {
         self.cursor
     }
 
-    /// Number of rows currently passing the substring filter — for footers that show
-    /// "X / Y matching".
+    /// Rows currently passing the filter — for "X / Y matching" footers.
     pub(crate) fn visible_len(&self) -> usize {
         self.visible.len()
     }
 
-    /// `true` when the user has typed a filter that excludes some rows.
     pub(crate) fn is_filtered(&self) -> bool {
         !self.query.is_empty()
     }
@@ -209,7 +199,7 @@ impl<T: SearchableItem> SearchableList<T> {
         h
     }
 
-    /// Total rows the list reports for [`super::Modal::height`]. Caller adds footer / borders.
+    /// Total rows the list occupies. Caller adds footer / borders.
     pub(crate) fn height(&self, _width: u16) -> u16 {
         self.chrome_height().saturating_add(self.viewport_height)
     }

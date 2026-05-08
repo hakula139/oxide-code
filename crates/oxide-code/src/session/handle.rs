@@ -271,9 +271,8 @@ pub(crate) async fn roll(
     }
 }
 
-/// Resumed transcript + finalize failure from the old session; mirrors [`RollOutcome`] for the
-/// resume-into-existing path. The handle is moved into the caller's `&mut SessionHandle` rather
-/// than carried here, so this struct only describes the *payload* the UI needs to repaint.
+/// Resumed transcript + finalize failure from the old session. The handle swap happens via
+/// `&mut SessionHandle`; this struct only carries the UI-rebuild payload.
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) messages: Vec<Message>,

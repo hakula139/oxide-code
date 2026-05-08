@@ -32,18 +32,16 @@ const PICKER_DESCRIPTION: &str =
 const VIEWPORT_HEIGHT: u16 = 12;
 const UNTITLED_MARKER: &str = "(untitled)";
 const ID_WIDTH: usize = 8;
-/// Reserved column count for `last_active` (`YYYY-MM-DD HH:MM`).
+/// Column count for the `YYYY-MM-DD HH:MM` slot.
 const TIMESTAMP_WIDTH: usize = 16;
-/// Padding between the columns laid out by [`SessionRow::render_row`].
 const COLUMN_GAP: usize = 2;
-/// Width of the fixed columns before title (id + gap + timestamp + gap).
 const FIXED_PREFIX_WIDTH: usize = ID_WIDTH + COLUMN_GAP + TIMESTAMP_WIDTH + COLUMN_GAP;
-/// `— ` separator before the project column. Display width 2 (em dash + space).
+/// Em dash + space (display width 2, not byte width).
 const SEPARATOR: &str = "— ";
 const SEPARATOR_WIDTH: usize = 2;
-/// Cap on the rendered project column so a deep path never starves the title column.
+/// Cap on the rendered project column so a deep path can't starve the title column.
 const PROJECT_CAP: usize = 32;
-/// Floor on the title column so narrow terminals still get a truncated label.
+/// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
 
 // ── SessionRow ──
@@ -71,8 +69,6 @@ impl SessionRow {
             .as_ref()
             .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
         let project = tildify(Path::new(&info.cwd));
-        // `session_id` already prefixes the haystack, so the displayed 8-char slice doesn't need
-        // its own slot — every prefix char is a substring match.
         let haystack = format!("{} {} {}", info.session_id, title, project);
         Self {
             session_id: info.session_id,
@@ -101,10 +97,8 @@ impl SearchableItem for SessionRow {
             theme.dim()
         };
 
-        // Compute column widths in DISPLAY width (CJK paths render double-wide), capped so a
-        // deep path can't starve the title column. Title budget is whatever's left after the
-        // fixed prefix + project + separator; floors at TITLE_FLOOR so narrow terminals still
-        // show a truncated label.
+        // Title budget = remainder after fixed prefix + project; clamped to TITLE_FLOOR so
+        // narrow terminals still show a label.
         let total = usize::from(width);
         let project_width = UnicodeWidthStr::width(self.project.as_str()).min(PROJECT_CAP);
         let title_budget = total
@@ -134,16 +128,14 @@ impl SearchableItem for SessionRow {
 pub(super) struct ResumePicker {
     store: SessionStore,
     list: SearchableList<SessionRow>,
-    /// Scope toggle — false=current project, true=every project.
+    /// `false` = current project, `true` = every project.
     all: bool,
     local_offset: UtcOffset,
-    /// Live session id — filtered out of every reload so the user can't pick "themselves" and
-    /// trigger a `roll_into` onto the open append-writer.
+    /// Filtered out of every reload so the user can't self-resume onto the open append-writer.
     live_session_id: String,
-    /// Total rows in the current scope; refreshed on every reload (Tab or open).
     total: usize,
-    /// Last reload's failure message, surfaced inline so a permission / IO error doesn't
-    /// disguise itself as "no sessions found". Cleared on the next successful reload.
+    /// Last reload's failure, surfaced inline so failures don't disguise themselves as "no
+    /// sessions found". Cleared on the next successful reload.
     load_error: Option<String>,
 }
 
@@ -224,7 +216,6 @@ impl ResumePicker {
 
 impl Modal for ResumePicker {
     fn height(&self, width: u16) -> u16 {
-        // List body + blank spacer + footer line.
         self.list.height(width).saturating_add(2)
     }
 
@@ -244,8 +235,7 @@ impl Modal for ResumePicker {
                 width: area.width,
                 height: 1,
             };
-            // Load error owns the footer when present — failure must not silently hide behind the
-            // generic "0 sessions" footer.
+            // Load error owns the footer when set — failure must not look like "0 sessions".
             let footer = if let Some(err) = &self.load_error {
                 Line::from(Span::styled(format!("! {err}"), theme.error()))
             } else {
@@ -346,10 +336,8 @@ impl SlashCommand for ResumeCmd {
     }
 }
 
-/// Match `prefix` against current-project sessions first; widen to all projects on no match so a
-/// session from another cwd still resolves by id-prefix. Excludes the live session id — resuming
-/// yourself is a no-op (and would race the open append-writer). Session ids are hex, so the
-/// `starts_with` match is implicitly case-sensitive but in practice that's invisible.
+/// Match `prefix` against current-project sessions first; widen to all projects on no match.
+/// Excludes the live session id — resuming yourself would race the open append-writer.
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
     let scoped = match_in_scope(store, prefix, live_id, false)?;
     if let Some(id) = scoped {
@@ -378,8 +366,7 @@ fn match_in_scope(
         0 => Ok(None),
         1 => Ok(matches.pop()),
         n => {
-            // Reuse the shared 5-id preview formatter so the typed-arg ambiguity message stays
-            // in lockstep with `ox -c <prefix>`.
+            // Reuse the CLI's preview formatter so /resume and `ox -c` share the same message.
             let preview = crate::session::resolver::format_session_id_preview(matches);
             Err(format!(
                 "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
@@ -596,7 +583,6 @@ mod tests {
             );
         }
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
-        // Most-recent-first: cursor starts on the latest row (i=2).
         assert_eq!(picker.list.cursor_index(), 0);
         picker.handle_key(&key(KeyCode::Down));
         assert_eq!(picker.list.cursor_index(), 1);
@@ -651,8 +637,7 @@ mod tests {
 
     #[test]
     fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Two projects, one session each — bare picker shows only the home-project session;
-        // Tab widens to show both. Filter survives the toggle so the user's typing isn't lost.
+        // Bare picker stays scoped; Tab widens AND preserves the typed filter.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_session(
@@ -927,8 +912,6 @@ mod tests {
 
     #[test]
     fn execute_typed_arg_unique_match_emits_forward_with_resolved_id() {
-        // Pin the success branch: a typed prefix that resolves uniquely returns
-        // SlashOutcome::Forward(Resume { session_id: full_id }).
         with_isolated_xdg(|_dir| {
             let store = SessionStore::open().unwrap();
             let target_id = stamped_id(0xab);

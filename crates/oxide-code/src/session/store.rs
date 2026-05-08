@@ -167,10 +167,7 @@ impl SessionStore {
         Ok(ListPage::new(sessions, total))
     }
 
-    /// Cheap pre-listing scan across every project subdirectory — returns
-    /// (path, mtime) pairs without parsing JSONL bodies. Exposed via
-    /// [`Self::list_paged`] so the caller can apply a limit before paying the
-    /// per-file parse cost.
+    /// Stat-only walk across every project subdir; defers JSONL parsing to the caller's cap.
     fn collect_paths_all_projects(&self) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(&self.sessions_dir)
