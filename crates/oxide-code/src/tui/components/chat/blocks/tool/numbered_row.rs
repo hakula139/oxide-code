@@ -242,8 +242,8 @@ mod tests {
 
     #[test]
     fn with_style_patches_row_bg_onto_content_spans() {
-        // Bar prefix stays transparent; number / separator / text inherit the row bg. Regression
-        // would either tint the chrome column or leave a hole in the band.
+        // Bar prefix stays transparent; number / separator / text inherit the row bg, so the
+        // chrome column never tints and the band has no holes.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 80,

@@ -545,9 +545,6 @@ mod tests {
     fn render_with_only_chrome_room_paints_the_border_and_skips_rows() {
         // When the layout reserves exactly CHROME_ROWS, the inner area has zero height — the
         // border still paints, but the row loop is skipped.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let popup = name_popup("");
         let width: u16 = 60;
         let mut terminal = Terminal::new(TestBackend::new(width, CHROME_ROWS)).unwrap();

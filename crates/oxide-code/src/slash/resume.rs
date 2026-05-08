@@ -429,6 +429,8 @@ fn match_in_scope(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use temp_env::with_var;
     use time::OffsetDateTime;
     use time::macros::datetime;
@@ -922,9 +924,6 @@ mod tests {
 
     #[test]
     fn render_runs_at_typical_widths_without_panicking() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -948,9 +947,6 @@ mod tests {
     fn render_skips_footer_when_area_too_short_for_two_rows_below_list() {
         // Defensive guard: if the parent allocates less than `list_h + 2` rows the picker drops
         // the footer rather than spilling into the list area or panicking.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let (_dir, store) = isolated_store();
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         let theme = Theme::default();
@@ -962,9 +958,6 @@ mod tests {
 
     #[test]
     fn render_surfaces_load_error_in_footer() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let (_dir, store) = isolated_store();
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         picker.load_error = Some("permission denied".to_owned());
@@ -1136,7 +1129,9 @@ mod tests {
     }
 
     #[test]
-    fn unhandled_keys_are_consumed_without_side_effects() {
+    fn unrecognized_keys_are_consumed_without_side_effects() {
+        // Both bare unhandled keys (Insert) and Ctrl + non-`u` chars are absorbed silently —
+        // neither may push into the filter or move the cursor.
         let (_dir, store) = isolated_store();
         seed_session(
             &store,
@@ -1150,20 +1145,7 @@ mod tests {
         assert!(matches!(outcome, ModalKey::Consumed));
         assert_eq!(picker.list.query(), "");
         assert_eq!(picker.list.cursor_index(), 0);
-    }
 
-    #[test]
-    fn ctrl_other_chars_are_consumed_without_filtering() {
-        // Ctrl + non-`u` chars are absorbed silently — they must not push into the filter.
-        let (_dir, store) = isolated_store();
-        seed_session(
-            &store,
-            &stamped_id(0x11),
-            Some("only"),
-            1,
-            datetime!(2026-04-18 09:00:00 UTC),
-        );
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let mut event = KeyEvent::from(KeyCode::Char('a'));
         event.modifiers = KeyModifiers::CONTROL;
         picker.handle_key(&event);

@@ -489,8 +489,7 @@ mod tests {
         assert!(msg.contains("unknown field `model`"), "{msg}");
     }
 
-    /// Regression: `show_thinking` in `[client]` used to drop the whole file silently and surface
-    /// as "no credentials". Also covers section-level typos (same code path).
+    /// Covers section-level `deny_unknown_fields` (top-level: `load_file_rejects_unknown_top_level_key`).
     #[test]
     fn load_file_rejects_misplaced_field() {
         let dir = tempfile::tempdir().unwrap();

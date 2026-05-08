@@ -89,15 +89,11 @@ mod tests {
     // ── parse_color: hex ──
 
     #[test]
-    fn parse_color_hex_lowercase() {
+    fn parse_color_hex_is_case_insensitive() {
         assert_eq!(
             parse_color("#cdd6f4").unwrap(),
             Color::Rgb(0xcd, 0xd6, 0xf4)
         );
-    }
-
-    #[test]
-    fn parse_color_hex_uppercase() {
         assert_eq!(
             parse_color("#CDD6F4").unwrap(),
             Color::Rgb(0xcd, 0xd6, 0xf4)

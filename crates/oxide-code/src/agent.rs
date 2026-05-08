@@ -795,7 +795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_text_only_response_records_assistant_message_and_returns() {
+    async fn agent_turn_text_only_response_records_and_completes() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("Hello there!")]);

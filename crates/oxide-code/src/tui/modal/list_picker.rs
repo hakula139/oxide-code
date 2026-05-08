@@ -213,6 +213,9 @@ impl<T: PickerItem> ListPicker<T> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
 
     // ── Test fixture ──
@@ -363,12 +366,8 @@ mod tests {
 
     #[test]
     fn render_runs_without_panicking_at_minimum_width() {
-        // Smoke test: extreme narrow widths must not panic on the
-        // truncation arithmetic. Real visual snapshots happen in the
-        // concrete picker tests where output is meaningful.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
+        // Smoke test: narrow widths must not panic on the truncation arithmetic. Real visual
+        // snapshots happen in the concrete picker tests where output is meaningful.
         let p = picker(vec![FakeItem {
             description: Some("a long description"),
             ..FakeItem::new("very-long-label")
@@ -389,9 +388,6 @@ mod tests {
         // Drives the `PickerItem` default impls (`description` / `is_active` / `key_hint` all
         // unset) and the render branches that skip the optional description rows. Without this
         // the trait-default arms and the no-description render arms stay uncovered.
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         struct MinimalItem(&'static str);
         impl PickerItem for MinimalItem {
             fn label(&self) -> &str {

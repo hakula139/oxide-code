@@ -1343,30 +1343,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_finds_first_prompt_title_in_long_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let mut writer = store.create(&sample_header("long")).unwrap();
-        writer
-            .append(&Entry::Title {
-                title: "first prompt".to_owned(),
-                source: TitleSource::FirstPrompt,
-                updated_at: datetime!(2026-04-16 12:00:00 UTC),
-            })
-            .unwrap();
-        let padding = "x".repeat(200);
-        for _ in 0..30 {
-            writer
-                .append(&sample_message_entry(Uuid::new_v4(), &padding))
-                .unwrap();
-        }
-
-        let sessions = store.list().unwrap();
-        let title = sessions[0].title.as_ref().unwrap();
-        assert_eq!(title.title, "first prompt");
-    }
-
-    #[tokio::test]
     async fn list_finds_ai_title_buried_between_head_and_tail() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
@@ -1464,7 +1440,7 @@ mod tests {
 
     // ── list_paged ──
 
-    /// Helper: builds `count` finished sessions in monotonically increasing mtime order.
+    /// Builds `count` finished sessions in monotonically increasing mtime order.
     fn seed_n_sessions(store: &SessionStore, count: usize) {
         for i in 0..count {
             let id = format!("session-{i:04}");
@@ -1513,9 +1489,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_paged_zero_limit_yields_no_rows_but_full_total() {
-        // `--limit 0` is the unbounded sentinel at the CLI; the store's `Some(0)` means
-        // "parse no rows" which is what happens if we faithfully apply the cap. Pin the
-        // contract so the CLI translation layer (limit=0 → None) is the documented seam.
+        // `Some(0)` means "parse no rows"; the CLI's `--limit 0` unbounded sentinel translates
+        // to `None` upstream. Pin that the store layer faithfully applies the cap.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_n_sessions(&store, 3);

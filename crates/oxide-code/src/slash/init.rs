@@ -117,34 +117,16 @@ mod tests {
     // ── InitCmd::execute ──
 
     #[test]
-    fn execute_does_not_push_chat_blocks() {
-        let (chat, _outcome) = run_execute();
+    fn execute_forwards_authoring_prompt_without_chat_writes() {
+        let (chat, outcome) = run_execute();
         assert_eq!(chat.entry_count(), 0);
-    }
-
-    #[test]
-    fn execute_prompt_targets_agents_md_and_claude_md() {
-        let (_chat, outcome) = run_execute();
+        let Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p))) = outcome else {
+            panic!("expected Forward(SubmitPrompt), got {outcome:?}");
+        };
+        assert!(p.contains("AGENTS.md") && p.contains("CLAUDE.md"), "{p}");
         assert!(
-            matches!(
-                &outcome,
-                Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p)))
-                    if p.contains("AGENTS.md") && p.contains("CLAUDE.md")
-            ),
-            "prompt must target both AGENTS.md and CLAUDE.md: {outcome:?}",
-        );
-    }
-
-    #[test]
-    fn execute_prompt_says_do_not_overwrite_existing_file() {
-        let (_chat, outcome) = run_execute();
-        assert!(
-            matches!(
-                &outcome,
-                Ok(SlashOutcome::Forward(UserAction::SubmitPrompt(p)))
-                    if p.contains("already exists") && p.contains("not overwrite")
-            ),
-            "prompt must instruct the model not to overwrite an existing file: {outcome:?}",
+            p.contains("already exists") && p.contains("not overwrite"),
+            "{p}"
         );
     }
 }

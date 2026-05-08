@@ -184,6 +184,9 @@ impl Modal for EffortSlider {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
     use crate::slash::test_session_info;
 
@@ -201,7 +204,7 @@ mod tests {
     // ── new ──
 
     #[test]
-    fn new_returns_none_for_no_effort_model() {
+    fn new_is_absent_for_no_effort_model() {
         let mut info = test_session_info();
         info.config.model_id = "claude-haiku-4-5".to_owned();
         assert!(EffortSlider::new(&info).is_none());
@@ -306,9 +309,6 @@ mod tests {
 
     #[test]
     fn render_emits_title_at_typical_widths() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         // Cover both a full-ladder model (Opus 4.7 → 5 tiers) and a short-ladder one
         // (Sonnet 4.6 → 3 tiers) so the n-dependent width arithmetic gets exercised.
@@ -340,9 +340,6 @@ mod tests {
 
     #[test]
     fn render_active_glyph_column_tracks_selected_tier() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
         let width: u16 = 80;
         let mut s = slider_for("claude-opus-4-7", Some(Effort::Low));

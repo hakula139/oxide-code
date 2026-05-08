@@ -372,15 +372,12 @@ mod tests {
     // ── Composite helpers ──
 
     #[test]
-    fn tool_border_uses_muted_foreground() {
+    fn composite_helpers_route_to_expected_slot_foreground() {
         let t = Theme::default();
         assert_eq!(t.tool_border().fg, t.muted.fg);
-    }
-
-    #[test]
-    fn tool_icon_uses_accent_foreground() {
-        let t = Theme::default();
         assert_eq!(t.tool_icon().fg, t.accent.fg);
+        assert_eq!(t.border_focused().fg, t.accent.fg);
+        assert_eq!(t.border_unfocused().fg, t.dim.fg);
     }
 
     #[test]
@@ -393,18 +390,6 @@ mod tests {
     fn separator_span_contains_pipe() {
         let t = Theme::default();
         assert!(t.separator_span().content.contains('│'));
-    }
-
-    #[test]
-    fn border_focused_uses_accent() {
-        let t = Theme::default();
-        assert_eq!(t.border_focused().fg, t.accent.fg);
-    }
-
-    #[test]
-    fn border_unfocused_uses_dim() {
-        let t = Theme::default();
-        assert_eq!(t.border_unfocused().fg, t.dim.fg);
     }
 
     // ── Markdown rendering ──
@@ -443,21 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn blockquote_uses_success_color() {
+    fn markdown_helpers_route_to_expected_slot_foreground() {
         let t = Theme::default();
         assert_eq!(t.blockquote().fg, t.success.fg);
-    }
-
-    #[test]
-    fn list_marker_uses_accent_color() {
-        let t = Theme::default();
         assert_eq!(t.list_marker().fg, t.accent.fg);
-    }
-
-    #[test]
-    fn horizontal_rule_uses_dim_color() {
-        let t = Theme::default();
         assert_eq!(t.horizontal_rule().fg, t.dim.fg);
+        assert_eq!(t.table_border().fg, t.dim.fg);
     }
 
     #[test]
@@ -466,12 +442,6 @@ mod tests {
         let style = t.table_header();
         assert_eq!(style.fg, t.text.fg);
         assert!(style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn table_border_uses_dim_color() {
-        let t = Theme::default();
-        assert_eq!(t.table_border().fg, t.dim.fg);
     }
 
     // ── Default theme cohesion ──

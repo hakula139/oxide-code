@@ -94,31 +94,22 @@ mod tests {
     // ── display_label ──
 
     #[test]
-    fn display_label_no_aliases_is_just_slashed_name() {
+    fn display_label_combines_name_aliases_and_usage() {
+        // Covers the no-alias / alias-only / usage-only / both-present matrix.
         assert_eq!(display_label(&HelpCmd), "/help");
-    }
-
-    #[test]
-    fn display_label_with_aliases_lists_them_in_parens() {
         assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
-    }
-
-    #[test]
-    fn fake_fixture_stub_methods_satisfy_trait_contract() {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        assert_eq!(Fake::CLEAR.description(), "");
-        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Done));
-    }
-
-    #[test]
-    fn display_label_with_usage_appends_hint_after_name() {
         assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
         assert_eq!(
             display_label(&Fake::CLEAR_WITH_USAGE),
             "/clear (new, reset) <args>",
         );
+
+        // Cover the Fake stub's trait wiring so the whole file participates in coverage.
+        let mut chat = ChatView::new(&Theme::default(), false);
+        let info = crate::slash::test_session_info();
+        let mut ctx = SlashContext::new(&mut chat, &info);
+        assert_eq!(Fake::CLEAR.description(), "");
+        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Done));
     }
 
     /// Covers the no-alias / alias-only / usage-only / both-present matrix.

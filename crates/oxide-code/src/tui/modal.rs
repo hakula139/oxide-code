@@ -221,6 +221,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::testing::ScriptedModal;
     use super::*;
@@ -257,9 +259,6 @@ mod tests {
 
     #[test]
     fn render_paints_top_border_then_delegates_body_below_it() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let mut stack = ModalStack::new();
         let modal = ScriptedModal::new(ModalAction::None);
         let body_height = modal.declared_height;
@@ -292,9 +291,6 @@ mod tests {
     fn render_no_ops_when_stack_empty_or_area_smaller_than_body() {
         // Three short-circuit branches in `render`: empty stack, area.height == 0, and
         // body_height == 0 (area only big enough for the border row).
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
         let theme = Theme::default();
 
         let empty = ModalStack::new();

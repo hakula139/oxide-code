@@ -23,14 +23,10 @@ mod tests {
     // ── string ──
 
     #[test]
-    fn string_unset_is_absent() {
+    fn string_unset_or_empty_is_absent() {
         temp_env::with_var_unset(KEY, || {
             assert_eq!(string(KEY), None);
         });
-    }
-
-    #[test]
-    fn string_empty_is_absent() {
         temp_env::with_var(KEY, Some(""), || {
             assert_eq!(string(KEY), None);
         });

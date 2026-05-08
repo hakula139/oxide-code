@@ -173,6 +173,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::slash::test_session_info;
+    use crate::tui::components::chat::ChatView;
+    use crate::tui::theme::Theme;
 
     fn git_setup(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -206,10 +209,6 @@ mod tests {
 
     #[test]
     fn execute_forwards_process_cwd_through_execute_in() {
-        use crate::slash::test_session_info;
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
         let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info));
@@ -222,10 +221,6 @@ mod tests {
 
     #[test]
     fn execute_in_clean_repo_pushes_no_changes_marker() {
-        use crate::slash::test_session_info;
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
         let (_dir, repo) = fresh_repo();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
@@ -237,10 +232,6 @@ mod tests {
 
     #[test]
     fn execute_in_dirty_repo_pushes_diff_text() {
-        use crate::slash::test_session_info;
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("note.txt"), "hello\n").unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
@@ -253,10 +244,6 @@ mod tests {
 
     #[test]
     fn execute_in_outside_a_repo_errors() {
-        use crate::slash::test_session_info;
-        use crate::tui::components::chat::ChatView;
-        use crate::tui::theme::Theme;
-
         let dir = tempfile::tempdir().unwrap();
         let mut chat = ChatView::new(&Theme::default(), false);
         let info = test_session_info();
@@ -434,15 +421,10 @@ mod tests {
     // ── truncate ──
 
     #[test]
-    fn truncate_short_input_unchanged() {
-        let s = "abc".to_owned();
-        assert_eq!(truncate(s), "abc");
-    }
-
-    #[test]
-    fn truncate_at_exact_cap_preserves_input() {
-        let s = "a".repeat(MAX_BYTES);
-        assert_eq!(truncate(s.clone()), s);
+    fn truncate_under_or_at_cap_is_unchanged() {
+        assert_eq!(truncate("abc".to_owned()), "abc");
+        let exact = "a".repeat(MAX_BYTES);
+        assert_eq!(truncate(exact.clone()), exact);
     }
 
     #[test]
@@ -470,17 +452,13 @@ mod tests {
     // ── format_size ──
 
     #[test]
-    fn format_size_truncates_to_one_decimal_for_kb() {
+    fn format_size_picks_unit_and_truncates_to_one_decimal() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(1023), "1023 B");
         assert_eq!(format_size(1024), "1.0 KB");
         assert_eq!(format_size(1536), "1.5 KB");
         assert_eq!(format_size(1024 * 1024 - 1), "1023.9 KB");
-    }
-
-    #[test]
-    fn format_size_switches_to_mb_above_one_megabyte() {
         let mb = 1024 * 1024;
         assert_eq!(format_size(mb), "1.0 MB");
         assert_eq!(format_size(mb * 3 / 2), "1.5 MB");
