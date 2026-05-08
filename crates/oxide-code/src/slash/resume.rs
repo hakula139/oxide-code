@@ -93,13 +93,14 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
-        // Match the /model picker: cursor row goes `text + bold`, non-cursor stays plain text. The
-        // `>` gutter marker already carries the accent color, so layering accent on the title
-        // duplicated the highlight.
+        // Three-tier hierarchy: cursor row goes `text + bold`, non-cursor titles take `Modifier::DIM`
+        // (softer than full `text` but still brighter than the metadata's `dim` foreground), and
+        // metadata stays on `theme.dim()`. Without the middle tier titles + metadata read at the
+        // same weight, making it harder to scan.
         let title_style = if is_cursor {
             theme.text().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
-            theme.text()
+            theme.text().add_modifier(ratatui::style::Modifier::DIM)
         };
         let title_budget = usize::from(width).max(TITLE_FLOOR);
         let title_line = Line::from(Span::styled(
