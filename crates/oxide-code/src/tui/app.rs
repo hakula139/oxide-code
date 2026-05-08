@@ -512,6 +512,9 @@ impl App {
         self.chat
             .load_history(messages, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
+        // Drop queued prompts: they were typed for the old thread and would land in the resumed
+        // one with no context. `/clear` (SessionRolled) doesn't drop them — same identity, just a
+        // fresh slate.
         self.pending_prompts.clear();
         // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay (e.g.,
         // a "confirm switch" prompt above the picker) would otherwise carry across the swap.
