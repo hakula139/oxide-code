@@ -294,8 +294,7 @@ impl<T: SearchableItem> SearchableList<T> {
             .x
             .saturating_add(SEARCH_PROMPT_WIDTH)
             .saturating_add(query_display_width);
-        let cursor_x = raw_x.min(area.right().saturating_sub(1));
-        frame.set_cursor_position((cursor_x, cursor_y));
+        crate::tui::cursor::place_clamped(frame, raw_x, cursor_y, area);
     }
 
     fn push_item_lines(
