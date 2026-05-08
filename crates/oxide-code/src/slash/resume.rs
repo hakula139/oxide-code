@@ -36,6 +36,8 @@ const ID_WIDTH: usize = 8;
 const TIMESTAMP_WIDTH: usize = 16;
 /// Padding between the columns laid out by [`SessionRow::render_row`].
 const COLUMN_GAP: usize = 2;
+/// Width of the fixed columns before title (id + gap + timestamp + gap).
+const FIXED_PREFIX_WIDTH: usize = ID_WIDTH + COLUMN_GAP + TIMESTAMP_WIDTH + COLUMN_GAP;
 /// `— ` separator before the project column. Display width 2 (em dash + space).
 const SEPARATOR: &str = "— ";
 const SEPARATOR_WIDTH: usize = 2;
@@ -104,10 +106,9 @@ impl SearchableItem for SessionRow {
         // fixed prefix + project + separator; floors at TITLE_FLOOR so narrow terminals still
         // show a truncated label.
         let total = usize::from(width);
-        let fixed = ID_WIDTH + COLUMN_GAP + TIMESTAMP_WIDTH + COLUMN_GAP;
         let project_width = UnicodeWidthStr::width(self.project.as_str()).min(PROJECT_CAP);
         let title_budget = total
-            .saturating_sub(fixed)
+            .saturating_sub(FIXED_PREFIX_WIDTH)
             .saturating_sub(COLUMN_GAP + SEPARATOR_WIDTH + project_width)
             .max(TITLE_FLOOR);
         let title = truncate_to_width(&self.title, title_budget);
@@ -367,7 +368,7 @@ fn match_in_scope(
     let page = store
         .list_paged(None, all)
         .map_err(|e| format!("list sessions: {e:#}"))?;
-    let matches: Vec<String> = page
+    let mut matches: Vec<String> = page
         .into_sessions()
         .into_iter()
         .map(|s| s.session_id)
@@ -375,7 +376,7 @@ fn match_in_scope(
         .collect();
     match matches.len() {
         0 => Ok(None),
-        1 => Ok(matches.into_iter().next()),
+        1 => Ok(matches.pop()),
         n => {
             // Reuse the shared 5-id preview formatter so the typed-arg ambiguity message stays
             // in lockstep with `ox -c <prefix>`.
@@ -389,8 +390,6 @@ fn match_in_scope(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use temp_env::with_var;
     use time::OffsetDateTime;
     use time::macros::datetime;
@@ -432,8 +431,9 @@ mod tests {
 
     fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
         let dir = tempfile::tempdir().unwrap();
-        let path: PathBuf = dir.path().to_owned();
-        with_var("XDG_DATA_HOME", Some(path.as_os_str()), || f(dir.path()))
+        with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+            f(dir.path())
+        })
     }
 
     // ── SessionRow ──

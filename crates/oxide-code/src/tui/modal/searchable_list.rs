@@ -128,19 +128,19 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     pub(crate) fn select_next(&mut self) {
-        if self.visible.is_empty() {
+        let Some(len) = self.nonzero_visible_len() else {
             return;
-        }
-        self.cursor = (self.cursor + 1) % self.visible.len();
+        };
+        self.cursor = (self.cursor + 1) % len;
         self.scroll_into_view();
     }
 
     pub(crate) fn select_prev(&mut self) {
-        if self.visible.is_empty() {
+        let Some(len) = self.nonzero_visible_len() else {
             return;
-        }
+        };
         self.cursor = if self.cursor == 0 {
-            self.visible.len() - 1
+            len - 1
         } else {
             self.cursor - 1
         };
@@ -148,16 +148,16 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     pub(crate) fn page_down(&mut self) {
-        if self.visible.is_empty() {
+        let Some(len) = self.nonzero_visible_len() else {
             return;
-        }
+        };
         let step = usize::from(self.viewport_height).max(1);
-        self.cursor = (self.cursor + step).min(self.visible.len() - 1);
+        self.cursor = (self.cursor + step).min(len - 1);
         self.scroll_into_view();
     }
 
     pub(crate) fn page_up(&mut self) {
-        if self.visible.is_empty() {
+        if self.nonzero_visible_len().is_none() {
             return;
         }
         let step = usize::from(self.viewport_height).max(1);
@@ -165,14 +165,27 @@ impl<T: SearchableItem> SearchableList<T> {
         self.scroll_into_view();
     }
 
+    fn nonzero_visible_len(&self) -> Option<usize> {
+        (!self.visible.is_empty()).then_some(self.visible.len())
+    }
+
     fn recompute_visible(&mut self) {
-        let needle = self.query.to_lowercase();
-        self.visible.clear();
-        for (i, item) in self.items.iter().enumerate() {
-            if needle.is_empty() || item.haystack().to_lowercase().contains(&needle) {
-                self.visible.push(i);
-            }
-        }
+        // Empty-needle fast path skips the per-row to_lowercase allocation.
+        self.visible = if self.query.is_empty() {
+            (0..self.items.len()).collect()
+        } else {
+            let needle = self.query.to_lowercase();
+            self.items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    item.haystack()
+                        .to_lowercase()
+                        .contains(&needle)
+                        .then_some(i)
+                })
+                .collect()
+        };
         self.cursor = 0;
         self.viewport_offset = 0;
     }
@@ -202,7 +215,7 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         lines.push(Line::from(Span::styled(
             self.title.clone(),
