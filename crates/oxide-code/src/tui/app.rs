@@ -512,12 +512,19 @@ impl App {
         self.chat
             .load_history(messages, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
-        // Drop queued prompts: they were typed for the old thread and would land in the resumed
-        // one with no context. `/clear` (SessionRolled) doesn't drop them — same identity, just a
-        // fresh slate.
+        // Drop queued prompts (they belong to the previous thread); surface the count so the
+        // user knows their Enter-committed work didn't carry over. `/clear` (SessionRolled)
+        // keeps them — same identity, just a fresh slate.
+        let dropped = self.pending_prompts.len();
         self.pending_prompts.clear();
-        // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay (e.g.,
-        // a "confirm switch" prompt above the picker) would otherwise carry across the swap.
+        if dropped > 0 {
+            self.chat.push_system_message(format!(
+                "{dropped} queued prompt{plural} discarded — typed for the previous session.",
+                plural = if dropped == 1 { "" } else { "s" },
+            ));
+        }
+        // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
+        // would otherwise carry across the swap.
         self.modals.clear();
         self.sync_input_queue_hint();
         self.finalize_idle();
@@ -2038,8 +2045,8 @@ mod tests {
         assert_eq!(app.status_bar.title(), Some("Resumed title"));
         assert_eq!(
             app.chat.entry_count(),
-            2,
-            "chat must reflect the resumed transcript, not the live prompt",
+            3,
+            "chat must reflect the resumed transcript + the queued-prompt-discarded notice",
         );
         assert_eq!(
             app.pending_calls.len(),
@@ -2054,6 +2061,22 @@ mod tests {
         assert_eq!(app.status_bar.status(), &Status::Idle);
         assert!(app.input.is_enabled(), "resume returns to idle input");
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn handle_session_resumed_with_no_queued_prompts_is_silent() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            messages: vec![Message::user("only msg")],
+            tool_metadata: HashMap::new(),
+        });
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "no queued prompts → no discarded-prompts notice",
+        );
     }
 
     #[test]
