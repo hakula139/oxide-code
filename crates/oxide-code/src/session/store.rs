@@ -539,10 +539,16 @@ fn read_session_info(path: &Path) -> Result<SessionInfo> {
         }
     }
 
-    let last_active_at = metadata
-        .modified()
-        .ok()
-        .map_or(created_at, OffsetDateTime::from);
+    let last_active_at = match metadata.modified() {
+        Ok(t) => OffsetDateTime::from(t),
+        Err(e) => {
+            warn!(
+                "cannot read mtime of {} (falling back to created_at): {e}",
+                path.display()
+            );
+            created_at
+        }
+    };
 
     Ok(SessionInfo {
         session_id,

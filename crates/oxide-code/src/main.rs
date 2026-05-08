@@ -393,7 +393,9 @@ async fn agent_loop_task(
                 client.set_session_id(outcome.new_id.clone());
                 messages.clear();
                 if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
-                    warn!("session-rolled event dropped: {e}");
+                    // /clear succeeded server-side but the TUI never sees the new id — surfaces as
+                    // a stuck "old session" header. Error-level so the log makes it findable.
+                    tracing::error!("session-rolled event dropped: {e}");
                 }
             }
             UserAction::Resume { session_id } => {
@@ -505,7 +507,10 @@ fn apply_swap_config(
         effort: resolved,
         requested_effort: effort,
     }) {
-        warn!("config-changed event dropped: {e}");
+        // Dropping this leaves the status bar showing the previous model / effort even though the
+        // client has already swapped — error-level so it stands out in the log when the TUI looks
+        // wrong after a /model or /effort swap.
+        tracing::error!("config-changed event dropped: {e}");
     }
 }
 

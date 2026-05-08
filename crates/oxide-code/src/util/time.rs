@@ -6,13 +6,18 @@
 use std::sync::OnceLock;
 
 use time::UtcOffset;
+use tracing::warn;
 
 static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
 
 /// Captures the local offset on the calling thread. Safe only before tokio spawns workers; the
 /// binary calls this once at startup.
 pub(crate) fn init_local_offset() {
-    _ = LOCAL_OFFSET.set(UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC));
+    let offset = UtcOffset::current_local_offset().unwrap_or_else(|e| {
+        warn!("cannot read local timezone offset, falling back to UTC: {e}");
+        UtcOffset::UTC
+    });
+    _ = LOCAL_OFFSET.set(offset);
 }
 
 /// Returns the cached local offset, falling back to UTC if `init_local_offset` was never called

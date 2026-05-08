@@ -85,14 +85,13 @@ async fn generate_and_record(
 
     let outcome = session.append_ai_title(title.clone()).await;
     if let Some(failure) = outcome.failure.as_deref() {
-        if session.is_actor_alive() {
-            sink.session_write_error(Some(failure));
-        } else {
+        if !session.is_actor_alive() {
             // Session was finalized (e.g., /clear or /resume) before this background task
             // returned. Warn-log; surfacing into the next session's UI would mislead the user.
-            tracing::warn!("title-gen append after session shutdown: {failure}");
+            warn!("title-gen append after session shutdown: {failure}");
             return Ok(());
         }
+        sink.session_write_error(Some(failure));
     }
 
     _ = sink.send(AgentEvent::SessionTitleUpdated {

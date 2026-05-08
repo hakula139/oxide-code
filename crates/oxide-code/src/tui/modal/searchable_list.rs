@@ -160,9 +160,9 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     pub(crate) fn page_up(&mut self) {
-        if self.nonzero_visible_len().is_none() {
+        let Some(_len) = self.nonzero_visible_len() else {
             return;
-        }
+        };
         let step = usize::from(self.viewport_height).max(1);
         self.cursor = self.cursor.saturating_sub(step);
         self.scroll_into_view();

@@ -169,12 +169,18 @@ impl FileTracker {
         );
     }
 
-    /// Best-effort post-write stat + record; skips silently on stat failure.
+    /// Best-effort post-write stat + record; warn-logs on stat failure so subsequent Edit calls
+    /// re-Read the file rather than failing silently against a stale snapshot.
     pub(crate) async fn record_modify_after_write(&self, path: &Path, bytes: &[u8]) {
-        if let Ok(meta) = tokio::fs::metadata(path).await
-            && let Ok(mtime) = meta.modified()
-        {
-            self.record_modify(path, bytes, mtime, meta.len());
+        match tokio::fs::metadata(path).await.and_then(|m| {
+            let modified = m.modified()?;
+            Ok((m.len(), modified))
+        }) {
+            Ok((size, mtime)) => self.record_modify(path, bytes, mtime, size),
+            Err(e) => warn!(
+                "skip post-write tracker update for {} (stat failed): {e}",
+                path.display()
+            ),
         }
     }
 
