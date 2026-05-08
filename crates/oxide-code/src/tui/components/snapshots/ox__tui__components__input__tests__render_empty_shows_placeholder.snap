@@ -1,7 +1,8 @@
 ---
 source: crates/oxide-code/src/tui/components/input.rs
+assertion_line: 697
 expression: "render_to_backend(&input, 60, 3)"
 ---
 "────────────────────────────────────────────────────────────"
-"❯  Ask anything...                                          "
+"❯ Ask anything...                                           "
 "────────────────────────────────────────────────────────────"

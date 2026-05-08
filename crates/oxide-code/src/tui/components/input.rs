@@ -43,6 +43,10 @@ pub(crate) struct InputArea {
     popup: SlashPopup,
     enabled: bool,
     has_queued: bool,
+    /// Placeholder text painted at `textarea.x` when the buffer is truly empty. Hand-rolled so the
+    /// terminal-native cursor lands on the placeholder's first character (matches the modal
+    /// pickers' search row); `ratatui_textarea`'s built-in placeholder offsets one column right.
+    placeholder: &'static str,
     /// `Cell` because `render(&self)` is immutable.
     last_width: Cell<u16>,
     scroll_top: Cell<u16>,
@@ -55,7 +59,6 @@ impl InputArea {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
-        textarea.set_placeholder_style(theme.dim());
         textarea.set_wrap_mode(WrapMode::Word);
         textarea.set_block(Block::default());
 
@@ -65,6 +68,7 @@ impl InputArea {
             enabled: true,
             has_queued: false,
             popup: SlashPopup::new(theme),
+            placeholder: PLACEHOLDER_IDLE,
             last_width: Cell::new(0),
             scroll_top: Cell::new(0),
         };
@@ -73,11 +77,10 @@ impl InputArea {
     }
 
     /// Re-skin subsequent renders. The textarea keeps a cached `Style`, so the previous theme's
-    /// text / placeholder colors would persist if not reapplied here.
+    /// text color would persist if not reapplied here.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.textarea.set_style(theme.text());
-        self.textarea.set_placeholder_style(theme.dim());
         self.popup.set_theme(theme);
     }
 
@@ -239,6 +242,14 @@ impl InputArea {
         let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
         let cursor_y = textarea_area.y + cursor_row - top;
 
+        if self.is_buffer_empty() && textarea_area.height > 0 {
+            let area = Rect::new(textarea_area.x, textarea_area.y, textarea_area.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(self.placeholder, self.theme.dim()))),
+                area,
+            );
+        }
+
         if let Some(token) = self.ghost_text() {
             // Paint past the cursor, clipped to the textarea's right edge so wrapping mid-token
             // doesn't bleed into the next row.
@@ -262,14 +273,13 @@ impl InputArea {
     // ── Render Helpers ──
 
     fn refresh_placeholder(&mut self) {
-        let text = if !self.enabled {
+        self.placeholder = if !self.enabled {
             PLACEHOLDER_BUSY
         } else if self.has_queued {
             PLACEHOLDER_IDLE_QUEUED
         } else {
             PLACEHOLDER_IDLE
         };
-        self.textarea.set_placeholder_text(text);
     }
 
     // ── Popup & State ──
@@ -400,6 +410,12 @@ impl InputArea {
             .lines()
             .iter()
             .all(|line| line.trim().is_empty())
+    }
+
+    /// Truly-empty buffer (no characters at all). Stricter than [`is_empty`] — whitespace-only
+    /// buffers count as non-empty here so the placeholder disappears once the user types a space.
+    fn is_buffer_empty(&self) -> bool {
+        matches!(self.textarea.lines(), [first] if first.is_empty())
     }
 
     fn submit(&mut self) -> Option<UserAction> {
@@ -833,8 +849,8 @@ mod tests {
 
     // ── refresh_placeholder ──
 
-    fn placeholder_text(input: &InputArea) -> String {
-        input.textarea.placeholder_text().to_owned()
+    fn placeholder_text(input: &InputArea) -> &'static str {
+        input.placeholder
     }
 
     #[test]
