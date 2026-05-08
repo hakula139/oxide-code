@@ -227,7 +227,7 @@ impl<T: SearchableItem> SearchableList<T> {
             let is_cursor = vi == self.cursor;
             let item_idx = self.visible[vi];
             let item = &self.items[item_idx];
-            lines.push(Self::render_row(item, vi, is_cursor, row_width, theme));
+            lines.push(Self::render_row(item, is_cursor, row_width, theme));
         }
 
         if self.visible.is_empty() && !self.query.is_empty() {
@@ -260,14 +260,7 @@ impl<T: SearchableItem> SearchableList<T> {
         Line::from(spans)
     }
 
-    fn render_row(
-        item: &T,
-        visible_idx: usize,
-        is_cursor: bool,
-        body_width: u16,
-        theme: &Theme,
-    ) -> Line<'static> {
-        let _ = visible_idx;
+    fn render_row(item: &T, is_cursor: bool, body_width: u16, theme: &Theme) -> Line<'static> {
         let cursor_span = Span::styled(
             if is_cursor {
                 CURSOR_MARKER.to_owned()
