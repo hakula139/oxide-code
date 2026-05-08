@@ -93,14 +93,14 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
-        // Three-tier hierarchy: cursor row goes `text + bold`, non-cursor titles take `Modifier::DIM`
-        // (softer than full `text` but still brighter than the metadata's `dim` foreground), and
-        // metadata stays on `theme.dim()`. Without the middle tier titles + metadata read at the
-        // same weight, making it harder to scan.
+        // Three-tier hierarchy via the theme's `text` / `muted` / `dim` slots: cursor row paints
+        // `text + bold` (primary), non-cursor titles take `muted` (secondary, distinct fg from
+        // metadata), metadata stays on `dim` (tertiary). Dimming `text` with `Modifier::DIM`
+        // would keep titles in the same color family as metadata and read flat at a glance.
         let title_style = if is_cursor {
             theme.text().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
-            theme.text().add_modifier(ratatui::style::Modifier::DIM)
+            theme.muted()
         };
         let title_budget = usize::from(width).max(TITLE_FLOOR);
         let title_line = Line::from(Span::styled(
@@ -588,6 +588,49 @@ mod tests {
         assert!(
             meta_text.contains(" ago") || meta_text.contains('-'),
             "meta row must carry a relative time or ISO date: {meta_text}",
+        );
+    }
+
+    #[test]
+    fn render_uses_three_distinct_foregrounds_for_cursor_unselected_and_metadata() {
+        // Selected title → `text` + bold; unselected → `muted`; metadata → `dim`. Three distinct
+        // foregrounds keep the rows scannable; a regression that flattens any pair (e.g. dimming
+        // `text` with `Modifier::DIM`) would make titles and metadata read alike.
+        let info = raw_session_info(
+            stamped_id(0xab),
+            "/work/oxide",
+            Some("Fix auth"),
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let row = SessionRow::from_info(info, UtcOffset::UTC, true);
+        let theme = Theme::default();
+
+        let cursor = row.render(60, true, &theme);
+        let cursor_title = cursor[0].spans[0].style;
+        assert_eq!(cursor_title.fg, theme.text.fg, "selected uses text fg");
+        assert!(
+            cursor_title
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "selected is bold",
+        );
+
+        let unselected = row.render(60, false, &theme);
+        assert_eq!(
+            unselected[0].spans[0].style.fg, theme.muted.fg,
+            "unselected title uses muted fg",
+        );
+        assert_eq!(
+            unselected[1].spans[0].style.fg, theme.dim.fg,
+            "metadata uses dim fg",
+        );
+        assert_ne!(
+            theme.text.fg, theme.muted.fg,
+            "tier 1 vs 2 must be distinct fgs",
+        );
+        assert_ne!(
+            theme.muted.fg, theme.dim.fg,
+            "tier 2 vs 3 must be distinct fgs",
         );
     }
 
