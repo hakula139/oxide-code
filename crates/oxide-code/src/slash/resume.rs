@@ -243,21 +243,22 @@ impl Modal for ResumePicker {
         self.list.render(frame, list_area, theme);
 
         let remaining = area.height.saturating_sub(list_h);
-        if remaining >= 2 {
-            let footer_area = Rect {
-                x: area.x,
-                y: area.y.saturating_add(list_h).saturating_add(1),
-                width: area.width,
-                height: 1,
-            };
-            // Load error owns the footer when set — failure must not look like "0 sessions".
-            let footer = if let Some(err) = &self.load_error {
-                Line::from(Span::styled(format!("! {err}"), theme.error()))
-            } else {
-                Line::from(Span::styled(self.footer_text(), theme.dim()))
-            };
-            frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
+        if remaining < 2 {
+            return;
         }
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(list_h).saturating_add(1),
+            width: area.width,
+            height: 1,
+        };
+        // Load error owns the footer when set — failure must not look like "0 sessions".
+        let footer = if let Some(err) = &self.load_error {
+            Line::from(Span::styled(format!("! {err}"), theme.error()))
+        } else {
+            Line::from(Span::styled(self.footer_text(), theme.dim()))
+        };
+        frame.render_widget(Paragraph::new(footer).style(theme.surface()), footer_area);
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
@@ -596,12 +597,11 @@ mod tests {
         );
         let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
         let outcome = picker.handle_key(&key(KeyCode::Enter));
-        match outcome {
-            ModalKey::Submitted(ModalAction::User(UserAction::Resume { session_id })) => {
-                assert_eq!(session_id, stamped_id(0x11));
-            }
-            other => panic!("expected Submitted(Resume), got {other:?}"),
-        }
+        let ModalKey::Submitted(ModalAction::User(UserAction::Resume { session_id })) = outcome
+        else {
+            panic!("expected Submitted(Resume), got {outcome:?}");
+        };
+        assert_eq!(session_id, stamped_id(0x11));
     }
 
     #[test]
@@ -915,11 +915,45 @@ mod tests {
         for c in "fix".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
+        let footer = picker.footer_text();
         assert!(
-            picker.footer_text().starts_with("1 / 3 matching · scope:"),
-            "filter `fix` should narrow to one title but keep `total` visible: {}",
-            picker.footer_text(),
+            footer.starts_with("1 / 3 matching · scope:"),
+            "filter `fix` should narrow to one title but keep `total` visible: {footer}",
         );
+    }
+
+    #[test]
+    fn render_skips_footer_when_area_too_short_for_two_rows_below_list() {
+        // Defensive guard: if the parent allocates less than `list_h + 2` rows the picker drops
+        // the footer rather than spilling into the list area or panicking.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (_dir, store) = isolated_store();
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, 1), &theme))
+            .expect("render must not panic at height=1");
+    }
+
+    #[test]
+    fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {
+        // Pin the Err arm of `reload`: removing the project dir makes `list_paged` fail with
+        // ENOENT on `read_dir`. The picker must surface that as `load_error` (so the footer can
+        // distinguish "0 sessions" from "load failed") and zero out `total`.
+        let (dir, store) = isolated_store();
+        let project_dir = crate::session::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+        assert!(
+            picker.load_error.is_some(),
+            "reload should surface list_paged failure: {:?}",
+            picker.load_error,
+        );
+        assert_eq!(picker.total, 0, "no rows materialise on the Err arm");
     }
 
     #[test]
@@ -1017,12 +1051,10 @@ mod tests {
             let mut ctx = SlashContext::new(&mut chat, &info);
             // 4-char prefix is enough to pin a single session in the seeded store.
             let outcome = ResumeCmd.execute(&target_id[..4], &mut ctx).unwrap();
-            match outcome {
-                SlashOutcome::Forward(UserAction::Resume { session_id }) => {
-                    assert_eq!(session_id, target_id);
-                }
-                other => panic!("expected Forward(Resume), got {other:?}"),
-            }
+            let SlashOutcome::Forward(UserAction::Resume { session_id }) = outcome else {
+                panic!("expected Forward(Resume), got {outcome:?}");
+            };
+            assert_eq!(session_id, target_id);
         });
     }
 

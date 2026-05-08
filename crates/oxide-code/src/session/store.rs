@@ -392,13 +392,13 @@ fn collect_session_paths(dir: &Path) -> Result<Vec<(PathBuf, OffsetDateTime)>> {
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
         .filter_map(|e| {
             let path = e.path();
-            match e.metadata().and_then(|m| m.modified()) {
-                Ok(t) => Some((path, OffsetDateTime::from(t))),
-                Err(err) => {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .inspect_err(|err| {
                     warn!("skipping session {} (stat failed): {err}", path.display());
-                    None
-                }
-            }
+                })
+                .ok()
+                .map(|t| (path, OffsetDateTime::from(t)))
         })
         .collect())
 }
@@ -610,7 +610,7 @@ pub(super) fn test_session_file(dir: &Path, session_id: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-pub(super) fn test_project_dir(dir: &Path) -> PathBuf {
+pub(crate) fn test_project_dir(dir: &Path) -> PathBuf {
     dir.join(TEST_PROJECT)
 }
 

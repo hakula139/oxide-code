@@ -383,7 +383,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let session = super::super::handle::testing::acks_with_failure("live-session", "disk full");
+        let session = super::super::handle::testing::acks_append_ai_title_with_failure(
+            "live-session",
+            "disk full",
+        );
         let client = title_client(server.uri());
         let sink = CapturingSink::new();
 

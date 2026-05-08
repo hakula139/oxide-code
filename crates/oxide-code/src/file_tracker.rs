@@ -203,16 +203,14 @@ impl FileTracker {
         let mut by_path = self.lock();
         let mut dropped = Vec::new();
         for snap in snapshots {
-            let Ok(meta) = std::fs::metadata(&snap.path) else {
-                dropped.push(snap.path);
-                continue;
-            };
-            let Ok(current_mtime) = meta.modified() else {
+            let Ok((current_size, current_mtime)) =
+                std::fs::metadata(&snap.path).and_then(|m| m.modified().map(|t| (m.len(), t)))
+            else {
                 dropped.push(snap.path);
                 continue;
             };
             let stored_mtime = SystemTime::from(snap.mtime);
-            if meta.len() != snap.size || current_mtime != stored_mtime {
+            if current_size != snap.size || current_mtime != stored_mtime {
                 dropped.push(snap.path);
                 continue;
             }
