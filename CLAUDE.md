@@ -124,6 +124,7 @@ ox                                          # Start an interactive session
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
 │   │   ├── status.rs                       # Status bar (model, spinner, status, working directory)
 │   │   └── welcome.rs                      # Empty-state welcome screen — identity ribbon + body column, themed via `accent`/`text`/`dim`
+│   ├── cursor.rs                           # `place_clamped` — shared right-edge-clamp cursor placement for input surfaces
 │   ├── event.rs                            # ChannelSink (mpsc transport for the TUI)
 │   ├── glyphs.rs                           # Shared visual constants (chevrons, bar, tool indicators, spinner frames)
 │   ├── markdown.rs                         # Markdown module root (pulldown-cmark + syntect renderer)

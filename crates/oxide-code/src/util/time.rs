@@ -13,11 +13,16 @@ static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
 /// Captures the local offset on the calling thread. Safe only before tokio spawns workers; the
 /// binary calls this once at startup.
 pub(crate) fn init_local_offset() {
-    let offset = UtcOffset::current_local_offset().unwrap_or_else(|e| {
+    _ = LOCAL_OFFSET.set(resolve_offset(UtcOffset::current_local_offset()));
+}
+
+/// Pure fallback for the offset lookup — split from `init_local_offset` so the warn-and-fallback
+/// arm can be tested without depending on the host's TZ database state.
+fn resolve_offset(result: Result<UtcOffset, time::error::IndeterminateOffset>) -> UtcOffset {
+    result.unwrap_or_else(|e| {
         warn!("cannot read local timezone offset, falling back to UTC: {e}");
         UtcOffset::UTC
-    });
-    _ = LOCAL_OFFSET.set(offset);
+    })
 }
 
 /// Returns the cached local offset, falling back to UTC if `init_local_offset` was never called
@@ -45,5 +50,21 @@ mod tests {
             first, second,
             "local_offset must return a stable cached value across reads",
         );
+    }
+
+    // ── resolve_offset ──
+
+    #[test]
+    fn resolve_offset_passes_ok_through_unchanged() {
+        let offset = UtcOffset::from_hms(8, 0, 0).unwrap();
+        assert_eq!(resolve_offset(Ok(offset)), offset);
+    }
+
+    #[test]
+    fn resolve_offset_falls_back_to_utc_on_err() {
+        // `IndeterminateOffset` is the only error variant — used here as a stand-in for any host
+        // TZ-database failure. The fallback path must not propagate the error.
+        let err = Err(time::error::IndeterminateOffset);
+        assert_eq!(resolve_offset(err), UtcOffset::UTC);
     }
 }
