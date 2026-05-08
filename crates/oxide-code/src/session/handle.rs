@@ -766,8 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_persists_one_file_snapshot_per_tracked_file() {
-        // Assert the path SET (not just count) so a bug pointing every snapshot at the same
-        // file would still fail.
+        // Assert the path set so the test fails even if every snapshot points at the same file.
         let dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());

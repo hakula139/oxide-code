@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn display_label_combines_name_aliases_and_usage() {
-        // Covers the no-alias / alias-only / usage-only / both-present matrix.
+        // Four-row matrix: no-alias / alias-only / usage-only / both-present.
         assert_eq!(display_label(&HelpCmd), "/help");
         assert_eq!(display_label(&Fake::CLEAR), "/clear (new, reset)");
         assert_eq!(display_label(&Fake::MODEL), "/model <model-id>");
@@ -103,16 +103,8 @@ mod tests {
             display_label(&Fake::CLEAR_WITH_USAGE),
             "/clear (new, reset) <args>",
         );
-
-        // Cover the Fake stub's trait wiring so the whole file participates in coverage.
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = crate::slash::test_session_info();
-        let mut ctx = SlashContext::new(&mut chat, &info);
-        assert_eq!(Fake::CLEAR.description(), "");
-        assert_eq!(Fake::CLEAR.execute("", &mut ctx), Ok(SlashOutcome::Done));
     }
 
-    /// Covers the no-alias / alias-only / usage-only / both-present matrix.
     struct Fake {
         name: &'static str,
         aliases: &'static [&'static str],
