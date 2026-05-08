@@ -128,7 +128,7 @@ impl SearchableItem for SessionRow {
             meta.push_str(project);
         }
         let meta_line = Line::from(Span::styled(
-            truncate_to_width(&meta, usize::from(width)),
+            truncate_to_width(&meta, usize::from(width).max(TITLE_FLOOR)),
             theme.dim(),
         ));
 

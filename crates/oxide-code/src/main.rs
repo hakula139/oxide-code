@@ -443,12 +443,11 @@ async fn apply_resume(
     };
     let new_id = session.session_id().to_owned();
     client.set_session_id(new_id.clone());
-    let messages_for_event = outcome.messages.clone();
-    *messages = outcome.messages;
+    messages.clone_from(&outcome.messages);
     if let Err(e) = sink.send(AgentEvent::SessionResumed {
         id: new_id,
         title: outcome.title,
-        messages: messages_for_event,
+        messages: outcome.messages,
         tool_metadata: outcome.tool_result_metadata,
     }) {
         // Channel closed mid-resume leaves the TUI on the OLD chat. Pinpoint the desync.

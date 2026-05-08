@@ -47,9 +47,9 @@ MMIX
 mplan
 mpsc
 mtimes
-nucleo
 MULT
 nonewline
+nucleo
 onig
 pgid
 println
@@ -81,11 +81,11 @@ tokio
 toks
 toolu
 tracing
-usize
 unmaterialized
 unresumable
 unrotated
 urandom
+usize
 venv
 vtable
 writeln
