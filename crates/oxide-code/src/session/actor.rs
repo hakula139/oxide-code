@@ -31,6 +31,12 @@ pub(super) enum SessionCmd {
         title: String,
         ack: oneshot::Sender<Outcome>,
     },
+    /// User-supplied title from `/rename`. Latches `manual_title_set` so any in-flight
+    /// `AppendAiTitle` becomes a silent no-op.
+    SetManualTitle {
+        title: String,
+        ack: oneshot::Sender<Outcome>,
+    },
     Finish {
         /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
@@ -125,9 +131,25 @@ fn absorb(
             }
         }
         SessionCmd::AppendAiTitle { title, ack } => {
+            // Manual title wins. Latched at /rename time so a slow Haiku response can't overwrite
+            // it; the caller (title generator) also pre-checks the flag, but this defends against
+            // a flag flip after that pre-check.
+            if state.manual_title_set() {
+                _ = ack.send(Outcome { failure: None });
+                return;
+            }
             entries.push(Entry::Title {
                 title,
                 source: super::entry::TitleSource::AiGenerated,
+                updated_at: now,
+            });
+            acks.push(PendingAck::Outcome(ack));
+        }
+        SessionCmd::SetManualTitle { title, ack } => {
+            state.mark_manual_title_set();
+            entries.push(Entry::Title {
+                title,
+                source: super::entry::TitleSource::UserProvided,
                 updated_at: now,
             });
             acks.push(PendingAck::Outcome(ack));
@@ -307,6 +329,55 @@ mod tests {
         assert!(
             !content.contains(r#""type":"tool_result_metadata""#),
             "default metadata must not be written: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_persists_user_provided_entry_and_blocks_subsequent_ai_title() {
+        // Two-prong assertion: the manual entry hits disk with the right source, AND a later
+        // AppendAiTitle on the same session is silently dropped (no second title entry, no
+        // overwrite). Pins both halves of the manual-title-wins contract in one fixture.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec, _rec_rx) = record_cmd("Fix login");
+        let (manual_ack, _manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "User-picked title".to_owned(),
+            ack: manual_ack,
+        };
+        let (ai_ack, _ai_rx) = oneshot::channel();
+        let ai_cmd = SessionCmd::AppendAiTitle {
+            title: "AI title that should lose".to_owned(),
+            ack: ai_ack,
+        };
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![rec, manual_cmd, ai_cmd, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let title_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .collect();
+        // First-prompt title (from queue_message_entries) + the manual one. The AI append must
+        // not have produced a third title entry.
+        assert_eq!(
+            title_lines.len(),
+            2,
+            "first-prompt + manual; AI must not append a third title: {content}",
+        );
+        assert!(
+            title_lines
+                .iter()
+                .any(|l| l.contains("user_provided") && l.contains("User-picked title")),
+            "manual title must persist with `user_provided` source: {content}",
+        );
+        assert!(
+            !content.contains("AI title that should lose"),
+            "AI title must not appear on disk after manual override: {content}",
         );
     }
 

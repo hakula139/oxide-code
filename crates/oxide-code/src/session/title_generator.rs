@@ -83,6 +83,12 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
+    // The user may have run `/rename` while Haiku was thinking. The actor also drops a late
+    // AppendAiTitle for the same reason, but checking here saves the channel hop and prevents the
+    // status bar from briefly flashing the AI title.
+    if session.manual_title_set() {
+        return Ok(());
+    }
     let outcome = session.append_ai_title(title.clone()).await;
     if let Some(failure) = outcome.failure.as_deref() {
         if !session.is_actor_alive() {
@@ -301,6 +307,44 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix login")),
             "sink got SessionTitleUpdated: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_skips_emit_when_manual_title_was_set_during_haiku_call() {
+        // Race window the plan calls out: user runs `/rename` while Haiku is still computing.
+        // The pre-check before `append_ai_title` must catch the latch and bail without emitting
+        // SessionTitleUpdated — otherwise the status bar would briefly show the AI title and
+        // overwrite the user's manual pick.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"AI loses race"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        // Latch the flag *before* generate_and_record runs — simulates `/rename` having been
+        // dispatched while the Haiku request was in flight.
+        session.set_manual_title("User wins".to_owned()).await;
+
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+            "AI title must not emit when manual title is already set: {events:?}",
         );
     }
 

@@ -265,6 +265,7 @@ where
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
                     | UserAction::Resume { .. }
+                    | UserAction::Rename { .. }
                     | UserAction::SwapConfig { .. }
                     | UserAction::PreviewTheme { .. }
                     | UserAction::SwapTheme { .. }),

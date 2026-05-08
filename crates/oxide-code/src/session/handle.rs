@@ -45,6 +45,9 @@ pub(crate) struct SessionHandle {
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
+    /// Set by [`SessionHandle::set_manual_title`] before it dispatches the cmd. Lets the title
+    /// generator skip its append after a `/rename` lands while Haiku is still in flight.
+    manual_title_set: AtomicBool,
     /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,
 }
@@ -68,6 +71,14 @@ impl SharedState {
     /// Sticky-once: `true` on first call, `false` after.
     pub(super) fn surface_first_actor_gone(&self) -> bool {
         !self.actor_gone_surfaced.swap(true, Ordering::AcqRel)
+    }
+
+    pub(super) fn mark_manual_title_set(&self) {
+        self.manual_title_set.store(true, Ordering::Release);
+    }
+
+    pub(super) fn manual_title_set(&self) -> bool {
+        self.manual_title_set.load(Ordering::Acquire)
     }
 
     /// Most recent flush error, threaded into actor-gone messages.
@@ -143,6 +154,23 @@ impl SessionHandle {
         let (ack, rx) = oneshot::channel();
         self.dispatch_outcome(SessionCmd::AppendAiTitle { title, ack }, rx)
             .await
+    }
+
+    /// Persist a user-supplied title. Latches the manual-title flag so any in-flight
+    /// `AppendAiTitle` from the background title generator becomes a silent no-op — the flag flips
+    /// in `SharedState` *before* dispatch so the title generator's pre-check sees it even if the
+    /// actor hasn't drained its channel yet.
+    pub(crate) async fn set_manual_title(&self, title: String) -> Outcome {
+        self.shared.mark_manual_title_set();
+        let (ack, rx) = oneshot::channel();
+        self.dispatch_outcome(SessionCmd::SetManualTitle { title, ack }, rx)
+            .await
+    }
+
+    /// `true` once a `/rename` has been issued — used by the background title generator to skip
+    /// overwriting the user's manual pick.
+    pub(crate) fn manual_title_set(&self) -> bool {
+        self.shared.manual_title_set()
     }
 
     /// Write the session summary and finalize. Idempotent; no-op on fresh sessions that never

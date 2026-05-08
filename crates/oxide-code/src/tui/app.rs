@@ -297,7 +297,7 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear | UserAction::Rename { .. } | UserAction::SwapConfig { .. } => true,
             UserAction::Resume { .. } => {
                 // Disable input until the SessionResumed event fires — otherwise a typed prompt
                 // in the gap between forward and event would push into chat, then get wiped by
@@ -341,7 +341,11 @@ impl App {
                     self.chat.push_user_message(text.to_owned());
                 }
                 let (synthesized, modal) = {
-                    let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                    let mut ctx = SlashContext::with_title(
+                        &mut self.chat,
+                        &self.session_info,
+                        self.status_bar.title(),
+                    );
                     let action = slash::dispatch(&parsed, &mut ctx);
                     (action, ctx.take_modal())
                 };

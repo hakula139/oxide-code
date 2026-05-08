@@ -33,6 +33,9 @@ pub(super) struct SessionState {
     message_count: u32,
     /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
+    /// Latched on `/rename`. Suppresses any later [`SessionCmd::AppendAiTitle`] absorb so a slow
+    /// Haiku response cannot overwrite the user's manual title on disk.
+    manual_title_set: bool,
     finished: bool,
 }
 
@@ -61,6 +64,7 @@ impl SessionState {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt_seen: false,
+            manual_title_set: false,
             finished: false,
         }
     }
@@ -82,8 +86,19 @@ impl SessionState {
             initial_message_count,
             message_count: initial_message_count,
             first_user_prompt_seen,
+            // Title-gen never runs on resumed sessions (the first-prompt seed never fires), so the
+            // default is safe — manual gating only matters for fresh sessions.
+            manual_title_set: false,
             finished: false,
         }
+    }
+
+    pub(super) fn manual_title_set(&self) -> bool {
+        self.manual_title_set
+    }
+
+    pub(super) fn mark_manual_title_set(&mut self) {
+        self.manual_title_set = true;
     }
 
     /// Builds entries for one message; returns AI-title seed on first user-text.

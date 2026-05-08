@@ -30,14 +30,29 @@ impl LiveSessionInfo {
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a LiveSessionInfo,
+    /// Live session title (status-bar source of truth). Borrowed read-only — `/rename` pre-fills
+    /// its modal from here. `None` until either the first user prompt seeds a title or `/rename`
+    /// sets one explicitly.
+    pub(crate) title: Option<&'a str>,
     modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
+    /// Convenience: title-less context. Most call sites — and every test that doesn't exercise
+    /// `/rename` — pass `None` for the title, so this keeps them terse.
     pub(crate) fn new(chat: &'a mut ChatView, info: &'a LiveSessionInfo) -> Self {
+        Self::with_title(chat, info, None)
+    }
+
+    pub(crate) fn with_title(
+        chat: &'a mut ChatView,
+        info: &'a LiveSessionInfo,
+        title: Option<&'a str>,
+    ) -> Self {
         Self {
             chat,
             info,
+            title,
             modal: None,
         }
     }
