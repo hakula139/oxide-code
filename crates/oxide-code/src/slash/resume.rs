@@ -93,14 +93,13 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
-        let title_style = if is_cursor {
-            theme.text().add_modifier(ratatui::style::Modifier::BOLD)
-        } else {
-            theme.text()
-        };
-        let title_budget = usize::from(width).max(TITLE_FLOOR);
+        let budget = usize::from(width).max(TITLE_FLOOR);
+        let mut title_style = theme.text();
+        if is_cursor {
+            title_style = title_style.add_modifier(ratatui::style::Modifier::BOLD);
+        }
         let title_line = Line::from(Span::styled(
-            truncate_to_width(&self.title, title_budget),
+            truncate_to_width(&self.title, budget),
             title_style,
         ));
 
@@ -124,10 +123,7 @@ impl SearchableItem for SessionRow {
             meta.push_str(META_SEPARATOR);
             meta.push_str(project);
         }
-        let meta_line = Line::from(Span::styled(
-            truncate_to_width(&meta, usize::from(width).max(TITLE_FLOOR)),
-            theme.dim(),
-        ));
+        let meta_line = Line::from(Span::styled(truncate_to_width(&meta, budget), theme.dim()));
 
         vec![title_line, meta_line, Line::default()]
     }
