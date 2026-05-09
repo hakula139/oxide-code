@@ -156,6 +156,9 @@ impl RenameModal {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
     use crate::slash::context::{LiveSessionInfo, SlashContext};
     use crate::tui::components::chat::ChatView;
@@ -307,6 +310,22 @@ mod tests {
     }
 
     #[test]
+    fn handle_key_unhandled_codes_are_silently_consumed_without_buffer_change() {
+        let mut modal = RenameModal::new(Some("ab"));
+        let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Tab));
+
+        assert!(
+            matches!(outcome, ModalKey::Consumed),
+            "non-text keys must consume without action; got {outcome:?}",
+        );
+        let submit = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
+        let ModalKey::Submitted(ModalAction::User(UserAction::Rename { title })) = submit else {
+            panic!("buffer should still submit cleanly; got {submit:?}");
+        };
+        assert_eq!(title, "ab", "Tab must not have mutated the buffer");
+    }
+
+    #[test]
     fn handle_key_blank_only_buffer_does_not_submit() {
         let mut modal = RenameModal::new(None);
         for _ in 0..3 {
@@ -317,5 +336,114 @@ mod tests {
             matches!(outcome, ModalKey::Consumed),
             "all-whitespace Enter must not submit; got {outcome:?}",
         );
+    }
+
+    // ── Modal::render ──
+
+    fn rendered_buffer(modal: &RenameModal, width: u16) -> ratatui::buffer::Buffer {
+        let theme = Theme::default();
+        let h = modal.height(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
+            .expect("render must not panic");
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn render_lays_out_title_prompt_and_footer_in_order() {
+        let modal = RenameModal::new(Some("Fix auth"));
+        let width: u16 = 40;
+        let buf = rendered_buffer(&modal, width);
+
+        assert!(
+            row_text(&buf, 0, width).contains(MODAL_TITLE),
+            "title row missing: {:?}",
+            row_text(&buf, 0, width),
+        );
+        let input = row_text(&buf, 2, width);
+        assert!(
+            input.starts_with("/ Fix auth"),
+            "input row should show prompt + buffer; got {input:?}",
+        );
+        assert!(
+            row_text(&buf, 4, width).contains(FOOTER_HINT),
+            "footer hint missing: {:?}",
+            row_text(&buf, 4, width),
+        );
+    }
+
+    #[test]
+    fn render_truncates_buffer_wider_than_input_row_budget() {
+        let long: String = "x".repeat(100);
+        let modal = RenameModal::new(Some(&long));
+        let width: u16 = 20;
+        let buf = rendered_buffer(&modal, width);
+
+        let input = row_text(&buf, 2, width);
+        assert!(
+            input.contains(crate::util::text::ELLIPSIS),
+            "narrow width must produce an ellipsis; got {input:?}",
+        );
+    }
+
+    #[test]
+    fn render_places_cursor_after_visible_buffer_text() {
+        let theme = Theme::default();
+        let modal = RenameModal::new(Some("ab"));
+        let width: u16 = 40;
+        let h = modal.height(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
+            .unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+
+        // Input row sits at y = title (1) + gap (1) = 2; cursor lands after "/ ab" → x = 4.
+        assert_eq!(
+            (pos.x, pos.y),
+            (4, 2),
+            "cursor must land after the rendered buffer",
+        );
+    }
+
+    #[test]
+    fn render_clamps_cursor_when_buffer_overflows_visible_row() {
+        let theme = Theme::default();
+        let long: String = "x".repeat(100);
+        let modal = RenameModal::new(Some(&long));
+        let width: u16 = 20;
+        let h = modal.height(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, h)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, h), &theme))
+            .unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+
+        assert_eq!(pos.x, width - 1, "cursor must clamp to the right edge");
+    }
+
+    #[test]
+    fn render_skips_cursor_when_area_too_short_for_input_row() {
+        let theme = Theme::default();
+        let modal = RenameModal::new(Some("ab"));
+        let width: u16 = 40;
+        let mut terminal = Terminal::new(TestBackend::new(width, 5)).unwrap();
+        // Render the modal into an oversized terminal but pass a 1-row Rect so the input row is
+        // entirely off-screen. `place_cursor` should bail without panicking.
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, 1), &theme))
+            .expect("short-area render must not panic");
+    }
+
+    #[test]
+    fn height_sums_to_five_rows() {
+        // Title (1) + gap (1) + input (1) + gap (1) + footer (1) = 5; pinning lets render tests
+        // assume the input row sits at y=2.
+        assert_eq!(RenameModal::new(None).height(40), 5);
     }
 }

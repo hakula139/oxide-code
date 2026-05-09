@@ -646,11 +646,12 @@ mod tests {
     async fn record_tool_metadata_batch_actor_drops_ack_surfaces_actor_gone_failure() {
         // Distinguishes the rx-await fallback in dispatch_outcome from the cmd_tx.send-failed
         // early return: send succeeds, actor receives the cmd, but drops the ack (simulates a
-        // panic between recv and ack). `succeed=3` exercises each ack-bearing variant of the
-        // helper's or-pattern healthy first, then the drop arm on the 4th cmd.
-        let handle = testing::acks_then_drops("acks-then-drops", 3);
+        // panic between recv and ack). `succeed=4` exercises each ack-bearing variant of the
+        // helper's or-pattern healthy first, then the drop arm on the 5th cmd.
+        let handle = testing::acks_then_drops("acks-then-drops", 4);
 
         let title = handle.append_ai_title("ok".to_owned()).await;
+        let manual = handle.set_manual_title("manual".to_owned()).await;
         let finish = handle.finish(Vec::new()).await;
         let batch_ok = handle
             .record_tool_metadata_batch(vec![(
@@ -664,6 +665,10 @@ mod tests {
         let batch_dropped = handle.record_tool_metadata_batch(vec![]).await;
 
         assert!(title.failure.is_none(), "AppendAiTitle is acked healthily");
+        assert!(
+            manual.failure.is_none(),
+            "SetManualTitle is acked healthily"
+        );
         assert!(finish.failure.is_none(), "Finish is acked healthily");
         assert!(
             batch_ok.failure.is_none(),
@@ -712,6 +717,52 @@ mod tests {
 
         assert!(first.failure.is_some(), "first call must surface failure");
         assert!(second.failure.is_none(), "subsequent calls must be silent");
+    }
+
+    // ── set_manual_title ──
+
+    #[tokio::test]
+    async fn set_manual_title_writes_user_provided_title_and_latches_shared_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        assert!(
+            !handle.manual_title_set(),
+            "fresh handle must start unlatched"
+        );
+
+        handle.record_message(Message::user("seed")).await;
+        let outcome = handle.set_manual_title("User wins".to_owned()).await;
+
+        assert!(outcome.failure.is_none(), "healthy actor acks cleanly");
+        assert!(
+            handle.manual_title_set(),
+            "the shared flag must latch immediately on dispatch",
+        );
+
+        handle.finish(Vec::new()).await;
+        drop(handle);
+
+        let sessions = store.list().unwrap();
+        let session = sessions.iter().find(|s| s.session_id == sid).unwrap();
+        assert_eq!(session.title.as_ref().unwrap().title, "User wins");
+    }
+
+    #[tokio::test]
+    async fn set_manual_title_actor_gone_surfaces_failure_but_still_latches_flag() {
+        // The flag flips in SharedState *before* dispatch — even if the actor channel is dead,
+        // the title generator's pre-check must see the latch and skip its append.
+        let handle = testing::dead("dead");
+
+        let outcome = handle.set_manual_title("User wins".to_owned()).await;
+
+        assert!(outcome.failure.is_some(), "actor-gone must surface failure");
+        assert!(
+            handle.manual_title_set(),
+            "flag latches regardless of dispatch"
+        );
     }
 
     // ── finish ──
