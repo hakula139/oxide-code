@@ -94,10 +94,11 @@ impl SearchableItem for SessionRow {
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
         let budget = usize::from(width).max(TITLE_FLOOR);
-        let mut title_style = theme.text();
-        if is_cursor {
-            title_style = title_style.add_modifier(ratatui::style::Modifier::BOLD);
-        }
+        let title_style = if is_cursor {
+            theme.accent().add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            theme.text()
+        };
         let title_line = Line::from(Span::styled(
             truncate_to_width(&self.title, budget),
             title_style,
@@ -606,8 +607,8 @@ mod tests {
 
         let cursor = row.render(60, true, &theme);
         assert_eq!(
-            cursor[0].spans[0].style.fg, theme.text.fg,
-            "cursor title uses text fg",
+            cursor[0].spans[0].style.fg, theme.accent.fg,
+            "cursor title uses accent fg",
         );
         assert!(
             cursor[0].spans[0]
@@ -620,7 +621,7 @@ mod tests {
         let unselected = row.render(60, false, &theme);
         assert_eq!(
             unselected[0].spans[0].style.fg, theme.text.fg,
-            "non-cursor title also uses text fg",
+            "non-cursor title uses text fg",
         );
         assert!(
             !unselected[0].spans[0]
@@ -628,6 +629,10 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD),
             "non-cursor title is not bold",
+        );
+        assert_ne!(
+            theme.accent.fg, theme.text.fg,
+            "cursor vs non-cursor must use distinct fgs",
         );
         assert_eq!(
             unselected[1].spans[0].style.fg, theme.dim.fg,
