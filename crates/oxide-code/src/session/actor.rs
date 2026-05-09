@@ -144,18 +144,18 @@ fn absorb(
         }
         SessionCmd::SetManualTitle { title, ack } => {
             state.mark_manual_title_set();
-            let entry = Entry::Title {
-                title,
-                source: super::entry::TitleSource::UserProvided,
-                updated_at: now,
-            };
-            // Pending: defer; the queue dies with the actor if no record ever lands.
-            if state.is_pending() {
-                state.defer_entry(entry);
-                _ = ack.send(Outcome { failure: None });
-            } else {
-                entries.push(entry);
-                acks.push(PendingAck::Outcome(ack));
+            // Pending: defer (last-wins); the slot dies with the actor if no record lands.
+            // Active: route the title through the live batch.
+            match state.try_defer_title(title) {
+                Ok(()) => _ = ack.send(Outcome { failure: None }),
+                Err(title) => {
+                    entries.push(Entry::Title {
+                        title,
+                        source: super::entry::TitleSource::UserProvided,
+                        updated_at: now,
+                    });
+                    acks.push(PendingAck::Outcome(ack));
+                }
             }
         }
         SessionCmd::Finish { snapshots, ack } => {
@@ -385,14 +385,9 @@ mod tests {
             "deferred-entry path acks healthily"
         );
 
-        let project_dir = super::super::store::test_project_dir(dir.path());
-        let entries: Vec<_> = std::fs::read_dir(&project_dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect();
         assert!(
-            entries.is_empty(),
-            "no message ever sent → project dir stays empty, found: {entries:?}",
+            store.list().unwrap().is_empty(),
+            "no message ever sent → no on-disk session",
         );
     }
 
@@ -416,6 +411,62 @@ mod tests {
 
         let path = super::super::store::test_session_file(dir.path(), &session_id);
         let content = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        let header_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"header""#))
+            .expect("header line");
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"title""#))
+            .expect("title line");
+        let message_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"message""#))
+            .expect("message line");
+        assert!(
+            header_idx < title_idx && title_idx < message_idx,
+            "deferred title must flush AFTER header and BEFORE message: {content}",
+        );
+        let title_count = lines
+            .iter()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .count();
+        assert_eq!(
+            title_count, 1,
+            "deferred title replaces FirstPrompt: {content}"
+        );
+        assert!(
+            lines[title_idx].contains("user_provided") && lines[title_idx].contains("User-named"),
+            "the lone title is the user-provided one: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_two_set_manual_titles_before_record_writes_only_the_last() {
+        // Multiple `/rename` calls before any record must collapse to last-wins via the
+        // deferred slot's overwrite semantics.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (a_ack, _a_rx) = oneshot::channel();
+        let (b_ack, _b_rx) = oneshot::channel();
+        let a = SessionCmd::SetManualTitle {
+            title: "First name".to_owned(),
+            ack: a_ack,
+        };
+        let b = SessionCmd::SetManualTitle {
+            title: "Final name".to_owned(),
+            ack: b_ack,
+        };
+        let (rec, _rec_rx) = record_cmd("trigger");
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![a, b, rec, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
         let title_lines: Vec<&str> = content
             .lines()
             .filter(|l| l.contains(r#""type":"title""#))
@@ -423,11 +474,15 @@ mod tests {
         assert_eq!(
             title_lines.len(),
             1,
-            "deferred title replaces FirstPrompt: {content}"
+            "second rename overwrites the first: {content}"
         );
         assert!(
-            title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
-            "the lone title is the user-provided one: {content}",
+            title_lines[0].contains("Final name"),
+            "last-wins semantic: {content}",
+        );
+        assert!(
+            !content.contains("First name"),
+            "earlier rename must not reach disk: {content}",
         );
     }
 

@@ -41,12 +41,15 @@ pub(super) struct SessionState {
 /// Writer lifecycle.
 ///
 /// `Pending` defers `create + header write` until the first non-empty flush — a session that
-/// exits without recording leaves nothing on disk. `deferred` holds entries that arrived while
-/// `Pending` (currently `/rename` titles); they flush alongside the header on first promotion,
-/// or vanish with the actor. `Broken` marks the `BufWriter`'s buffer as undefined after a
-/// partial write — we drop it and `open_append` afresh on the next batch.
+/// exits without recording leaves nothing on disk. `deferred_title` holds the most recent
+/// `/rename` (last-wins) and rides out alongside the header on first promotion, or vanishes
+/// with the actor. `Broken` is set after a partial write so the next batch reopens via
+/// `open_append` instead of trusting an undefined `BufWriter`.
 enum WriterStatus {
-    Pending { header: Entry, deferred: Vec<Entry> },
+    Pending {
+        header: Entry,
+        deferred_title: Option<String>,
+    },
     Active(SessionWriter),
     Broken,
 }
@@ -59,7 +62,7 @@ impl SessionState {
             store,
             writer_status: WriterStatus::Pending {
                 header,
-                deferred: Vec::new(),
+                deferred_title: None,
             },
             last_message_uuid: None,
             initial_message_count: 0,
@@ -101,17 +104,15 @@ impl SessionState {
         self.manual_title_set = true;
     }
 
-    pub(super) fn is_pending(&self) -> bool {
-        matches!(self.writer_status, WriterStatus::Pending { .. })
-    }
-
-    /// Queue an entry for the first promotion flush. Caller asserts [`Self::is_pending`].
-    pub(super) fn defer_entry(&mut self, entry: Entry) {
-        let WriterStatus::Pending { deferred, .. } = &mut self.writer_status else {
-            debug_assert!(false, "defer_entry called when writer is not Pending");
-            return;
+    /// Queues `title` to flush as a `UserProvided` entry on first `Pending` → `Active`
+    /// promotion. Returns `Err(title)` when the writer is already `Active` / `Broken` so the
+    /// caller can route into the live batch instead. A second deferral overwrites the first.
+    pub(super) fn try_defer_title(&mut self, title: String) -> Result<(), String> {
+        let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
+            return Err(title);
         };
-        deferred.push(entry);
+        *deferred_title = Some(title);
+        Ok(())
     }
 
     /// Builds entries for one message; returns AI-title seed on first user-text.
@@ -181,15 +182,20 @@ impl SessionState {
     }
 
     /// Writes entries in one flush; transitions to Broken on failure so next batch reopens.
-    /// On first `Pending` → `Active` promotion, any deferred entries flush ahead of `entries`.
+    /// On first `Pending` → `Active` promotion, any deferred title flushes ahead of `entries`
+    /// as a `UserProvided` entry stamped at flush time.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
-        let (mut writer, deferred) = self.take_or_open_writer()?;
+        let (mut writer, deferred_title) = self.take_or_open_writer()?;
         let result = (|| -> Result<()> {
-            for entry in &deferred {
-                writer.append_no_flush(entry)?;
+            if let Some(title) = &deferred_title {
+                writer.append_no_flush(&Entry::Title {
+                    title: title.clone(),
+                    source: TitleSource::UserProvided,
+                    updated_at: OffsetDateTime::now_utc(),
+                })?;
             }
             for entry in entries {
                 writer.append_no_flush(entry)?;
@@ -203,19 +209,25 @@ impl SessionState {
         result
     }
 
-    /// Returns the writer plus any entries deferred while `Pending`. On `Pending` failure the
-    /// header AND deferred entries are restored so the next batch retries `create`.
-    fn take_or_open_writer(&mut self) -> Result<(SessionWriter, Vec<Entry>)> {
+    /// Returns the writer plus any title deferred while `Pending`. On `Pending` failure the
+    /// header AND deferred title are restored so the next batch retries `create`.
+    fn take_or_open_writer(&mut self) -> Result<(SessionWriter, Option<String>)> {
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
-            WriterStatus::Active(w) => Ok((w, Vec::new())),
-            WriterStatus::Pending { header, deferred } => match self.store.create(&header) {
-                Ok(w) => Ok((w, deferred)),
+            WriterStatus::Active(w) => Ok((w, None)),
+            WriterStatus::Pending {
+                header,
+                deferred_title,
+            } => match self.store.create(&header) {
+                Ok(w) => Ok((w, deferred_title)),
                 Err(e) => {
-                    self.writer_status = WriterStatus::Pending { header, deferred };
+                    self.writer_status = WriterStatus::Pending {
+                        header,
+                        deferred_title,
+                    };
                     Err(e)
                 }
             },
-            WriterStatus::Broken => Ok((self.store.open_append(&self.session_id)?, Vec::new())),
+            WriterStatus::Broken => Ok((self.store.open_append(&self.session_id)?, None)),
         }
     }
 }
@@ -566,22 +578,45 @@ mod tests {
     }
 
     #[test]
-    fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
-        // The next batch must retry create rather than open_append a file that was never created.
+    fn flush_entries_pending_create_failure_keeps_pending_and_preserves_deferred_title() {
+        // The next batch must retry create rather than open_append a file that was never
+        // created — and the deferred title must survive into the retry. A regression that
+        // restored `Pending { deferred_title: None }` on rollback would silently drop the
+        // user's `/rename`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
+        let session_id = state.session_id.to_string();
+        state
+            .try_defer_title("Survives rollback".to_owned())
+            .expect("fresh state must accept defer");
+
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
-
         let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
         let result = state.flush_entries(&entries);
 
         assert!(result.is_err(), "create must fail with project dir gone");
+        let WriterStatus::Pending {
+            deferred_title: Some(restored),
+            ..
+        } = &state.writer_status
+        else {
+            panic!("create failure must leave Pending with deferred title intact");
+        };
+        assert_eq!(
+            restored, "Survives rollback",
+            "deferred title must survive rollback verbatim",
+        );
+
+        std::fs::create_dir_all(&project_dir).unwrap();
+        state.flush_entries(&entries).expect("retry succeeds");
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
         assert!(
-            matches!(state.writer_status, WriterStatus::Pending { .. }),
-            "create failure must leave Pending intact for next-batch retry",
+            content.contains("Survives rollback"),
+            "deferred title reaches disk on retry: {content}",
         );
     }
 

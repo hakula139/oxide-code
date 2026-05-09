@@ -1323,6 +1323,14 @@ mod tests {
             title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
             "the lone title is the original UserProvided one: {content}",
         );
+        let message_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"message""#))
+            .count();
+        assert_eq!(
+            message_count, 1,
+            "the resumed message must reach disk: {content}",
+        );
     }
 
     #[tokio::test]
