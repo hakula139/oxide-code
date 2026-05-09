@@ -1290,8 +1290,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_title_only_session_succeeds_and_keeps_title_on_next_message() {
-        // A header+title-only file must be resumable, and the next message must NOT push a
-        // duplicate FirstPrompt title — `data.title.is_some()` pre-fills `first_user_prompt_seen`.
+        // Title-only resume must not push a duplicate `FirstPrompt` on the next message.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let session_id = "title-only-fixture";

@@ -286,8 +286,6 @@ mod tests {
 
     #[test]
     fn handle_key_backspace_on_empty_buffer_is_a_silent_noop() {
-        // Without the noop guard, popping an empty String would panic in some std impls; here it
-        // happens to return None, but the test pins the behavior either way.
         let mut modal = RenameModal::new(None);
         assert!(matches!(
             modal.handle_key(&KeyEvent::from(KeyCode::Backspace)),
@@ -297,7 +295,7 @@ mod tests {
 
     #[test]
     fn handle_key_char_at_max_length_drops_extra_input() {
-        // Cap mirrors `MAX_TITLE_LEN` — over-long titles would visually overflow `--list` rows.
+        // Cap mirrors `session::state::MAX_TITLE_LEN` — over-long titles overflow `--list` rows.
         let prefilled: String = "a".repeat(MAX_TITLE_CHARS);
         let mut modal = RenameModal::new(Some(&prefilled));
         modal.handle_key(&KeyEvent::from(KeyCode::Char('z')));
