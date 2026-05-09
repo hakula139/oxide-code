@@ -1,6 +1,8 @@
 # Slash Commands
 
-Slash commands are built-in shortcuts that run client-side, without involving the model. Type `/` to open the autocomplete popup, browse with Up / Down, and complete with Tab.
+Type `/` to open the autocomplete popup. **Up / Down** browse, **Tab** completes, **Enter** submits, **Esc** dismisses. Aliases (`/clear (new, reset)`) all route to the same command.
+
+For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup switches to **arg mode** after `/<name>` + space, listing valid values.
 
 ## Built-in Commands
 
@@ -18,53 +20,32 @@ Slash commands are built-in shortcuts that run client-side, without involving th
 | `/status`                                   | Open a read-only modal of model, effort, cwd, version, auth, and session id.         |
 | `/theme [<name>]`                           | Open the theme picker (live preview), or swap directly to a built-in theme.          |
 
-## Autocomplete Popup
-
-When you type `/`, a two-column popup appears above the input:
-
-- **Up / Down** navigate the rows.
-- **Tab** completes the selected row. In name mode it inserts `/<name>` plus a trailing space; in arg mode it replaces the typed prefix with the picked value.
-- **Enter** submits the current line.
-- **Esc** dismisses the popup.
-
-Matches are ranked by tier: name-prefix > alias-prefix > name-substring > alias-substring. Aliases display inline in the canonical row (`/clear (new, reset)`); typing any alias routes to the same impl.
-
-After `/<name>` plus a trailing space, the popup switches to **arg mode** for commands with a curated argument roster (`/model`, `/effort`, `/theme`): rows show valid values with descriptions, prefix-filtered as you type.
-
 ## Sending a Literal `/foo`
 
-To send a message that _starts_ with a slash without invoking a command, double the leading slash. Typing `//etc` sends the literal `/etc`.
+Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-Read-only commands (`/config`, `/diff`, `/help`, `/status`, and bare `/effort` / `/model` / `/theme` which open modals) are safe to run while the agent is streaming. State-mutating commands (`/clear`, `/effort <level>`, `/init`, `/model <id>`, `/rename` — both bare and `<title>` — `/resume` — both bare and `<id-prefix>` — and `/theme <name>`) refuse mid-turn — wait for the current response to complete, then retry.
+State-mutating commands (`/clear`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
 
 ## Model and Effort
 
-Bare `/model` opens the combined model + effort picker; bare `/effort` opens a Speed ↔ Intelligence slider. Both apply on Enter and cancel on Esc.
+Bare `/model` and `/effort` open pickers; both apply on Enter, cancel on Esc.
 
-`/model <id>` resolves in four tiers: alias (`opus`, `sonnet`, `haiku`, with optional `[1m]` for the 1M-context variants) → exact / dated id → unique suffix → unique substring. Swapping clamps the current effort to the new model's caps; `/effort` on a model without effort (Haiku 4.5) errors with a recovery hint. See [Configuration](configuration.md) for the full tier reference and per-model defaults.
+`/model <id>` accepts aliases (`opus`, `sonnet`, `haiku` — append `[1m]` for the 1M-context variants), full ids, or any unique suffix or substring. Haiku has no effort tier, so `/effort` on Haiku errors with a recovery hint. See [Configuration](configuration.md) for tier defaults.
 
-## Resuming a Session
+## Sessions
 
-Bare `/resume` (alias `/continue`) opens an in-place session picker. Type to filter by id, title, or project; Up / Down or PageUp / PageDown navigate; Tab toggles between the current project and all projects; Enter resumes the highlighted session; Esc cancels. Switching session preserves the running TUI — chat repopulates from the resumed transcript and the next prompt continues that thread.
+`/rename` opens a modal pre-filled with the current title; `/rename <title>` sets it directly. The chosen title sticks and replaces the auto-generated AI title for the rest of the session.
 
-`/resume <id-prefix>` resolves the prefix against the current project first and widens to all projects if there's no in-project match. Ambiguous prefixes list the candidates with their 8-character ids.
+`/resume` opens a searchable session picker — type to filter by id, title, or project, Tab toggles current-project ↔ all projects, Enter resumes. `/resume <id-prefix>` jumps directly; ambiguous prefixes list candidates. Switching sessions preserves the running TUI — chat repopulates and the next prompt continues that thread.
 
-`/resume` mid-session is the in-app equivalent of `ox -c <id-prefix>` at launch — both call the same load + sanitize path. The CLI launcher is unchanged.
+## Theme
 
-## Renaming a Session
+`/theme` opens the picker — **Up / Down** previews each theme live, number keys jump to a row, **Enter** applies for the rest of the session, **Esc** reverts.
 
-Bare `/rename` opens a single-line modal pre-filled with the current title — edit, Enter to save, Esc to cancel. `/rename <title>` applies directly without the modal. Either form latches the manual title for the rest of the session, so a slow background AI title generation can't overwrite it.
+`/theme <name>` swaps directly to a built-in (`mocha`, `macchiato`, `frappe`, `latte`, `material`). Custom themes go in `~/.config/ox/config.toml` under `[tui.theme] base`.
 
-The new title persists to the session's JSONL with a `user_provided` source tag and shows up immediately in the status bar and `ox --list`.
+## Persistence
 
-## Switching the Theme
-
-`/theme` (no argument) opens a list picker for the built-in themes — Up / Down repaints the full TUI in the candidate theme so you can compare without committing, number keys (`1`–`9`) jump to a row, Enter applies for the rest of the session, Esc snaps back to the original. Restart returns to the theme set in your `ox.toml`.
-
-`/theme <name>` swaps directly to a built-in (`mocha`, `macchiato`, `frappe`, `latte`, `material`). Custom file-path themes aren't accepted via the slash form — edit `~/.config/ox/config.toml` to point `[tui.theme] base` at a custom TOML.
-
-## Stance: No Silent Config Writes
-
-Slash commands never write user config files. Runtime mutations (`/model`, `/effort`, `/theme`) stay session-local; restart returns to the user-declared configuration. Persisting a slash-command choice across restarts will require an explicit subcommand writing to an explicit user-opted-in path — never a silent merge.
+Slash-command choices stay session-local. Restart returns to your declared configuration in `ox.toml` — no slash command writes user config files.
