@@ -70,7 +70,7 @@ No beta header gates `display` — it's GA on 4.7.
 
 1. `content_block_start` with `type: "thinking"` — initialize with empty `thinking: ""` and `signature: ""`.
 2. `content_block_delta` with `thinking_delta` — append to `thinking` text.
-3. `content_block_delta` with `signature_delta` — set `signature`. Arrives as a full value rather than an incremental delta.
+3. `content_block_delta` with `signature_delta` — set `signature` to the full value (deltas arrive complete, not incremental).
 4. `content_block_stop` — block is complete.
 
 ### Redacted Thinking

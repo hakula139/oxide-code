@@ -13,7 +13,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 3. **Persist the tracker on session finish, verify on resume.** A new `Entry::FileSnapshot` variant rides the existing JSONL forward-compat. On resume each snapshot is re-`stat()`-checked; survivors restore into the in-memory tracker. Mismatches drop silently.
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
 5. **Partial-view Reads do not satisfy the gate.** A ranged Read populates `LastView::Partial { offset, limit }`. Edit / Write against a partial-view path fires the "must read fully first" error.
-6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit; an actor-message-per-update path would force ten-plus round-trips per turn. Lock contention on a small struct with no I/O is microseconds.
+6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit, and an actor-message-per-update path would force ten-plus round-trips per turn, while lock contention on a small struct with no I/O is microseconds.
 7. **xxh64 for change detection.** Cryptographic integrity isn't required, since the tracker only needs to spot drift, and xxh64 is already used elsewhere in the crate.
 8. **No tracker-managed file lock.** Single-agent today; the tracker handles the "external editor changed the file" case directly. Add the `Semaphore` when multi-agent or parallel-tool-execution lands.
 

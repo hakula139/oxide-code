@@ -72,7 +72,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ## Titles
 
-When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title. Setting `/rename` cancels and replaces the AI title for the rest of the session.
+When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title, and setting `/rename` cancels and replaces the AI title for the rest of the session.
 
 ## Security
 

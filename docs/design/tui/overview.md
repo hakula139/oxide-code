@@ -41,7 +41,7 @@ tokio::select! {
 
 ## Streaming Markdown
 
-Line-based commit with stable-prefix cache. Buffer tokens, commit at `\n` boundaries. Track a monotonic byte boundary — only lines beyond the cached boundary are re-parsed. Stable prefix stored as owned `Line<'static>` values. O(new lines) per token.
+Line-based commit with a stable-prefix cache: buffer tokens and commit at `\n` boundaries, tracking a monotonic byte boundary so only lines past the cached boundary get re-parsed. The stable prefix is stored as owned `Line<'static>` values, which keeps the hot path at O(new lines) per token.
 
 Code blocks: buffer entire block, apply syntax highlighting on completion.
 

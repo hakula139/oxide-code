@@ -45,6 +45,6 @@ Instruction files are injected verbatim into the system prompt:
 
 Tips:
 
-- Keep instructions concise — they consume tokens on every API call.
+- Keep instructions concise, since they consume tokens on every API call.
 - Focus on rules the assistant can't infer from the code itself.
 - Put personal preferences in the global file; put team-shared conventions at the project level.

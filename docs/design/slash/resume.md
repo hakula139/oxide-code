@@ -25,14 +25,14 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 5. **`RollIntoOutcome` is flat.** Nesting a `ResumedSession` field would add a wrapper layer for no consumer. The agent loop reads each field independently, so diagnostic fields (`finalize_failure`, `drifted_paths`) sit alongside the transcript fields rather than under a sub-struct.
 6. **Surface old-session finalize failures and tracker drift as distinct errors.** Two failures with two causes: the previous session failing to finalize cleanly (writer), and tracked files drifting since the resumed session (filesystem). Distinct phrasing prevents the user from reading either as a current-writer fault.
 7. **Drop queued prompts on resume; surface the count.** Queued prompts belong to the source thread, so replaying them in a different transcript would amount to silent corruption. `/clear` keeps the queue (same identity, fresh slate), but `/resume` drops it and prints `N queued prompt(s) discarded` so the user knows their typing didn't carry over.
-8. **New primitive `SearchableList` instead of extending `ListPicker`.** `ListPicker` is small and focused, and bolting search + viewport onto it would double its surface area for the simpler pickers. `SearchableList` sits sibling-style with the same trait pattern and the same delegation, and if a third pattern shows up the abstraction can fold; until then, two narrow primitives beat one wide one.
-9. **Two-method `SearchableItem`: `haystack` + `render`.** A substring filter and a layout callback are the only things the primitive needs from items. Date grouping, numeric mnemonics, and other UX shapes were prototyped and dropped — they bloat the trait for one consumer.
+8. **New primitive `SearchableList` instead of extending `ListPicker`.** `ListPicker` is small and focused, and bolting search + viewport onto it would double its surface area for the simpler pickers. `SearchableList` sits sibling-style with the same trait pattern and the same delegation, and if a third pattern shows up the abstraction can fold. Until then, two narrow primitives beat one wide one.
+9. **Two-method `SearchableItem`: `haystack` + `render`.** A substring filter and a layout callback are the only things the primitive needs from items. Date grouping, numeric mnemonics, and other UX shapes were prototyped and dropped because they bloat the trait for one consumer.
 10. **Substring search, no fuzzy in v1.** Codex and opencode both ship plain substring and it works. `nucleo-matcher` is a small dep with a clean upgrade path if users complain.
 11. **Project scoping defaults to current cwd; Tab widens.** Matches the existing `ox -c` resolver semantics: CLI `--all` widens up front, in-picker `Tab` toggles, and the typed query persists across the rebuild.
 12. **30-row default page; no background load-more in v1.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts; more than 30 sessions in a project is search territory anyway.
-13. **Listing API consolidates `list()` / `list_all()` into `list_paged(limit, all)`.** Existing wrappers stay for back-compat. The win is cap-before-tail-scan ordering — for 1000 sessions, only the first N files get parsed.
+13. **Listing API consolidates `list()` / `list_all()` into `list_paged(limit, all)`.** Existing wrappers stay for back-compat. The win is cap-before-tail-scan ordering: for 1000 sessions, only the first N files get parsed.
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set; `0` is the explicit opt-out rather than a magic large default.
-15. **Modal-only echoing on bare; typed-arg echoes.** Mirrors the universal rule: the modal IS the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes — the swap-confirmation system message anchors the pair.
+15. **Modal-only echoing on bare; typed-arg echoes.** Mirrors the universal rule: the modal IS the response, so the typed `> /resume` line stays out of history. Typed `> /resume <id>` echoes because the swap-confirmation system message anchors the pair.
 16. **Always show the picker, even with one or zero matches.** Auto-resuming on a single match would surprise users who typed `/resume` just to peek the list, and an empty list with a clear message beats silently doing nothing.
 
 ## Per-Component Notes
@@ -52,7 +52,7 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 ## Out of Scope / Deferred
 
 - **CLI `--resume` / `-r` flag.** Picker entry from the shell makes sense; not blocking the slash work and adds a new clap arm + alt-screen run mode. Worth its own PR.
-- **Date grouping in the picker.** Considered (`Today` / `Yesterday` / ISO date) but dropped — flat mtime list reads fine at 30 rows, and the `last_active_at` column already encodes recency.
+- **Date grouping in the picker.** Considered (`Today` / `Yesterday` / ISO date) but dropped: flat mtime list reads fine at 30 rows, and the `last_active_at` column already encodes recency.
 - **Numeric `1`–`9` mnemonics.** Cursor + Enter is enough; mnemonics conflict with type-to-search.
 - **Worktree / branch tree expansion** (Claude Code's `▼` / `▶`) and **side preview pane.** Both double layout complexity for marginal gain.
 - **Custom-title rename in-picker.** Sessions get an AI-generated title shortly after the first prompt; user-settable titles are a separate feature.

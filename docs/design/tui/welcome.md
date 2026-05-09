@@ -36,7 +36,7 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
                      Tip — press / to browse all commands
 ```
 
-Sections: identity ribbon (single line, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)` — without that pad each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit above the body column.
+Sections: identity ribbon (single line, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit above the body column.
 
 ### Width ladder
 
@@ -47,7 +47,7 @@ Sections: identity ribbon (single line, centered) → body column (env / cwd / s
 | 25-39 | wordmark                  | model + effort only | tildified, center-truncated | hidden       | hidden       |
 | <25   | suppressed                | suppressed          | suppressed                  | suppressed   | suppressed   |
 
-Below 25 cols nothing paints — the terminal is too narrow to read the welcome cleanly; let the input field anchor the empty session.
+Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead.
 
 ### Theme slots
 

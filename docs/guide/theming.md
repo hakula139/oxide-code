@@ -66,7 +66,7 @@ See the [ANSI escape code reference][ansi] for what each name maps to in your te
 
 ## Slot definitions
 
-A custom theme file must define **every slot** — a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
+A custom theme file must define **every slot**, since a missing slot is a parse error so typos surface immediately. For partial customization on top of a base, use `[tui.theme.overrides]` instead (see [Overrides](#overrides) below).
 
 > **Note:** the same `slot = "#hex"` line means different things in a theme file vs an override. Inside a theme file body, it's a bare-color slot definition with `fg` set and `bg` / modifiers cleared. Inside `[tui.theme.overrides]`, it's a _patch_ that updates only `fg` and preserves the base slot's `bg` and modifiers. The override semantics are detailed in [Overrides](#overrides).
 
@@ -199,7 +199,7 @@ Modifier flags use **three-state semantics**:
 | `true`     | sets the bit                        |
 | `false`    | clears the bit                      |
 
-So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base — rewriting the base with itself is almost always a typo.
+So `accent = { bold = false }` removes bold from the base accent without disturbing its color, and `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base, since rewriting the base with itself is almost always a typo.
 
 ## Errors
 

@@ -23,7 +23,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 1. **Two truncation layers, separated by responsibility.** View-shape (per-tool) stays per-tool — tool-specific knowledge. Byte-budget (centralized) runs after `Tool::run` as the absolute safety net.
 2. **Head + tail strategy.** Keeps both the command setup and the final outcome, which are the two slices the model needs most. Tail-only would lose the prompt; head-only would lose the result.
-3. **No spillover to disk.** opencode-style spill needs a Task agent. 128 KB head-tail preserves enough. Add when Task lands.
+3. **No spillover to disk.** opencode-style spill needs a Task agent, and 128 KB head-tail preserves enough today; add spill when Task lands.
 4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` (unbounded match counts from per-tool caps) vs `ToolMetadata::truncated_bytes` (pre-cap byte count from the registry's safety net). Prevents glob's `(X of N matches)` from rendering bytes when both layers fire.
 
 ## Sources

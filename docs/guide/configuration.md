@@ -76,7 +76,7 @@ Append `[1m]` to `model` to opt into the 1M-token context window on models that 
 model = "claude-opus-4-7[1m]"
 ```
 
-1M access depends on your subscription or gateway, so it is opt-in rather than automatic. The tag is silently ignored on models without 1M support (e.g. Haiku).
+1M access depends on your subscription or gateway, so you have to opt in explicitly. The tag is silently ignored on models without 1M support (e.g. Haiku).
 
 ### `[tui]` — Terminal UI
 
@@ -119,7 +119,7 @@ oxide-code checks three credential sources in order:
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file: `ox.toml` is resolved by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident, and a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
+Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident, and a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
 
 ## Environment variables
 
