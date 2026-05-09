@@ -20,6 +20,7 @@ mod model;
 mod parser;
 mod picker;
 mod registry;
+mod rename;
 mod resume;
 mod status;
 mod theme;

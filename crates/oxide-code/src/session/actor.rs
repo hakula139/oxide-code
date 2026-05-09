@@ -31,6 +31,11 @@ pub(super) enum SessionCmd {
         title: String,
         ack: oneshot::Sender<Outcome>,
     },
+    /// User-supplied title from `/rename`. Latches `manual_title_set` to suppress AI titles.
+    SetManualTitle {
+        title: String,
+        ack: oneshot::Sender<Outcome>,
+    },
     Finish {
         /// Drained tracker snapshots; written as one `FileSnapshot` entry each plus a `Summary`.
         snapshots: Vec<FileSnapshot>,
@@ -67,11 +72,25 @@ pub(super) async fn run(
         let mut entries: Vec<Entry> = Vec::new();
         let mut acks: Vec<PendingAck> = Vec::new();
         let mut should_exit = false;
-        absorb(first, &mut entries, &mut acks, &mut state, &mut should_exit);
+        absorb(
+            first,
+            &mut entries,
+            &mut acks,
+            &mut state,
+            &shared,
+            &mut should_exit,
+        );
         // try_recv only drains what is already queued; cmds arriving after this loop wait for
         // the next `recv().await` (and form a new batch). Coalescing without an interval timer.
         while let Ok(next) = rx.try_recv() {
-            absorb(next, &mut entries, &mut acks, &mut state, &mut should_exit);
+            absorb(
+                next,
+                &mut entries,
+                &mut acks,
+                &mut state,
+                &shared,
+                &mut should_exit,
+            );
         }
         let failure = match state.flush_entries(&entries) {
             Err(e) => {
@@ -94,12 +113,14 @@ fn absorb(
     entries: &mut Vec<Entry>,
     acks: &mut Vec<PendingAck>,
     state: &mut SessionState,
+    shared: &SharedState,
     should_exit: &mut bool,
 ) {
     let now = OffsetDateTime::now_utc();
     match cmd {
         SessionCmd::Record { msg, ack } => {
-            let (msg_entries, ai_title_seed) = state.queue_message_entries(&msg, now);
+            let (msg_entries, ai_title_seed) =
+                state.queue_message_entries(&msg, now, shared.manual_title_set());
             entries.extend(msg_entries);
             acks.push(PendingAck::Record { ack, ai_title_seed });
         }
@@ -125,12 +146,31 @@ fn absorb(
             }
         }
         SessionCmd::AppendAiTitle { title, ack } => {
+            // Re-check: a `/rename` can flip the latch after the generator already queued this.
+            if shared.manual_title_set() {
+                _ = ack.send(Outcome { failure: None });
+                return;
+            }
             entries.push(Entry::Title {
                 title,
                 source: super::entry::TitleSource::AiGenerated,
                 updated_at: now,
             });
             acks.push(PendingAck::Outcome(ack));
+        }
+        SessionCmd::SetManualTitle { title, ack } => {
+            shared.mark_manual_title_set();
+            match state.try_defer_title(title) {
+                None => _ = ack.send(Outcome { failure: None }),
+                Some(title) => {
+                    entries.push(Entry::Title {
+                        title,
+                        source: super::entry::TitleSource::UserProvided,
+                        updated_at: now,
+                    });
+                    acks.push(PendingAck::Outcome(ack));
+                }
+            }
         }
         SessionCmd::Finish { snapshots, ack } => {
             entries.extend(state.finish_entries(snapshots, now));
@@ -335,6 +375,173 @@ mod tests {
             .and_then(|s| s.title)
             .expect("title");
         assert_eq!(title.title, "Fix the auth flow");
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_alone_leaves_no_file_on_disk() {
+        // `/rename`-then-quit must leave no JSONL artifact. The deferred entry rides on
+        // `WriterStatus::Pending` and dies with the actor when no record ever arrives.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let (manual_ack, manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "Doomed rename".to_owned(),
+            ack: manual_ack,
+        };
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![manual_cmd, fin]).await;
+
+        let outcome = manual_rx.await.expect("manual ack must arrive");
+        assert!(
+            outcome.failure.is_none(),
+            "deferred-entry path acks healthily"
+        );
+
+        assert!(
+            store.list().unwrap().is_empty(),
+            "no message ever sent → no on-disk session",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_then_record_replaces_first_prompt_title() {
+        // `/rename` then send produces ONE title (UserProvided), not two: the deferred title
+        // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (manual_ack, _manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "User-named".to_owned(),
+            ack: manual_ack,
+        };
+        let (rec, _rec_rx) = record_cmd("hello");
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![manual_cmd, rec, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        let header_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"header""#))
+            .expect("header line");
+        let title_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"title""#))
+            .expect("title line");
+        let message_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""type":"message""#))
+            .expect("message line");
+        assert!(
+            header_idx < title_idx && title_idx < message_idx,
+            "deferred title must flush AFTER header and BEFORE message: {content}",
+        );
+        let title_count = lines
+            .iter()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .count();
+        assert_eq!(
+            title_count, 1,
+            "deferred title replaces FirstPrompt: {content}"
+        );
+        assert!(
+            lines[title_idx].contains("user_provided") && lines[title_idx].contains("User-named"),
+            "the lone title is the user-provided one: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_two_set_manual_titles_keep_only_the_last() {
+        // Multiple `/rename` calls before any record must collapse to last-wins via the
+        // deferred slot's overwrite semantics.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (a_ack, _a_rx) = oneshot::channel();
+        let (b_ack, _b_rx) = oneshot::channel();
+        let a = SessionCmd::SetManualTitle {
+            title: "First name".to_owned(),
+            ack: a_ack,
+        };
+        let b = SessionCmd::SetManualTitle {
+            title: "Final name".to_owned(),
+            ack: b_ack,
+        };
+        let (rec, _rec_rx) = record_cmd("trigger");
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![a, b, rec, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let title_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .collect();
+        assert_eq!(
+            title_lines.len(),
+            1,
+            "second rename overwrites the first: {content}"
+        );
+        assert!(
+            title_lines[0].contains("Final name"),
+            "last-wins semantic: {content}",
+        );
+        assert!(
+            !content.contains("First name"),
+            "earlier rename must not reach disk: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_after_record_blocks_ai_title() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec, _rec_rx) = record_cmd("Fix login");
+        let (manual_ack, _manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "User-picked title".to_owned(),
+            ack: manual_ack,
+        };
+        let (ai_ack, _ai_rx) = oneshot::channel();
+        let ai_cmd = SessionCmd::AppendAiTitle {
+            title: "AI title that should lose".to_owned(),
+            ack: ai_ack,
+        };
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![rec, manual_cmd, ai_cmd, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let title_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .collect();
+        assert_eq!(
+            title_lines.len(),
+            2,
+            "FirstPrompt + UserProvided; AI must not append a third: {content}",
+        );
+        assert!(
+            title_lines
+                .iter()
+                .any(|l| l.contains("user_provided") && l.contains("User-picked title")),
+            "manual title must persist with `user_provided` source: {content}",
+        );
+        assert!(
+            !content.contains("AI title that should lose"),
+            "AI title must not appear on disk after manual override: {content}",
+        );
     }
 
     #[tokio::test]

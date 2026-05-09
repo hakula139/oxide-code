@@ -19,7 +19,7 @@ impl SlashCommand for EffortCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Open the effort slider or switch directly with `/effort <level>`"
+        "Adjust reasoning effort"
     }
 
     fn classify(&self, args: &str) -> SlashKind {

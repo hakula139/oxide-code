@@ -179,7 +179,7 @@ impl SlashCommand for ThemeCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Open the theme picker or switch directly with `/theme <name>`"
+        "Change the theme"
     }
 
     fn classify(&self, args: &str) -> SlashKind {

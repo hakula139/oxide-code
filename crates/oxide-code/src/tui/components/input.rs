@@ -30,10 +30,6 @@ enum PopupKey {
     Pass,
 }
 
-const PLACEHOLDER_IDLE: &str = "Ask anything...";
-const PLACEHOLDER_BUSY: &str = "Type to queue a follow-up...";
-const PLACEHOLDER_IDLE_QUEUED: &str = "Esc edits last queued · Enter adds another";
-
 // ── InputArea ──
 
 /// Multi-line input area with dynamic height and slash-command popup.
@@ -42,7 +38,6 @@ pub(crate) struct InputArea {
     textarea: TextArea<'static>,
     popup: SlashPopup,
     enabled: bool,
-    has_queued: bool,
     /// `Cell` because `render(&self)` is immutable.
     last_width: Cell<u16>,
     scroll_top: Cell<u16>,
@@ -55,46 +50,29 @@ impl InputArea {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_style(theme.text());
-        textarea.set_placeholder_style(theme.dim());
         textarea.set_wrap_mode(WrapMode::Word);
         textarea.set_block(Block::default());
 
-        let mut input = Self {
+        Self {
             theme: theme.clone(),
             textarea,
             enabled: true,
-            has_queued: false,
             popup: SlashPopup::new(theme),
             last_width: Cell::new(0),
             scroll_top: Cell::new(0),
-        };
-        input.refresh_placeholder();
-        input
+        }
     }
 
     /// Re-skin subsequent renders. The textarea keeps a cached `Style`, so the previous theme's
-    /// text / placeholder colors would persist if not reapplied here.
+    /// text color would persist if not reapplied here.
     pub(crate) fn set_theme(&mut self, theme: &Theme) {
         self.theme = theme.clone();
         self.textarea.set_style(theme.text());
-        self.textarea.set_placeholder_style(theme.dim());
         self.popup.set_theme(theme);
     }
 
-    pub(crate) fn set_has_queued(&mut self, has_queued: bool) {
-        if self.has_queued == has_queued {
-            return;
-        }
-        self.has_queued = has_queued;
-        self.refresh_placeholder();
-    }
-
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        if self.enabled == enabled {
-            return;
-        }
         self.enabled = enabled;
-        self.refresh_placeholder();
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -240,11 +218,12 @@ impl InputArea {
         let cursor_y = textarea_area.y + cursor_row - top;
 
         if let Some(token) = self.ghost_text() {
-            // Paint past the cursor, clipped to the textarea's right edge so wrapping mid-token
-            // doesn't bleed into the next row.
-            let width = textarea_area.right().saturating_sub(raw_cursor_x);
+            // Mirror `ratatui_textarea`'s built-in placeholder layout: the cursor sits at the
+            // insertion column, the dim hint starts one column right.
+            let ghost_x = raw_cursor_x.saturating_add(1);
+            let width = textarea_area.right().saturating_sub(ghost_x);
             if width > 0 {
-                let area = Rect::new(raw_cursor_x, cursor_y, width, 1);
+                let area = Rect::new(ghost_x, cursor_y, width, 1);
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(token, self.theme.dim()))),
                     area,
@@ -259,19 +238,6 @@ impl InputArea {
 // ── Private Helpers ──
 
 impl InputArea {
-    // ── Render Helpers ──
-
-    fn refresh_placeholder(&mut self) {
-        let text = if !self.enabled {
-            PLACEHOLDER_BUSY
-        } else if self.has_queued {
-            PLACEHOLDER_IDLE_QUEUED
-        } else {
-            PLACEHOLDER_IDLE
-        };
-        self.textarea.set_placeholder_text(text);
-    }
-
     // ── Popup & State ──
 
     fn handle_popup_key(&mut self, event: &Event) -> PopupKey {
@@ -676,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn render_empty_shows_placeholder() {
+    fn render_empty_buffer_shows_only_prompt_marker_and_borders() {
         let input = test_input();
         insta::assert_snapshot!(render_to_backend(&input, 60, 3));
     }
@@ -760,15 +726,28 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_ghost_text_at_cursor_in_arg_mode_with_empty_prefix() {
+    fn render_paints_ghost_text_after_cursor_in_arg_mode() {
+        // Mirrors the textarea's built-in placeholder layout: cursor at the insertion point,
+        // dim hint starts the column right of it.
         let mut input = test_input();
         type_text(&mut input, "/model ");
         input.refresh_popup();
-        let backend = render_to_backend(&input, 60, 3);
-        let rendered = format!("{backend}");
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal.draw(|f| input.render(f, f.area())).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row: String = (0..60).map(|x| buf[(x, 1)].symbol()).collect();
         assert!(
-            rendered.contains("[id]"),
-            "ghost-text `[id]` should paint at the cursor: {rendered}",
+            row.contains("/model  [id]"),
+            "ghost-text must sit one column past the cursor: {row:?}",
+        );
+
+        let pos = terminal.get_cursor_position().unwrap();
+        let cursor_col = USER_PROMPT_PREFIX_WIDTH + u16::try_from("/model ".len()).unwrap();
+        assert_eq!(
+            (pos.x, pos.y),
+            (cursor_col, 1),
+            "OS cursor must land at the typed insertion point, not on `[`",
         );
     }
 
@@ -829,43 +808,6 @@ mod tests {
             0,
             "cursor row 0 < prev → scroll_top tracks back down to cursor",
         );
-    }
-
-    // ── refresh_placeholder ──
-
-    fn placeholder_text(input: &InputArea) -> String {
-        input.textarea.placeholder_text().to_owned()
-    }
-
-    #[test]
-    fn refresh_placeholder_idle_empty_queue_shows_default() {
-        let input = test_input();
-        assert_eq!(placeholder_text(&input), PLACEHOLDER_IDLE);
-    }
-
-    #[test]
-    fn refresh_placeholder_busy_shows_queue_follow_up_copy() {
-        let mut input = test_input();
-        input.set_enabled(false);
-        assert_eq!(placeholder_text(&input), PLACEHOLDER_BUSY);
-    }
-
-    #[test]
-    fn refresh_placeholder_idle_with_queue_shows_edit_hint() {
-        let mut input = test_input();
-        input.set_has_queued(true);
-        assert_eq!(placeholder_text(&input), PLACEHOLDER_IDLE_QUEUED);
-    }
-
-    #[test]
-    fn refresh_placeholder_busy_takes_precedence_over_queue() {
-        // Busy + queue (the user typed a follow-up while a turn is
-        // running): the placeholder still encourages queueing rather
-        // than the idle-queue copy that suggests editing.
-        let mut input = test_input();
-        input.set_has_queued(true);
-        input.set_enabled(false);
-        assert_eq!(placeholder_text(&input), PLACEHOLDER_BUSY);
     }
 
     // ── visual_line_count ──

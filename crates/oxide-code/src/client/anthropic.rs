@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_billing_block_ships_under_both_auth_modes_with_cch_populated() {
+    async fn stream_message_billing_block_ships_under_both_auth_modes() {
         // 3P gateways reject API-key requests without the cch attestation, so the billing block
         // must ship under both auth modes with the placeholder replaced by xxHash64.
         for auth in [api_key(), oauth()] {

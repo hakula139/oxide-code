@@ -15,7 +15,7 @@ impl SlashCommand for HelpCmd {
     }
 
     fn description(&self) -> &'static str {
-        "List the available slash commands and their usage hints"
+        "List slash commands"
     }
 
     fn echoes_input(&self, _args: &str) -> bool {

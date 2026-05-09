@@ -30,14 +30,25 @@ impl LiveSessionInfo {
 pub(crate) struct SlashContext<'a> {
     pub(crate) chat: &'a mut ChatView,
     pub(crate) info: &'a LiveSessionInfo,
+    /// Live session title — `/rename` pre-fills its modal from here. `None` until seeded.
+    pub(crate) title: Option<&'a str>,
     modal: Option<Box<dyn Modal>>,
 }
 
 impl<'a> SlashContext<'a> {
     pub(crate) fn new(chat: &'a mut ChatView, info: &'a LiveSessionInfo) -> Self {
+        Self::with_title(chat, info, None)
+    }
+
+    pub(crate) fn with_title(
+        chat: &'a mut ChatView,
+        info: &'a LiveSessionInfo,
+        title: Option<&'a str>,
+    ) -> Self {
         Self {
             chat,
             info,
+            title,
             modal: None,
         }
     }

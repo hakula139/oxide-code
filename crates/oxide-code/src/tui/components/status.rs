@@ -77,7 +77,6 @@ impl StatusBar {
         &self.status
     }
 
-    #[cfg(test)]
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }

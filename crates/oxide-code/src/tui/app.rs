@@ -240,7 +240,6 @@ impl App {
             && let Some(prompt) = self.pending_prompts.pop_back()
         {
             self.input.set_text(&prompt);
-            self.sync_input_queue_hint();
         }
     }
 
@@ -297,7 +296,7 @@ impl App {
                 self.should_quit = true;
                 true
             }
-            UserAction::Clear | UserAction::SwapConfig { .. } => true,
+            UserAction::Clear | UserAction::Rename { .. } | UserAction::SwapConfig { .. } => true,
             UserAction::Resume { .. } => {
                 // Disable input until the SessionResumed event fires — otherwise a typed prompt
                 // in the gap between forward and event would push into chat, then get wiped by
@@ -341,7 +340,11 @@ impl App {
                     self.chat.push_user_message(text.to_owned());
                 }
                 let (synthesized, modal) = {
-                    let mut ctx = SlashContext::new(&mut self.chat, &self.session_info);
+                    let mut ctx = SlashContext::with_title(
+                        &mut self.chat,
+                        &self.session_info,
+                        self.status_bar.title(),
+                    );
                     let action = slash::dispatch(&parsed, &mut ctx);
                     (action, ctx.take_modal())
                 };
@@ -391,7 +394,6 @@ impl App {
             return false;
         }
         self.pending_prompts.push_back(text.to_owned());
-        self.sync_input_queue_hint();
         // Skip forwarding while cancelling — the agent resets and we drain locally on idle.
         !matches!(self.status_bar.status(), Status::Cancelling)
     }
@@ -437,7 +439,6 @@ impl App {
             AgentEvent::PromptDrained(text) => {
                 self.pending_prompts.pop_front();
                 self.chat.push_user_message(text);
-                self.sync_input_queue_hint();
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -526,7 +527,6 @@ impl App {
         // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
         // would otherwise carry across the swap.
         self.modals.clear();
-        self.sync_input_queue_hint();
         self.finalize_idle();
     }
 
@@ -542,11 +542,6 @@ impl App {
         if let Some(prompt) = self.pending_prompts.pop_front() {
             self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
         }
-        self.sync_input_queue_hint();
-    }
-
-    fn sync_input_queue_hint(&mut self) {
-        self.input.set_has_queued(!self.pending_prompts.is_empty());
     }
 
     /// Sets busy status unless a user-acknowledgement status is showing.
@@ -1557,7 +1552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward() {
+    async fn dispatch_arg_bearing_slash_during_busy_refuses_locally() {
         // `/model <id>` and `/effort <level>` both mutate Client; pin both so a regression
         // that special-cases only one leaks the other.
         for (cmd, gate_phrase) in [
@@ -1583,7 +1578,7 @@ mod tests {
     async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
         // Bare `/model` is ReadOnly so it dispatches mid-turn into the picker modal. (`/effort` is
         // always Mutating after the typed-arg-only refactor; its bare-form busy path is covered by
-        // `dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward`.)
+        // `dispatch_arg_bearing_slash_during_busy_refuses_locally`.)
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
@@ -1818,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
+    fn handle_config_changed_model_swap_refreshes_status_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
         // confirmation block. Display name is derived locally from `model_id`.
@@ -2027,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_session_resumed_swaps_id_replays_transcript_and_clears_pending_state() {
+    fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
         app.chat.push_user_message("live prompt".to_owned());
         app.pending_prompts.push_back("queued".to_owned());
@@ -2659,13 +2654,13 @@ mod tests {
 
     #[test]
     fn draw_frame_hides_input_and_popup_while_modal_active() {
-        // Modal owns focus, so the layout must collapse the input + popup bands. The idle
-        // placeholder is the cheapest substring proof that the input got rendered.
+        // Modal owns focus, so the layout must collapse the input + popup bands. The user-prompt
+        // marker (`❯`) is the cheapest substring proof that the input got rendered.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let baseline = rendered_text(&mut app, 60, 14);
         assert!(
-            baseline.contains("Ask anything..."),
-            "input placeholder must paint without a modal: {baseline}",
+            baseline.contains(USER_PROMPT_PREFIX),
+            "input prompt marker must paint without a modal: {baseline}",
         );
 
         app.modals
@@ -2676,7 +2671,7 @@ mod tests {
             "modal body must render: {with_modal}",
         );
         assert!(
-            !with_modal.contains("Ask anything..."),
+            !with_modal.contains(USER_PROMPT_PREFIX),
             "input must collapse while modal is active: {with_modal}",
         );
 

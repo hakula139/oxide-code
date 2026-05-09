@@ -51,7 +51,7 @@ macro_rules! for_each_slot {
         $callback! {
             // Text hierarchy
             (text, "Primary text"),
-            (muted, "Secondary text, labels, borders"),
+            (muted, "Secondary text and labels — between text and dim"),
             (dim, "Dimmed metadata, timestamps"),
 
             // Surfaces
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn composite_helpers_route_to_expected_slot_foreground() {
         let t = Theme::default();
-        assert_eq!(t.tool_border().fg, t.muted.fg);
+        assert_eq!(t.tool_border().fg, t.tool_border.fg);
         assert_eq!(t.tool_icon().fg, t.accent.fg);
         assert_eq!(t.border_focused().fg, t.accent.fg);
         assert_eq!(t.border_unfocused().fg, t.dim.fg);

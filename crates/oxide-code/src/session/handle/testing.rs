@@ -73,6 +73,7 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 }
                 SessionCmd::ToolMetadata { ack, .. }
                 | SessionCmd::AppendAiTitle { ack, .. }
+                | SessionCmd::SetManualTitle { ack, .. }
                 | SessionCmd::Finish { ack, .. } => {
                     _ = ack.send(Outcome { failure: None });
                 }

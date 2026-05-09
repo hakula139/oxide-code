@@ -83,6 +83,10 @@ pub(crate) enum UserAction {
     Resume {
         session_id: String,
     },
+    /// Manual title from `/rename` or its modal. Suppresses AI title generation for this session.
+    Rename {
+        title: String,
+    },
     /// Symmetric model + effort swap. At least one field must be `Some`; `None` leaves that axis
     /// as-is. Modal pickers and typed-arg `/model <id>` / `/effort <tier>` both flow through here.
     SwapConfig {

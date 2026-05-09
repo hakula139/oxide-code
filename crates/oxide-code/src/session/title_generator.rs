@@ -83,6 +83,11 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
+    // Skip if the user ran `/rename` while Haiku was thinking; otherwise the status bar would
+    // briefly flash the AI title before the actor drops it.
+    if session.manual_title_set() {
+        return Ok(());
+    }
     let outcome = session.append_ai_title(title.clone()).await;
     if let Some(failure) = outcome.failure.as_deref() {
         if !session.is_actor_alive() {
@@ -301,6 +306,38 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { title, .. } if title == "Fix login")),
             "sink got SessionTitleUpdated: {events:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_and_record_skips_emit_when_manual_title_was_set_during_haiku_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(completion_body(r#"{"title":"AI loses race"}"#)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = prepared_session(dir.path()).await;
+        session.set_manual_title("User wins".to_owned()).await;
+
+        let client = title_client(server.uri());
+        let sink = CapturingSink::new();
+
+        generate_and_record(&client, &session, &sink, "first prompt")
+            .await
+            .unwrap();
+
+        let events = sink.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionTitleUpdated { .. })),
+            "AI title must not emit when manual title is already set: {events:?}",
         );
     }
 

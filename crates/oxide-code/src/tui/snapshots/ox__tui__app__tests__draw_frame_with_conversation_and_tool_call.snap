@@ -1,5 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
+assertion_line: 2609
 expression: "render_app(&mut app, 60, 12)"
 ---
 "  test-model │ Ready                                ~/test  "
@@ -12,5 +13,5 @@ expression: "render_app(&mut app, 60, 12)"
 "◉ Two files.                                                "
 "                                                            "
 "────────────────────────────────────────────────────────────"
-"❯  Ask anything...                                          "
+"❯                                                           "
 "────────────────────────────────────────────────────────────"

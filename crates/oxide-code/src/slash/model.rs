@@ -30,7 +30,7 @@ impl SlashCommand for ModelCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Open the model picker or switch directly with `/model <id>`"
+        "Switch the model"
     }
 
     fn classify(&self, args: &str) -> SlashKind {

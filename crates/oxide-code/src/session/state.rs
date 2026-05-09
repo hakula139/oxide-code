@@ -36,16 +36,15 @@ pub(super) struct SessionState {
     finished: bool,
 }
 
-/// Writer lifecycle.
-///
-/// `Pending` defers `create + header write` until the first record cmd, so a fresh session
-/// that exits without recording leaves nothing on disk. `Broken` marks the writer's
-/// `BufWriter` as undefined after a partial write — its buffer state is unspecified by the
-/// stdlib, so we drop it and `open_append` afresh on the next batch instead of risking a
-/// torn line. Recovery from `Broken` is automatic: [`SessionState::take_or_open_writer`]
-/// reopens against the existing file and the next flush appends cleanly.
+/// Writer lifecycle. `Pending` defers file creation until the first non-empty flush — a
+/// `/rename`-then-quit leaves nothing on disk. `deferred_title` holds the latest rename
+/// (last-wins) and flushes with the header on first promotion. `Broken` reopens via
+/// `open_append` on the next batch.
 enum WriterStatus {
-    Pending { header: Entry },
+    Pending {
+        header: Entry,
+        deferred_title: Option<String>,
+    },
     Active(SessionWriter),
     Broken,
 }
@@ -56,7 +55,10 @@ impl SessionState {
         Self {
             session_id: Arc::from(session_id),
             store,
-            writer_status: WriterStatus::Pending { header },
+            writer_status: WriterStatus::Pending {
+                header,
+                deferred_title: None,
+            },
             last_message_uuid: None,
             initial_message_count: 0,
             message_count: 0,
@@ -65,7 +67,9 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active` because the loader already read the file.
+    /// Resumed sessions land directly in `Active`. Pass `first_user_prompt_seen = true` whenever
+    /// the disk already holds a title or any user message — otherwise the next recorded message
+    /// will push a duplicate `FirstPrompt` entry.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -86,11 +90,24 @@ impl SessionState {
         }
     }
 
+    /// Parks `title` for the first `Pending` → `Active` flush as `UserProvided`. Returns
+    /// `Some(title)` when already `Active` / `Broken` so the caller queues it normally.
+    /// Last-wins on repeat.
+    pub(super) fn try_defer_title(&mut self, title: String) -> Option<String> {
+        let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
+            return Some(title);
+        };
+        *deferred_title = Some(title);
+        None
+    }
+
     /// Builds entries for one message; returns AI-title seed on first user-text.
+    /// `manual_title_set` skips both the `FirstPrompt` push and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,
         now: OffsetDateTime,
+        manual_title_set: bool,
     ) -> (Vec<Entry>, Option<String>) {
         let mut entries: Vec<Entry> = Vec::with_capacity(2);
         let mut ai_title_seed: Option<String> = None;
@@ -98,14 +115,17 @@ impl SessionState {
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(message)
         {
-            // Latch before the title push so a later flush failure won't produce a duplicate.
+            // Latch before queueing anything — a flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
-            ai_title_seed = Some(text.to_owned());
-            entries.push(Entry::Title {
-                title: truncate_title(text, MAX_TITLE_LEN),
-                source: TitleSource::FirstPrompt,
-                updated_at: now,
-            });
+            // `/rename` already queued the UserProvided title; skip the FirstPrompt + AI seed.
+            if !manual_title_set {
+                ai_title_seed = Some(text.to_owned());
+                entries.push(Entry::Title {
+                    title: truncate_title(text, MAX_TITLE_LEN),
+                    source: TitleSource::FirstPrompt,
+                    updated_at: now,
+                });
+            }
         }
 
         let uuid = Uuid::new_v4();
@@ -150,19 +170,26 @@ impl SessionState {
     }
 
     /// Writes entries in one flush; transitions to Broken on failure so next batch reopens.
+    /// On first `Pending` → `Active` promotion, any deferred title flushes ahead of `entries`
+    /// as a `UserProvided` entry stamped at flush time.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut writer = self.take_or_open_writer()?;
+        let (mut writer, deferred_title) = self.take_or_open_writer()?;
         let result = (|| -> Result<()> {
+            if let Some(title) = &deferred_title {
+                writer.append_no_flush(&Entry::Title {
+                    title: title.clone(),
+                    source: TitleSource::UserProvided,
+                    updated_at: OffsetDateTime::now_utc(),
+                })?;
+            }
             for entry in entries {
                 writer.append_no_flush(entry)?;
             }
             writer.flush()
         })();
-        // BufWriter's buffer is undefined after a partial write — flag Broken so next batch
-        // reopens.
         self.writer_status = match result {
             Ok(()) => WriterStatus::Active(writer),
             Err(_) => WriterStatus::Broken,
@@ -170,20 +197,25 @@ impl SessionState {
         result
     }
 
-    fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
-        // Swap-with-Broken takes ownership without an extra clone. On `Pending` failure we
-        // restore the header so the next batch retries `create` instead of `open_append`-ing
-        // a file that was never created.
+    /// Returns the writer plus any title deferred while `Pending`. On `Pending` failure the
+    /// header AND deferred title are restored so the next batch retries `create`.
+    fn take_or_open_writer(&mut self) -> Result<(SessionWriter, Option<String>)> {
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
-            WriterStatus::Active(w) => Ok(w),
-            WriterStatus::Pending { header } => match self.store.create(&header) {
-                Ok(w) => Ok(w),
+            WriterStatus::Active(w) => Ok((w, None)),
+            WriterStatus::Pending {
+                header,
+                deferred_title,
+            } => match self.store.create(&header) {
+                Ok(w) => Ok((w, deferred_title)),
                 Err(e) => {
-                    self.writer_status = WriterStatus::Pending { header };
+                    self.writer_status = WriterStatus::Pending {
+                        header,
+                        deferred_title,
+                    };
                     Err(e)
                 }
             },
-            WriterStatus::Broken => self.store.open_append(&self.session_id),
+            WriterStatus::Broken => Ok((self.store.open_append(&self.session_id)?, None)),
         }
     }
 }
@@ -287,16 +319,63 @@ mod tests {
     use super::*;
     use crate::file_tracker::FileTracker;
 
+    // ── try_defer_title ──
+
+    #[test]
+    fn try_defer_title_pending_accepts_and_overwrites_previous_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+
+        assert!(state.try_defer_title("first".to_owned()).is_none());
+        assert!(state.try_defer_title("second".to_owned()).is_none());
+
+        let WriterStatus::Pending {
+            deferred_title: Some(slot),
+            ..
+        } = &state.writer_status
+        else {
+            panic!("expected Pending with last-wins deferred title");
+        };
+        assert_eq!(slot, "second", "later defer overwrites the earlier one");
+    }
+
+    #[test]
+    fn try_defer_title_active_rejects_with_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+        state.flush_entries(&entries).unwrap();
+        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
+
+        let rejected = state.try_defer_title("Manual title".to_owned());
+        assert_eq!(rejected.as_deref(), Some("Manual title"));
+    }
+
+    #[test]
+    fn try_defer_title_broken_rejects_with_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        state.writer_status = WriterStatus::Broken;
+
+        let rejected = state.try_defer_title("Manual title".to_owned());
+        assert_eq!(rejected.as_deref(), Some("Manual title"));
+    }
+
     // ── queue_message_entries ──
 
     #[test]
-    fn queue_message_entries_first_user_text_emits_title_then_message_and_seeds_ai_title() {
+    fn queue_message_entries_seeds_ai_title_on_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (entries, seed) = state.queue_message_entries(&Message::user("Fix the auth bug"), now);
+        let (entries, seed) =
+            state.queue_message_entries(&Message::user("Fix the auth bug"), now, false);
 
         assert_eq!(entries.len(), 2, "title + message");
         assert!(matches!(
@@ -316,10 +395,10 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        _ = state.queue_message_entries(&Message::user("first"), now);
+        _ = state.queue_message_entries(&Message::user("first"), now, false);
         let first_tip = state.last_message_uuid.unwrap();
 
-        let (entries, seed) = state.queue_message_entries(&Message::user("second"), now);
+        let (entries, seed) = state.queue_message_entries(&Message::user("second"), now, false);
 
         assert_eq!(entries.len(), 1, "no second title");
         let Entry::Message {
@@ -349,7 +428,7 @@ mod tests {
             }],
         };
 
-        let (entries, seed) = state.queue_message_entries(&msg, now);
+        let (entries, seed) = state.queue_message_entries(&msg, now, false);
 
         assert_eq!(entries.len(), 1, "message only");
         assert!(matches!(&entries[0], Entry::Message { .. }));
@@ -367,7 +446,7 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now);
+        let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now, false);
 
         assert_eq!(entries.len(), 1);
         assert!(seed.is_none());
@@ -382,7 +461,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hello"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
         state.flush_entries(&entries).unwrap();
 
         let entries = state.finish_entries(Vec::new(), now);
@@ -413,7 +492,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(&msgs).unwrap();
 
         for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
@@ -443,7 +522,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(&entries).unwrap();
         let _first = state.finish_entries(Vec::new(), now);
 
@@ -460,7 +539,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut original = SessionState::fresh(store.clone(), "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = original.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
         original.flush_entries(&entries).unwrap();
         let parent = original.last_message_uuid;
         let session_id = original.session_id.to_string();
@@ -489,7 +568,7 @@ mod tests {
             .expect("/dev/full must be openable on Linux");
         state.writer_status = WriterStatus::Active(writer);
 
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         let result = state.flush_entries(&entries);
 
         assert!(result.is_err(), "flush to /dev/full must surface ENOSPC");
@@ -508,12 +587,12 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let session_id = state.session_id.to_string();
 
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
         state.flush_entries(&entries).unwrap();
         assert!(matches!(state.writer_status, WriterStatus::Active(_)));
         state.writer_status = WriterStatus::Broken;
 
-        let (entries, _) = state.queue_message_entries(&Message::user("second"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
         state.flush_entries(&entries).unwrap();
 
         assert!(
@@ -534,22 +613,48 @@ mod tests {
     }
 
     #[test]
-    fn flush_entries_pending_create_failure_keeps_pending_for_retry() {
-        // The next batch must retry create rather than open_append a file that was never created.
+    fn flush_entries_pending_create_failure_preserves_deferred_title() {
+        // The next batch must retry create rather than open_append a file that was never
+        // created — and the deferred title must survive into the retry. A regression that
+        // restored `Pending { deferred_title: None }` on rollback would silently drop the
+        // user's `/rename`.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
+        let session_id = state.session_id.to_string();
+        assert!(
+            state
+                .try_defer_title("Survives rollback".to_owned())
+                .is_none(),
+            "fresh state must accept defer",
+        );
+
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
-
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
         let result = state.flush_entries(&entries);
 
         assert!(result.is_err(), "create must fail with project dir gone");
+        let WriterStatus::Pending {
+            deferred_title: Some(restored),
+            ..
+        } = &state.writer_status
+        else {
+            panic!("create failure must leave Pending with deferred title intact");
+        };
+        assert_eq!(
+            restored, "Survives rollback",
+            "deferred title must survive rollback verbatim",
+        );
+
+        std::fs::create_dir_all(&project_dir).unwrap();
+        state.flush_entries(&entries).expect("retry succeeds");
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
         assert!(
-            matches!(state.writer_status, WriterStatus::Pending { .. }),
-            "create failure must leave Pending intact for next-batch retry",
+            content.contains("Survives rollback"),
+            "deferred title reaches disk on retry: {content}",
         );
     }
 

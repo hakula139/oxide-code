@@ -28,5 +28,5 @@ The picks lean toward the Codex precedent on most surfaces — it is the one Rus
 - `crates/oxide-code/src/tool/bash.rs` — `kill_on_drop(true)`.
 - `crates/oxide-code/src/tui/app.rs` — `App::pending_prompts`, `dispatch_user_action` / `apply_action_locally`, `finalize_idle` / `drain_pending_prompt`, `set_active_status`, `expire_armed_exit`.
 - `crates/oxide-code/src/tui/components/chat/blocks/interrupted.rs` — `InterruptedMarker` block.
-- `crates/oxide-code/src/tui/components/input.rs` — placeholder copy, Ctrl+D POSIX gate, Esc-pop, `set_text`.
+- `crates/oxide-code/src/tui/components/input.rs` — Ctrl+D POSIX gate, Esc-pop, `set_text`.
 - `crates/oxide-code/src/tui/components/status.rs` — `Status` variants, busy hints, spinner.

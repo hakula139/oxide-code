@@ -15,7 +15,7 @@ impl SlashCommand for InitCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Generate or update the project's `AGENTS.md` / `CLAUDE.md`"
+        "Set up `AGENTS.md` / `CLAUDE.md`"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {

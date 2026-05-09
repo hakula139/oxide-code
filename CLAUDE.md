@@ -82,6 +82,7 @@ ox                                          # Start an interactive session
 │   ├── parser.rs                           # parse_slash + popup_query — detect `/cmd args`; allows `:` and `.`
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
+│   ├── rename.rs                           # /rename — bare opens a single-line title editor; `/rename <title>` applies directly; locks out AI title generation
 │   ├── resume.rs                           # /resume (alias /continue) — bare opens a searchable session picker (Tab toggles current-project ↔ all-projects); `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
@@ -118,7 +119,7 @@ ox                                          # Start an interactive session
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
-│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring
+│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring + arg-mode `[id]` ghost text
 │   │   ├── input/
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay — dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests

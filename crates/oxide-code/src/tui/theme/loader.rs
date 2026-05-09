@@ -734,7 +734,7 @@ mod tests {
     fn parse_theme_mocha_matches_known_palette() {
         let t = parse_theme(builtin::MOCHA).unwrap();
         assert_eq!(t.text.fg, Some(Color::Rgb(0xcd, 0xd6, 0xf4)), "Text");
-        assert_eq!(t.muted.fg, Some(Color::Rgb(0x6c, 0x70, 0x86)), "Overlay0");
+        assert_eq!(t.muted.fg, Some(Color::Rgb(0xa6, 0xad, 0xc8)), "Subtext0");
         assert_eq!(t.dim.fg, Some(Color::Rgb(0x58, 0x5b, 0x70)), "Surface2");
         assert_eq!(t.accent.fg, Some(Color::Rgb(0x89, 0xb4, 0xfa)), "Blue");
         assert_eq!(t.user.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)), "Peach");

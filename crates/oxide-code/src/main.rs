@@ -410,6 +410,9 @@ async fn agent_loop_task(
                 )
                 .await;
             }
+            UserAction::Rename { title } => {
+                apply_rename(&session, &sink, title).await;
+            }
             UserAction::SwapConfig { model, effort } => {
                 apply_swap_config(&mut client, &sink, model, effort);
             }
@@ -485,6 +488,20 @@ fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
         drifted.len(),
         preview.join(", "),
     )
+}
+
+async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: String) {
+    let outcome = session.set_manual_title(title.clone()).await;
+    sink.session_write_error(outcome.failure.as_deref());
+    if outcome.failure.is_some() {
+        return;
+    }
+    if let Err(e) = sink.send(AgentEvent::SessionTitleUpdated {
+        session_id: session.session_id().to_owned(),
+        title,
+    }) {
+        tracing::error!("session-title-updated event dropped: {e}");
+    }
 }
 
 /// Order matters: model swap re-clamps effort before the explicit pick is applied.
