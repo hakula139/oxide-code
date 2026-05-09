@@ -33,7 +33,7 @@ a1b2c3d4   2026-04-18 09:20    12     ~/work/oxide     Fix authentication bug
 
 Titles that overflow the terminal width are truncated with `...`. When output is piped, titles render untruncated so downstream tools can wrap at their own width.
 
-By default the listing caps at 30 rows so a long-running project doesn't dump hundreds of sessions on every invocation. When the cap clips the result, the trailing line tells you the hidden count and how to widen it (`--limit N` or `--limit 0`).
+By default the listing caps at 30 rows so a long-running project doesn't dump hundreds of sessions on every invocation. When the cap clips the result, the trailing line shows the hidden count and how to widen it (`--limit N` or `--limit 0`).
 
 ## Resuming a Session
 
@@ -68,11 +68,11 @@ On resume, oxide-code loads the full history and appends new messages to the sam
 
 ### Mid-Session Resume
 
-Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project; Tab toggles current-project ↔ all projects; Enter resumes the highlighted session in place. Skip the picker with `/resume <id-prefix>` to jump directly. The mid-session resume reuses the same load + sanitize pipeline as `ox -c`, so behavior is identical between launch-time and in-session.
+Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process — type to filter by id, title, or project, Tab to widen the scope from current-project to all projects, Enter to resume the highlighted session in place. Skip the picker with `/resume <id-prefix>` to jump directly. Mid-session resume behaves identically to `ox -c` from launch.
 
 ## Titles
 
-When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title.
+When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title. Setting `/rename` cancels and replaces the AI title for the rest of the session.
 
 ## Security
 

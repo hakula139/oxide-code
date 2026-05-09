@@ -44,4 +44,4 @@ Slim `CommandOption[]` from a React hook (~12 built-ins).
 | Claude Code | declarative `Command[]`     | ~100     | submit handler | three modes           | synthetic messages w/ display modes | yes (markdown + YAML)        |
 | Codex       | strum enum + impl methods   | ~55      | input layer    | one big `match`       | synthetic `history_cell`            | no                           |
 | opencode    | `CommandOption[]` from hook | ~12      | input layer    | closures + server     | toast / dialog / synthetic message  | yes (server-published)       |
-| oxide-code  | trait + `&[&dyn]` slice     | 9        | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | not yet (namespace reserved) |
+| oxide-code  | trait + `&[&dyn]` slice     | 11       | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | not yet (namespace reserved) |

@@ -33,7 +33,7 @@ show_thinking = true
 | ------------------ | ------- | --------------------------- | ----------------------------------- |
 | `api_key`          | string  | —                           | Anthropic API key                   |
 | `base_url`         | string  | `https://api.anthropic.com` | API base URL                        |
-| `model`            | string  | `claude-opus-4-7`           | Model to use                        |
+| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                        |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier        |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response             |
 | `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`) |
@@ -85,7 +85,7 @@ model = "claude-opus-4-7[1m]"
 | `show_thinking` | boolean | `false` | Show extended thinking                     |
 | `show_welcome`  | boolean | `true`  | Paint the welcome splash on an empty chat  |
 
-On Opus 4.7, `show_thinking = true` additionally opts the request into `thinking.display = "summarized"` so the API streams reasoning text; otherwise the 4.7 default (`"omitted"`) applies and the UI sees nothing until the final answer starts.
+On Opus 4.7, `show_thinking = true` opts the request into `thinking.display = "summarized"` so the API streams reasoning text; otherwise the 4.7 default of `"omitted"` applies and the UI sees nothing until the final answer arrives.
 
 `show_welcome = false` blanks the chat region until you submit a prompt — useful when piping or screen-recording.
 
@@ -119,7 +119,7 @@ oxide-code checks three credential sources in order:
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` is resolved by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident; a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk. This matches what Claude Code itself does — Anthropic's CLI reads `ANTHROPIC_API_KEY` and otherwise keeps OAuth tokens in the macOS Keychain where it can.
+Prefer the environment variable (or OAuth) over `api_key` in a config file: `ox.toml` is resolved by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident, and a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
 
 ## Environment variables
 
@@ -129,7 +129,7 @@ Environment variables override all config file values.
 | ---------------------- | ------------------------- | --------------------------- | ---------------------------- |
 | `ANTHROPIC_API_KEY`    | `client.api_key`          | —                           | Anthropic API key            |
 | `ANTHROPIC_BASE_URL`   | `client.base_url`         | `https://api.anthropic.com` | API base URL                 |
-| `ANTHROPIC_MODEL`      | `client.model`            | `claude-opus-4-7`           | Model to use                 |
+| `ANTHROPIC_MODEL`      | `client.model`            | `claude-opus-4-7[1m]`       | Model to use                 |
 | `ANTHROPIC_EFFORT`     | `client.effort`           | per-model                   | Intelligence-vs-latency tier |
 | `ANTHROPIC_MAX_TOKENS` | `client.max_tokens`       | effort-derived              | Max tokens per response      |
 | `OX_PROMPT_CACHE_TTL`  | `client.prompt_cache_ttl` | `1h`                        | Prompt-cache TTL             |

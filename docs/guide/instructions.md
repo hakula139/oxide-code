@@ -21,7 +21,7 @@ Instruction files are loaded from three scopes:
 | Project          | `<dir>/CLAUDE.md` — every directory from the project root down to the CWD | Team-shared conventions                    |
 | Project (hidden) | `<dir>/.claude/CLAUDE.md` — same walk, inside `.claude/`                  | Same as above, but out of the project root |
 
-More specific locations override broader ones. For a working directory of `/repo/crates/core`, files are loaded (and merged) in this order: `~/.claude/` → `/repo/` → `/repo/crates/` → `/repo/crates/core/`, checking both the root-level and `.claude/` variants at each step. The project root is the git repository root when available, otherwise the current working directory.
+Files closer to your working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load (and merge) in this order: `~/.claude/` → `/repo/` → `/repo/crates/` → `/repo/crates/core/`, checking both the root-level and `.claude/` variants at each step. The project root is the git repository root when available, falling back to the current working directory.
 
 ## Writing effective instructions
 

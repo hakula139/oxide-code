@@ -15,7 +15,7 @@ The direction is simple:
 - Streaming output with markdown rendering and syntax-highlighted code blocks.
 - Multi-line input with a prompt marker and a status bar showing model, working directory, and run state.
 - Welcome surface on empty chat with identity, environment, and a few starter commands.
-- Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, structured glob lists, and bash output.
+- Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, and structured glob lists. Bash output rides the default truncated-text view.
 - Themable via runtime-loaded TOML — 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) with per-slot overrides.
 - Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
 
@@ -92,7 +92,7 @@ Remaining surface beyond Working Today:
 
 - Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
 
-Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
+Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only, and restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to a user-opted-in path — never a silent merge into a `~/.claude.json`-style mega-file.
 
 ### Viewport Virtualization
 
@@ -125,7 +125,7 @@ Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only;
 
 ### Status Bar Redesign
 
-- Current bar packs model + status + (optional) title + cwd into a single line; layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
+- Current bar packs model + status + (optional) title + cwd into a single line — layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
 - Direction: a richer, possibly multi-segment surface — token / cost meter, queued-prompt indicator, session id glance, theme indicator. Likely needs a layout rethink rather than incremental slot additions.
 
 ## Not the Goal Right Now

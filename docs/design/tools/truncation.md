@@ -7,8 +7,8 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 ### Centralized dispatcher cap (`tool.rs`)
 
 - `MAX_OUTPUT_BYTES = 128 KB` — enforced on every tool output via `cap_output()`.
-- `TRUNCATION_OVERHEAD = 50` — bytes reserved for the head-tail separator.
-- `cap_output(content) -> (String, Option<len>)` — head-tail strategy preserving setup context and final outcome.
+- `TRUNCATION_OVERHEAD = 80` — bytes reserved for the head-tail separator.
+- `cap_output(content) -> (String, Option<len>)` — head + tail strategy preserving setup context and final outcome.
 - `MAX_LINE_LENGTH = 500` — per-line cap consumed by `read` and `grep` via `truncate_line`.
 
 ### Per-tool view-shape caps
@@ -22,7 +22,7 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 ## Design Decisions
 
 1. **Two truncation layers, separated by responsibility.** View-shape (per-tool) stays per-tool — tool-specific knowledge. Byte-budget (centralized) runs after `Tool::run` as the absolute safety net.
-2. **Head-tail, not tail-only.** Preserves both the command and the outcome — the two pieces the model most needs.
+2. **Head + tail strategy.** Keeps both the command setup and the final outcome, which are the two slices the model needs most. Tail-only would lose the prompt; head-only would lose the result.
 3. **No spillover to disk.** opencode-style spill needs a Task agent. 128 KB head-tail preserves enough. Add when Task lands.
 4. **Two distinct metadata fields.** `ToolMetadata::truncated_total` (unbounded match counts from per-tool caps) vs `ToolMetadata::truncated_bytes` (pre-cap byte count from the registry's safety net). Prevents glob's `(X of N matches)` from rendering bytes when both layers fire.
 

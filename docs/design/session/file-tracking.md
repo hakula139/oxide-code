@@ -4,7 +4,7 @@ Read-before-Edit gate, mtime + xxh64 staleness detection, persistence across ses
 
 ## Implementation
 
-The `FileTracker` (`crates/oxide-code/src/file_tracker.rs`) is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker; Edit and Write enforce the Read-before-Edit gate and mtime + xxh64 staleness check. Tracker state persists to JSONL on session finish and verifies on resume.
+The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker; Edit and Write enforce the Read-before-Edit gate and mtime + xxh64 staleness check. Tracker state persists to JSONL on session finish and verifies on resume.
 
 ## Design Decisions
 
@@ -14,7 +14,7 @@ The `FileTracker` (`crates/oxide-code/src/file_tracker.rs`) is a per-session `Ar
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
 5. **Partial-view Reads do not satisfy the gate.** A ranged Read populates `LastView::Partial { offset, limit }`. Edit / Write against a partial-view path fires the "must read fully first" error.
 6. **`Arc<Mutex<HashMap>>` instead of an actor channel.** The tracker mutates on every Read / Write / Edit; an actor-message-per-update path would force ten-plus round-trips per turn. Lock contention on a small struct with no I/O is microseconds.
-7. **xxh64, not SHA-256.** Change detection, not cryptographic integrity. Already used elsewhere in the crate.
+7. **xxh64 for change detection.** Cryptographic integrity isn't required here — the tracker only needs to spot drift — and xxh64 is already used elsewhere in the crate.
 8. **No tracker-managed file lock.** Single-agent today; the tracker handles the "external editor changed the file" case directly. Add the `Semaphore` when multi-agent or parallel-tool-execution lands.
 
 ## Sources

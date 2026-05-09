@@ -15,16 +15,9 @@ Core stack, rendering strategy, and streaming architecture.
 
 ## Architecture
 
-### Component trait
+### Components
 
-```text
-trait Component {
-    fn handle_event(&mut self, event: &Event) -> Option<Action>;
-    fn render(&self, frame: &mut Frame, area: Rect);
-}
-```
-
-Each component owns its state, handles its events, and renders into a given area. The root `App` dispatches events top-down and collects actions bottom-up.
+Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) that the App composes directly — there's no formal `Component` trait. Each owns its state, handles its events, and renders into a given area, while the root `App` dispatches events top-down and collects actions bottom-up.
 
 ### Async event loop
 
@@ -60,6 +53,6 @@ Code blocks: buffer entire block, apply syntax highlighting on completion.
 4. **Render throttling at ~60 FPS**.
 5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on completion.
 6. **Custom pulldown-cmark + syntect renderer** — uses Codex's `pending_marker` pattern for correct list handling.
-7. **Catppuccin Mocha dark theme by default** with 11 named color slots. Transparent background.
+7. **Catppuccin Mocha dark theme by default** with named color slots covering text, surfaces, accents, status, code, diff, headings, body, and chrome. Transparent background.
 8. **Two-tier tool display** — inline summary with per-tool icons, plus truncated output body.
 9. **Viewport virtualization** for long conversations (deferred).

@@ -35,7 +35,7 @@ Each ships as a vendored TOML file [in the source tree][themes-src] and doubles 
 
 ## Custom theme files
 
-`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`; no other expansion happens — environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) are passed through literally and will fail to read. Relative paths are resolved against the process working directory, not the config file directory; prefer absolute or `~/`-anchored paths.
+`base` accepts any filesystem path to a TOML body using the same shape as the vendored themes. A leading `~/` expands to `$HOME`, but no other expansion happens: environment variables (`$HOME`, `${XDG_CONFIG_HOME}`) and Windows-style references (`%USERPROFILE%`) pass through literally and will fail to read. Relative paths resolve against the process working directory rather than the config file directory, so prefer absolute or `~/`-anchored paths.
 
 ```toml
 [tui.theme]
@@ -199,7 +199,7 @@ Modifier flags use **three-state semantics**:
 | `true`     | sets the bit                        |
 | `false`    | clears the bit                      |
 
-So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base — it would otherwise silently re-write the base with itself, almost certainly a config bug.
+So `accent = { bold = false }` removes bold from the base accent without disturbing its color. `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base — rewriting the base with itself is almost always a typo.
 
 ## Errors
 
@@ -213,7 +213,7 @@ The default tracing level is `warn`, so per-slot fallback messages surface witho
 - **TUI** — diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame.
 - **Bare REPL / headless / `--list`** — diagnostics go to stderr, the natural CLI surface.
 
-Set `RUST_LOG=info` (or `debug`) for more detail. The same routing applies in both modes.
+Set `RUST_LOG=info` (or `debug`) for more detail.
 
 ## Examples
 
@@ -260,4 +260,4 @@ Useful for transparent / non-truecolor terminals where forcing an RGB foreground
 surface = { bg = "#1e1e2e" }
 ```
 
-Default `surface` is `Color::Reset` (terminal background). Set a `bg` to give the chat / input / status panels an opaque tint — useful on transparent terminals.
+Default `surface` uses the terminal background (`reset`). Set a `bg` to give the chat / input / status panels an opaque tint — useful on transparent terminals.

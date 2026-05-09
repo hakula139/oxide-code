@@ -12,12 +12,12 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 
 ## Implementation
 
-[`crates/oxide-code/src/tui/components/welcome.rs`](../../../crates/oxide-code/src/tui/components/welcome.rs) — a stateless renderer (`paint`) plus a small data snapshot (`WelcomeSnapshot`) derived from `&LiveSessionInfo`. Painted by `App::draw_frame` into the chat region when:
+`tui/components/welcome` is a stateless renderer (`paint`) plus a small data snapshot (`WelcomeSnapshot`) derived from `&LiveSessionInfo`. Painted by `App::draw_frame` into the chat region when:
 
 - `chat.is_empty()` (no blocks, no streaming, no thinking buffer), AND
 - `session_info.config.show_welcome` resolves to true (default: true).
 
-`ChatView` keeps its own empty-state branch — but now it returns an empty `Text` for that case, and `App` paints the welcome on top instead. The "is the chat empty?" predicate stays where the data lives.
+`ChatView` keeps its own empty-state branch but now returns an empty `Text` for that case, and `App` paints the welcome on top instead. The "is the chat empty?" predicate stays where the data lives.
 
 ## Layout
 
@@ -55,21 +55,21 @@ Below 25 cols nothing paints — the terminal is too narrow to read the welcome 
 
 ## Design Decisions
 
-1. **Empty-chat branch stays in `ChatView`; rendering moves to App.** `ChatView::is_empty()` is the predicate; `App::draw_frame` reads it and decides which renderer to invoke. Welcome is not transcript content — it's a placeholder painted in the chat region. Pushing it into `ChatView::blocks` would conflate ephemeral onboarding with persisted conversation state and break the `is_empty` check itself.
-2. **Stateless `paint(frame, area, theme, snapshot)` function, not a `Welcome` struct.** The welcome owns no state across frames — it's a pure projection of `LiveSessionInfo`. A struct would invite caches and lifecycle hooks the welcome doesn't need.
-3. **`WelcomeSnapshot` is a small projection, not the full `LiveSessionInfo`.** Keeping the shape narrow (model display, effort, auth label, cwd, version, starter rows) lets snapshot tests build fixtures cheaply and decouples the welcome from `LiveSessionInfo` evolution.
-4. **Starter rows sample 3 from a curated pool of 8, plus a randomized tip.** The full slash registry has nine entries; advertising all of them defeats the point of "try one of." The 8-entry `STARTER_POOL` and 8-entry `TIP_POOL` give the surface variety per launch without becoming a tip dashboard — every entry is a concrete action a user can take next. Picks are seeded from `session_id`, so a session always shows the same surface but `/clear` (which rolls the session) shows a fresh pick.
-5. **Curated rows live alongside the welcome (in `welcome.rs`), not as a method on `SlashCommand`.** Adding `is_starter() -> bool` to the trait would push welcome-specific concern into every command. The welcome's curation is the welcome's responsibility.
-6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` — no ASCII mark, no animation.** A four-side box reads as generic CLI chrome; an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark — typographic identity rather than container chrome. Wordmark is `oxide-code` (project name, the brand a migrator searches for) rather than `ox` (binary command).
-7. **Two-tier width ladder, not three.** Codex / Claude Code lean on truncate-and-reflow; opencode leans on flex-shrink. For a fixed-content welcome a coarse ladder (full / collapsed / suppressed) is simpler than tuning per-element shrink behavior.
+1. **Empty-chat branch stays in `ChatView`; rendering moves to App.** `ChatView::is_empty()` is the predicate, and `App::draw_frame` reads it to decide which renderer to invoke. Welcome is a placeholder painted in the chat region rather than transcript content; pushing it into `ChatView::blocks` would conflate ephemeral onboarding with persisted conversation state and break the `is_empty` check itself.
+2. **Stateless `paint(frame, area, theme, snapshot)` function.** The welcome owns no state across frames — it's a pure projection of `LiveSessionInfo`, and a struct would only invite caches and lifecycle hooks the welcome doesn't need.
+3. **`WelcomeSnapshot` projects only what the welcome needs.** Model display, effort, auth label, cwd, version, and starter rows — keeping the shape narrow makes snapshot-test fixtures cheap and decouples the welcome from `LiveSessionInfo` evolution.
+4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising all eleven slash commands defeats the point of "try one of"; the 9-entry `STARTER_POOL` and 9-entry `TIP_POOL` give the surface variety per launch without becoming a tip dashboard, and every entry is a concrete action a user can take next. Picks are seeded from `session_id`, so a session always shows the same surface but `/clear` (which rolls the session) yields a fresh pick.
+5. **Curated rows live alongside the welcome.** Adding `is_starter() -> bool` to `SlashCommand` would push a welcome-specific concern into every command; the welcome's curation is the welcome's responsibility.
+6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark — typographic identity rather than container chrome. The wordmark itself is `oxide-code` (project name, the brand a migrator searches for) rather than `ox` (binary command).
+7. **Coarse three-tier width ladder (full / collapsed / suppressed).** Codex and Claude Code lean on truncate-and-reflow, opencode on flex-shrink; for a fixed-content welcome a coarse ladder is simpler than tuning per-element shrink behavior.
 8. **Body lines pad to one shared column width; box centers independently.** `Paragraph::alignment(Center)` aligns each line on its own visual center, so a naive layout has every line floating to its own indent ("ransom note"). Padding env / cwd / starters / trailer to one common width forces a single shared left edge. The identity box stays centered as its own unit, anchoring the screen above the body column.
-9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape (TOML option + env, empty-is-absent). When false, the chat region is blank — the input field anchors the empty session.
+9. **`[tui] show_welcome = true` (default) + `OX_SHOW_WELCOME` env override.** Mirrors the existing `show_thinking` knob shape (TOML option + env, empty-is-absent); when false, the chat region is blank and the input field anchors the empty session.
 10. **`/clear` re-shows the welcome automatically.** `/clear` clears `chat.blocks`, which restores `is_empty()` → welcome paints on next frame. No special re-emission path needed (the opposite of Codex's history-cell shape).
 11. **Resume never shows the welcome.** Resume populates `chat.blocks` from the JSONL transcript, so `is_empty()` returns false on first paint. No special-casing needed.
 
 ## Out of Scope / Deferred
 
-- **Live feeds** (recent sessions, release notes, upsells) — Claude Code does this; turns onboarding into a dashboard with a maintenance cost.
+- **Live feeds** (recent sessions, release notes, upsells) — Claude Code ships them but the result is an onboarding dashboard with ongoing maintenance cost.
 - **ASCII mascot / animations** — Codex / Claude Code both ship them. Outsized for the value; static text reads as deliberate.
 - **Plugin hooks for welcome content** — opencode-style slot overrides. Not until there's a plugin system.
 - **Tab-into-the-welcome navigation** — the welcome is read-only; the user types in the input below it. No focus model.
@@ -77,10 +77,10 @@ Below 25 cols nothing paints — the terminal is too narrow to read the welcome 
 
 ## Sources
 
-- `crates/oxide-code/src/tui/components/welcome.rs` — `paint`, `WelcomeSnapshot`, starter rows.
-- `crates/oxide-code/src/tui/components/chat.rs` — `is_empty()` predicate (existing).
-- `crates/oxide-code/src/tui/app.rs` — `draw_frame` empty-chat branch, `show_welcome` gate.
-- `crates/oxide-code/src/slash/context.rs` — `LiveSessionInfo` (snapshot input).
 - `crates/oxide-code/src/config.rs` — `show_welcome` field.
 - `crates/oxide-code/src/config/file.rs` — `[tui] show_welcome` TOML option.
+- `crates/oxide-code/src/slash/context.rs` — `LiveSessionInfo` (snapshot input).
+- `crates/oxide-code/src/tui/app.rs` — `draw_frame` empty-chat branch, `show_welcome` gate.
+- `crates/oxide-code/src/tui/components/chat.rs` — `is_empty()` predicate (existing).
+- `crates/oxide-code/src/tui/components/welcome.rs` — `paint`, `WelcomeSnapshot`, starter rows.
 - `crates/oxide-code/src/util/path.rs` — `tildify` (cwd display).
