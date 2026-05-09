@@ -1552,7 +1552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward() {
+    async fn dispatch_arg_bearing_slash_during_busy_refuses_locally() {
         // `/model <id>` and `/effort <level>` both mutate Client; pin both so a regression
         // that special-cases only one leaks the other.
         for (cmd, gate_phrase) in [
@@ -1578,7 +1578,7 @@ mod tests {
     async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
         // Bare `/model` is ReadOnly so it dispatches mid-turn into the picker modal. (`/effort` is
         // always Mutating after the typed-arg-only refactor; its bare-form busy path is covered by
-        // `dispatch_arg_bearing_slash_during_busy_refuses_with_system_message_no_forward`.)
+        // `dispatch_arg_bearing_slash_during_busy_refuses_locally`.)
         let (mut app, _rx, _agent_tx) = test_app(None);
         app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
 
@@ -1813,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_config_changed_with_model_swap_refreshes_status_bar_session_info_and_chat() {
+    fn handle_config_changed_model_swap_refreshes_status_and_chat() {
         // Three surfaces refresh in one shot: status-bar label,
         // `session_info` (backs `/status` / `/config`), and a chat
         // confirmation block. Display name is derived locally from `model_id`.
@@ -2022,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_session_resumed_swaps_id_replays_transcript_and_clears_pending_state() {
+    fn handle_session_resumed_replays_transcript_and_clears_pending() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Old"));
         app.chat.push_user_message("live prompt".to_owned());
         app.pending_prompts.push_back("queued".to_owned());

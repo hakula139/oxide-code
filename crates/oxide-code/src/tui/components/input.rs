@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_ghost_text_one_column_after_cursor_in_arg_mode_with_empty_prefix() {
+    fn render_paints_ghost_text_after_cursor_in_arg_mode() {
         // Mirrors the textarea's built-in placeholder layout: cursor at the insertion point,
         // dim hint starts the column right of it.
         let mut input = test_input();

@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_by_prefix_promotes_prefix_matches_above_substring_within_declared_order() {
+    fn rank_by_prefix_promotes_prefix_above_substring() {
         // `h` prefixes `high`; substring-matches `xhigh`. Prefix wins; declared order otherwise.
         assert_eq!(ranked("h"), vec!["high", "xhigh"]);
     }
