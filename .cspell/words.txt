@@ -46,6 +46,7 @@ misparse
 MMIX
 mplan
 mpsc
+msvc
 mtimes
 MULT
 nonewline
@@ -72,6 +73,7 @@ syntect
 sysname
 SYSPROMPT
 tengu
+Tera
 thiserror
 throbber
 tildified
