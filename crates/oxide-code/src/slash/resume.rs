@@ -93,8 +93,6 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
-        // Title rides `text` on every row so it stays distinct from the `dim` metadata line; the
-        // cursor row adds `BOLD` plus the gutter marker for emphasis.
         let title_style = if is_cursor {
             theme.text().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
@@ -601,9 +599,6 @@ mod tests {
 
     #[test]
     fn render_uses_two_distinct_foregrounds_with_bold_marking_the_cursor_row() {
-        // Title on `text` for every row; metadata on `dim`. The cursor row adds BOLD plus the
-        // gutter marker for emphasis. A regression that dimmed the title back to `muted` (or
-        // flattened it onto `dim`) would re-introduce the "title and metadata read alike" issue.
         let info = raw_session_info(
             stamped_id(0xab),
             "/work/oxide",
