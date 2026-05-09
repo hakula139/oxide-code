@@ -70,7 +70,7 @@ No beta header gates `display` — it's GA on 4.7.
 
 1. `content_block_start` with `type: "thinking"` — initialize with empty `thinking: ""` and `signature: ""`.
 2. `content_block_delta` with `thinking_delta` — append to `thinking` text.
-3. `content_block_delta` with `signature_delta` — set `signature` (full value, not incremental).
+3. `content_block_delta` with `signature_delta` — set `signature` to the full value (deltas arrive complete, not incremental).
 4. `content_block_stop` — block is complete.
 
 ### Redacted Thinking
@@ -93,7 +93,7 @@ Order matters: trailing thinking must be stripped before whitespace filtering, o
 ### Constraints
 
 - **Trailing thinking**: Assistant messages must not end with a thinking block. Stripping can leave a thinking-only message empty — a placeholder text block must be inserted (not message deletion) to preserve user / assistant alternation. Deleting the message would create consecutive user messages, which the API rejects.
-- **Credential rotation**: Signatures are cryptographically bound to the API key that generated them. When credentials change (e.g., user logs in with a different account), all thinking and redacted_thinking blocks must be stripped from the conversation history — their signatures are now invalid and the API will reject them with 400.
+- **Credential rotation**: Signatures are cryptographically bound to the API key that generated them, so when credentials change (e.g., user logs in with a different account) all thinking and redacted_thinking blocks must be stripped from history. Old signatures become invalid and the API rejects them with 400.
 
 ## Signatures
 

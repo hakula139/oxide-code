@@ -141,7 +141,7 @@ Tool schemas are sent via the API `tools` parameter, **not** in the system promp
 The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Cache scopes:
 
 - `global` — static instructions identical across all sessions. **First-party only**; 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) for the full invariance rule.
-- _(absent)_ — default (org-scoped) ephemeral cache. Universally accepted.
+- _(absent)_ — default org-scoped ephemeral cache. Universally accepted.
 - `null` (no `cache_control`) — dynamic content, not cached.
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
@@ -170,7 +170,7 @@ The flat sections array gets transformed into the block layout actually sent to 
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
 | 3   | Dynamic sections joined (`\n\n`) | —                       |
 
-Dropping the `scope` field (rather than serializing `scope: "org"` explicitly) is deliberate: org is the default when `scope` is absent, the wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
+Dropping the `scope` field (rather than serializing `scope: "org"` explicitly) is deliberate: org is the absent-field default, the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 

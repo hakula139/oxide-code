@@ -64,7 +64,7 @@ Additional useful betas:
 
 The accepted beta set differs per model family and per call type (agentic chat vs one-shot utility). Sending an unsupported beta — most commonly `context-1m-2025-08-07` to Haiku — trips gateway validation with HTTP 400 `invalid_request_error`. The mapping Claude Code applies in `claude-code/src/utils/betas.ts`:
 
-Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first, producing a visual staircase of narrowing checkmarks.
+Rows are grouped by role: identity / auth → universal agentic → model-tier-gated. Within each group the broadest support comes first.
 
 Cell legend: `✓` always on, `—` not supported (or stripped), `[1m]` opt-in via the model suffix, `*` caller opt-in (body field + beta ship together, see rules below).
 
@@ -84,7 +84,7 @@ Key rules:
 - **Haiku + `context-1m`** — rejected (Haiku has a 200K window); the `[1m]` tag is silently stripped rather than forwarded.
 - **Haiku + `interleaved-thinking`** — third-party gateways reject it; first-party accepts.
 - **Haiku one-shots** (title generation, compaction classifier) — strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
-- **`prompt-caching-scope` ships unconditionally** — the header alone is a server-side no-op without a `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()`, since 3P gateways reject the scope field downstream of tool definitions (see [Prompt Caching Scope](#prompt-caching-scope)).
+- **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code therefore emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()` (see [Prompt Caching Scope](#prompt-caching-scope) for why).
 - **`context-1m` is user opt-in via `[1m]`** — appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that don't carry 1M access. Convention matches Claude Code.
 - **`effort` is Opus 4.6+ and Sonnet 4.6+ only** — Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. The per-level ceiling (`xhigh` on 4.7, `max` on Opus 4.6 / 4.7) is separately encoded in `Capabilities::effort_xhigh` / `effort_max`.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op — the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
@@ -214,9 +214,9 @@ oxide-code ships `prompt-caching-scope-2026-01-05` on every agentic request (3P 
 - Base URL host matches `api.anthropic.com` or `api-staging.anthropic.com` → `{"type": "ephemeral", "scope": "global"}`.
 - Any other host (gateways, self-hosted, malformed URLs) → `{"type": "ephemeral"}`. The header still ships; without the scope field it's a server-side no-op.
 
-The shape is otherwise identical in both modes: same static / dynamic section split, same boundary marker, same block order. Only the body-side `scope` field toggles.
+Shape is otherwise identical in both modes; only the body-side `scope` field toggles.
 
-This matches the broader pattern of gating features like fine-grained tool streaming and client-request-ID injection on base URL rather than on the provider enum alone — the provider flag says "not Bedrock / not Vertex", but a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party by that check.
+Same pattern as fine-grained tool streaming and client-request-ID injection: gate on base URL rather than provider enum, since the provider flag only says "not Bedrock / not Vertex" and a user pointing `ANTHROPIC_BASE_URL` at a gateway still parses as first-party under that check.
 
 ## Agentic Request Body Fields
 
@@ -278,7 +278,7 @@ As of April 4, 2026, Anthropic enforces that OAuth subscription credits (Pro / M
 - **API key** (`ANTHROPIC_API_KEY`) with standard per-token billing.
 - **Extra Usage** billing enabled on the account, which allows OAuth but bills per-token beyond the subscription.
 
-The `cch` hash is the primary technical enforcement mechanism. The algorithm (xxHash64, non-cryptographic) and constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time — the current scheme is billing plumbing, not a security boundary.
+The `cch` hash is the primary technical enforcement mechanism, and both the algorithm (xxHash64, non-cryptographic) and the constants are publicly known. No additional protections exist: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing rather than a security boundary.
 
 oxide-code computes valid `cch` hashes on every outbound request — both OAuth and API-key. Claude Code 2.1.121 emits the attestation block under both auth modes; 3P re-distribution gateways treat absence as a missing client signature and reject. The fingerprint salt and xxHash64 seed are version-specific constants; they may change with Claude Code releases.
 

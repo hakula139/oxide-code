@@ -34,13 +34,13 @@ On Unix, session files are created with mode `0o600`.
 
 ### Actor + batched writes
 
-The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel. Each cmd carries a oneshot ack. The actor's loop: `recv().await` for the first cmd, then `try_recv()` until empty, then one buffered flush over the batch.
+The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, then `try_recv()`s until empty, then issues one buffered flush over the batch.
 
-`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush. The text-only branch records its single assistant message via the sequential path. Side effect of joining: the on-disk file is iteration-atomic — a crash mid-tool leaves the file at the previous turn's tail.
+`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush, while the text-only branch records its single assistant message via the sequential path. The side effect of joining is that the on-disk file is iteration-atomic, so a crash mid-tool leaves the file at the previous turn's tail.
 
 ### Writer recovery on flush error
 
-`WriterStatus` is three variants: `Pending { header }` (file not yet on disk), `Active(SessionWriter)` (steady state), `Broken` (last batch errored — next batch reopens via `SessionStore::open_append`).
+`WriterStatus` is three variants: `Pending` (file not yet on disk; staged header plus an optional deferred rename), `Active(SessionWriter)` (steady state), `Broken` (last batch errored, next batch reopens via `SessionStore::open_append`).
 
 ### Lazy materialization
 
@@ -48,11 +48,11 @@ Starting a session stages the header in memory; the on-disk file is created by t
 
 ### Resume and sanitization
 
-`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline: strip trailing thinking, drop unresolved tool_use / orphan tool_result, merge adjacent same-role survivors, inject head / tail sentinels.
+`ox -c` reopens the existing session file. The loader walks `Entry::Message` lines into a UUID-indexed DAG, picks the newest-timestamped leaf as the tip, and walks back via `parent_uuid` to produce a linear chain. The sanitization pipeline then strips trailing thinking, drops unresolved tool_use / orphan tool_result, merges adjacent same-role survivors, and injects head / tail sentinels.
 
 ### Fork-on-conflict concurrency
 
-No file-level lock. Two processes resuming the same session both append; the newest-leaf rule resolves forks deterministically. Writes smaller than `PIPE_BUF` are atomic under POSIX `O_APPEND`.
+There is no file-level lock: two processes resuming the same session both append, and the newest-leaf rule resolves forks deterministically. Writes smaller than `PIPE_BUF` are atomic under POSIX `O_APPEND`.
 
 ### AI-generated titles
 

@@ -38,14 +38,14 @@ Bare `/model` and `/effort` open pickers; both apply on Enter, cancel on Esc.
 
 `/rename` opens a modal pre-filled with the current title; `/rename <title>` sets it directly. The chosen title sticks and replaces the auto-generated AI title for the rest of the session.
 
-`/resume` opens a searchable session picker — type to filter by id, title, or project, Tab toggles current-project ↔ all projects, Enter resumes. `/resume <id-prefix>` jumps directly; ambiguous prefixes list candidates. Switching sessions preserves the running TUI — chat repopulates and the next prompt continues that thread.
+`/resume` opens a searchable session picker. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session. `/resume <id-prefix>` jumps directly, and ambiguous prefixes list candidates. Switching sessions preserves the running TUI: chat repopulates and the next prompt continues that thread.
 
 ## Theme
 
-`/theme` opens the picker — **Up / Down** previews each theme live, number keys jump to a row, **Enter** applies for the rest of the session, **Esc** reverts.
+`/theme` opens the picker. **Up / Down** preview each theme live, number keys jump to a row, **Enter** applies for the rest of the session, and **Esc** reverts.
 
 `/theme <name>` swaps directly to a built-in (`mocha`, `macchiato`, `frappe`, `latte`, `material`). Custom themes go in `~/.config/ox/config.toml` under `[tui.theme] base`.
 
 ## Persistence
 
-Slash-command choices stay session-local. Restart returns to your declared configuration in `ox.toml` — no slash command writes user config files.
+Slash-command choices stay session-local. Restart returns to your declared configuration in `ox.toml`. No slash command writes user config files.
