@@ -30,8 +30,8 @@ const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
 const UNTITLED_MARKER: &str = "(untitled)";
 const ID_WIDTH: usize = 8;
-/// Each row paints a title line + a metadata line (Claude Code-style two-line layout).
-const ROW_HEIGHT: u16 = 2;
+/// Each row paints title + metadata + a trailing blank for breathing room between sessions.
+const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
 /// Visual separator between metadata segments.
@@ -93,14 +93,12 @@ impl SearchableItem for SessionRow {
     }
 
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>> {
-        // Three-tier hierarchy via the theme's `text` / `muted` / `dim` slots: cursor row paints
-        // `text + bold` (primary), non-cursor titles take `muted` (secondary, distinct fg from
-        // metadata), metadata stays on `dim` (tertiary). Dimming `text` with `Modifier::DIM`
-        // would keep titles in the same color family as metadata and read flat at a glance.
+        // Title rides `text` on every row so it stays distinct from the `dim` metadata line; the
+        // cursor row adds `BOLD` plus the gutter marker for emphasis.
         let title_style = if is_cursor {
             theme.text().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
-            theme.muted()
+            theme.text()
         };
         let title_budget = usize::from(width).max(TITLE_FLOOR);
         let title_line = Line::from(Span::styled(
@@ -133,7 +131,7 @@ impl SearchableItem for SessionRow {
             theme.dim(),
         ));
 
-        vec![title_line, meta_line]
+        vec![title_line, meta_line, Line::default()]
     }
 
     fn row_height() -> u16 {
@@ -582,7 +580,11 @@ mod tests {
         let row = SessionRow::from_info(info, UtcOffset::UTC, true);
         let theme = Theme::default();
         let lines = row.render(60, false, &theme);
-        assert_eq!(lines.len(), 2, "row must paint two terminal rows");
+        assert_eq!(
+            lines.len(),
+            3,
+            "row must paint title + meta + trailing blank"
+        );
         let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let meta_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(title_text.contains("Fix auth"), "title row: {title_text}");
@@ -591,13 +593,17 @@ mod tests {
             meta_text.contains(" ago") || meta_text.contains('-'),
             "meta row must carry a relative time or ISO date: {meta_text}",
         );
+        assert!(
+            lines[2].spans.iter().all(|s| s.content.is_empty()),
+            "trailing row must be blank for between-row breathing room",
+        );
     }
 
     #[test]
-    fn render_uses_three_distinct_foregrounds_for_cursor_unselected_and_metadata() {
-        // Selected title → `text` + bold; unselected → `muted`; metadata → `dim`. Three distinct
-        // foregrounds keep the rows scannable; a regression that flattens any pair (e.g. dimming
-        // `text` with `Modifier::DIM`) would make titles and metadata read alike.
+    fn render_uses_two_distinct_foregrounds_with_bold_marking_the_cursor_row() {
+        // Title on `text` for every row; metadata on `dim`. The cursor row adds BOLD plus the
+        // gutter marker for emphasis. A regression that dimmed the title back to `muted` (or
+        // flattened it onto `dim`) would re-introduce the "title and metadata read alike" issue.
         let info = raw_session_info(
             stamped_id(0xab),
             "/work/oxide",
@@ -608,31 +614,37 @@ mod tests {
         let theme = Theme::default();
 
         let cursor = row.render(60, true, &theme);
-        let cursor_title = cursor[0].spans[0].style;
-        assert_eq!(cursor_title.fg, theme.text.fg, "selected uses text fg");
+        assert_eq!(
+            cursor[0].spans[0].style.fg, theme.text.fg,
+            "cursor title uses text fg",
+        );
         assert!(
-            cursor_title
+            cursor[0].spans[0]
+                .style
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD),
-            "selected is bold",
+            "cursor title is bold",
         );
 
         let unselected = row.render(60, false, &theme);
         assert_eq!(
-            unselected[0].spans[0].style.fg, theme.muted.fg,
-            "unselected title uses muted fg",
+            unselected[0].spans[0].style.fg, theme.text.fg,
+            "non-cursor title also uses text fg",
+        );
+        assert!(
+            !unselected[0].spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "non-cursor title is not bold",
         );
         assert_eq!(
             unselected[1].spans[0].style.fg, theme.dim.fg,
             "metadata uses dim fg",
         );
         assert_ne!(
-            theme.text.fg, theme.muted.fg,
-            "tier 1 vs 2 must be distinct fgs",
-        );
-        assert_ne!(
-            theme.muted.fg, theme.dim.fg,
-            "tier 2 vs 3 must be distinct fgs",
+            theme.text.fg, theme.dim.fg,
+            "title vs metadata must be distinct fgs",
         );
     }
 
