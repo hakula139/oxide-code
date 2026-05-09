@@ -45,10 +45,9 @@ pub(crate) struct SessionHandle {
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Single source of truth for "user has run `/rename`". Latched eagerly by
-    /// [`SessionHandle::set_manual_title`] so the title generator's pre-check sees it without an
-    /// actor round-trip; the actor mirrors the latch on absorb to suppress AI titles in the same
-    /// batch and skip the `FirstPrompt` push in the next message.
+    /// Set when the user has run `/rename` — suppresses AI titles and the next `FirstPrompt`.
+    /// Latched by [`SessionHandle::set_manual_title`] before dispatch so the title generator's
+    /// pre-check observes it without an actor round-trip.
     manual_title_set: AtomicBool,
     /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,

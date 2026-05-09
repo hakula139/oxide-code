@@ -36,13 +36,10 @@ pub(super) struct SessionState {
     finished: bool,
 }
 
-/// Writer lifecycle.
-///
-/// `Pending` defers `create + header write` until the first non-empty flush — a session that
-/// exits without recording leaves nothing on disk. `deferred_title` holds the most recent
-/// `/rename` (last-wins) and rides out alongside the header on first promotion, or vanishes
-/// with the actor. `Broken` is set after a partial write so the next batch reopens via
-/// `open_append` instead of trusting an undefined `BufWriter`.
+/// Writer lifecycle. `Pending` defers file creation until the first non-empty flush — a
+/// `/rename`-then-quit leaves nothing on disk. `deferred_title` holds the latest rename
+/// (last-wins) and flushes with the header on first promotion. `Broken` reopens via
+/// `open_append` on the next batch.
 enum WriterStatus {
     Pending {
         header: Entry,
@@ -93,9 +90,9 @@ impl SessionState {
         }
     }
 
-    /// Queues `title` to flush as a `UserProvided` entry on first `Pending` → `Active`
-    /// promotion. Returns `Some(title)` when the writer is already `Active` / `Broken` so the
-    /// caller can route into the live batch instead. A second deferral overwrites the first.
+    /// Parks `title` for the first `Pending` → `Active` flush as `UserProvided`. Returns
+    /// `Some(title)` when already `Active` / `Broken` so the caller queues it normally.
+    /// Last-wins on repeat.
     pub(super) fn try_defer_title(&mut self, title: String) -> Option<String> {
         let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
             return Some(title);
