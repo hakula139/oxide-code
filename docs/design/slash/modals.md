@@ -16,7 +16,7 @@ Three things drove the abstraction:
 
 ## Trait Shape
 
-A modal is `Send` (App lives on tokio) but not `Sync` — modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of four outcomes:
+A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of four outcomes:
 
 - **Consumed** — stay open, key handled internally.
 - **Cancelled** — close, no dispatch.
@@ -42,16 +42,16 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 
 ## Design Decisions
 
-1. **Trait per modal.** Each concrete modal is its own type implementing `Modal`, so adding one is a new file plus a constructor — no central match arm.
+1. **Trait per modal.** Each concrete modal is its own type implementing `Modal`, so adding one is a new file plus a constructor with no central match arm.
 2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** Single-element today, but the `Vec` lets a future "confirm leave?" overlay inside a picker `push` itself on without a redesign.
 3. **Typed result delivery, no callbacks.** Modal emits `ModalKey::Submitted(ModalAction)` and the manager dispatches; boxed `FnOnce` callbacks were rejected for the lifetime / `Send` complexity and because they hide the dispatch graph.
-4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Reactive subscriptions are deferred — when a value changes mid-modal (rare), the modal closes and reopens with fresh state.
+4. **Modals receive a `&LiveSessionInfo` snapshot at open.** Reactive subscriptions are deferred, so when a value changes mid-modal (rare) the modal closes and reopens with fresh state.
 5. **Layout band sized by `ModalStack::height(width)`.** Zero rows when empty (so the existing layout stays unchanged); displaces the chat upward when active, just like the slash popup.
-6. **Modals open via `SlashContext::open_modal` instead of a new `SlashOutcome` variant.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`). The dispatcher harvests the slot after `execute` and pushes onto the App's stack — same shape as `chat: &mut ChatView` for write-effects.
+6. **Modals open via `SlashContext::open_modal` instead of a new `SlashOutcome` variant.** Keeps `SlashOutcome` derive-clean (`Debug + PartialEq + Eq`). The dispatcher harvests the slot after `execute` and pushes onto the App's stack, mirroring how `chat: &mut ChatView` carries write-effects.
 7. **Bare `/model` and bare `/effort` open separate modals.** Threading both bare forms through one modal would force a single-axis decision through a two-axis interface. `/model` keeps the multi-axis combined picker (model and effort cycle together); `/effort` gets its own single-axis slider. Typed-arg `/model <id>` and `/effort <level>` keep direct-switch behaviour for scripting and power users.
 8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort` and `/theme` both build on it today; future approval prompts will too.
-9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, `/help` all build the same shape — title + sectioned label-value rows + footer — so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor. New overviews are a `Vec<KvSection>` away.
-10. **Read-only modals don't bind Enter.** `KvOverview::handle_key` consumes every key, and Esc / Ctrl+C cancel universally at the stack layer. Enter stays reserved for commit semantics in `ListPicker`-based modals — binding it to dismiss in `KvOverview` would give the same gesture two meanings across modal types.
+9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same title + sectioned-rows + footer shape, so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor, and new overviews are a `Vec<KvSection>` away.
+10. **Read-only modals don't bind Enter.** `KvOverview::handle_key` consumes every key, and Esc / Ctrl+C cancel universally at the stack layer. Enter stays reserved for commit semantics in `ListPicker`-based modals, since binding it to dismiss in `KvOverview` would give the same gesture two meanings across modal types.
 
 ## Per-Modal Notes
 

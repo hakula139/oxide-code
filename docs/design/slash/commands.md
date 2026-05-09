@@ -12,8 +12,8 @@ Eleven built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/m
 - `/theme` swaps the TUI palette mid-session; bare opens a live-preview list picker.
 - `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
 - `/rename` sets the session title manually and locks out the AI title generator; bare opens a single-line editor pre-filled with the current title.
-- `/resume` swaps to a different session in place — bare opens a searchable picker, typed-arg jumps directly. Full design: [resume.md](resume.md).
-- `/config`, `/help`, `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer — output can run to hundreds of lines, where scrollback value beats modal cropping.
+- `/resume` swaps to a different session in place: bare opens a searchable picker, and typed-arg jumps directly. Full design: [resume.md](resume.md).
+- `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
 
@@ -42,9 +42,9 @@ Eleven built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/m
 - **`/status`** — Opens a [`KvOverview`](modals.md) of session descriptors. No args, no chat output. Esc / Enter both dismiss.
 - **`/config`** — Opens a [`KvOverview`](modals.md) with two headed sections: resolved effective config and the layered TOML source paths it was assembled from. Path discovery runs per-invocation so mid-session edits surface immediately.
 - **`/help`** — Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases parenthesize after the canonical name; `usage()` placeholder appends.
-- **`/diff`** — The lone printer: pushes `git diff HEAD` + untracked into chat as a system message, capped at 64 KB on a UTF-8 boundary. Modal output would crop without scrollback, so the diff genuinely earns its place in transcript.
-- **`/rename`** — Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `UserAction::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`; bare suppresses echo (the modal IS the response) while typed-arg echoes, anchored by the swap-confirmation message. See [modals.md](modals.md).
-- **`/resume`** (alias `/continue`) — Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`; bare suppresses echo, typed-arg echoes. Full design: [resume.md](resume.md).
+- **`/diff`** — The lone printer: pushes `git diff HEAD` plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. Modal output would crop without scrollback, so the diff earns its place in the transcript.
+- **`/rename`** — Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `UserAction::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`; bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
+- **`/resume`** (alias `/continue`) — Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
 
 ## Sources
 

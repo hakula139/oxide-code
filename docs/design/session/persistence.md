@@ -36,7 +36,7 @@ On Unix, session files are created with mode `0o600`.
 
 The on-disk file is owned by a single `tokio::spawn`-ed actor task; the rest of the program holds a `SessionHandle` that forwards operations as `SessionCmd` over a bounded mpsc channel, with each cmd carrying a oneshot ack. The actor's loop awaits the first cmd, then `try_recv()`s until empty, then issues one buffered flush over the batch.
 
-`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush, while the text-only branch records its single assistant message via the sequential path. The side effect of joining is that the on-disk file is iteration-atomic — a crash mid-tool leaves the file at the previous turn's tail.
+`agent_turn` queues a tool round's three writes through one `tokio::join!` so the actor's drain coalesces them into a single buffered flush, while the text-only branch records its single assistant message via the sequential path. The side effect of joining is that the on-disk file is iteration-atomic, so a crash mid-tool leaves the file at the previous turn's tail.
 
 ### Writer recovery on flush error
 

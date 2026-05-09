@@ -93,7 +93,7 @@ Order matters: trailing thinking must be stripped before whitespace filtering, o
 ### Constraints
 
 - **Trailing thinking**: Assistant messages must not end with a thinking block. Stripping can leave a thinking-only message empty — a placeholder text block must be inserted (not message deletion) to preserve user / assistant alternation. Deleting the message would create consecutive user messages, which the API rejects.
-- **Credential rotation**: Signatures are cryptographically bound to the API key that generated them, so when credentials change (e.g., user logs in with a different account) all thinking and redacted_thinking blocks must be stripped from history — the old signatures become invalid and the API rejects them with 400.
+- **Credential rotation**: Signatures are cryptographically bound to the API key that generated them, so when credentials change (e.g., user logs in with a different account) all thinking and redacted_thinking blocks must be stripped from history. Old signatures become invalid and the API rejects them with 400.
 
 ## Signatures
 
