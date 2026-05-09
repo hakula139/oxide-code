@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn try_defer_title_active_returns_title_verbatim() {
+    fn try_defer_title_active_rejects_with_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn try_defer_title_broken_returns_title_verbatim() {
+    fn try_defer_title_broken_rejects_with_title() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");

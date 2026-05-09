@@ -1275,18 +1275,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_empty_session_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let original = start(&store, "m");
-        let session_id = original.session_id().to_owned();
-        original.finish(Vec::new()).await;
-        drop(original);
-
-        assert!(resume(&store, &session_id).is_err());
-    }
-
-    #[tokio::test]
     async fn resume_title_only_session_succeeds_and_keeps_title_on_next_message() {
         // Title-only resume must not push a duplicate `FirstPrompt` on the next message.
         let dir = tempfile::tempdir().unwrap();
@@ -1330,6 +1318,18 @@ mod tests {
             message_count, 1,
             "the resumed message must reach disk: {content}",
         );
+    }
+
+    #[tokio::test]
+    async fn resume_empty_session_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let original = start(&store, "m");
+        let session_id = original.session_id().to_owned();
+        original.finish(Vec::new()).await;
+        drop(original);
+
+        assert!(resume(&store, &session_id).is_err());
     }
 
     #[tokio::test]
