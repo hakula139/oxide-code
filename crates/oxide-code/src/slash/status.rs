@@ -14,7 +14,7 @@ impl SlashCommand for StatusCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Show session info: model, effort, version, working directory, auth source, and session ID"
+        "Show current session info"
     }
 
     fn echoes_input(&self, _args: &str) -> bool {

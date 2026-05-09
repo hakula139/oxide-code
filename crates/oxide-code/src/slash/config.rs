@@ -18,7 +18,7 @@ impl SlashCommand for ConfigCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Show the resolved configuration and the layered files (~/.config/ox/config.toml, ./ox.toml) it was assembled from"
+        "Show resolved config"
     }
 
     fn echoes_input(&self, _args: &str) -> bool {

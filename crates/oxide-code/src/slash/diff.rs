@@ -23,7 +23,7 @@ impl SlashCommand for DiffCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Show uncommitted working-tree changes (`git diff HEAD`) and the names of any untracked files"
+        "Show uncommitted working-tree changes"
     }
 
     fn execute(&self, _args: &str, ctx: &mut SlashContext<'_>) -> Result<SlashOutcome, String> {
