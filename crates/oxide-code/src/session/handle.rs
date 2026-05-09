@@ -45,8 +45,10 @@ pub(crate) struct SessionHandle {
 pub(super) struct SharedState {
     flush_failure_surfaced: AtomicBool,
     actor_gone_surfaced: AtomicBool,
-    /// Latched by [`SessionHandle::set_manual_title`]. Lets the title generator skip its append
-    /// after a `/rename` lands while Haiku is still in flight.
+    /// Single source of truth for "user has run `/rename`". Latched eagerly by
+    /// [`SessionHandle::set_manual_title`] so the title generator's pre-check sees it without an
+    /// actor round-trip; the actor mirrors the latch on absorb to suppress AI titles in the same
+    /// batch and skip the `FirstPrompt` push in the next message.
     manual_title_set: AtomicBool,
     /// Most recent flush error — threaded into actor-gone messages so the user sees the I/O cause.
     last_flush_failure: std::sync::Mutex<Option<String>>,

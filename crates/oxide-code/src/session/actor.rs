@@ -72,11 +72,25 @@ pub(super) async fn run(
         let mut entries: Vec<Entry> = Vec::new();
         let mut acks: Vec<PendingAck> = Vec::new();
         let mut should_exit = false;
-        absorb(first, &mut entries, &mut acks, &mut state, &mut should_exit);
+        absorb(
+            first,
+            &mut entries,
+            &mut acks,
+            &mut state,
+            &shared,
+            &mut should_exit,
+        );
         // try_recv only drains what is already queued; cmds arriving after this loop wait for
         // the next `recv().await` (and form a new batch). Coalescing without an interval timer.
         while let Ok(next) = rx.try_recv() {
-            absorb(next, &mut entries, &mut acks, &mut state, &mut should_exit);
+            absorb(
+                next,
+                &mut entries,
+                &mut acks,
+                &mut state,
+                &shared,
+                &mut should_exit,
+            );
         }
         let failure = match state.flush_entries(&entries) {
             Err(e) => {
@@ -99,12 +113,14 @@ fn absorb(
     entries: &mut Vec<Entry>,
     acks: &mut Vec<PendingAck>,
     state: &mut SessionState,
+    shared: &SharedState,
     should_exit: &mut bool,
 ) {
     let now = OffsetDateTime::now_utc();
     match cmd {
         SessionCmd::Record { msg, ack } => {
-            let (msg_entries, ai_title_seed) = state.queue_message_entries(&msg, now);
+            let (msg_entries, ai_title_seed) =
+                state.queue_message_entries(&msg, now, shared.manual_title_set());
             entries.extend(msg_entries);
             acks.push(PendingAck::Record { ack, ai_title_seed });
         }
@@ -131,7 +147,7 @@ fn absorb(
         }
         SessionCmd::AppendAiTitle { title, ack } => {
             // Defends against a manual-title flip between the title generator's pre-check and here.
-            if state.manual_title_set() {
+            if shared.manual_title_set() {
                 _ = ack.send(Outcome { failure: None });
                 return;
             }
@@ -143,7 +159,7 @@ fn absorb(
             acks.push(PendingAck::Outcome(ack));
         }
         SessionCmd::SetManualTitle { title, ack } => {
-            state.mark_manual_title_set();
+            shared.mark_manual_title_set();
             // Pending: defer (last-wins); the slot dies with the actor if no record lands.
             // Active: route the title through the live batch.
             match state.try_defer_title(title) {

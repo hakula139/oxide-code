@@ -33,8 +33,6 @@ pub(super) struct SessionState {
     message_count: u32,
     /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
-    /// Suppresses both the FirstPrompt-title push and any subsequent AI-title append.
-    manual_title_set: bool,
     finished: bool,
 }
 
@@ -68,7 +66,6 @@ impl SessionState {
             initial_message_count: 0,
             message_count: 0,
             first_user_prompt_seen: false,
-            manual_title_set: false,
             finished: false,
         }
     }
@@ -91,17 +88,8 @@ impl SessionState {
             initial_message_count,
             message_count: initial_message_count,
             first_user_prompt_seen,
-            manual_title_set: false,
             finished: false,
         }
-    }
-
-    pub(super) fn manual_title_set(&self) -> bool {
-        self.manual_title_set
-    }
-
-    pub(super) fn mark_manual_title_set(&mut self) {
-        self.manual_title_set = true;
     }
 
     /// Queues `title` to flush as a `UserProvided` entry on first `Pending` → `Active`
@@ -116,10 +104,12 @@ impl SessionState {
     }
 
     /// Builds entries for one message; returns AI-title seed on first user-text.
+    /// `manual_title_set` skips both the `FirstPrompt` push and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
         message: &Message,
         now: OffsetDateTime,
+        manual_title_set: bool,
     ) -> (Vec<Entry>, Option<String>) {
         let mut entries: Vec<Entry> = Vec::with_capacity(2);
         let mut ai_title_seed: Option<String> = None;
@@ -130,7 +120,7 @@ impl SessionState {
             // Latch before the push so a later flush failure won't produce a duplicate.
             self.first_user_prompt_seen = true;
             // `/rename` already queued the UserProvided title; skip the FirstPrompt + AI seed.
-            if !self.manual_title_set {
+            if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
                     title: truncate_title(text, MAX_TITLE_LEN),
@@ -340,7 +330,8 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (entries, seed) = state.queue_message_entries(&Message::user("Fix the auth bug"), now);
+        let (entries, seed) =
+            state.queue_message_entries(&Message::user("Fix the auth bug"), now, false);
 
         assert_eq!(entries.len(), 2, "title + message");
         assert!(matches!(
@@ -360,10 +351,10 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        _ = state.queue_message_entries(&Message::user("first"), now);
+        _ = state.queue_message_entries(&Message::user("first"), now, false);
         let first_tip = state.last_message_uuid.unwrap();
 
-        let (entries, seed) = state.queue_message_entries(&Message::user("second"), now);
+        let (entries, seed) = state.queue_message_entries(&Message::user("second"), now, false);
 
         assert_eq!(entries.len(), 1, "no second title");
         let Entry::Message {
@@ -393,7 +384,7 @@ mod tests {
             }],
         };
 
-        let (entries, seed) = state.queue_message_entries(&msg, now);
+        let (entries, seed) = state.queue_message_entries(&msg, now, false);
 
         assert_eq!(entries.len(), 1, "message only");
         assert!(matches!(&entries[0], Entry::Message { .. }));
@@ -411,7 +402,7 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
 
-        let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now);
+        let (entries, seed) = state.queue_message_entries(&Message::assistant("hi"), now, false);
 
         assert_eq!(entries.len(), 1);
         assert!(seed.is_none());
@@ -426,7 +417,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hello"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hello"), now, false);
         state.flush_entries(&entries).unwrap();
 
         let entries = state.finish_entries(Vec::new(), now);
@@ -457,7 +448,7 @@ mod tests {
         let tracker = FileTracker::default();
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (msgs, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(&msgs).unwrap();
 
         for name in ["/tmp/a", "/tmp/b", "/tmp/c"] {
@@ -487,7 +478,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         state.flush_entries(&entries).unwrap();
         let _first = state.finish_entries(Vec::new(), now);
 
@@ -504,7 +495,7 @@ mod tests {
         let store = test_store(dir.path());
         let mut original = SessionState::fresh(store.clone(), "m");
         let now = OffsetDateTime::now_utc();
-        let (entries, _) = original.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = original.queue_message_entries(&Message::user("hi"), now, false);
         original.flush_entries(&entries).unwrap();
         let parent = original.last_message_uuid;
         let session_id = original.session_id.to_string();
@@ -533,7 +524,7 @@ mod tests {
             .expect("/dev/full must be openable on Linux");
         state.writer_status = WriterStatus::Active(writer);
 
-        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("hi"), now, false);
         let result = state.flush_entries(&entries);
 
         assert!(result.is_err(), "flush to /dev/full must surface ENOSPC");
@@ -552,12 +543,12 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let session_id = state.session_id.to_string();
 
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
         state.flush_entries(&entries).unwrap();
         assert!(matches!(state.writer_status, WriterStatus::Active(_)));
         state.writer_status = WriterStatus::Broken;
 
-        let (entries, _) = state.queue_message_entries(&Message::user("second"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("second"), now, false);
         state.flush_entries(&entries).unwrap();
 
         assert!(
@@ -594,7 +585,7 @@ mod tests {
 
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
-        let (entries, _) = state.queue_message_entries(&Message::user("first"), now);
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
         let result = state.flush_entries(&entries);
 
         assert!(result.is_err(), "create must fail with project dir gone");
