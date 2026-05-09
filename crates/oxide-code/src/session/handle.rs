@@ -369,13 +369,17 @@ fn from_resumed_data(
     mut data: SessionData,
     writer: super::store::SessionWriter,
 ) -> Result<ResumedSession> {
+    let pre_sanitize_len = data.messages.len();
     sanitize_resumed_messages(&mut data.messages);
-    // Bail rather than chain the next record onto a `last_message_uuid` that sanitize just dropped.
-    if data.messages.is_empty() {
-        bail!("session {session_id} has no messages to resume");
+    // Bail only on sanitize wiping a non-empty list — chaining onto a dropped `last_message_uuid`
+    // would corrupt the chain. A title-only file is fine; next message starts a fresh chain.
+    if pre_sanitize_len > 0 && data.messages.is_empty() {
+        bail!("session {session_id}: sanitize dropped all messages (likely corrupt)");
     }
 
-    let first_user_prompt_seen = data.messages.iter().any(|m| extract_user_text(m).is_some());
+    // `data.title.is_some()` flips the gate so a title-only resume skips the FirstPrompt push.
+    let first_user_prompt_seen =
+        data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);
     let title = data.title.map(|t| t.title);
 
@@ -1283,6 +1287,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_title_only_session_succeeds_and_keeps_title_on_next_message() {
+        // A header+title-only file must be resumable, and the next message must NOT push a
+        // duplicate FirstPrompt title — `data.title.is_some()` pre-fills `first_user_prompt_seen`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let session_id = "title-only-fixture";
+        super::super::store::seed_test_session(
+            &store,
+            session_id,
+            Some("User-named"),
+            None,
+            time::macros::datetime!(2026-01-01 00:00:00 UTC),
+        );
+
+        let resumed = resume(&store, session_id).expect("title-only session must resume");
+        assert!(resumed.messages.is_empty(), "no messages on disk yet");
+        assert_eq!(resumed.title.as_deref(), Some("User-named"));
+
+        resumed.handle.record_message(Message::user("hi")).await;
+        resumed.handle.finish(Vec::new()).await;
+        resumed.handle.shutdown().await;
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), session_id)).unwrap();
+        let title_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .collect();
+        assert_eq!(
+            title_lines.len(),
+            1,
+            "next message must NOT add a FirstPrompt title alongside the existing one: {content}",
+        );
+        assert!(
+            title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
+            "the lone title is the original UserProvided one: {content}",
+        );
+    }
+
+    #[tokio::test]
     async fn resume_all_messages_sanitized_errors() {
         // Sanitize drops the lone unresolved tool_use, leaving an empty chain — resume must bail.
         let dir = tempfile::tempdir().unwrap();
@@ -1305,7 +1348,7 @@ mod tests {
             .err()
             .expect("all messages sanitized must be an error");
         assert!(
-            format!("{err:#}").contains("no messages to resume"),
+            format!("{err:#}").contains("sanitize dropped all messages"),
             "error explains why: {err:#}",
         );
     }

@@ -33,21 +33,20 @@ pub(super) struct SessionState {
     message_count: u32,
     /// Latched on first user-text so we don't emit a duplicate title entry.
     first_user_prompt_seen: bool,
-    /// Latched on `/rename`. Lets the `AppendAiTitle` absorb arm drop a late Haiku response.
+    /// Suppresses both the FirstPrompt-title push and any subsequent AI-title append.
     manual_title_set: bool,
     finished: bool,
 }
 
 /// Writer lifecycle.
 ///
-/// `Pending` defers `create + header write` until the first record cmd, so a fresh session
-/// that exits without recording leaves nothing on disk. `Broken` marks the writer's
-/// `BufWriter` as undefined after a partial write — its buffer state is unspecified by the
-/// stdlib, so we drop it and `open_append` afresh on the next batch instead of risking a
-/// torn line. Recovery from `Broken` is automatic: [`SessionState::take_or_open_writer`]
-/// reopens against the existing file and the next flush appends cleanly.
+/// `Pending` defers `create + header write` until the first non-empty flush — a session that
+/// exits without recording leaves nothing on disk. `deferred` holds entries that arrived while
+/// `Pending` (currently `/rename` titles); they flush alongside the header on first promotion,
+/// or vanish with the actor. `Broken` marks the `BufWriter`'s buffer as undefined after a
+/// partial write — we drop it and `open_append` afresh on the next batch.
 enum WriterStatus {
-    Pending { header: Entry },
+    Pending { header: Entry, deferred: Vec<Entry> },
     Active(SessionWriter),
     Broken,
 }
@@ -58,7 +57,10 @@ impl SessionState {
         Self {
             session_id: Arc::from(session_id),
             store,
-            writer_status: WriterStatus::Pending { header },
+            writer_status: WriterStatus::Pending {
+                header,
+                deferred: Vec::new(),
+            },
             last_message_uuid: None,
             initial_message_count: 0,
             message_count: 0,
@@ -68,7 +70,8 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active` because the loader already read the file.
+    /// Resumed sessions land directly in `Active`. Caller pre-ORs `first_user_prompt_seen` with
+    /// "title already on disk" so the next message doesn't push a duplicate first-prompt entry.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -85,8 +88,6 @@ impl SessionState {
             initial_message_count,
             message_count: initial_message_count,
             first_user_prompt_seen,
-            // Title-gen never runs on resumed sessions (the first-prompt seed never fires), so the
-            // default is safe — manual gating only matters for fresh sessions.
             manual_title_set: false,
             finished: false,
         }
@@ -98,6 +99,19 @@ impl SessionState {
 
     pub(super) fn mark_manual_title_set(&mut self) {
         self.manual_title_set = true;
+    }
+
+    pub(super) fn is_pending(&self) -> bool {
+        matches!(self.writer_status, WriterStatus::Pending { .. })
+    }
+
+    /// Queue an entry for the first promotion flush. Caller asserts [`Self::is_pending`].
+    pub(super) fn defer_entry(&mut self, entry: Entry) {
+        let WriterStatus::Pending { deferred, .. } = &mut self.writer_status else {
+            debug_assert!(false, "defer_entry called when writer is not Pending");
+            return;
+        };
+        deferred.push(entry);
     }
 
     /// Builds entries for one message; returns AI-title seed on first user-text.
@@ -112,14 +126,17 @@ impl SessionState {
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(message)
         {
-            // Latch before the title push so a later flush failure won't produce a duplicate.
+            // Latch before the push so a later flush failure won't produce a duplicate.
             self.first_user_prompt_seen = true;
-            ai_title_seed = Some(text.to_owned());
-            entries.push(Entry::Title {
-                title: truncate_title(text, MAX_TITLE_LEN),
-                source: TitleSource::FirstPrompt,
-                updated_at: now,
-            });
+            // `/rename` already queued the UserProvided title; skip the FirstPrompt + AI seed.
+            if !self.manual_title_set {
+                ai_title_seed = Some(text.to_owned());
+                entries.push(Entry::Title {
+                    title: truncate_title(text, MAX_TITLE_LEN),
+                    source: TitleSource::FirstPrompt,
+                    updated_at: now,
+                });
+            }
         }
 
         let uuid = Uuid::new_v4();
@@ -164,19 +181,21 @@ impl SessionState {
     }
 
     /// Writes entries in one flush; transitions to Broken on failure so next batch reopens.
+    /// On first `Pending` → `Active` promotion, any deferred entries flush ahead of `entries`.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut writer = self.take_or_open_writer()?;
+        let (mut writer, deferred) = self.take_or_open_writer()?;
         let result = (|| -> Result<()> {
+            for entry in &deferred {
+                writer.append_no_flush(entry)?;
+            }
             for entry in entries {
                 writer.append_no_flush(entry)?;
             }
             writer.flush()
         })();
-        // BufWriter's buffer is undefined after a partial write — flag Broken so next batch
-        // reopens.
         self.writer_status = match result {
             Ok(()) => WriterStatus::Active(writer),
             Err(_) => WriterStatus::Broken,
@@ -184,20 +203,19 @@ impl SessionState {
         result
     }
 
-    fn take_or_open_writer(&mut self) -> Result<SessionWriter> {
-        // Swap-with-Broken takes ownership without an extra clone. On `Pending` failure we
-        // restore the header so the next batch retries `create` instead of `open_append`-ing
-        // a file that was never created.
+    /// Returns the writer plus any entries deferred while `Pending`. On `Pending` failure the
+    /// header AND deferred entries are restored so the next batch retries `create`.
+    fn take_or_open_writer(&mut self) -> Result<(SessionWriter, Vec<Entry>)> {
         match std::mem::replace(&mut self.writer_status, WriterStatus::Broken) {
-            WriterStatus::Active(w) => Ok(w),
-            WriterStatus::Pending { header } => match self.store.create(&header) {
-                Ok(w) => Ok(w),
+            WriterStatus::Active(w) => Ok((w, Vec::new())),
+            WriterStatus::Pending { header, deferred } => match self.store.create(&header) {
+                Ok(w) => Ok((w, deferred)),
                 Err(e) => {
-                    self.writer_status = WriterStatus::Pending { header };
+                    self.writer_status = WriterStatus::Pending { header, deferred };
                     Err(e)
                 }
             },
-            WriterStatus::Broken => self.store.open_append(&self.session_id),
+            WriterStatus::Broken => Ok((self.store.open_append(&self.session_id)?, Vec::new())),
         }
     }
 }

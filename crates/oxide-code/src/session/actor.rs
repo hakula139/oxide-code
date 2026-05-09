@@ -144,12 +144,19 @@ fn absorb(
         }
         SessionCmd::SetManualTitle { title, ack } => {
             state.mark_manual_title_set();
-            entries.push(Entry::Title {
+            let entry = Entry::Title {
                 title,
                 source: super::entry::TitleSource::UserProvided,
                 updated_at: now,
-            });
-            acks.push(PendingAck::Outcome(ack));
+            };
+            // Pending: defer; the queue dies with the actor if no record ever lands.
+            if state.is_pending() {
+                state.defer_entry(entry);
+                _ = ack.send(Outcome { failure: None });
+            } else {
+                entries.push(entry);
+                acks.push(PendingAck::Outcome(ack));
+            }
         }
         SessionCmd::Finish { snapshots, ack } => {
             entries.extend(state.finish_entries(snapshots, now));
@@ -330,7 +337,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_set_manual_title_persists_user_provided_entry_and_blocks_subsequent_ai_title() {
+    async fn run_appends_ai_title_after_record() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec, _rec_rx) = record_cmd("Fix login");
+        let (ai_ack, _ai_rx) = oneshot::channel();
+        let ai_cmd = SessionCmd::AppendAiTitle {
+            title: "Fix the auth flow".to_owned(),
+            ack: ai_ack,
+        };
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![rec, ai_cmd, fin]).await;
+
+        // Tail scan picks the latest-updated_at title — AI wins over first-prompt.
+        let title = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .and_then(|s| s.title)
+            .expect("title");
+        assert_eq!(title.title, "Fix the auth flow");
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_on_unwritten_session_leaves_no_file_on_disk() {
+        // `/rename`-then-quit must leave no JSONL artifact. The deferred entry rides on
+        // `WriterStatus::Pending` and dies with the actor when no record ever arrives.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let (manual_ack, manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "Doomed rename".to_owned(),
+            ack: manual_ack,
+        };
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![manual_cmd, fin]).await;
+
+        let outcome = manual_rx.await.expect("manual ack must arrive");
+        assert!(
+            outcome.failure.is_none(),
+            "deferred-entry path acks healthily"
+        );
+
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        let entries: Vec<_> = std::fs::read_dir(&project_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "no message ever sent → project dir stays empty, found: {entries:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_then_record_writes_user_provided_title_in_lieu_of_first_prompt() {
+        // `/rename` then send produces ONE title (UserProvided), not two: the deferred title
+        // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (manual_ack, _manual_rx) = oneshot::channel();
+        let manual_cmd = SessionCmd::SetManualTitle {
+            title: "User-named".to_owned(),
+            ack: manual_ack,
+        };
+        let (rec, _rec_rx) = record_cmd("hello");
+        let (fin, _fin_rx) = finish_cmd();
+
+        drive(state, vec![manual_cmd, rec, fin]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let title_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"title""#))
+            .collect();
+        assert_eq!(
+            title_lines.len(),
+            1,
+            "deferred title replaces FirstPrompt: {content}"
+        );
+        assert!(
+            title_lines[0].contains("user_provided") && title_lines[0].contains("User-named"),
+            "the lone title is the user-provided one: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_set_manual_title_after_record_blocks_subsequent_ai_title() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");
@@ -359,7 +461,7 @@ mod tests {
         assert_eq!(
             title_lines.len(),
             2,
-            "first-prompt + manual; AI must not append a third title: {content}",
+            "FirstPrompt + UserProvided; AI must not append a third: {content}",
         );
         assert!(
             title_lines
@@ -371,33 +473,6 @@ mod tests {
             !content.contains("AI title that should lose"),
             "AI title must not appear on disk after manual override: {content}",
         );
-    }
-
-    #[tokio::test]
-    async fn run_appends_ai_title_after_record() {
-        let dir = tempdir().unwrap();
-        let store = test_store(dir.path());
-        let state = SessionState::fresh(store.clone(), "m");
-        let session_id = state.session_id.to_string();
-        let (rec, _rec_rx) = record_cmd("Fix login");
-        let (ai_ack, _ai_rx) = oneshot::channel();
-        let ai_cmd = SessionCmd::AppendAiTitle {
-            title: "Fix the auth flow".to_owned(),
-            ack: ai_ack,
-        };
-        let (fin, _fin_rx) = finish_cmd();
-
-        drive(state, vec![rec, ai_cmd, fin]).await;
-
-        // Tail scan picks the latest-updated_at title — AI wins over first-prompt.
-        let title = store
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.session_id == session_id)
-            .and_then(|s| s.title)
-            .expect("title");
-        assert_eq!(title.title, "Fix the auth flow");
     }
 
     #[tokio::test]
