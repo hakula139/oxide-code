@@ -376,10 +376,9 @@ fn from_resumed_data(
     // Bail only on sanitize wiping a non-empty list — chaining onto a dropped `last_message_uuid`
     // would corrupt the chain. A title-only file is fine; next message starts a fresh chain.
     if pre_sanitize_len > 0 && data.messages.is_empty() {
-        bail!("session {session_id}: sanitize dropped all messages (likely corrupt)");
+        bail!("session {session_id}: sanitize dropped all messages");
     }
 
-    // `data.title.is_some()` flips the gate so a title-only resume skips the FirstPrompt push.
     let first_user_prompt_seen =
         data.messages.iter().any(|m| extract_user_text(m).is_some()) || data.title.is_some();
     let message_count = u32::try_from(data.messages.len()).unwrap_or(u32::MAX);

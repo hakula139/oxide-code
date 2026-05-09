@@ -146,7 +146,7 @@ fn absorb(
             }
         }
         SessionCmd::AppendAiTitle { title, ack } => {
-            // Defends against a manual-title flip between the title generator's pre-check and here.
+            // Re-check: a `/rename` can flip the latch after the generator already queued this.
             if shared.manual_title_set() {
                 _ = ack.send(Outcome { failure: None });
                 return;

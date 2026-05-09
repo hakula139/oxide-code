@@ -70,8 +70,9 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active`. Caller pre-ORs `first_user_prompt_seen` with
-    /// "title already on disk" so the next message doesn't push a duplicate first-prompt entry.
+    /// Resumed sessions land directly in `Active`. Pass `first_user_prompt_seen = true` whenever
+    /// the disk already holds a title or any user message — otherwise the next recorded message
+    /// will push a duplicate `FirstPrompt` entry.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -117,7 +118,7 @@ impl SessionState {
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(message)
         {
-            // Latch before the push so a later flush failure won't produce a duplicate.
+            // Latch before queueing anything — a flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
             // `/rename` already queued the UserProvided title; skip the FirstPrompt + AI seed.
             if !manual_title_set {
