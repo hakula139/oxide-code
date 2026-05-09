@@ -354,7 +354,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Resume a previous session — `/resume` for the picker, `/resume <id-prefix>` to jump"
+        "Resume a previous session"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {

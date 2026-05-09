@@ -38,7 +38,7 @@ impl SlashCommand for RenameCmd {
     }
 
     fn description(&self) -> &'static str {
-        "Rename the current session — `/rename` for a modal, `/rename <title>` to apply directly"
+        "Rename the current session"
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
