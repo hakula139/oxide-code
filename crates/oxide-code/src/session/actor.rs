@@ -160,11 +160,9 @@ fn absorb(
         }
         SessionCmd::SetManualTitle { title, ack } => {
             shared.mark_manual_title_set();
-            // Pending: defer (last-wins); the slot dies with the actor if no record lands.
-            // Active: route the title through the live batch.
             match state.try_defer_title(title) {
-                Ok(()) => _ = ack.send(Outcome { failure: None }),
-                Err(title) => {
+                None => _ = ack.send(Outcome { failure: None }),
+                Some(title) => {
                     entries.push(Entry::Title {
                         title,
                         source: super::entry::TitleSource::UserProvided,

@@ -93,14 +93,14 @@ impl SessionState {
     }
 
     /// Queues `title` to flush as a `UserProvided` entry on first `Pending` → `Active`
-    /// promotion. Returns `Err(title)` when the writer is already `Active` / `Broken` so the
+    /// promotion. Returns `Some(title)` when the writer is already `Active` / `Broken` so the
     /// caller can route into the live batch instead. A second deferral overwrites the first.
-    pub(super) fn try_defer_title(&mut self, title: String) -> Result<(), String> {
+    pub(super) fn try_defer_title(&mut self, title: String) -> Option<String> {
         let WriterStatus::Pending { deferred_title, .. } = &mut self.writer_status else {
-            return Err(title);
+            return Some(title);
         };
         *deferred_title = Some(title);
-        Ok(())
+        None
     }
 
     /// Builds entries for one message; returns AI-title seed on first user-text.
@@ -320,6 +320,52 @@ mod tests {
     use super::super::store::test_store;
     use super::*;
     use crate::file_tracker::FileTracker;
+
+    // ── try_defer_title ──
+
+    #[test]
+    fn try_defer_title_pending_accepts_and_overwrites_previous_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+
+        assert!(state.try_defer_title("first".to_owned()).is_none());
+        assert!(state.try_defer_title("second".to_owned()).is_none());
+
+        let WriterStatus::Pending {
+            deferred_title: Some(slot),
+            ..
+        } = &state.writer_status
+        else {
+            panic!("expected Pending with last-wins deferred title");
+        };
+        assert_eq!(slot, "second", "later defer overwrites the earlier one");
+    }
+
+    #[test]
+    fn try_defer_title_active_returns_title_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (entries, _) = state.queue_message_entries(&Message::user("first"), now, false);
+        state.flush_entries(&entries).unwrap();
+        assert!(matches!(state.writer_status, WriterStatus::Active(_)));
+
+        let rejected = state.try_defer_title("Manual title".to_owned());
+        assert_eq!(rejected.as_deref(), Some("Manual title"));
+    }
+
+    #[test]
+    fn try_defer_title_broken_returns_title_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        state.writer_status = WriterStatus::Broken;
+
+        let rejected = state.try_defer_title("Manual title".to_owned());
+        assert_eq!(rejected.as_deref(), Some("Manual title"));
+    }
 
     // ── queue_message_entries ──
 
@@ -579,9 +625,12 @@ mod tests {
         let mut state = SessionState::fresh(store, "m");
         let now = OffsetDateTime::now_utc();
         let session_id = state.session_id.to_string();
-        state
-            .try_defer_title("Survives rollback".to_owned())
-            .expect("fresh state must accept defer");
+        assert!(
+            state
+                .try_defer_title("Survives rollback".to_owned())
+                .is_none(),
+            "fresh state must accept defer",
+        );
 
         let project_dir = super::super::store::test_project_dir(dir.path());
         std::fs::remove_dir_all(&project_dir).unwrap();
