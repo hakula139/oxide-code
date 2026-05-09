@@ -63,10 +63,10 @@ The direction is simple:
 
 ### Slash Commands
 
-- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/resume` (alias `/continue`), `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
+- Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume` (alias `/continue`), `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
-- Mid-session swap: `/model`, `/effort`, `/resume`, and `/theme`. Session-only — no slash command writes user config files.
-- Modal UI primitive (focus-grabbing overlays above the input). Bare `/model` opens a combined model + effort picker; `/effort` opens a Speed ↔ Intelligence slider; `/resume` opens a searchable session picker; `/theme` opens a list picker with live preview (Up / Down repaints the TUI in the candidate theme; Esc snaps back, Enter commits); `/status`, `/config`, and `/help` open read-only kv overviews. Esc / Ctrl+C cancel any modal universally.
+- Mid-session swaps (`/model`, `/effort`, `/rename`, `/resume`, `/theme`) are session-only — no slash command writes user config files.
+- Modal UI primitive: focus-grabbing overlays above the input for picker, slider, editor, and read-only kv-overview forms. Esc / Ctrl+C cancels any modal.
 
 ### Authentication & Configuration
 
@@ -90,7 +90,7 @@ The direction is simple:
 
 Remaining surface beyond Working Today:
 
-- Deferred: `/compact`, `/cost`, `/login` / `/logout`, `/rename` (manual session-title override), custom user commands, `/init` multi-phase flow.
+- Deferred: `/compact`, `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
 
 Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only; restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to an **explicit user-opted-in path** — never a silent merge. (Rejects Claude Code's `~/.claude.json` mega-file pattern.)
 
