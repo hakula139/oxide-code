@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_set_manual_title_on_unwritten_session_leaves_no_file_on_disk() {
+    async fn run_set_manual_title_alone_leaves_no_file_on_disk() {
         // `/rename`-then-quit must leave no JSONL artifact. The deferred entry rides on
         // `WriterStatus::Pending` and dies with the actor when no record ever arrives.
         let dir = tempdir().unwrap();
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_set_manual_title_then_record_writes_user_provided_title_in_lieu_of_first_prompt() {
+    async fn run_set_manual_title_then_record_replaces_first_prompt_title() {
         // `/rename` then send produces ONE title (UserProvided), not two: the deferred title
         // flushes ahead of the message, and `manual_title_set` suppresses the FirstPrompt push.
         let dir = tempdir().unwrap();
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_two_set_manual_titles_before_record_writes_only_the_last() {
+    async fn run_two_set_manual_titles_keep_only_the_last() {
         // Multiple `/rename` calls before any record must collapse to last-wins via the
         // deferred slot's overwrite semantics.
         let dir = tempdir().unwrap();
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_set_manual_title_after_record_blocks_subsequent_ai_title() {
+    async fn run_set_manual_title_after_record_blocks_ai_title() {
         let dir = tempdir().unwrap();
         let store = test_store(dir.path());
         let state = SessionState::fresh(store.clone(), "m");

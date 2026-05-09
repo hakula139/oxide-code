@@ -368,7 +368,7 @@ mod tests {
     // ── queue_message_entries ──
 
     #[test]
-    fn queue_message_entries_first_user_text_emits_title_then_message_and_seeds_ai_title() {
+    fn queue_message_entries_seeds_ai_title_on_first_user_text() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_entries_pending_create_failure_keeps_pending_and_preserves_deferred_title() {
+    fn flush_entries_pending_create_failure_preserves_deferred_title() {
         // The next batch must retry create rather than open_append a file that was never
         // created — and the deferred title must survive into the retry. A regression that
         // restored `Pending { deferred_title: None }` on rollback would silently drop the

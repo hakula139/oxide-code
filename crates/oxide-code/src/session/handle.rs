@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_title_only_session_succeeds_and_keeps_title_on_next_message() {
+    async fn resume_title_only_session_keeps_title_on_next_message() {
         // Title-only resume must not push a duplicate `FirstPrompt` on the next message.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
