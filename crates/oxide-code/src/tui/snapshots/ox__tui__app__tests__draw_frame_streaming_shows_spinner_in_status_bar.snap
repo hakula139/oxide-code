@@ -1,6 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/app.rs
-assertion_line: 2625
+assertion_line: 2620
 expression: "render_app(&mut app, 60, 8)"
 ---
 "  test-model │ ⣷ Streaming · Esc to interrupt       ~/test  "
@@ -9,5 +9,5 @@ expression: "render_app(&mut app, 60, 8)"
 "                                                            "
 "◉ part                                                      "
 "────────────────────────────────────────────────────────────"
-"❯ Type to queue a follow-up...                              "
+"❯                                                           "
 "────────────────────────────────────────────────────────────"

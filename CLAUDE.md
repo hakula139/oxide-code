@@ -119,7 +119,7 @@ ox                                          # Start an interactive session
 │   │   │       │   ├── read_excerpt.rs     # Read-tool line-numbered excerpt body + path / range header
 │   │   │       │   └── text.rs             # Default truncated-text body (fallback for tools without a richer view)
 │   │   │       └── user.rs                 # UserMessage
-│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring
+│   │   ├── input.rs                        # Multi-line input area (ratatui-textarea) + slash-popup wiring + arg-mode `[id]` ghost text
 │   │   ├── input/
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay — dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests

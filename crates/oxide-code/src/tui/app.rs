@@ -240,7 +240,6 @@ impl App {
             && let Some(prompt) = self.pending_prompts.pop_back()
         {
             self.input.set_text(&prompt);
-            self.sync_input_queue_hint();
         }
     }
 
@@ -395,7 +394,6 @@ impl App {
             return false;
         }
         self.pending_prompts.push_back(text.to_owned());
-        self.sync_input_queue_hint();
         // Skip forwarding while cancelling — the agent resets and we drain locally on idle.
         !matches!(self.status_bar.status(), Status::Cancelling)
     }
@@ -441,7 +439,6 @@ impl App {
             AgentEvent::PromptDrained(text) => {
                 self.pending_prompts.pop_front();
                 self.chat.push_user_message(text);
-                self.sync_input_queue_hint();
             }
             AgentEvent::TurnComplete => {
                 self.finish_turn();
@@ -530,7 +527,6 @@ impl App {
         // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
         // would otherwise carry across the swap.
         self.modals.clear();
-        self.sync_input_queue_hint();
         self.finalize_idle();
     }
 
@@ -546,11 +542,6 @@ impl App {
         if let Some(prompt) = self.pending_prompts.pop_front() {
             self.dispatch_user_action(UserAction::SubmitPrompt(prompt));
         }
-        self.sync_input_queue_hint();
-    }
-
-    fn sync_input_queue_hint(&mut self) {
-        self.input.set_has_queued(!self.pending_prompts.is_empty());
     }
 
     /// Sets busy status unless a user-acknowledgement status is showing.
@@ -2663,13 +2654,13 @@ mod tests {
 
     #[test]
     fn draw_frame_hides_input_and_popup_while_modal_active() {
-        // Modal owns focus, so the layout must collapse the input + popup bands. The idle
-        // placeholder is the cheapest substring proof that the input got rendered.
+        // Modal owns focus, so the layout must collapse the input + popup bands. The user-prompt
+        // marker (`❯`) is the cheapest substring proof that the input got rendered.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let baseline = rendered_text(&mut app, 60, 14);
         assert!(
-            baseline.contains("Ask anything..."),
-            "input placeholder must paint without a modal: {baseline}",
+            baseline.contains(USER_PROMPT_PREFIX),
+            "input prompt marker must paint without a modal: {baseline}",
         );
 
         app.modals
@@ -2680,7 +2671,7 @@ mod tests {
             "modal body must render: {with_modal}",
         );
         assert!(
-            !with_modal.contains("Ask anything..."),
+            !with_modal.contains(USER_PROMPT_PREFIX),
             "input must collapse while modal is active: {with_modal}",
         );
 
