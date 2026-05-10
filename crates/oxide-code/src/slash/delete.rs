@@ -31,10 +31,11 @@ impl SlashCommand for DeleteCmd {
         SlashKind::Mutating
     }
 
-    fn echoes_input(&self, _args: &str) -> bool {
-        // Echo so the user sees what they tried to delete on both the typed-arg success path
-        // and the bare-form error block.
-        true
+    fn echoes_input(&self, args: &str) -> bool {
+        // Bare `/delete` is rejected with a self-explanatory error block, so echoing the empty
+        // command would just orphan a `> /delete` line above it. The typed-arg form echoes for
+        // chat context. Mirrors the pattern `/resume`, `/effort`, etc. follow.
+        !args.trim().is_empty()
     }
 
     fn usage(&self) -> Option<&'static str> {
@@ -131,10 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn echoes_input_is_true_for_both_bare_and_typed_arg() {
-        // The bare form's error block and the typed-arg success path both benefit from the
-        // user-typed line landing in chat for context.
-        assert!(DeleteCmd.echoes_input(""));
+    fn echoes_input_suppressed_on_bare_form_and_active_on_typed_arg() {
+        // Bare form's error block stands alone; typed form anchors the chat line above the
+        // confirm modal so the user can re-read what they targeted.
+        assert!(!DeleteCmd.echoes_input(""));
+        assert!(!DeleteCmd.echoes_input("   "), "whitespace counts as bare");
         assert!(DeleteCmd.echoes_input("abcd"));
     }
 
