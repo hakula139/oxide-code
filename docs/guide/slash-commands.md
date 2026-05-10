@@ -41,7 +41,7 @@ Bare `/model` and `/effort` open pickers; both apply on Enter, cancel on Esc.
 
 `/resume` opens a searchable session picker. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session. `/resume <id-prefix>` jumps directly, and ambiguous prefixes list candidates. Switching sessions preserves the running TUI: chat repopulates and the next prompt continues that thread.
 
-Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a confirm modal — **Y / Enter** unlinks the JSONL, **N** cancels, **Esc / Ctrl+C** dismisses. The picker reloads on focus return so the deleted row drops without reopening. `/delete <id-prefix>` opens the same confirm modal directly without the picker step. The live session is filtered out of both paths and refused at the store layer; only finalized sessions can be deleted.
+Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a confirm modal. **Y / Enter** unlinks the JSONL and prints a `Deleted session {id}: {title}` line in chat, **N** cancels, **Esc / Ctrl+C** dismisses. The picker reloads on focus return so the deleted row drops without reopening. `/delete <id-prefix>` opens the same confirm modal directly without the picker step. The live session is filtered out of both paths and refused at the store layer, so only finalized sessions can be deleted.
 
 ## Theme
 

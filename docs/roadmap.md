@@ -66,7 +66,7 @@ The direction is simple:
 - Built-in: `/clear` (aliases `/new`, `/reset`), `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume` (alias `/continue`), `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
 - Mid-session swaps (`/model`, `/effort`, `/rename`, `/resume`, `/theme`) are session-only, and no slash command writes user config files.
-- Destructive ops (`/delete <id-prefix>`, or Ctrl+D / Delete inside the `/resume` picker) gate behind a Y/N confirm modal; the live session is filtered out and refused at the store layer.
+- Destructive ops (`/delete <id-prefix>`, or Ctrl+D / Delete inside the `/resume` picker) gate behind a Y/N confirm modal. Successful deletes print a `Deleted session {id}: {title}` line in chat; the live session is filtered out and refused at the store layer.
 - Modal UI primitive: focus-grabbing overlays above the input for picker, slider, editor, and read-only kv-overview forms; nested modals layer cleanly. Esc / Ctrl+C cancels any modal.
 
 ### Authentication & Configuration
