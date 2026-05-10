@@ -29,15 +29,11 @@ const STARTER_POOL: &[Starter] = &[
 ];
 
 const TIP_POOL: &[&str] = &[
-    "/clear starts a fresh conversation",
-    "/effort tunes Speed ↔ Intelligence",
-    "/resume opens the session picker",
-    "Ctrl+D in /resume deletes a session",
-    "/theme previews live as you scroll",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",
     "press / to browse all commands",
     "press Ctrl+C twice to exit",
+    "press Ctrl+D in /resume to delete a session",
     "press Enter to send, Shift+Enter for newline",
 ];
 
