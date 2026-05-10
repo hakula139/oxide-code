@@ -508,7 +508,7 @@ mod tests {
 
         let outcome = stack.handle_key(&key('h'));
         assert!(outcome.is_none(), "Push must not surface a ModalAction");
-        assert_eq!(stack.height(80), 7 + TOP_BORDER_HEIGHT, "child becomes top",);
+        assert_eq!(stack.height(80), 7 + TOP_BORDER_HEIGHT, "child becomes top");
     }
 
     #[test]

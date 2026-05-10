@@ -71,7 +71,9 @@ ox                                          # Start an interactive session
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
 │   ├── config.rs                           # /config — opens a KvOverview modal of resolved config + layered file paths
+│   ├── confirm.rs                          # ConfirmDeleteSessionModal — destructive-action gate; runs the unlink synchronously on Y, sticky inline error on failure
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
+│   ├── delete.rs                           # /delete <id-prefix> — typed-arg form; resolves prefix, pushes ConfirmDeleteSessionModal; bare /delete rejected
 │   ├── diff.rs                             # /diff — `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort — bare opens the slider; `/effort <level>` resolves the typed-arg shortcut
 │   ├── effort_slider.rs                    # EffortSlider — Speed ↔ Intelligence horizontal slider, opened by bare /effort
@@ -83,7 +85,7 @@ ox                                          # Start an interactive session
 │   ├── picker.rs                           # ModelEffortPicker — combined model + effort modal; emits a single SwapConfig
 │   ├── registry.rs                         # SlashCommand trait + SlashOutcome + echoes_input + BUILT_INS slice + alias-aware lookup
 │   ├── rename.rs                           # /rename — bare opens a single-line title editor; `/rename <title>` applies directly; locks out AI title generation
-│   ├── resume.rs                           # /resume (alias /continue) — bare opens a searchable session picker (Tab toggles current-project ↔ all-projects); `/resume <id-prefix>` jumps directly
+│   ├── resume.rs                           # /resume (alias /continue) — bare opens a searchable session picker (Tab toggles current-project ↔ all-projects, Ctrl+D / Delete pushes the confirm-delete modal); `/resume <id-prefix>` jumps directly
 │   ├── status.rs                           # /status — opens a KvOverview modal of session descriptors
 │   └── theme.rs                            # /theme — bare opens the picker (live preview); `/theme <name>` validates against the curated roster and swaps
 ├── tool.rs                                 # Tool trait, registry, definitions
