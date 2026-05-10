@@ -11,6 +11,7 @@ mod clear;
 mod config;
 mod confirm;
 mod context;
+mod delete;
 mod diff;
 mod effort;
 mod effort_slider;
