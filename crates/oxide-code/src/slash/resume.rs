@@ -1251,9 +1251,12 @@ mod tests {
         assert!(stack.is_active(), "child sits atop the picker");
 
         let outcome = stack.handle_key(&key(KeyCode::Char('y')));
+        let Some(ModalAction::SystemMessage(msg)) = outcome else {
+            panic!("Y must surface a SystemMessage; got {outcome:?}");
+        };
         assert!(
-            matches!(outcome, Some(ModalAction::None)),
-            "Y submits silently"
+            msg.starts_with("Deleted session "),
+            "chat-stream confirmation: {msg}",
         );
         assert!(stack.is_active(), "picker remains after the child pops");
         assert_eq!(

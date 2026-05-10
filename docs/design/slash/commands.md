@@ -4,7 +4,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-Eleven built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+12 built-ins: `/clear`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
 - `/model` swaps the active model mid-session via `Client::set_model`.
@@ -13,6 +13,7 @@ Eleven built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/m
 - `/init` synthesizes an AGENTS.md / CLAUDE.md author-or-update prompt and forwards to the agent loop.
 - `/rename` sets the session title manually and locks out the AI title generator; bare opens a single-line editor pre-filled with the current title.
 - `/resume` swaps to a different session in place: bare opens a searchable picker, and typed-arg jumps directly. Full design: [resume.md](resume.md).
+- `/delete <id-prefix>` unlinks a saved session's JSONL after a Y/N confirm. The `/resume` picker offers the same gesture via Ctrl+D / Delete on the cursor row.
 - `/config`, `/help`, and `/status` open a read-only [`KvOverview`](modals.md) modal. `/diff` is the lone printer because its output can run to hundreds of lines, where scrollback value beats modal cropping.
 
 ## Design Decisions
@@ -45,14 +46,19 @@ Eleven built-ins: `/clear`, `/config`, `/diff`, `/effort`, `/help`, `/init`, `/m
 - **`/diff`** — The lone printer: pushes `git diff HEAD` plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 - **`/rename`** — Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `UserAction::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`; bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
 - **`/resume`** (alias `/continue`) — Bare opens a searchable session picker ([modals.md](modals.md)), while `/resume <id-prefix>` resolves directly via a current-project-first lookup that widens to all projects on miss. Both forms refuse mid-turn and forward `UserAction::Resume`. Bare suppresses echo while typed-arg echoes. Full design: [resume.md](resume.md).
+- **`/delete`** — Typed-arg only; bare returns a friendly redirect since "what gets deleted?" has no good default. Picker entry is Ctrl+D / Delete inside `/resume`. Both push `ConfirmDeleteSessionModal` ([modals.md](modals.md)), which runs `SessionStore::delete` on Y / Enter and latches failures inline. Live-session refusal is layered across the picker filter, the resolver, and the store-layer bail.
 
 ## Sources
 
 - `crates/oxide-code/src/agent.rs` — `agent_turn` `Clear` and `SwapConfig` arms.
+- `crates/oxide-code/src/session/display.rs` — shared metadata-line formatter used by the picker row and the delete confirm modal.
+- `crates/oxide-code/src/session/store.rs` — `SessionStore::delete` (live-session refusal at the FS boundary).
 - `crates/oxide-code/src/slash.rs` — dispatch, `SlashOutcome`.
 - `crates/oxide-code/src/slash/clear.rs` — `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/config.rs` — `/config` row builder + sectioned `KvOverview` constructor.
+- `crates/oxide-code/src/slash/confirm.rs` — `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error).
 - `crates/oxide-code/src/slash/context.rs` — `SlashContext`, `open_modal` / `take_modal`.
+- `crates/oxide-code/src/slash/delete.rs` — `DeleteCmd` + prefix resolver.
 - `crates/oxide-code/src/slash/diff.rs` — `/diff` printer with 64 KB UTF-8-boundary cap.
 - `crates/oxide-code/src/slash/effort.rs` — `EffortCmd`, level parser.
 - `crates/oxide-code/src/slash/effort_slider.rs` — bare `/effort` Speed ↔ Intelligence slider modal.

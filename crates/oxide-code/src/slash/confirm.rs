@@ -67,11 +67,15 @@ impl ConfirmDeleteSessionModal {
             .unwrap_or(&self.session_id)
     }
 
-    /// Run `store.delete`. On Ok, pop with success. On Err, stay open with a sticky inline error
-    /// that clears on the next non-confirm keypress.
+    /// Run `store.delete`. On Ok, pop and emit a chat-stream confirmation. On Err, stay open with
+    /// a sticky inline error that clears on the next non-confirm keypress.
     fn confirm(&mut self) -> ModalKey {
         match self.store.delete(&self.session_id, &self.live_session_id) {
-            Ok(()) => ModalKey::Submitted(ModalAction::None),
+            Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
+                "Deleted session {}: {}",
+                self.id_prefix(),
+                self.display_title,
+            ))),
             Err(e) => {
                 self.error = Some(format!("{e:#}"));
                 ModalKey::Consumed
@@ -227,15 +231,22 @@ mod tests {
     // ── handle_key ──
 
     #[test]
-    fn y_press_runs_delete_and_submits_with_no_action() {
+    fn y_press_runs_delete_and_submits_with_chat_confirmation() {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_to_delete = modal.session_id.clone();
 
         let outcome = modal.handle_key(&key(KeyCode::Char('y')));
+        let ModalKey::Submitted(ModalAction::SystemMessage(msg)) = outcome else {
+            panic!("Y must Submit(SystemMessage); got {outcome:?}");
+        };
         assert!(
-            matches!(outcome, ModalKey::Submitted(ModalAction::None)),
-            "Y must Submit(None); got {outcome:?}",
+            msg.starts_with("Deleted session abcd1234"),
+            "confirmation must lead with the id prefix: {msg}",
+        );
+        assert!(
+            msg.contains("Fix auth flow"),
+            "confirmation includes title: {msg}"
         );
         assert!(
             store
@@ -252,7 +263,10 @@ mod tests {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let outcome = modal.handle_key(&key(KeyCode::Enter));
-        assert!(matches!(outcome, ModalKey::Submitted(ModalAction::None)));
+        assert!(matches!(
+            outcome,
+            ModalKey::Submitted(ModalAction::SystemMessage(_)),
+        ));
         assert!(store.list().unwrap().is_empty());
     }
 
@@ -261,7 +275,10 @@ mod tests {
         let (_dir, store) = isolated_store();
         let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
         let outcome = modal.handle_key(&key(KeyCode::Char('Y')));
-        assert!(matches!(outcome, ModalKey::Submitted(ModalAction::None)));
+        assert!(matches!(
+            outcome,
+            ModalKey::Submitted(ModalAction::SystemMessage(_)),
+        ));
     }
 
     #[test]

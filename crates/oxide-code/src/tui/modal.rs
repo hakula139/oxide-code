@@ -74,6 +74,9 @@ pub(crate) enum ModalAction {
     None,
     /// Forward a [`UserAction`] to the agent loop, sharing the keyboard-typed dispatch path.
     User(UserAction),
+    /// Push a confirmation line into chat after the modal pops. Used by destructive-action
+    /// modals so the user has chat-stream evidence the action ran.
+    SystemMessage(String),
 }
 
 // ── ModalStack ──

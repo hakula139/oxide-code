@@ -70,6 +70,10 @@ On resume, oxide-code loads the full history and appends new messages to the sam
 
 Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session in place. To skip the picker, pass `/resume <id-prefix>` to jump directly. Mid-session resume behaves identically to `ox -c` from launch.
 
+### Deleting a Session
+
+Inside the `/resume` picker, press **Ctrl+D** (or **Delete**) on the cursor row to open a Y/N confirm modal. **Y / Enter** unlinks the session JSONL; **N / Esc / Ctrl+C** dismisses. To skip the picker, run `/delete <id-prefix>` to open the same confirm directly. Only finalized sessions can be deleted: the live session is filtered out of both paths and refused at the store layer.
+
 ## Titles
 
 When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title, and setting `/rename` cancels and replaces the AI title for the rest of the session.
