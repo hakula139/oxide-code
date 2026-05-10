@@ -9,6 +9,7 @@
 
 mod clear;
 mod config;
+mod confirm;
 mod context;
 mod diff;
 mod effort;
