@@ -366,9 +366,12 @@ impl Modal for ResumePicker {
     }
 
     fn on_focus_regained(&mut self) {
-        // Refresh after the confirm modal pops — the deleted row (if any) drops from view, and
-        // any other on-disk change since the picker opened lands too.
+        // Re-seek the cursor after reload so cancel-delete keeps the user on the same row.
+        let prev_id = self.list.selected().map(|r| r.session_id.clone());
         self.reload();
+        if let Some(id) = prev_id {
+            self.list.cursor_to(|row| row.session_id == id);
+        }
     }
 }
 
@@ -1262,10 +1265,103 @@ mod tests {
         let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
         assert_eq!(picker.total, 2, "both seeded rows present");
 
-        // Simulate an external mutation (the confirm modal's delete) and trigger the hook.
         store.delete(&id_a, "live-session-id").unwrap();
         picker.on_focus_regained();
         assert_eq!(picker.total, 1, "deleted row drops on reload");
+    }
+
+    #[test]
+    fn on_focus_regained_preserves_cursor_when_row_is_still_present() {
+        // Cancel-delete must leave the user on the row they were inspecting; without re-seeking
+        // after reload, replace_items would yank the cursor back to row 0.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "second"), (0x33, "third")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        picker.handle_key(&key(KeyCode::Down));
+        let pinned = picker.list.selected().unwrap().session_id.clone();
+
+        picker.on_focus_regained();
+        let after = picker.list.selected().unwrap().session_id.clone();
+        assert_eq!(
+            after, pinned,
+            "cursor must remain on the previously selected row"
+        );
+    }
+
+    #[test]
+    fn on_focus_regained_falls_back_to_top_when_previously_selected_row_was_deleted() {
+        // If the row is gone, cursor_to is a no-op and the cursor stays at the post-reload zero.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "doomed"), (0x33, "third")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let target = stamped_id(0x22);
+        let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        picker.list.cursor_to(|row| row.session_id == target);
+        assert_eq!(picker.list.selected().unwrap().session_id, target);
+
+        store.delete(&target, "live-session-id").unwrap();
+        picker.on_focus_regained();
+        assert_eq!(picker.total, 2, "deleted row dropped");
+        assert_ne!(
+            picker.list.selected().unwrap().session_id,
+            target,
+            "cursor moved off the deleted row",
+        );
+    }
+
+    #[test]
+    fn ctrl_d_then_y_through_modal_stack_unlinks_the_session() {
+        // End-to-end: picker on the stack, Ctrl+D pushes the confirm child, Y on the child runs
+        // the unlink and pops back. Pins the wiring across ResumePicker, ModalKey::Push,
+        // ModalStack::handle_key, ConfirmDeleteSessionModal, and SessionStore::delete.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        let mut stack = crate::tui::modal::ModalStack::new();
+        stack.push(Box::new(picker));
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        assert!(
+            stack.handle_key(&ctrl_d).is_none(),
+            "Push outcome must not surface a ModalAction",
+        );
+        assert!(stack.is_active(), "child sits atop the picker");
+
+        let outcome = stack.handle_key(&key(KeyCode::Char('y')));
+        assert!(
+            matches!(outcome, Some(ModalAction::None)),
+            "Y submits silently"
+        );
+        assert!(stack.is_active(), "picker remains after the child pops");
+        assert_eq!(
+            store.list().unwrap().len(),
+            1,
+            "one row was actually deleted from disk",
+        );
     }
 
     // ── ResumeCmd ──
