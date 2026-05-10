@@ -1,9 +1,5 @@
-//! Destructive-action confirm modal, currently scoped to session deletion. Generalize when a
-//! second use case lands.
-//!
-//! Pushed as a nested overlay above the resume picker, or directly from `/delete <id-prefix>`.
-//! Y or Enter runs the delete. Failures latch inline so the user sees the error without losing
-//! the modal.
+//! Destructive-action confirm modal scoped to session deletion. Generalize when a second use
+//! case lands.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -22,16 +18,14 @@ use crate::util::text::truncate_to_width;
 // ── Constants ──
 
 const TITLE: &str = "Delete this session?";
-const FOOTER_HINT: &str = "[Y] delete   [N] cancel   Esc to cancel";
+const FOOTER_HINT: &str = "[Y] delete   [N] cancel";
 /// Width floor so narrow terminals still paint the full body without panicking.
 const MIN_BUDGET: usize = 8;
 
 // ── ConfirmDeleteSessionModal ──
 
 /// Confirm-and-delete overlay. Owns the `SessionStore` clone so the unlink fires synchronously on
-/// Y without a roundtrip through the agent loop. The `live_session_id` field threads the live id
-/// down to `store.delete` for its FS-boundary refusal check, even though upstream callers
-/// (resume picker filter, `/delete` resolver) already filter it.
+/// Y without a roundtrip through the agent loop.
 pub(super) struct ConfirmDeleteSessionModal {
     store: SessionStore,
     session_id: String,

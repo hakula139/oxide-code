@@ -34,9 +34,8 @@ pub(crate) trait Modal: Send {
     /// a typed action. The stack pops on cancel or submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
 
-    /// Hook called by the stack when this modal becomes the top entry again after a nested modal
-    /// pops. Default no-op. Pickers that need to refresh their data after a sub-modal mutated
-    /// shared state (e.g. the resume picker reloading after delete) override this.
+    /// Fires when this modal returns to the top of the stack after a nested modal pops. Default
+    /// no-op; pickers override to refresh state mutated by the sub-modal.
     fn on_focus_regained(&mut self) {}
 }
 
@@ -54,8 +53,7 @@ pub(crate) enum ModalKey {
     Push(Box<dyn Modal>),
 }
 
-/// Hand-rolled because `Box<dyn Modal>` can't satisfy `Debug` without forcing every impl to derive
-/// it. `Push` prints opaquely. Other variants delegate to their inner [`ModalAction`].
+/// Hand-rolled because `Box<dyn Modal>` can't derive `Debug` without forcing every impl to.
 impl std::fmt::Debug for ModalKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
