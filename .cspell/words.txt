@@ -47,12 +47,21 @@ MMIX
 mplan
 mpsc
 msvc
+msys
 mtimes
+MSRV
 MULT
+nixfmt
+nixos
+nixpkgs
 nonewline
 nucleo
+numtide
+oxalica
 onig
 pgid
+pkgs
+pname
 println
 pulldown
 RAII
@@ -64,6 +73,7 @@ rfind
 riscv
 rrggbb
 rsplit
+rustc
 rustls
 serde
 serie
@@ -86,6 +96,7 @@ tracing
 unmaterialized
 unresumable
 unrotated
+untap
 urandom
 usize
 venv

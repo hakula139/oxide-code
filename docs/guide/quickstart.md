@@ -2,10 +2,11 @@
 
 ## Install
 
-Requires [Rust](https://www.rust-lang.org/tools/install) 1.91+ (uses edition 2024).
+See [Installation](install.md) for the full matrix (prebuilt tarball, Homebrew, cargo, Nix). The shortest path on macOS / Linux:
 
 ```bash
-cargo install --path crates/oxide-code
+brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
+brew install oxide-code
 ```
 
 ## Set up credentials

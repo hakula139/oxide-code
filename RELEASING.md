@@ -43,6 +43,16 @@ Any prose that should land in the changelog must come from a commit message: use
 
    Each archive contains the `ox` binary.
 
+8. Refresh the Homebrew formula against the published artifacts and commit:
+
+   ```bash
+   ./scripts/update-homebrew-formula.sh vX.Y.Z
+   git commit -am "chore(release): refresh Homebrew formula for vX.Y.Z"
+   git push
+   ```
+
+   The script regenerates `Formula/oxide-code.rb` by fetching each `.sha256` sidecar from the release. Run it after the workflow finishes uploading assets, otherwise the sidecar URLs return 404.
+
 ## Installing `git-cliff`
 
 ```bash
