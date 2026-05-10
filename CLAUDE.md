@@ -54,6 +54,7 @@ ox                                          # Start an interactive session
 ├── session/
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
+│   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line)
 │   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
 │   ├── handle/

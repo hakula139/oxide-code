@@ -7,6 +7,7 @@ use std::path::Path;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
+use crate::session::display::format_metadata_line;
 use crate::session::entry::SessionInfo;
 use crate::session::store::SessionStore;
 use crate::util::path::tildify;
@@ -122,57 +123,18 @@ fn display_title(info: &SessionInfo) -> String {
         .map_or_else(|| "(untitled)".to_owned(), |t| t.title.clone())
 }
 
-/// Single-line summary mirroring [`super::resume`]'s picker row metadata: `{id_prefix} ·
-/// {when} · {N msgs} · {branch} · {project}`.
+/// Wraps [`format_metadata_line`] with the `/delete`-specific project rule: the confirm modal has
+/// no scope context, so the project always shows when `cwd` is non-empty.
 fn metadata_line(info: &SessionInfo) -> String {
-    use std::fmt::Write as _;
-    const SEP: &str = " · ";
-    const ID_WIDTH: usize = 8;
-
-    let local_offset = crate::util::time::local_offset();
-    let now = time::OffsetDateTime::now_utc().to_offset(local_offset);
-    let when = format_relative(info.last_active_at.to_offset(local_offset), now);
-    let prefix = info
-        .session_id
-        .get(..ID_WIDTH)
-        .unwrap_or(info.session_id.as_str());
-    let mut meta = format!("{prefix}{SEP}{when}");
-    let count = info.exit.as_ref().map_or(0, |e| e.message_count);
-    if count > 0 {
-        let unit = if count == 1 { "msg" } else { "msgs" };
-        _ = write!(meta, "{SEP}{count} {unit}");
-    }
-    if let Some(branch) = info.git_branch.as_deref() {
-        meta.push_str(SEP);
-        meta.push_str(branch);
-    }
     let project = tildify(Path::new(&info.cwd));
-    if !project.is_empty() {
-        meta.push_str(SEP);
-        meta.push_str(&project);
-    }
-    meta
-}
-
-/// Compact relative-time matching the picker's footer ("3 minutes ago"); falls back to ISO date
-/// past 30 days. Negative deltas (clock skew) collapse to 0.
-fn format_relative(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> String {
-    let secs = (now - ts).whole_seconds().max(0);
-    let (n, unit) = if secs < 60 {
-        (secs, "second")
-    } else if secs < 3600 {
-        (secs / 60, "minute")
-    } else if secs < 86_400 {
-        (secs / 3600, "hour")
-    } else if secs < 30 * 86_400 {
-        (secs / 86_400, "day")
-    } else {
-        return ts
-            .format(time::macros::format_description!("[year]-[month]-[day]"))
-            .expect("static format never fails");
-    };
-    let plural = if n == 1 { "" } else { "s" };
-    format!("{n} {unit}{plural} ago")
+    format_metadata_line(
+        &info.session_id,
+        info.last_active_at,
+        crate::util::time::local_offset(),
+        info.exit.as_ref().map_or(0, |e| e.message_count),
+        info.git_branch.as_deref(),
+        (!project.is_empty()).then_some(project.as_str()),
+    )
 }
 
 #[cfg(test)]
@@ -357,75 +319,51 @@ mod tests {
         });
     }
 
-    // ── format_relative ──
+    // ── display_title ──
 
     #[test]
-    fn format_relative_pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
-        let now = datetime!(2026-05-08 12:00:00 UTC);
-        assert_eq!(
-            format_relative(now - time::Duration::seconds(1), now),
-            "1 second ago"
-        );
-        assert_eq!(
-            format_relative(now - time::Duration::seconds(45), now),
-            "45 seconds ago"
-        );
-        assert_eq!(
-            format_relative(now - time::Duration::minutes(1), now),
-            "1 minute ago"
-        );
-        assert_eq!(
-            format_relative(now - time::Duration::hours(2), now),
-            "2 hours ago"
-        );
-        assert_eq!(
-            format_relative(now - time::Duration::days(5), now),
-            "5 days ago"
-        );
-        assert_eq!(
-            format_relative(now - time::Duration::days(60), now),
-            "2026-03-09"
-        );
-        assert_eq!(
-            format_relative(now + time::Duration::seconds(30), now),
-            "0 seconds ago",
-            "future stamps collapse to 0 rather than negative",
-        );
-    }
-
-    // ── metadata_line ──
-
-    #[test]
-    fn metadata_line_includes_msg_count_and_branch_when_present() {
+    fn display_title_falls_back_to_untitled_marker_when_title_absent() {
         let info = SessionInfo {
             session_id: stamped_id(0xab),
-            cwd: "/work/oxide".to_owned(),
-            last_active_at: datetime!(2026-05-08 09:00:00 UTC),
-            title: None,
-            exit: Some(crate::session::entry::ExitInfo {
-                message_count: 14,
-                updated_at: datetime!(2026-05-08 09:00:00 UTC),
-            }),
-            git_branch: Some("feat/login".to_owned()),
-        };
-        let line = metadata_line(&info);
-        assert!(line.contains(&info.session_id[..8]), "id prefix: {line}");
-        assert!(line.contains("14 msgs"), "plural msg count: {line}");
-        assert!(line.contains("feat/login"), "branch: {line}");
-    }
-
-    #[test]
-    fn metadata_line_omits_msg_count_when_session_never_finalized() {
-        let info = SessionInfo {
-            session_id: stamped_id(0xcd),
             cwd: "/work".to_owned(),
             last_active_at: datetime!(2026-05-08 09:00:00 UTC),
             title: None,
             exit: None,
             git_branch: None,
         };
+        assert_eq!(display_title(&info), "(untitled)");
+    }
+
+    // ── metadata_line ──
+
+    #[test]
+    fn metadata_line_includes_tildified_project_when_cwd_is_non_empty() {
+        // The wrapper's only contribution over the shared formatter is the always-show-project
+        // rule (the picker hides project in scoped mode, the confirm modal always shows it).
+        let info = SessionInfo {
+            session_id: stamped_id(0xab),
+            cwd: "/work/oxide".to_owned(),
+            last_active_at: datetime!(2026-05-08 09:00:00 UTC),
+            title: None,
+            exit: None,
+            git_branch: None,
+        };
         let line = metadata_line(&info);
-        assert!(!line.contains("msgs"), "no plural: {line}");
-        assert!(!line.contains("msg"), "no singular: {line}");
+        assert!(line.contains("/work/oxide"), "project shown: {line}");
+    }
+
+    #[test]
+    fn metadata_line_omits_project_when_cwd_is_empty() {
+        let info = SessionInfo {
+            session_id: stamped_id(0xab),
+            cwd: String::new(),
+            last_active_at: datetime!(2026-05-08 09:00:00 UTC),
+            title: None,
+            exit: None,
+            git_branch: None,
+        };
+        let line = metadata_line(&info);
+        assert!(!line.ends_with(" · "), "no trailing separator: {line}");
+        assert!(!line.contains(" ·  · "), "no double separator: {line}");
     }
 }

@@ -16,6 +16,7 @@ use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
+use crate::session::display::format_metadata_line;
 use crate::session::entry::SessionInfo;
 use crate::session::store::SessionStore;
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
@@ -30,13 +31,10 @@ const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
 const UNTITLED_MARKER: &str = "(untitled)";
-const ID_WIDTH: usize = 8;
 /// Each row paints title + metadata + a trailing blank for breathing room between sessions.
 const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
-/// Visual separator between metadata segments.
-const META_SEPARATOR: &str = " · ";
 
 // ── SessionRow ──
 
@@ -83,34 +81,16 @@ impl SessionRow {
         }
     }
 
-    fn id_prefix(&self) -> &str {
-        self.session_id.get(..ID_WIDTH).unwrap_or(&self.session_id)
-    }
-
     /// Single-line metadata summary used by both the picker row and the delete-confirm modal.
-    /// Shape: `{id_prefix} · {when} · {N msgs} · {branch} · {project}`. Empty fields are omitted.
     fn metadata_line(&self) -> String {
-        use std::fmt::Write as _;
-        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
-        let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
-        let mut meta = format!("{} · {when}", self.id_prefix());
-        if self.message_count > 0 {
-            let unit = if self.message_count == 1 {
-                "msg"
-            } else {
-                "msgs"
-            };
-            _ = write!(meta, "{META_SEPARATOR}{} {unit}", self.message_count);
-        }
-        if let Some(branch) = self.git_branch.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(branch);
-        }
-        if let Some(project) = self.project.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(project);
-        }
-        meta
+        format_metadata_line(
+            &self.session_id,
+            self.last_active_at,
+            self.local_offset,
+            self.message_count,
+            self.git_branch.as_deref(),
+            self.project.as_deref(),
+        )
     }
 }
 
@@ -139,38 +119,6 @@ impl SearchableItem for SessionRow {
 
     fn row_height() -> u16 {
         ROW_HEIGHT
-    }
-}
-
-/// Coarse-grain "N seconds/minutes/hours/days ago"; falls back to ISO date past 30 days so "327
-/// days ago" doesn't displace a more recognizable absolute reference. Negative deltas (clock skew,
-/// future stamps from another machine) collapse to 0 to keep the singular/plural axis sane.
-fn format_relative_time(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> String {
-    let secs = (now - ts).whole_seconds().max(0);
-    if secs < 60 {
-        return format!("{secs} {} ago", pluralize(secs, "second"));
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins} {} ago", pluralize(mins, "minute"));
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{hours} {} ago", pluralize(hours, "hour"));
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format!("{days} {} ago", pluralize(days, "day"));
-    }
-    ts.format(time::macros::format_description!("[year]-[month]-[day]"))
-        .expect("static `[year]-[month]-[day]` description never fails on a valid `OffsetDateTime`")
-}
-
-fn pluralize(n: i64, unit: &str) -> String {
-    if n == 1 {
-        unit.to_owned()
-    } else {
-        format!("{unit}s")
     }
 }
 
@@ -566,7 +514,6 @@ mod tests {
             datetime!(2026-04-18 09:00:00 UTC),
         );
         let row = SessionRow::from_info(absent, UtcOffset::UTC, true);
-        assert_eq!(row.id_prefix().len(), ID_WIDTH);
         assert_eq!(row.title, UNTITLED_MARKER);
         assert!(row.haystack.contains(&row.session_id));
         assert!(row.haystack.contains("/work/oxide"));
@@ -625,7 +572,10 @@ mod tests {
         let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let meta_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(title_text.contains("Fix auth"), "title row: {title_text}");
-        assert!(meta_text.contains(row.id_prefix()), "meta row: {meta_text}");
+        assert!(
+            meta_text.contains(&row.session_id[..8]),
+            "meta row: {meta_text}"
+        );
         assert!(
             meta_text.contains(" ago") || meta_text.contains('-'),
             "meta row must carry a relative time or ISO date: {meta_text}",
@@ -736,57 +686,6 @@ mod tests {
             "no count when exit is missing: {meta}"
         );
         assert!(!meta.contains("msg"), "no singular either: {meta}");
-    }
-
-    // ── format_relative_time ──
-
-    #[test]
-    fn format_relative_time_pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
-        let now = datetime!(2026-05-08 12:00:00 UTC);
-        // Singular at the 1-of-each boundary, plural everywhere else.
-        assert_eq!(
-            format_relative_time(now - time::Duration::seconds(1), now),
-            "1 second ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::seconds(3), now),
-            "3 seconds ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::minutes(1), now),
-            "1 minute ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::minutes(2), now),
-            "2 minutes ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::hours(1), now),
-            "1 hour ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::hours(5), now),
-            "5 hours ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(1), now),
-            "1 day ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(3), now),
-            "3 days ago",
-        );
-        // 30+ days falls back to the absolute ISO date.
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(60), now),
-            "2026-03-09",
-        );
-        // Negative delta (future stamp / clock skew) collapses to "0 seconds ago" rather than
-        // emitting "-30 seconds ago".
-        assert_eq!(
-            format_relative_time(now + time::Duration::seconds(30), now),
-            "0 seconds ago",
-        );
     }
 
     // ── ResumePicker::new ──
@@ -1523,7 +1422,7 @@ mod tests {
         );
         let err = resolve_prefix(&store, "aaaa", "other").unwrap_err();
         assert!(err.contains("ambiguous prefix"), "{err}");
-        assert!(err.contains(&id_a[..ID_WIDTH]), "expected id_a in {err}");
-        assert!(err.contains(&id_b[..ID_WIDTH]), "expected id_b in {err}");
+        assert!(err.contains(&id_a[..8]), "expected id_a in {err}");
+        assert!(err.contains(&id_b[..8]), "expected id_b in {err}");
     }
 }
