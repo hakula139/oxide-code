@@ -190,9 +190,9 @@ impl SessionStore {
         Ok(out)
     }
 
-    /// Removes a session's JSONL from disk. Refuses if `session_id == live_id` so the caller
-    /// can't unlink the open append-writer's file underneath itself. Returns the underlying I/O
-    /// error verbatim if the file can't be located or removed.
+    /// Remove a session's JSONL from disk. Refuses when `session_id == live_id` as the FS-boundary
+    /// defense against unlinking the open append-writer's file. Upstream callers (resume picker
+    /// filter, `/delete` resolver) also filter the live id, so this layer catches genuine bugs.
     pub(crate) fn delete(&self, session_id: &str, live_id: &str) -> Result<()> {
         validate_session_id(session_id)?;
         if session_id == live_id {

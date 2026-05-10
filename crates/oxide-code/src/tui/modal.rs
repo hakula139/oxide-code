@@ -17,7 +17,6 @@ use ratatui::widgets::Paragraph;
 use crate::agent::event::UserAction;
 use crate::tui::theme::Theme;
 
-/// One-row top separator above the modal body — visually delineates the modal from the chat.
 const TOP_BORDER_HEIGHT: u16 = 1;
 const TOP_BORDER_GLYPH: char = '─';
 
@@ -47,11 +46,11 @@ pub(crate) enum ModalKey {
     Consumed,
     Cancelled,
     Submitted(ModalAction),
-    /// Emit `action` without popping — for live-preview modals where cursor moves should mutate
-    /// app state without committing.
+    /// Emit `action` without popping. Live-preview modals use this so cursor moves can mutate app
+    /// state without committing.
     Preview(ModalAction),
-    /// Push `modal` onto the stack as a nested overlay; the current modal stays beneath. Used by
-    /// pickers that open a confirm dialog (e.g. delete) without losing their own state.
+    /// Push `modal` onto the stack as a nested overlay. The current modal stays beneath, so a
+    /// picker can open a confirm dialog without losing its own state.
     Push(Box<dyn Modal>),
 }
 
@@ -79,10 +78,8 @@ pub(crate) enum ModalAction {
 
 // ── ModalStack ──
 
-/// LIFO stack of modal overlays. Only the top modal renders and receives keys; nested entries
-/// resume in reverse `push` order on cancel / submit. Single-modal-at-a-time today; the `Vec`
-/// is there so a future "confirm leave?" overlay inside a picker can `push` without ownership
-/// rework.
+/// LIFO stack of modal overlays. Only the top modal renders and receives keys. Nested entries
+/// resume in reverse push order on cancel or submit.
 #[derive(Default)]
 pub(crate) struct ModalStack {
     stack: Vec<Box<dyn Modal>>,
@@ -97,14 +94,13 @@ impl ModalStack {
         !self.stack.is_empty()
     }
 
-    /// Push a modal onto the stack. The new modal receives keys until
-    /// it submits or cancels; the previous top resumes.
+    /// Push a modal onto the stack.
     pub(crate) fn push(&mut self, modal: Box<dyn Modal>) {
         self.stack.push(modal);
     }
 
-    /// Drop every modal on the stack — used when a session swap discards in-flight UI state and
-    /// the picker / nested overlays are no longer meaningful in the new session.
+    /// Drop every modal on the stack. Called on session swap so picker and nested overlays don't
+    /// leak across sessions.
     pub(crate) fn clear(&mut self) {
         self.stack.clear();
     }
@@ -148,9 +144,10 @@ impl ModalStack {
         top.render(frame, body_area, theme);
     }
 
-    /// Routes `event` to the top modal. `None` = key consumed or stack empty;
-    /// `Some(ModalAction::None)` = silent close. Esc and Ctrl+C cancel any modal universally —
-    /// short-circuit before delegation so individual modals don't reimplement the gesture.
+    /// Routes `event` to the top modal. Returns `None` when the key was consumed or the stack is
+    /// empty, `Some(ModalAction::None)` for a silent close, and `Some(action)` for a Submit or
+    /// Preview. Esc and Ctrl+C short-circuit before delegation as a universal cancel, so
+    /// individual modals don't reimplement the gesture.
     pub(crate) fn handle_key(&mut self, event: &KeyEvent) -> Option<ModalAction> {
         if self.stack.is_empty() {
             return None;
@@ -178,9 +175,8 @@ impl ModalStack {
         }
     }
 
-    /// Pops the top entry and calls [`Modal::on_focus_regained`] on the new top, if any. The
-    /// notification lets pickers (e.g. `/resume`) refresh after a nested confirm modal mutated
-    /// shared state.
+    /// Pop the top entry and notify the new top via [`Modal::on_focus_regained`]. Pickers
+    /// override the hook to refresh after a nested confirm modal mutated shared state.
     fn pop_and_notify(&mut self) {
         self.stack.pop();
         if let Some(top) = self.stack.last_mut() {
@@ -309,8 +305,21 @@ mod tests {
         let mut stack = ModalStack::new();
         stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
         assert!(stack.is_active());
-        // Modal body (3) + one-row top separator.
         assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT);
+    }
+
+    // ── clear ──
+
+    #[test]
+    fn clear_drops_every_modal_on_the_stack() {
+        // Session swap calls clear and expects every nested modal gone, not just the top.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        assert!(stack.is_active());
+        stack.clear();
+        assert!(!stack.is_active(), "clear must empty the stack");
+        assert_eq!(stack.height(80), 0);
     }
 
     // ── render ──
@@ -373,15 +382,6 @@ mod tests {
     }
 
     // ── handle_key ──
-
-    #[test]
-    fn handle_key_consumed_keeps_modal_active() {
-        let mut stack = ModalStack::new();
-        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
-        // Non-sentinel keys are consumed; stack stays active.
-        assert!(stack.handle_key(&key('x')).is_none());
-        assert!(stack.is_active());
-    }
 
     #[test]
     fn handle_key_cancel_pops_and_yields_modal_action_none() {

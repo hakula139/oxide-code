@@ -1,9 +1,9 @@
-//! Destructive-action confirm modal. Currently scoped to session deletion (the only destructive
-//! action shipped); generalize when a second use case lands.
+//! Destructive-action confirm modal, currently scoped to session deletion. Generalize when a
+//! second use case lands.
 //!
-//! Pushed as a nested overlay above the resume picker (or directly from `/delete <id-prefix>`).
-//! Y / Enter performs the delete; failures stay surfaced inline so the user sees the error
-//! without losing the modal.
+//! Pushed as a nested overlay above the resume picker, or directly from `/delete <id-prefix>`.
+//! Y or Enter runs the delete. Failures latch inline so the user sees the error without losing
+//! the modal.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -28,9 +28,9 @@ const MIN_BUDGET: usize = 8;
 // ── ConfirmDeleteSessionModal ──
 
 /// Confirm-and-delete overlay. Owns the `SessionStore` clone so the unlink fires synchronously on
-/// Y without a roundtrip through the agent loop. `live_session_id` is plumbing for the store-layer
-/// refusal check; defense-in-depth at the FS boundary even though callers also filter the live id
-/// upstream.
+/// Y without a roundtrip through the agent loop. The `live_session_id` field threads the live id
+/// down to `store.delete` for its FS-boundary refusal check, even though upstream callers
+/// (resume picker filter, `/delete` resolver) already filter it.
 pub(super) struct ConfirmDeleteSessionModal {
     store: SessionStore,
     session_id: String,
@@ -67,8 +67,8 @@ impl ConfirmDeleteSessionModal {
             .unwrap_or(&self.session_id)
     }
 
-    /// Confirms the delete: runs `store.delete` and either pops with success or stays open with
-    /// an inline error. The error path is sticky until the user presses another key.
+    /// Run `store.delete`. On Ok, pop with success. On Err, stay open with a sticky inline error
+    /// that clears on the next non-confirm keypress.
     fn confirm(&mut self) -> ModalKey {
         match self.store.delete(&self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::None),
@@ -82,7 +82,6 @@ impl ConfirmDeleteSessionModal {
 
 impl Modal for ConfirmDeleteSessionModal {
     fn height(&self, _width: u16) -> u16 {
-        // title + blank + identity + metadata + blank + footer + (optional error row).
         if self.error.is_some() { 7 } else { 6 }
     }
 
@@ -122,13 +121,12 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        // Esc / Ctrl+C are intercepted at the stack level (universal cancel); we never see them.
+        // Esc and Ctrl+C are intercepted at the stack level. Any other key clears the sticky
+        // error so the user's next confirm attempt isn't shadowed by the previous failure.
         match event.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.confirm(),
             KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
             _ => {
-                // Any other press clears a sticky error so the next confirm attempt isn't
-                // overshadowed by the previous failure.
                 self.error = None;
                 ModalKey::Consumed
             }

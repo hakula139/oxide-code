@@ -25,16 +25,14 @@ impl SlashCommand for DeleteCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating in both forms: bare emits an error block; typed-arg opens a confirm modal that
-        // performs the unlink. The agent loop drops mid-turn user actions, so the gating must
-        // wait for idle even though deletion never touches live-session state.
+        // Mutating so the typed-arg confirm modal and bare-form error block aren't dropped
+        // mid-turn by the agent loop's user-action drop.
         SlashKind::Mutating
     }
 
     fn echoes_input(&self, _args: &str) -> bool {
-        // Typed `/delete <id>` is interesting in chat — the user might want to see what they
-        // tried to delete. The bare form's error block has its own context, but the line is
-        // also useful there.
+        // Echo so the user sees what they tried to delete on both the typed-arg success path
+        // and the bare-form error block.
         true
     }
 
@@ -176,11 +174,18 @@ mod tests {
 
     #[test]
     fn classify_is_always_mutating() {
-        // Both forms touch SessionStore (typed-arg pushes a modal that performs the delete; bare
-        // emits an error block). Bare's error is informational but still a state-aware response,
-        // so Mutating keeps it idle-gated alongside the active form.
+        // Both forms touch SessionStore. Typed-arg pushes a modal that performs the delete, bare
+        // emits an error block. Mutating keeps both idle-gated.
         assert_eq!(DeleteCmd.classify(""), SlashKind::Mutating);
         assert_eq!(DeleteCmd.classify("ab"), SlashKind::Mutating);
+    }
+
+    #[test]
+    fn echoes_input_is_true_for_both_bare_and_typed_arg() {
+        // The bare form's error block and the typed-arg success path both benefit from the
+        // user-typed line landing in chat for context.
+        assert!(DeleteCmd.echoes_input(""));
+        assert!(DeleteCmd.echoes_input("abcd"));
     }
 
     // ── DeleteCmd::execute ──
