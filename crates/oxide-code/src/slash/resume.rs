@@ -18,6 +18,7 @@ use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
 use crate::session::display::format_metadata_line;
 use crate::session::entry::SessionInfo;
+use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -371,43 +372,12 @@ impl SlashCommand for ResumeCmd {
     }
 }
 
-/// Match `prefix` against current-project sessions first, widen to all projects on no match.
-/// Excludes the live session id, since resuming yourself would race the open append-writer.
+/// Project the shared resolver onto a session id. `/resume` carries no live-id-specific error
+/// since the picker already filters the live session out of its rows.
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
-    let scoped = match_in_scope(store, prefix, live_id, false)?;
-    if let Some(id) = scoped {
-        return Ok(id);
-    }
-    let widened = match_in_scope(store, prefix, live_id, true)?;
-    widened.ok_or_else(|| format!("no session matching `{prefix}`"))
-}
-
-fn match_in_scope(
-    store: &SessionStore,
-    prefix: &str,
-    live_id: &str,
-    all: bool,
-) -> Result<Option<String>, String> {
-    let page = store
-        .list_paged(None, all)
-        .map_err(|e| format!("list sessions: {e:#}"))?;
-    let mut matches: Vec<String> = page
-        .into_sessions()
-        .into_iter()
-        .map(|s| s.session_id)
-        .filter(|id| id != live_id && id.starts_with(prefix))
-        .collect();
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
-        n => {
-            // Reuse the CLI's preview formatter so /resume and `ox -c` share the same message.
-            let preview = crate::session::resolver::format_session_id_preview(matches);
-            Err(format!(
-                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
-            ))
-        }
-    }
+    resolve_prefix_to_info(store, prefix, live_id)?
+        .map(|info| info.session_id)
+        .ok_or_else(|| format!("no session matching `{prefix}`"))
 }
 
 #[cfg(test)]

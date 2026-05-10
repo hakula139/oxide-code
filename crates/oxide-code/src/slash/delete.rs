@@ -9,6 +9,7 @@ use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::session::display::format_metadata_line;
 use crate::session::entry::SessionInfo;
+use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
 use crate::util::path::tildify;
 
@@ -51,7 +52,7 @@ impl SlashCommand for DeleteCmd {
         let store =
             SessionStore::open().map_err(|e| format!("session store unavailable: {e:#}"))?;
         let live_id = ctx.info.session_id.as_str();
-        let info = resolve_prefix_to_info(&store, arg, live_id)?;
+        let info = resolve_for_delete(&store, arg, live_id)?;
         ctx.open_modal(Box::new(ConfirmDeleteSessionModal::new(
             store,
             info.session_id.clone(),
@@ -65,17 +66,15 @@ impl SlashCommand for DeleteCmd {
 
 // ── Resolution ──
 
-/// Match `prefix` against current-project sessions first, widen to all projects on no match,
-/// and surface a distinct error when the prefix matches only the live id.
-fn resolve_prefix_to_info(
+/// Wrap the shared resolver with `/delete`'s live-id surface: matches against the live id surface
+/// a dedicated error so the user sees the real reason rather than the generic "no session
+/// matching" they'd get for a typo.
+fn resolve_for_delete(
     store: &SessionStore,
     prefix: &str,
     live_id: &str,
 ) -> Result<SessionInfo, String> {
-    if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
-        return Ok(info);
-    }
-    if let Some(info) = match_in_scope(store, prefix, live_id, true)? {
+    if let Some(info) = resolve_prefix_to_info(store, prefix, live_id)? {
         return Ok(info);
     }
     if live_id.starts_with(prefix) {
@@ -84,33 +83,6 @@ fn resolve_prefix_to_info(
         ));
     }
     Err(format!("no session matching `{prefix}`"))
-}
-
-fn match_in_scope(
-    store: &SessionStore,
-    prefix: &str,
-    live_id: &str,
-    all: bool,
-) -> Result<Option<SessionInfo>, String> {
-    let page = store
-        .list_paged(None, all)
-        .map_err(|e| format!("list sessions: {e:#}"))?;
-    let mut matches: Vec<SessionInfo> = page
-        .into_sessions()
-        .into_iter()
-        .filter(|info| info.session_id != live_id && info.session_id.starts_with(prefix))
-        .collect();
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
-        n => {
-            let ids: Vec<String> = matches.into_iter().map(|s| s.session_id).collect();
-            let preview = crate::session::resolver::format_session_id_preview(ids);
-            Err(format!(
-                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
-            ))
-        }
-    }
 }
 
 // ── Display Formatting ──

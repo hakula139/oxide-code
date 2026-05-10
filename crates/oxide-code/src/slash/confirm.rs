@@ -341,7 +341,7 @@ mod tests {
         for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
             let outcome = modal.handle_key(&key(stray));
             assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
-            assert!(modal.error.is_some(), "{stray:?} must not clear the latch",);
+            assert!(modal.error.is_some(), "{stray:?} must not clear the latch");
         }
 
         // A deliberate Y re-attempt clears the latch before re-running confirm; the re-attempt
