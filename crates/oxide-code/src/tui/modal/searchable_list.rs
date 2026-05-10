@@ -22,13 +22,13 @@ pub(crate) trait SearchableItem {
     fn haystack(&self) -> Cow<'_, str>;
 
     /// Paint the item body to the right of the cursor gutter (owned by the primitive). Multi-line
-    /// returns let layouts split across rows (e.g. title row + dim metadata row); the primitive
+    /// returns let layouts split across rows (e.g. title row + dim metadata row). The primitive
     /// places the gutter marker on the first line and pads subsequent lines with blanks for
     /// alignment. Length must equal [`Self::row_height`] for every instance.
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>>;
 
-    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance — the
-    /// list primitive treats this as a layout invariant when sizing its viewport.
+    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance, since
+    /// the list primitive treats this as a layout invariant when sizing its viewport.
     fn row_height() -> u16
     where
         Self: Sized,
@@ -48,7 +48,7 @@ const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
 
 /// Selectable + searchable list with a scrollable viewport. Cursor walks the **filtered** index
-/// space — out-of-filter rows are skipped by navigation.
+/// space, so out-of-filter rows are skipped by navigation.
 pub(crate) struct SearchableList<T: SearchableItem> {
     title: String,
     description: Option<String>,
@@ -56,9 +56,9 @@ pub(crate) struct SearchableList<T: SearchableItem> {
     query: String,
     /// Indices into `items` that pass the current `query`, in original item order.
     visible: Vec<usize>,
-    /// Cursor into `visible`; resets to 0 on filter changes.
+    /// Cursor into `visible`. Resets to 0 on filter changes.
     cursor: usize,
-    /// First visible row painted; tracks `cursor` to stay on screen.
+    /// First visible row painted. Tracks `cursor` to stay on screen.
     viewport_offset: usize,
     viewport_height: u16,
 }
@@ -104,7 +104,7 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
-    /// Replace all items and re-run the filter; cursor + viewport reset.
+    /// Replace all items and re-run the filter. Cursor and viewport reset to 0.
     pub(crate) fn replace_items(&mut self, items: Vec<T>) {
         self.items = items;
         self.recompute_visible();

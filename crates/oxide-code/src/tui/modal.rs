@@ -22,8 +22,8 @@ const TOP_BORDER_GLYPH: char = '─';
 
 // ── Modal Trait ──
 
-/// Focus-grabbing UI overlay. `Send` because App lives on tokio; not `Sync` — modals own mutable
-/// state and are exclusively driven from the App task.
+/// Focus-grabbing UI overlay. `Send` because App lives on tokio. Not `Sync` because modals own
+/// mutable state and are exclusively driven from the App task.
 pub(crate) trait Modal: Send {
     /// Total rows the modal needs at the given terminal width, before the wrapping separator.
     fn height(&self, width: u16) -> u16;
@@ -31,11 +31,11 @@ pub(crate) trait Modal: Send {
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme);
 
     /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted
-    /// a typed action; the stack pops on cancel / submit.
+    /// a typed action. The stack pops on cancel or submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
 
     /// Hook called by the stack when this modal becomes the top entry again after a nested modal
-    /// pops. Default no-op; pickers that need to refresh their data after a sub-modal mutated
+    /// pops. Default no-op. Pickers that need to refresh their data after a sub-modal mutated
     /// shared state (e.g. the resume picker reloading after delete) override this.
     fn on_focus_regained(&mut self) {}
 }
@@ -55,7 +55,7 @@ pub(crate) enum ModalKey {
 }
 
 /// Hand-rolled because `Box<dyn Modal>` can't satisfy `Debug` without forcing every impl to derive
-/// it. The `Push` arm prints opaquely; the rest delegate to their inner [`ModalAction`].
+/// it. `Push` prints opaquely. Other variants delegate to their inner [`ModalAction`].
 impl std::fmt::Debug for ModalKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -72,7 +72,7 @@ impl std::fmt::Debug for ModalKey {
 pub(crate) enum ModalAction {
     /// No dispatch needed (live-preview modals that already mutated UI state).
     None,
-    /// Forward a [`UserAction`] to the agent loop — shares the keyboard-typed dispatch path.
+    /// Forward a [`UserAction`] to the agent loop, sharing the keyboard-typed dispatch path.
     User(UserAction),
 }
 

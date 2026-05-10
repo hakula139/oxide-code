@@ -48,9 +48,9 @@ struct SessionRow {
     /// Rendered as "N msgs" so the user can see session weight at a glance.
     message_count: u32,
     git_branch: Option<String>,
-    /// `Some` only when the picker scope is widened to all projects — the metadata column then
-    /// surfaces the project path so the user can disambiguate. Scoped picks already share a
-    /// project, so painting it would be noise.
+    /// `Some` only when the picker scope is widened to all projects, so the metadata column can
+    /// surface the project path for disambiguation. Scoped picks already share a project, so
+    /// painting it would be noise.
     project: Option<String>,
     haystack: String,
 }
@@ -62,8 +62,8 @@ impl SessionRow {
             .as_ref()
             .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
         let project_path = tildify(Path::new(&info.cwd));
-        // Project name participates in search only when the user can see it; in scoped mode every
-        // row shares the same project, so substring-matching against it just confuses the filter.
+        // Project participates in search only when the user can see it. In scoped mode every row
+        // shares the same project, so substring-matching against it just confuses the filter.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
         } else {
@@ -185,7 +185,7 @@ impl ResumePicker {
             Some(row) => ModalKey::Submitted(ModalAction::User(UserAction::Resume {
                 session_id: row.session_id.clone(),
             })),
-            // Stay open so the user can Tab the scope or Esc out — silent dismissal hides why
+            // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
             None => ModalKey::Consumed,
         }
@@ -256,7 +256,7 @@ impl Modal for ResumePicker {
             width: area.width,
             height: 1,
         };
-        // Load error owns the footer when set — failure must not look like "0 sessions".
+        // Load error owns the footer when set, so failure doesn't look like "0 sessions".
         let footer = if let Some(err) = &self.load_error {
             Line::from(Span::styled(format!("! {err}"), theme.error()))
         } else {
@@ -293,7 +293,7 @@ impl Modal for ResumePicker {
                 self.list.pop_char();
                 ModalKey::Consumed
             }
-            // Both gestures open the same confirm — the footer hint advertises Ctrl+D, but the
+            // Both gestures open the same confirm. The footer hint advertises Ctrl+D, but the
             // dedicated Delete key (when the keyboard has one) is convenient muscle memory.
             KeyCode::Delete => self.start_delete_confirm(),
             KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -341,7 +341,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating in both forms: bare opens a picker that submits a Resume action; typed-arg
+        // Mutating in both forms: bare opens a picker that submits a Resume action, typed-arg
         // forwards Resume directly. The agent loop drops mid-turn user actions, so even the
         // picker form must wait for idle.
         SlashKind::Mutating
@@ -371,8 +371,8 @@ impl SlashCommand for ResumeCmd {
     }
 }
 
-/// Match `prefix` against current-project sessions first; widen to all projects on no match.
-/// Excludes the live session id — resuming yourself would race the open append-writer.
+/// Match `prefix` against current-project sessions first, widen to all projects on no match.
+/// Excludes the live session id, since resuming yourself would race the open append-writer.
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
     let scoped = match_in_scope(store, prefix, live_id, false)?;
     if let Some(id) = scoped {
