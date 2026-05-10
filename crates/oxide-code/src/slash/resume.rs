@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use time::UtcOffset;
 
+use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
@@ -85,6 +86,32 @@ impl SessionRow {
     fn id_prefix(&self) -> &str {
         self.session_id.get(..ID_WIDTH).unwrap_or(&self.session_id)
     }
+
+    /// Single-line metadata summary used by both the picker row and the delete-confirm modal.
+    /// Shape: `{id_prefix} · {when} · {N msgs} · {branch} · {project}`. Empty fields are omitted.
+    fn metadata_line(&self) -> String {
+        use std::fmt::Write as _;
+        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
+        let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
+        let mut meta = format!("{} · {when}", self.id_prefix());
+        if self.message_count > 0 {
+            let unit = if self.message_count == 1 {
+                "msg"
+            } else {
+                "msgs"
+            };
+            _ = write!(meta, "{META_SEPARATOR}{} {unit}", self.message_count);
+        }
+        if let Some(branch) = self.git_branch.as_deref() {
+            meta.push_str(META_SEPARATOR);
+            meta.push_str(branch);
+        }
+        if let Some(project) = self.project.as_deref() {
+            meta.push_str(META_SEPARATOR);
+            meta.push_str(project);
+        }
+        meta
+    }
 }
 
 impl SearchableItem for SessionRow {
@@ -103,29 +130,10 @@ impl SearchableItem for SessionRow {
             truncate_to_width(&self.title, budget),
             title_style,
         ));
-
-        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
-        let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
-        let mut meta = format!("{} · {}", self.id_prefix(), when);
-        if self.message_count > 0 {
-            use std::fmt::Write as _;
-            let unit = if self.message_count == 1 {
-                "msg"
-            } else {
-                "msgs"
-            };
-            _ = write!(meta, "{META_SEPARATOR}{} {unit}", self.message_count);
-        }
-        if let Some(branch) = self.git_branch.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(branch);
-        }
-        if let Some(project) = self.project.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(project);
-        }
-        let meta_line = Line::from(Span::styled(truncate_to_width(&meta, budget), theme.dim()));
-
+        let meta_line = Line::from(Span::styled(
+            truncate_to_width(&self.metadata_line(), budget),
+            theme.dim(),
+        ));
         vec![title_line, meta_line, Line::default()]
     }
 
@@ -235,6 +243,22 @@ impl ResumePicker {
         }
     }
 
+    /// Builds and pushes the [`ConfirmDeleteSessionModal`] for the cursor row. No-op (key
+    /// consumed silently) when the list is empty, so an accidental Ctrl+D / Delete with no
+    /// row selected doesn't surface anything misleading.
+    fn start_delete_confirm(&self) -> ModalKey {
+        let Some(row) = self.list.selected() else {
+            return ModalKey::Consumed;
+        };
+        ModalKey::Push(Box::new(ConfirmDeleteSessionModal::new(
+            self.store.clone(),
+            row.session_id.clone(),
+            row.title.clone(),
+            row.metadata_line(),
+            self.live_session_id.clone(),
+        )))
+    }
+
     fn footer_text(&self) -> String {
         let scope = if self.all {
             "all projects"
@@ -254,7 +278,10 @@ impl ResumePicker {
                 plural = if self.total == 1 { "" } else { "s" },
             )
         };
-        format!("{count} · scope: {scope} · Tab to toggle · Enter to resume · Esc to cancel")
+        format!(
+            "{count} · scope: {scope} · Tab to toggle · Enter to resume · Ctrl+D to delete · \
+             Esc to cancel"
+        )
     }
 }
 
@@ -318,6 +345,12 @@ impl Modal for ResumePicker {
                 self.list.pop_char();
                 ModalKey::Consumed
             }
+            // Both gestures open the same confirm — the footer hint advertises Ctrl+D, but the
+            // dedicated Delete key (when the keyboard has one) is convenient muscle memory.
+            KeyCode::Delete => self.start_delete_confirm(),
+            KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.start_delete_confirm()
+            }
             KeyCode::Char(c) if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 if c == 'u' {
                     self.list.set_query(String::new());
@@ -330,6 +363,12 @@ impl Modal for ResumePicker {
             }
             _ => ModalKey::Consumed,
         }
+    }
+
+    fn on_focus_regained(&mut self) {
+        // Refresh after the confirm modal pops — the deleted row (if any) drops from view, and
+        // any other on-disk change since the picker opened lands too.
+        self.reload();
     }
 }
 
@@ -872,7 +911,8 @@ mod tests {
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert_eq!(
             picker.footer_text(),
-            "1 session · scope: current project · Tab to toggle · Enter to resume · Esc to cancel",
+            "1 session · scope: current project · Tab to toggle · Enter to resume · \
+             Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir2, empty_store) = isolated_store();
@@ -880,7 +920,8 @@ mod tests {
         empty.handle_key(&key(KeyCode::Tab));
         assert_eq!(
             empty.footer_text(),
-            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · Esc to cancel",
+            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · \
+             Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir3, two_store) = isolated_store();
@@ -1158,6 +1199,73 @@ mod tests {
         event.modifiers = KeyModifiers::CONTROL;
         picker.handle_key(&event);
         assert_eq!(picker.list.query(), "");
+    }
+
+    #[test]
+    fn ctrl_d_pushes_confirm_modal_for_cursor_row() {
+        // Both gestures route to the same confirm push — verifies the dual-binding contract from
+        // the picker footer hint.
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Fix auth"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        let outcome = picker.handle_key(&ctrl_d);
+        assert!(
+            matches!(outcome, ModalKey::Push(_)),
+            "Ctrl+D must push the confirm modal; got {outcome:?}",
+        );
+
+        let outcome = picker.handle_key(&key(KeyCode::Delete));
+        assert!(
+            matches!(outcome, ModalKey::Push(_)),
+            "Delete key must push the confirm modal; got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn ctrl_d_with_no_rows_consumes_silently_instead_of_pushing() {
+        // No selection → no row identity to confirm against. Better to consume than to surface a
+        // confused-looking "delete (nothing)?" modal.
+        let (_dir, store) = isolated_store();
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        let outcome = picker.handle_key(&ctrl_d);
+        assert!(matches!(outcome, ModalKey::Consumed));
+    }
+
+    // ── ResumePicker::on_focus_regained ──
+
+    #[test]
+    fn on_focus_regained_reloads_rows_so_an_externally_deleted_session_disappears() {
+        let (_dir, store) = isolated_store();
+        let id_a = stamped_id(0x11);
+        let id_b = stamped_id(0x22);
+        for (id, title) in [(&id_a, "first"), (&id_b, "second")] {
+            seed_session(
+                &store,
+                id,
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+        }
+        let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        assert_eq!(picker.total, 2, "both seeded rows present");
+
+        // Simulate an external mutation (the confirm modal's delete) and trigger the hook.
+        store.delete(&id_a, "live-session-id").unwrap();
+        picker.on_focus_regained();
+        assert_eq!(picker.total, 1, "deleted row drops on reload");
     }
 
     // ── ResumeCmd ──
