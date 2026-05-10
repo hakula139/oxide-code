@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use super::clear::ClearCmd;
 use super::config::ConfigCmd;
 use super::context::SlashContext;
+use super::delete::DeleteCmd;
 use super::diff::DiffCmd;
 use super::effort::EffortCmd;
 use super::help::HelpCmd;
@@ -80,8 +81,8 @@ pub(crate) trait SlashCommand: Sync {
 
 /// Alphabetical for stable `/help` and empty-query popup ordering.
 pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
-    &ClearCmd, &ConfigCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd, &RenameCmd,
-    &ResumeCmd, &StatusCmd, &ThemeCmd,
+    &ClearCmd, &ConfigCmd, &DeleteCmd, &DiffCmd, &EffortCmd, &HelpCmd, &InitCmd, &ModelCmd,
+    &RenameCmd, &ResumeCmd, &StatusCmd, &ThemeCmd,
 ];
 
 /// Resolves `name` against canonical names first, then aliases.

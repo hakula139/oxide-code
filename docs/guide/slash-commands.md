@@ -10,6 +10,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | ------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
 | `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
+| `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.     |
 | `/diff`                                     | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
 | `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
 | `/help`                                     | Open a read-only modal listing available commands.                                   |
@@ -26,7 +27,7 @@ Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-State-mutating commands (`/clear`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
+State-mutating commands (`/clear`, `/delete`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
 
 ## Model and Effort
 
@@ -39,6 +40,8 @@ Bare `/model` and `/effort` open pickers; both apply on Enter, cancel on Esc.
 `/rename` opens a modal pre-filled with the current title; `/rename <title>` sets it directly. The chosen title sticks and replaces the auto-generated AI title for the rest of the session.
 
 `/resume` opens a searchable session picker. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session. `/resume <id-prefix>` jumps directly, and ambiguous prefixes list candidates. Switching sessions preserves the running TUI: chat repopulates and the next prompt continues that thread.
+
+Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. Only finalized sessions can be deleted.
 
 ## Theme
 

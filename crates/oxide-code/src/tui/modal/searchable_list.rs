@@ -22,13 +22,13 @@ pub(crate) trait SearchableItem {
     fn haystack(&self) -> Cow<'_, str>;
 
     /// Paint the item body to the right of the cursor gutter (owned by the primitive). Multi-line
-    /// returns let layouts split across rows (e.g. title row + dim metadata row); the primitive
+    /// returns let layouts split across rows (e.g. title row + dim metadata row). The primitive
     /// places the gutter marker on the first line and pads subsequent lines with blanks for
     /// alignment. Length must equal [`Self::row_height`] for every instance.
     fn render(&self, width: u16, is_cursor: bool, theme: &Theme) -> Vec<Line<'static>>;
 
-    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance — the
-    /// list primitive treats this as a layout invariant when sizing its viewport.
+    /// Constant terminal-rows per item. Must match `render(...).len()` for every instance, since
+    /// the list primitive treats this as a layout invariant when sizing its viewport.
     fn row_height() -> u16
     where
         Self: Sized,
@@ -48,7 +48,7 @@ const SEARCH_ROW_HEIGHT: u16 = 1;
 const SECTION_GAP: u16 = 1;
 
 /// Selectable + searchable list with a scrollable viewport. Cursor walks the **filtered** index
-/// space — out-of-filter rows are skipped by navigation.
+/// space, so out-of-filter rows are skipped by navigation.
 pub(crate) struct SearchableList<T: SearchableItem> {
     title: String,
     description: Option<String>,
@@ -56,9 +56,9 @@ pub(crate) struct SearchableList<T: SearchableItem> {
     query: String,
     /// Indices into `items` that pass the current `query`, in original item order.
     visible: Vec<usize>,
-    /// Cursor into `visible`; resets to 0 on filter changes.
+    /// Cursor into `visible`. Resets to 0 on filter changes.
     cursor: usize,
-    /// First visible row painted; tracks `cursor` to stay on screen.
+    /// First visible row painted. Tracks `cursor` to stay on screen.
     viewport_offset: usize,
     viewport_height: u16,
 }
@@ -104,10 +104,22 @@ impl<T: SearchableItem> SearchableList<T> {
         }
     }
 
-    /// Replace all items and re-run the filter; cursor + viewport reset.
+    /// Replace all items and re-run the filter. Cursor and viewport reset to 0.
     pub(crate) fn replace_items(&mut self, items: Vec<T>) {
         self.items = items;
         self.recompute_visible();
+    }
+
+    /// Seek the cursor to the first visible row matching `f`, scrolling it into view. No-op if no
+    /// row matches. Pairs with [`Self::replace_items`] to keep the cursor pinned across a refresh.
+    pub(crate) fn cursor_to<F: Fn(&T) -> bool>(&mut self, f: F) {
+        for (vi, &item_idx) in self.visible.iter().enumerate() {
+            if self.items.get(item_idx).is_some_and(&f) {
+                self.cursor = vi;
+                self.scroll_into_view();
+                return;
+            }
+        }
     }
 
     pub(crate) fn selected(&self) -> Option<&T> {
@@ -250,7 +262,11 @@ impl<T: SearchableItem> SearchableList<T> {
 
         if self.visible.is_empty() && !self.query.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("    no matches for `{}`", self.query),
+                format!(
+                    "{}no matches for `{}`",
+                    " ".repeat(SEARCH_PROMPT_WIDTH.into()),
+                    self.query,
+                ),
                 theme.dim(),
             )));
         }
@@ -420,6 +436,47 @@ mod tests {
         let mut l = list(vec![FakeItem::new("a")]);
         l.pop_char();
         assert_eq!(l.query(), "");
+    }
+
+    // ── cursor_to ──
+
+    #[test]
+    fn cursor_to_seeks_to_first_visible_row_matching_predicate() {
+        let mut l = list(vec![
+            FakeItem::new("alpha"),
+            FakeItem::new("beta"),
+            FakeItem::new("gamma"),
+        ]);
+        l.cursor_to(|item| item.haystack == "gamma");
+        assert_eq!(l.cursor_index(), 2);
+        l.cursor_to(|item| item.haystack == "alpha");
+        assert_eq!(l.cursor_index(), 0);
+    }
+
+    #[test]
+    fn cursor_to_is_a_noop_when_no_row_matches() {
+        let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
+        l.select_next();
+        assert_eq!(l.cursor_index(), 1);
+        l.cursor_to(|item| item.haystack == "missing");
+        assert_eq!(l.cursor_index(), 1, "no match leaves cursor untouched");
+    }
+
+    #[test]
+    fn cursor_to_walks_only_filtered_rows() {
+        let mut l = list(vec![
+            FakeItem::new("apple"),
+            FakeItem::new("BERRY"),
+            FakeItem::new("apricot"),
+        ]);
+        l.set_query("ap".to_owned());
+        assert_eq!(l.visible_len(), 2, "berry filtered out");
+        l.cursor_to(|item| item.haystack == "BERRY");
+        assert_eq!(
+            l.cursor_index(),
+            0,
+            "filtered-out row never receives the cursor"
+        );
     }
 
     // ── replace_items ──

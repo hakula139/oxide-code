@@ -2,6 +2,9 @@
 /target/
 /node_modules/
 
+# cargo insta pending-review files
+*.snap.new
+
 # Python
 /.venv/
 

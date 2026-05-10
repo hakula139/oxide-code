@@ -12,10 +12,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use time::UtcOffset;
 
+use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
+use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
+use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -28,14 +31,10 @@ use crate::util::text::truncate_to_width;
 const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
-const UNTITLED_MARKER: &str = "(untitled)";
-const ID_WIDTH: usize = 8;
 /// Each row paints title + metadata + a trailing blank for breathing room between sessions.
 const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
 const TITLE_FLOOR: usize = 8;
-/// Visual separator between metadata segments.
-const META_SEPARATOR: &str = " · ";
 
 // ── SessionRow ──
 
@@ -49,22 +48,19 @@ struct SessionRow {
     /// Rendered as "N msgs" so the user can see session weight at a glance.
     message_count: u32,
     git_branch: Option<String>,
-    /// `Some` only when the picker scope is widened to all projects — the metadata column then
-    /// surfaces the project path so the user can disambiguate. Scoped picks already share a
-    /// project, so painting it would be noise.
+    /// `Some` only when the picker scope is widened to all projects, so the metadata column can
+    /// surface the project path for disambiguation. Scoped picks already share a project, so
+    /// painting it would be noise.
     project: Option<String>,
     haystack: String,
 }
 
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = info
-            .title
-            .as_ref()
-            .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
+        let title = display_title(&info);
         let project_path = tildify(Path::new(&info.cwd));
-        // Project name participates in search only when the user can see it; in scoped mode every
-        // row shares the same project, so substring-matching against it just confuses the filter.
+        // Project participates in search only when the user can see it. In scoped mode every row
+        // shares the same project, so substring-matching against it just confuses the filter.
         let haystack = if show_project {
             format!("{} {} {}", info.session_id, title, project_path)
         } else {
@@ -82,8 +78,16 @@ impl SessionRow {
         }
     }
 
-    fn id_prefix(&self) -> &str {
-        self.session_id.get(..ID_WIDTH).unwrap_or(&self.session_id)
+    /// Single-line metadata summary used by both the picker row and the delete-confirm modal.
+    fn metadata_line(&self) -> String {
+        format_metadata_line(
+            &self.session_id,
+            self.last_active_at,
+            self.local_offset,
+            self.message_count,
+            self.git_branch.as_deref(),
+            self.project.as_deref(),
+        )
     }
 }
 
@@ -103,66 +107,15 @@ impl SearchableItem for SessionRow {
             truncate_to_width(&self.title, budget),
             title_style,
         ));
-
-        let now = time::OffsetDateTime::now_utc().to_offset(self.local_offset);
-        let when = format_relative_time(self.last_active_at.to_offset(self.local_offset), now);
-        let mut meta = format!("{} · {}", self.id_prefix(), when);
-        if self.message_count > 0 {
-            use std::fmt::Write as _;
-            let unit = if self.message_count == 1 {
-                "msg"
-            } else {
-                "msgs"
-            };
-            _ = write!(meta, "{META_SEPARATOR}{} {unit}", self.message_count);
-        }
-        if let Some(branch) = self.git_branch.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(branch);
-        }
-        if let Some(project) = self.project.as_deref() {
-            meta.push_str(META_SEPARATOR);
-            meta.push_str(project);
-        }
-        let meta_line = Line::from(Span::styled(truncate_to_width(&meta, budget), theme.dim()));
-
+        let meta_line = Line::from(Span::styled(
+            truncate_to_width(&self.metadata_line(), budget),
+            theme.dim(),
+        ));
         vec![title_line, meta_line, Line::default()]
     }
 
     fn row_height() -> u16 {
         ROW_HEIGHT
-    }
-}
-
-/// Coarse-grain "N seconds/minutes/hours/days ago"; falls back to ISO date past 30 days so "327
-/// days ago" doesn't displace a more recognizable absolute reference. Negative deltas (clock skew,
-/// future stamps from another machine) collapse to 0 to keep the singular/plural axis sane.
-fn format_relative_time(ts: time::OffsetDateTime, now: time::OffsetDateTime) -> String {
-    let secs = (now - ts).whole_seconds().max(0);
-    if secs < 60 {
-        return format!("{secs} {} ago", pluralize(secs, "second"));
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins} {} ago", pluralize(mins, "minute"));
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{hours} {} ago", pluralize(hours, "hour"));
-    }
-    let days = hours / 24;
-    if days < 30 {
-        return format!("{days} {} ago", pluralize(days, "day"));
-    }
-    ts.format(time::macros::format_description!("[year]-[month]-[day]"))
-        .expect("static `[year]-[month]-[day]` description never fails on a valid `OffsetDateTime`")
-}
-
-fn pluralize(n: i64, unit: &str) -> String {
-    if n == 1 {
-        unit.to_owned()
-    } else {
-        format!("{unit}s")
     }
 }
 
@@ -229,10 +182,26 @@ impl ResumePicker {
             Some(row) => ModalKey::Submitted(ModalAction::User(UserAction::Resume {
                 session_id: row.session_id.clone(),
             })),
-            // Stay open so the user can Tab the scope or Esc out — silent dismissal hides why
+            // Stay open so the user can Tab the scope or Esc out. Silent dismissal hides why
             // nothing happened.
             None => ModalKey::Consumed,
         }
+    }
+
+    /// Builds and pushes the [`ConfirmDeleteSessionModal`] for the cursor row. No-op (key
+    /// consumed silently) when the list is empty, so an accidental Ctrl+D / Delete with no
+    /// row selected doesn't surface anything misleading.
+    fn start_delete_confirm(&self) -> ModalKey {
+        let Some(row) = self.list.selected() else {
+            return ModalKey::Consumed;
+        };
+        ModalKey::Push(Box::new(ConfirmDeleteSessionModal::new(
+            self.store.clone(),
+            row.session_id.clone(),
+            row.title.clone(),
+            row.metadata_line(),
+            self.live_session_id.clone(),
+        )))
     }
 
     fn footer_text(&self) -> String {
@@ -254,7 +223,10 @@ impl ResumePicker {
                 plural = if self.total == 1 { "" } else { "s" },
             )
         };
-        format!("{count} · scope: {scope} · Tab to toggle · Enter to resume · Esc to cancel")
+        format!(
+            "{count} · scope: {scope} · Tab to toggle · Enter to resume · Ctrl+D to delete · \
+             Esc to cancel"
+        )
     }
 }
 
@@ -281,7 +253,7 @@ impl Modal for ResumePicker {
             width: area.width,
             height: 1,
         };
-        // Load error owns the footer when set — failure must not look like "0 sessions".
+        // Load error owns the footer when set, so failure doesn't look like "0 sessions".
         let footer = if let Some(err) = &self.load_error {
             Line::from(Span::styled(format!("! {err}"), theme.error()))
         } else {
@@ -318,6 +290,12 @@ impl Modal for ResumePicker {
                 self.list.pop_char();
                 ModalKey::Consumed
             }
+            // Both gestures open the same confirm. The footer hint advertises Ctrl+D, but the
+            // dedicated Delete key (when the keyboard has one) is convenient muscle memory.
+            KeyCode::Delete => self.start_delete_confirm(),
+            KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.start_delete_confirm()
+            }
             KeyCode::Char(c) if event.modifiers.contains(KeyModifiers::CONTROL) => {
                 if c == 'u' {
                     self.list.set_query(String::new());
@@ -329,6 +307,15 @@ impl Modal for ResumePicker {
                 ModalKey::Consumed
             }
             _ => ModalKey::Consumed,
+        }
+    }
+
+    fn on_focus_regained(&mut self) {
+        // Re-seek the cursor after reload so cancel-delete keeps the user on the same row.
+        let prev_id = self.list.selected().map(|r| r.session_id.clone());
+        self.reload();
+        if let Some(id) = prev_id {
+            self.list.cursor_to(|row| row.session_id == id);
         }
     }
 }
@@ -351,7 +338,7 @@ impl SlashCommand for ResumeCmd {
     }
 
     fn classify(&self, _args: &str) -> SlashKind {
-        // Mutating in both forms: bare opens a picker that submits a Resume action; typed-arg
+        // Mutating in both forms: bare opens a picker that submits a Resume action, typed-arg
         // forwards Resume directly. The agent loop drops mid-turn user actions, so even the
         // picker form must wait for idle.
         SlashKind::Mutating
@@ -381,70 +368,30 @@ impl SlashCommand for ResumeCmd {
     }
 }
 
-/// Match `prefix` against current-project sessions first; widen to all projects on no match.
-/// Excludes the live session id — resuming yourself would race the open append-writer.
+/// Project the shared resolver onto a session id. `/resume` carries no live-id-specific error
+/// since the picker already filters the live session out of its rows.
 fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<String, String> {
-    let scoped = match_in_scope(store, prefix, live_id, false)?;
-    if let Some(id) = scoped {
-        return Ok(id);
-    }
-    let widened = match_in_scope(store, prefix, live_id, true)?;
-    widened.ok_or_else(|| format!("no session matching `{prefix}`"))
-}
-
-fn match_in_scope(
-    store: &SessionStore,
-    prefix: &str,
-    live_id: &str,
-    all: bool,
-) -> Result<Option<String>, String> {
-    let page = store
-        .list_paged(None, all)
-        .map_err(|e| format!("list sessions: {e:#}"))?;
-    let mut matches: Vec<String> = page
-        .into_sessions()
-        .into_iter()
-        .map(|s| s.session_id)
-        .filter(|id| id != live_id && id.starts_with(prefix))
-        .collect();
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(matches.pop()),
-        n => {
-            // Reuse the CLI's preview formatter so /resume and `ox -c` share the same message.
-            let preview = crate::session::resolver::format_session_id_preview(matches);
-            Err(format!(
-                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
-            ))
-        }
-    }
+    resolve_prefix_to_info(store, prefix, live_id)?
+        .map(|info| info.session_id)
+        .ok_or_else(|| format!("no session matching `{prefix}`"))
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use temp_env::with_var;
     use time::OffsetDateTime;
     use time::macros::datetime;
 
     use super::*;
+    use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
     use crate::session::store::{seed_test_session, test_store};
-    use crate::slash::test_session_info;
+    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::components::chat::ChatView;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
-    }
-
-    fn stamped_id(byte: u8) -> String {
-        let s = format!("{byte:02x}");
-        // 36-char UUID-ish: `aabb1111-2222-3333-4444-555566667777`. 32 hex digits + 4 dashes.
-        format!(
-            "{s}{s}1111-2222-3333-4444-{s}{s}{s}{s}{s}{s}",
-            s = s.repeat(2),
-        )
     }
 
     fn seed_session(
@@ -461,13 +408,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         (dir, store)
-    }
-
-    fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
-        let dir = tempfile::tempdir().unwrap();
-        with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-            f(dir.path())
-        })
     }
 
     // ── SessionRow ──
@@ -524,7 +464,6 @@ mod tests {
             datetime!(2026-04-18 09:00:00 UTC),
         );
         let row = SessionRow::from_info(absent, UtcOffset::UTC, true);
-        assert_eq!(row.id_prefix().len(), ID_WIDTH);
         assert_eq!(row.title, UNTITLED_MARKER);
         assert!(row.haystack.contains(&row.session_id));
         assert!(row.haystack.contains("/work/oxide"));
@@ -583,7 +522,10 @@ mod tests {
         let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let meta_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(title_text.contains("Fix auth"), "title row: {title_text}");
-        assert!(meta_text.contains(row.id_prefix()), "meta row: {meta_text}");
+        assert!(
+            meta_text.contains(&row.session_id[..8]),
+            "meta row: {meta_text}"
+        );
         assert!(
             meta_text.contains(" ago") || meta_text.contains('-'),
             "meta row must carry a relative time or ISO date: {meta_text}",
@@ -694,57 +636,6 @@ mod tests {
             "no count when exit is missing: {meta}"
         );
         assert!(!meta.contains("msg"), "no singular either: {meta}");
-    }
-
-    // ── format_relative_time ──
-
-    #[test]
-    fn format_relative_time_pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
-        let now = datetime!(2026-05-08 12:00:00 UTC);
-        // Singular at the 1-of-each boundary, plural everywhere else.
-        assert_eq!(
-            format_relative_time(now - time::Duration::seconds(1), now),
-            "1 second ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::seconds(3), now),
-            "3 seconds ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::minutes(1), now),
-            "1 minute ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::minutes(2), now),
-            "2 minutes ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::hours(1), now),
-            "1 hour ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::hours(5), now),
-            "5 hours ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(1), now),
-            "1 day ago",
-        );
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(3), now),
-            "3 days ago",
-        );
-        // 30+ days falls back to the absolute ISO date.
-        assert_eq!(
-            format_relative_time(now - time::Duration::days(60), now),
-            "2026-03-09",
-        );
-        // Negative delta (future stamp / clock skew) collapses to "0 seconds ago" rather than
-        // emitting "-30 seconds ago".
-        assert_eq!(
-            format_relative_time(now + time::Duration::seconds(30), now),
-            "0 seconds ago",
-        );
     }
 
     // ── ResumePicker::new ──
@@ -872,7 +763,8 @@ mod tests {
         let picker = ResumePicker::new(store, "live-session-id".to_owned());
         assert_eq!(
             picker.footer_text(),
-            "1 session · scope: current project · Tab to toggle · Enter to resume · Esc to cancel",
+            "1 session · scope: current project · Tab to toggle · Enter to resume · \
+             Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir2, empty_store) = isolated_store();
@@ -880,7 +772,8 @@ mod tests {
         empty.handle_key(&key(KeyCode::Tab));
         assert_eq!(
             empty.footer_text(),
-            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · Esc to cancel",
+            "0 sessions · scope: all projects · Tab to toggle · Enter to resume · \
+             Ctrl+D to delete · Esc to cancel",
         );
 
         let (_dir3, two_store) = isolated_store();
@@ -1102,7 +995,8 @@ mod tests {
 
     #[test]
     fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Bare picker stays scoped; Tab widens AND preserves the typed filter.
+        // Bare picker stays scoped; Tab widens, preserves the typed filter, AND keeps the
+        // live-session out of the widened result so the user can never resume themselves.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_session(
@@ -1120,15 +1014,26 @@ mod tests {
             1,
             datetime!(2026-04-18 09:01:00 UTC),
         );
+        let live_id = stamped_id(0x33);
+        seed_session(
+            &other,
+            &live_id,
+            Some("live-foreign"),
+            1,
+            datetime!(2026-04-18 09:02:00 UTC),
+        );
 
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let mut picker = ResumePicker::new(store, live_id.clone());
         assert_eq!(picker.total, 1, "scoped: only the home project");
         for c in "11".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.query(), "11");
         picker.handle_key(&key(KeyCode::Tab));
-        assert_eq!(picker.total, 2, "Tab widens to all projects");
+        assert_eq!(
+            picker.total, 2,
+            "Tab widens to all projects but excludes the live session",
+        );
         assert_eq!(
             picker.list.query(),
             "11",
@@ -1158,6 +1063,174 @@ mod tests {
         event.modifiers = KeyModifiers::CONTROL;
         picker.handle_key(&event);
         assert_eq!(picker.list.query(), "");
+    }
+
+    #[test]
+    fn ctrl_d_pushes_confirm_modal_for_cursor_row() {
+        // Both gestures route to the same confirm push — verifies the dual-binding contract from
+        // the picker footer hint.
+        let (_dir, store) = isolated_store();
+        seed_session(
+            &store,
+            &stamped_id(0x11),
+            Some("Fix auth"),
+            3,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        let outcome = picker.handle_key(&ctrl_d);
+        assert!(
+            matches!(outcome, ModalKey::Push(_)),
+            "Ctrl+D must push the confirm modal; got {outcome:?}",
+        );
+
+        let outcome = picker.handle_key(&key(KeyCode::Delete));
+        assert!(
+            matches!(outcome, ModalKey::Push(_)),
+            "Delete key must push the confirm modal; got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn ctrl_d_with_no_rows_consumes_silently_instead_of_pushing() {
+        // No selection → no row identity to confirm against. Better to consume than to surface a
+        // confused-looking "delete (nothing)?" modal.
+        let (_dir, store) = isolated_store();
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        let outcome = picker.handle_key(&ctrl_d);
+        assert!(matches!(outcome, ModalKey::Consumed));
+    }
+
+    // ── ResumePicker::on_focus_regained ──
+
+    #[test]
+    fn on_focus_regained_reloads_rows_so_an_externally_deleted_session_disappears() {
+        let (_dir, store) = isolated_store();
+        let id_a = stamped_id(0x11);
+        let id_b = stamped_id(0x22);
+        for (id, title) in [(&id_a, "first"), (&id_b, "second")] {
+            seed_session(
+                &store,
+                id,
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+        }
+        let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        assert_eq!(picker.total, 2, "both seeded rows present");
+
+        store.delete(&id_a, "live-session-id").unwrap();
+        picker.on_focus_regained();
+        assert_eq!(picker.total, 1, "deleted row drops on reload");
+    }
+
+    #[test]
+    fn on_focus_regained_preserves_cursor_when_row_is_still_present() {
+        // Cancel-delete must leave the user on the row they were inspecting; without re-seeking
+        // after reload, replace_items would yank the cursor back to row 0.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "second"), (0x33, "third")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        picker.handle_key(&key(KeyCode::Down));
+        let pinned = picker.list.selected().unwrap().session_id.clone();
+
+        picker.on_focus_regained();
+        let after = picker.list.selected().unwrap().session_id.clone();
+        assert_eq!(
+            after, pinned,
+            "cursor must remain on the previously selected row"
+        );
+    }
+
+    #[test]
+    fn on_focus_regained_falls_back_to_top_when_previously_selected_row_was_deleted() {
+        // If the row is gone, cursor_to is a no-op and the cursor stays at the post-reload zero.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "doomed"), (0x33, "third")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let target = stamped_id(0x22);
+        let mut picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        picker.list.cursor_to(|row| row.session_id == target);
+        assert_eq!(picker.list.selected().unwrap().session_id, target);
+
+        store.delete(&target, "live-session-id").unwrap();
+        picker.on_focus_regained();
+        assert_eq!(picker.total, 2, "deleted row dropped");
+        assert_ne!(
+            picker.list.selected().unwrap().session_id,
+            target,
+            "cursor moved off the deleted row",
+        );
+        assert_eq!(
+            picker.list.cursor_index(),
+            0,
+            "cursor lands at row 0, the post-reload default",
+        );
+    }
+
+    #[test]
+    fn ctrl_d_then_y_through_modal_stack_unlinks_the_session() {
+        // End-to-end: picker on the stack, Ctrl+D pushes the confirm child, Y on the child runs
+        // the unlink and pops back. Pins the wiring across ResumePicker, ModalKey::Push,
+        // ModalStack::handle_key, ConfirmDeleteSessionModal, and SessionStore::delete.
+        let (_dir, store) = isolated_store();
+        for (byte, title) in [(0x11_u8, "first"), (0x22, "second")] {
+            seed_session(
+                &store,
+                &stamped_id(byte),
+                Some(title),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC) + time::Duration::seconds(i64::from(byte)),
+            );
+        }
+        let picker = ResumePicker::new(store.clone(), "live-session-id".to_owned());
+        let mut stack = crate::tui::modal::ModalStack::new();
+        stack.push(Box::new(picker));
+
+        let mut ctrl_d = KeyEvent::from(KeyCode::Char('d'));
+        ctrl_d.modifiers = KeyModifiers::CONTROL;
+        assert!(
+            stack.handle_key(&ctrl_d).is_none(),
+            "Push outcome must not surface a ModalAction",
+        );
+        assert!(stack.is_active(), "child sits atop the picker");
+
+        let outcome = stack.handle_key(&key(KeyCode::Char('y')));
+        let Some(ModalAction::SystemMessage(msg)) = outcome else {
+            panic!("Y must surface a SystemMessage; got {outcome:?}");
+        };
+        assert!(
+            msg.starts_with("Deleted session "),
+            "chat-stream confirmation: {msg}",
+        );
+        assert!(stack.is_active(), "picker remains after the child pops");
+        assert_eq!(
+            store.list().unwrap().len(),
+            1,
+            "one row was actually deleted from disk",
+        );
     }
 
     // ── ResumeCmd ──
@@ -1275,6 +1348,26 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefix_widens_to_other_projects_when_current_project_misses() {
+        // Pin the widening path inside resolve_prefix: scoped match returns None, the all-projects
+        // retry finds the target. Without widening, typing a foreign session id would surface
+        // as "no session matching" rather than resolving cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let target = stamped_id(0xab);
+        seed_session(
+            &other,
+            &target,
+            Some("foreign"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let store = test_store(dir.path());
+        let resolved = resolve_prefix(&store, &target[..4], "live").unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
     fn resolve_prefix_full_id_match_is_unique() {
         // Pasting a full session id is the common power-user case — must round-trip cleanly
         // and not be confused with an ambiguous prefix.
@@ -1319,7 +1412,7 @@ mod tests {
         );
         let err = resolve_prefix(&store, "aaaa", "other").unwrap_err();
         assert!(err.contains("ambiguous prefix"), "{err}");
-        assert!(err.contains(&id_a[..ID_WIDTH]), "expected id_a in {err}");
-        assert!(err.contains(&id_b[..ID_WIDTH]), "expected id_b in {err}");
+        assert!(err.contains(&id_a[..8]), "expected id_a in {err}");
+        assert!(err.contains(&id_b[..8]), "expected id_b in {err}");
     }
 }

@@ -214,6 +214,7 @@ impl App {
                 }
             }
             ModalAction::User(user_action) => self.dispatch_user_action(user_action),
+            ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
     }
 
@@ -1652,6 +1653,23 @@ mod tests {
         app.apply_modal_action(ModalAction::None);
         assert!(app.preview_theme_snapshot.is_none());
         assert_eq!(app.theme.text, original_text);
+    }
+
+    #[test]
+    fn modal_system_message_action_pushes_into_chat() {
+        // Destructive-action modals (e.g. confirm-delete) report success via SystemMessage so
+        // the user has chat-stream evidence the action ran. Pin the body verbatim so a future
+        // routing change that drops the message or pushes an empty block fails here.
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let entries_before = app.chat.entry_count();
+        let body = "Deleted session abc12345: Fix auth flow".to_owned();
+        app.apply_modal_action(ModalAction::SystemMessage(body.clone()));
+        assert_eq!(
+            app.chat.entry_count(),
+            entries_before + 1,
+            "SystemMessage must push exactly one block",
+        );
+        assert_eq!(app.chat.last_system_text(), Some(body.as_str()));
     }
 
     #[test]

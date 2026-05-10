@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::debug;
 
+use super::entry::SessionInfo;
 use super::handle::{self, ResumedSession};
 use super::store::SessionStore;
 use crate::util::text::ELLIPSIS;
@@ -124,6 +125,51 @@ fn looks_like_path(arg: &str) -> bool {
         || Path::new(arg)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+}
+
+/// Match `prefix` against finalized sessions, current-project first then widening to all
+/// projects. Excludes `live_id`. Errors name the failing scope.
+pub(crate) fn resolve_prefix_to_info(
+    store: &SessionStore,
+    prefix: &str,
+    live_id: &str,
+) -> Result<Option<SessionInfo>, String> {
+    if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
+        return Ok(Some(info));
+    }
+    match_in_scope(store, prefix, live_id, true)
+}
+
+fn match_in_scope(
+    store: &SessionStore,
+    prefix: &str,
+    live_id: &str,
+    all: bool,
+) -> Result<Option<SessionInfo>, String> {
+    let scope = if all {
+        "all projects"
+    } else {
+        "current project"
+    };
+    let page = store
+        .list_paged(None, all)
+        .map_err(|e| format!("list sessions ({scope}): {e:#}"))?;
+    let mut matches: Vec<SessionInfo> = page
+        .into_sessions()
+        .into_iter()
+        .filter(|info| info.session_id != live_id && info.session_id.starts_with(prefix))
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        n => {
+            let ids = matches.into_iter().map(|s| s.session_id);
+            let preview = format_session_id_preview(ids);
+            Err(format!(
+                "ambiguous prefix `{prefix}` matches {n} sessions: {preview}",
+            ))
+        }
+    }
 }
 
 /// Renders up to `MATCH_PREVIEW_LIMIT` IDs (truncated to 8 chars), with `, ...` for overflow.
@@ -387,6 +433,85 @@ mod tests {
             assert!(err.contains("empty session ID prefix"), "{raw:?} → {err:?}");
             assert!(err.contains("bare"), "{raw:?} → {err:?}");
         }
+    }
+
+    // ── resolve_prefix_to_info ──
+
+    #[test]
+    fn resolve_prefix_to_info_widens_to_other_projects_when_current_misses() {
+        // The shared resolver tries the current project first, then falls back to all projects.
+        // Without the widening pass `/delete` and `/resume` would refuse a real cross-project id.
+        let dir = tempfile::tempdir().unwrap();
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let target = "abcd1234-eeff-1122-3344-556677889900";
+        super::super::store::seed_test_session(
+            &other,
+            target,
+            Some("Foreign"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        );
+
+        let current = test_store(dir.path());
+        let info = resolve_prefix_to_info(&current, &target[..6], "live")
+            .unwrap()
+            .expect("widening pass must surface the foreign session");
+        assert_eq!(info.session_id, target);
+    }
+
+    #[test]
+    fn resolve_prefix_to_info_no_match_returns_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        assert!(
+            resolve_prefix_to_info(&store, "zzz", "live")
+                .unwrap()
+                .is_none(),
+            "missing prefix is Ok(None) so callers can layer their own error",
+        );
+    }
+
+    #[test]
+    fn resolve_prefix_to_info_filters_live_id_so_caller_layers_its_own_message() {
+        // The resolver excludes the live id silently; `/delete` adds the dedicated "cannot delete
+        // the live session" error, `/resume` falls through to "no session matching".
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let live_id = "abcd1234-eeff-1122-3344-556677889900";
+        super::super::store::seed_test_session(
+            &store,
+            live_id,
+            Some("Live"),
+            Some(1),
+            time::macros::datetime!(2026-04-18 09:00:00 UTC),
+        );
+
+        assert!(
+            resolve_prefix_to_info(&store, &live_id[..6], live_id)
+                .unwrap()
+                .is_none(),
+            "live-id-only matches don't surface to the caller",
+        );
+    }
+
+    #[test]
+    fn resolve_prefix_to_info_ambiguous_lists_short_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        for tail in ["a", "b"] {
+            let id = format!("aaaaaaaa-{tail}eef-1122-3344-556677889900");
+            super::super::store::seed_test_session(
+                &store,
+                &id,
+                Some("dup"),
+                Some(1),
+                time::macros::datetime!(2026-04-18 09:00:00 UTC),
+            );
+        }
+
+        let err = resolve_prefix_to_info(&store, "aaaaaaaa", "live").unwrap_err();
+        assert!(err.contains("ambiguous prefix"), "{err}");
+        assert!(err.contains("aaaaaaaa"), "id preview present: {err}");
     }
 
     // ── format_session_id_preview ──

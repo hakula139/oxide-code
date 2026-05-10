@@ -190,6 +190,19 @@ impl SessionStore {
         Ok(out)
     }
 
+    /// Remove a session's JSONL from disk. Refuses when `session_id == live_id` as the FS-boundary
+    /// defense against unlinking the open append-writer's file. Upstream callers (resume picker
+    /// filter, `/delete` resolver) also filter the live id, so this layer catches genuine bugs.
+    pub(crate) fn delete(&self, session_id: &str, live_id: &str) -> Result<()> {
+        validate_session_id(session_id)?;
+        if session_id == live_id {
+            bail!("refusing to delete the live session: {session_id}");
+        }
+        let path = self.find_session_path(session_id)?;
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to remove session file {}", path.display()))
+    }
+
     /// Finds a session file by suffix match, checking the home project first.
     fn find_session_path(&self, session_id: &str) -> Result<PathBuf> {
         validate_session_id(session_id)?;
@@ -1498,6 +1511,97 @@ mod tests {
         let page = store.list_paged(Some(0), false).unwrap();
         assert!(page.sessions().is_empty());
         assert_eq!(page.total(), 3, "total still reflects what's on disk");
+    }
+
+    // ── delete ──
+
+    #[tokio::test]
+    async fn delete_removes_the_session_file_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("doomed")).unwrap();
+        let path = test_session_file(dir.path(), "doomed");
+        assert!(path.exists(), "fixture path materialized: {path:?}");
+
+        store.delete("doomed", "live-session-id").unwrap();
+        assert!(!path.exists(), "delete must unlink the file: {path:?}");
+        assert!(
+            store.list().unwrap().is_empty(),
+            "list reflects the removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_falls_through_to_other_project_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let foreign_store =
+            SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let _w = foreign_store
+            .create(&sample_header("foreign-doomed"))
+            .unwrap();
+        drop(foreign_store);
+
+        store.delete("foreign-doomed", "live-session-id").unwrap();
+        let foreign_dir = dir.path().join("other-project");
+        let remaining: Vec<_> = fs::read_dir(&foreign_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "foreign project dir empty: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn delete_refuses_when_id_matches_live_session() {
+        // Defense in depth: the resume picker filters the live session id from rows, but a typed
+        // `/delete <live-id>` would otherwise reach this method and unlink the open writer's file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let _writer = store.create(&sample_header("live-id")).unwrap();
+        let err = store
+            .delete("live-id", "live-id")
+            .expect_err("self-delete must be rejected");
+        assert!(
+            err.to_string()
+                .contains("refusing to delete the live session"),
+            "error must explain the refusal: {err:#}",
+        );
+        assert!(
+            test_session_file(dir.path(), "live-id").exists(),
+            "file untouched"
+        );
+    }
+
+    #[test]
+    fn delete_errors_when_session_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let err = store
+            .delete("ghost", "live-id")
+            .expect_err("missing session must error");
+        assert!(
+            err.to_string().contains("session not found"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn delete_rejects_invalid_session_ids() {
+        // Path-traversal / NUL / oversize ids must hit `validate_session_id` before any disk op.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        for bogus in ["", "../etc/passwd", "session\0evil", &"a".repeat(65)] {
+            let err = store
+                .delete(bogus, "live-id")
+                .expect_err("must reject `{bogus}`");
+            assert!(
+                err.to_string().contains("invalid session ID"),
+                "id `{bogus}` must surface invalid-id error: {err:#}",
+            );
+        }
     }
 
     // ── find_session_path ──
