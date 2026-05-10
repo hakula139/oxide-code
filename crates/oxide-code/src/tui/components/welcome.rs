@@ -53,6 +53,10 @@ const FULL_MIN: u16 = 60;
 const COLLAPSED_MIN: u16 = 40;
 const NARROW_MIN: u16 = 25;
 
+/// Minimum height for the starters / tip block. Below this we drop them so the env / cwd column
+/// centers on its own width rather than reserving space for clipped content.
+const STARTERS_MIN_HEIGHT: u16 = 13;
+
 // ── Snapshot ──
 
 /// Projection of [`LiveSessionInfo`] consumed by [`paint`]; randomized fields are stable per
@@ -94,7 +98,7 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &Wel
     if area.width < NARROW_MIN || area.height == 0 {
         return;
     }
-    let lines = build_lines(area.width, theme, snap);
+    let lines = build_lines(area.width, area.height, theme, snap);
     let paragraph = Paragraph::new(lines)
         .alignment(Alignment::Center)
         .style(theme.surface());
@@ -103,10 +107,16 @@ pub(crate) fn paint(frame: &mut Frame<'_>, area: Rect, theme: &Theme, snap: &Wel
 
 // ── Line builders ──
 
-fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'static>> {
+fn build_lines(
+    width: u16,
+    height: u16,
+    theme: &Theme,
+    snap: &WelcomeSnapshot,
+) -> Vec<Line<'static>> {
     let max_body = usize::from(width);
     let full = width >= FULL_MIN;
     let with_starters = width >= COLLAPSED_MIN;
+    let render_starters_block = with_starters && height >= STARTERS_MIN_HEIGHT;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::raw(""));
@@ -114,10 +124,12 @@ fn build_lines(width: u16, theme: &Theme, snap: &WelcomeSnapshot) -> Vec<Line<'s
     lines.push(Line::raw(""));
 
     // Shared column width keeps centered rows on one left edge instead of each row floating.
+    // Starter / tip widths only contribute when the block actually renders, so a height-clipped
+    // area doesn't reserve space for content `Paragraph` will drop.
     let env = truncate_to_width(&environment_text(snap, full, with_starters), max_body);
     let cwd = cwd_text(max_body, snap, with_starters);
-    let starter_rows = with_starters.then(|| starter_rows(&snap.starters));
-    let tip_text = with_starters.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
+    let starter_rows = render_starters_block.then(|| starter_rows(&snap.starters));
+    let tip_text = render_starters_block.then(|| format!("{TIP_LABEL}{TIP_SEP}{}", snap.tip));
     // Clamp to area.width — wider columns clip on the right under center alignment.
     let column_width =
         column_width(&env, &cwd, starter_rows.as_deref(), tip_text.as_deref()).min(max_body);
@@ -453,6 +465,27 @@ mod tests {
             })
             .collect();
         assert!(row.contains("xhigh"), "narrow env must not clip: {row:?}");
+    }
+
+    #[test]
+    fn paint_below_starters_min_height_centers_env_on_its_own_width() {
+        // Regression: when starters / tip are clipped, the env row must still be centered.
+        let snap = snap_for(&fixture());
+        let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
+        let env_row: String = (0..80)
+            .map(|x| {
+                backend
+                    .buffer()
+                    .cell((x, 5))
+                    .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+            })
+            .collect();
+        let leading = env_row.chars().take_while(|c| *c == ' ').count();
+        let trailing = env_row.chars().rev().take_while(|c| *c == ' ').count();
+        assert!(
+            leading.abs_diff(trailing) <= 1,
+            "env row must be centered, got leading={leading} trailing={trailing}: {env_row:?}",
+        );
     }
 
     #[test]
