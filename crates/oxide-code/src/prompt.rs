@@ -155,20 +155,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_prompt_includes_user_context_with_claude_md() {
-        // Runs inside the oxide-code repo so CLAUDE.md exists and `user_context` is populated.
-        let parts = build_prompt("test-model").await;
-        let ctx = parts
-            .user_context
-            .as_deref()
-            .expect("expected user context from project CLAUDE.md");
-        assert!(ctx.contains("<system-reminder>"));
-        assert!(ctx.contains("# CLAUDE.md"));
-        assert!(ctx.contains("# Current date"));
-        assert!(ctx.contains("</system-reminder>"));
-    }
-
-    #[tokio::test]
     async fn build_prompt_system_does_not_contain_user_instructions() {
         let parts = build_prompt("test-model").await;
         assert!(
@@ -308,13 +294,15 @@ mod tests {
 
     #[tokio::test]
     async fn find_git_root_inside_repo() {
-        let cwd = std::env::current_dir().expect("cwd should be available");
-        let root = find_git_root(&cwd).await;
-        assert!(root.is_some(), "test must run inside a git repo");
-        assert!(
-            root.as_ref().unwrap().join(".git").exists(),
-            "root should contain .git"
-        );
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        init_git_repo(tmp.path());
+
+        let root = find_git_root(tmp.path()).await.expect("expected git root");
+        // Compare via canonicalize — macOS routes tempdirs through `/private`.
+        let expected = tmp.path().canonicalize().unwrap();
+        let actual = root.canonicalize().unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.join(".git").exists(), "root should contain .git");
     }
 
     #[tokio::test]

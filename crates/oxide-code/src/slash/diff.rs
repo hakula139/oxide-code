@@ -205,18 +205,6 @@ mod tests {
         assert!(!DiffCmd.description().is_empty());
     }
 
-    // ── execute ──
-
-    #[test]
-    fn execute_forwards_process_cwd_through_execute_in() {
-        let mut chat = ChatView::new(&Theme::default(), false);
-        let info = test_session_info();
-        let result = DiffCmd.execute("", &mut SlashContext::new(&mut chat, &info));
-        assert_eq!(result, Ok(SlashOutcome::Done));
-        assert_eq!(chat.entry_count(), 1);
-        assert!(!chat.last_is_error());
-    }
-
     // ── execute_in ──
 
     #[test]
