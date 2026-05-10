@@ -48,11 +48,19 @@ mplan
 mpsc
 msvc
 mtimes
+MSRV
 MULT
+nixfmt
+nixos
+nixpkgs
 nonewline
 nucleo
+numtide
+oxalica
 onig
 pgid
+pkgs
+pname
 println
 pulldown
 RAII
@@ -64,6 +72,7 @@ rfind
 riscv
 rrggbb
 rsplit
+rustc
 rustls
 serde
 serie
