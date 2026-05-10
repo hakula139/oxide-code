@@ -47,6 +47,7 @@ MMIX
 mplan
 mpsc
 msvc
+msys
 mtimes
 MSRV
 MULT
@@ -95,6 +96,7 @@ tracing
 unmaterialized
 unresumable
 unrotated
+untap
 urandom
 usize
 venv

@@ -28,6 +28,26 @@ Early development. What works today:
 
 See [`docs/roadmap.md`](docs/roadmap.md) for current focus and plans.
 
+## Installation
+
+Pick whichever path matches how you usually install developer tools — prebuilt tarball, Homebrew tap, `cargo install`, or Nix flake. See [Installation](docs/guide/install.md) for the full matrix; the most common one-liners:
+
+```bash
+# macOS (Apple Silicon) — prebuilt binary
+curl -fsSL https://github.com/hakula139/oxide-code/releases/latest/download/oxide-code-aarch64-apple-darwin.tar.gz | tar -xz
+sudo mv ox /usr/local/bin/
+
+# Homebrew (macOS, Linux)
+brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
+brew install oxide-code
+
+# From source (any Rust-supported platform)
+cargo install --git https://github.com/hakula139/oxide-code --locked
+
+# Nix
+nix profile install github:hakula139/oxide-code
+```
+
 ## Usage
 
 ```bash
@@ -38,16 +58,6 @@ ox
 ## Documentation
 
 See the [user guide](docs/guide/) for installation, configuration, slash commands, instruction files, sessions, and theming.
-
-## Building from Source
-
-Requires [Rust](https://www.rust-lang.org/tools/install) 1.91+ (uses edition 2024).
-
-```bash
-cargo build --release
-```
-
-The binary will be at `target/release/ox`.
 
 ## Development
 
