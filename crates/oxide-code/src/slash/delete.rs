@@ -66,9 +66,8 @@ impl SlashCommand for DeleteCmd {
 
 // ── Resolution ──
 
-/// Match `prefix` against current-project sessions first; widen to all projects on no match.
-/// Excludes the live session id (deleting the open writer's file is refused at the store layer
-/// anyway, but filtering here gives a clearer error message).
+/// Match `prefix` against current-project sessions first, widen to all projects on no match,
+/// and surface a distinct error when the prefix matches only the live id.
 fn resolve_prefix_to_info(
     store: &SessionStore,
     prefix: &str,
@@ -77,8 +76,15 @@ fn resolve_prefix_to_info(
     if let Some(info) = match_in_scope(store, prefix, live_id, false)? {
         return Ok(info);
     }
-    match_in_scope(store, prefix, live_id, true)?
-        .ok_or_else(|| format!("no session matching `{prefix}`"))
+    if let Some(info) = match_in_scope(store, prefix, live_id, true)? {
+        return Ok(info);
+    }
+    if live_id.starts_with(prefix) {
+        return Err(format!(
+            "cannot delete the live session: `{prefix}` matches the active session",
+        ));
+    }
+    Err(format!("no session matching `{prefix}`"))
 }
 
 fn match_in_scope(
@@ -267,13 +273,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_with_live_id_prefix_excludes_self_and_returns_no_match() {
-        // The live session id is filtered out of the resolve path so a typed `/delete <live-id>`
-        // surfaces as "no session matching" rather than a confirm modal that would then refuse
-        // at the store layer.
+    fn execute_with_live_id_prefix_returns_distinct_live_session_error() {
+        // The live session id is filtered out of match results, but a prefix that matches only
+        // the live id surfaces a distinct error so the user sees the real reason rather than the
+        // generic "no session matching" they'd get for a typo.
         with_isolated_xdg(|_| {
             let store = SessionStore::open().unwrap();
-            let live_id = "test-session"; // matches `test_session_info().session_id`.
+            let live_id = "test-session";
             seed_test_session(
                 &store,
                 live_id,
@@ -286,7 +292,42 @@ mod tests {
             let mut ctx = SlashContext::new(&mut chat, &info);
 
             let err = DeleteCmd.execute(live_id, &mut ctx).unwrap_err();
-            assert!(err.contains("no session matching"), "{err}");
+            assert!(
+                err.contains("cannot delete the live session"),
+                "live-only match must surface the dedicated message: {err}",
+            );
+            assert!(ctx.take_modal().is_none(), "no modal pushed for refusal");
+        });
+    }
+
+    #[test]
+    fn execute_with_live_id_prefix_returns_other_match_when_one_exists() {
+        // Live + a non-live session both match the prefix. The non-live one wins, no error.
+        with_isolated_xdg(|_| {
+            let store = SessionStore::open().unwrap();
+            let live_id = "test-session";
+            seed_test_session(
+                &store,
+                live_id,
+                Some("Live"),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let other_id = format!("test-other-{}", &stamped_id(0xab)[10..]);
+            seed_test_session(
+                &store,
+                &other_id,
+                Some("Other"),
+                Some(1),
+                datetime!(2026-04-18 09:01:00 UTC),
+            );
+            let mut chat = ChatView::new(&Theme::default(), false);
+            let info = test_session_info();
+            let mut ctx = SlashContext::new(&mut chat, &info);
+
+            let outcome = DeleteCmd.execute("test-", &mut ctx).unwrap();
+            assert_eq!(outcome, SlashOutcome::Done);
+            assert!(ctx.take_modal().is_some(), "non-live match opens the modal");
         });
     }
 
