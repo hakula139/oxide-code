@@ -51,14 +51,15 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 ## Sources
 
 - `crates/oxide-code/src/agent.rs` — `agent_turn` `Clear` and `SwapConfig` arms.
-- `crates/oxide-code/src/session/display.rs` — shared metadata-line formatter used by the picker row and the delete confirm modal.
+- `crates/oxide-code/src/session/display.rs` — shared `id_prefix`, `display_title`, and `format_metadata_line` used by the picker row and the delete confirm modal.
+- `crates/oxide-code/src/session/resolver.rs` — `resolve_prefix_to_info` (current-project-first, widen on miss, scoped error messages).
 - `crates/oxide-code/src/session/store.rs` — `SessionStore::delete` (live-session refusal at the FS boundary).
-- `crates/oxide-code/src/slash.rs` — dispatch, `SlashOutcome`.
+- `crates/oxide-code/src/slash.rs` — dispatch, `SlashOutcome`, shared test fixtures (`stamped_id`, `with_isolated_xdg`).
 - `crates/oxide-code/src/slash/clear.rs` — `ClearCmd`, send-first ordering.
 - `crates/oxide-code/src/slash/config.rs` — `/config` row builder + sectioned `KvOverview` constructor.
-- `crates/oxide-code/src/slash/confirm.rs` — `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error).
+- `crates/oxide-code/src/slash/confirm.rs` — `ConfirmDeleteSessionModal` (destructive-action gate, sticky inline error cleared only on deliberate Y / N).
 - `crates/oxide-code/src/slash/context.rs` — `SlashContext`, `open_modal` / `take_modal`.
-- `crates/oxide-code/src/slash/delete.rs` — `DeleteCmd` + prefix resolver.
+- `crates/oxide-code/src/slash/delete.rs` — `DeleteCmd` + live-id-aware resolver wrapper.
 - `crates/oxide-code/src/slash/diff.rs` — `/diff` printer with 64 KB UTF-8-boundary cap.
 - `crates/oxide-code/src/slash/effort.rs` — `EffortCmd`, level parser.
 - `crates/oxide-code/src/slash/effort_slider.rs` — bare `/effort` Speed ↔ Intelligence slider modal.
