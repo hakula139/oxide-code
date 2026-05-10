@@ -32,6 +32,7 @@ const TIP_POOL: &[&str] = &[
     "/clear starts a fresh conversation",
     "/effort tunes Speed ↔ Intelligence",
     "/resume opens the session picker",
+    "Ctrl+D in /resume deletes a session",
     "/theme previews live as you scroll",
     "ox --continue resumes your last session",
     "ox --list shows recent sessions",
