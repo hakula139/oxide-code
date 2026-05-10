@@ -27,25 +27,24 @@ const MIN_BUDGET: usize = 8;
 
 // ── ConfirmDeleteSessionModal ──
 
-/// Confirm-and-delete overlay. Owns the `SessionStore` clone needed to perform the unlink so the
-/// delete fires synchronously on Y without a roundtrip through the agent loop. The session being
-/// deleted is identified up front; refusing the live session is enforced inside `store.delete`.
-pub(crate) struct ConfirmDeleteSessionModal {
+/// Confirm-and-delete overlay. Owns the `SessionStore` clone so the unlink fires synchronously on
+/// Y without a roundtrip through the agent loop. `live_session_id` is plumbing for the store-layer
+/// refusal check; defense-in-depth at the FS boundary even though callers also filter the live id
+/// upstream.
+pub(super) struct ConfirmDeleteSessionModal {
     store: SessionStore,
     session_id: String,
-    /// Display title for the session being deleted (e.g. `(untitled)` when none was set).
     display_title: String,
-    /// Pre-formatted metadata line ("14 msgs · 2 hours ago"), built by the caller from the
-    /// `SessionInfo` so this modal stays decoupled from `time::OffsetDateTime` formatting.
+    /// Pre-formatted metadata ("14 msgs · 2 hours ago"). Caller builds it so the modal stays
+    /// decoupled from `time::OffsetDateTime` formatting.
     metadata: String,
-    /// Live session id, forwarded to `store.delete` for the same-id refusal check.
     live_session_id: String,
-    /// Sticky error from a failed delete attempt. Renders inline; cleared only on next press.
+    /// Sticky error from a failed delete attempt. Cleared on next press.
     error: Option<String>,
 }
 
 impl ConfirmDeleteSessionModal {
-    pub(crate) fn new(
+    pub(super) fn new(
         store: SessionStore,
         session_id: String,
         display_title: String,
@@ -155,11 +154,7 @@ mod tests {
         (dir, store)
     }
 
-    fn seed_modal(
-        store: &SessionStore,
-        id: &str,
-        title: &str,
-    ) -> (tempfile::TempDir, ConfirmDeleteSessionModal) {
+    fn seed_modal(store: &SessionStore, id: &str, title: &str) -> ConfirmDeleteSessionModal {
         let stamped_id = format!("{id:0<36}");
         seed_test_session(
             store,
@@ -168,15 +163,13 @@ mod tests {
             Some(3),
             time::macros::datetime!(2026-04-18 09:00:00 UTC),
         );
-        let modal = ConfirmDeleteSessionModal::new(
+        ConfirmDeleteSessionModal::new(
             store.clone(),
             stamped_id,
             title.to_owned(),
             "3 msgs · 2 hours ago".to_owned(),
             "live-session-id".to_owned(),
-        );
-        // Caller borrows store via the modal; tempdir kept alive externally.
-        (tempfile::tempdir().unwrap(), modal)
+        )
     }
 
     fn render_to_string(modal: &ConfirmDeleteSessionModal, width: u16, height: u16) -> String {
@@ -201,7 +194,7 @@ mod tests {
     #[test]
     fn render_paints_title_identity_metadata_and_footer() {
         let (_dir, store) = isolated_store();
-        let (_keep, modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let dump = render_to_string(&modal, 60, modal.height(60));
         assert!(dump.contains(TITLE), "title appears: {dump}");
         assert!(dump.contains("abcd1234"), "id prefix appears: {dump}");
@@ -216,7 +209,7 @@ mod tests {
     #[test]
     fn render_appends_error_row_when_previous_attempt_failed() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         modal.error = Some("permission denied".to_owned());
         // Height grows by one to accommodate the error row.
         assert_eq!(modal.height(60), 7, "error row claims an extra line");
@@ -227,7 +220,7 @@ mod tests {
     #[test]
     fn render_does_not_panic_at_minimum_widths() {
         let (_dir, store) = isolated_store();
-        let (_keep, modal) = seed_modal(&store, "abcd1234", "T");
+        let modal = seed_modal(&store, "abcd1234", "T");
         for w in [4_u16, 8, 20] {
             render_to_string(&modal, w, modal.height(w));
         }
@@ -238,7 +231,7 @@ mod tests {
     #[test]
     fn y_press_runs_delete_and_submits_with_no_action() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_to_delete = modal.session_id.clone();
 
         let outcome = modal.handle_key(&key(KeyCode::Char('y')));
@@ -259,7 +252,7 @@ mod tests {
     #[test]
     fn enter_press_is_an_alias_for_y_and_runs_delete() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let outcome = modal.handle_key(&key(KeyCode::Enter));
         assert!(matches!(outcome, ModalKey::Submitted(ModalAction::None)));
         assert!(store.list().unwrap().is_empty());
@@ -268,7 +261,7 @@ mod tests {
     #[test]
     fn uppercase_y_also_confirms() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
         let outcome = modal.handle_key(&key(KeyCode::Char('Y')));
         assert!(matches!(outcome, ModalKey::Submitted(ModalAction::None)));
     }
@@ -276,7 +269,7 @@ mod tests {
     #[test]
     fn n_press_cancels_without_running_delete() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let id_kept = modal.session_id.clone();
 
         let outcome = modal.handle_key(&key(KeyCode::Char('n')));
@@ -340,7 +333,7 @@ mod tests {
     #[test]
     fn unrecognized_keys_consume_silently_without_running_delete() {
         let (_dir, store) = isolated_store();
-        let (_keep, mut modal) = seed_modal(&store, "abcd1234", "Fix auth flow");
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth flow");
         let outcome = modal.handle_key(&key(KeyCode::Char('z')));
         assert!(matches!(outcome, ModalKey::Consumed));
         assert!(
