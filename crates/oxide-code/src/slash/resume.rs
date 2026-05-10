@@ -16,7 +16,7 @@ use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
 use crate::agent::event::UserAction;
-use crate::session::display::format_metadata_line;
+use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
@@ -31,7 +31,6 @@ use crate::util::text::truncate_to_width;
 const PICKER_TITLE: &str = "Resume session";
 const PICKER_DESCRIPTION: &str = "Pick a session to resume in place.";
 const VIEWPORT_HEIGHT: u16 = 6;
-const UNTITLED_MARKER: &str = "(untitled)";
 /// Each row paints title + metadata + a trailing blank for breathing room between sessions.
 const ROW_HEIGHT: u16 = 3;
 /// Floor on the title column so narrow terminals still show a truncated label.
@@ -58,10 +57,7 @@ struct SessionRow {
 
 impl SessionRow {
     fn from_info(info: SessionInfo, local_offset: UtcOffset, show_project: bool) -> Self {
-        let title = info
-            .title
-            .as_ref()
-            .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone());
+        let title = display_title(&info);
         let project_path = tildify(Path::new(&info.cwd));
         // Project participates in search only when the user can see it. In scoped mode every row
         // shares the same project, so substring-matching against it just confuses the filter.
@@ -389,6 +385,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
     use crate::session::store::{seed_test_session, test_store};
     use crate::slash::test_session_info;

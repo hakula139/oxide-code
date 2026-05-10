@@ -1,13 +1,28 @@
-//! Shared display-layer helpers for session listings. The resume picker and the `/delete` confirm
-//! modal both render `{id_prefix} · {when} · {N msgs} · {branch} · {project}` summaries, so the
-//! formatter lives here rather than being duplicated in each slash command.
+//! Shared display-layer helpers for session listings, used by the resume picker and the
+//! `/delete` confirm modal.
 
 use std::fmt::Write as _;
 
 use time::{OffsetDateTime, UtcOffset};
 
+use super::entry::SessionInfo;
+
 const SEPARATOR: &str = " · ";
-const ID_PREFIX_WIDTH: usize = 8;
+pub(crate) const ID_PREFIX_WIDTH: usize = 8;
+pub(crate) const UNTITLED_MARKER: &str = "(untitled)";
+
+/// First [`ID_PREFIX_WIDTH`] bytes of `session_id`, falling back to the full id when shorter.
+pub(crate) fn id_prefix(session_id: &str) -> &str {
+    session_id.get(..ID_PREFIX_WIDTH).unwrap_or(session_id)
+}
+
+/// Title from `info`, or [`UNTITLED_MARKER`] when absent. Owned so callers can pass it into
+/// `Box<dyn Modal>` constructors that outlive the borrow.
+pub(crate) fn display_title(info: &SessionInfo) -> String {
+    info.title
+        .as_ref()
+        .map_or_else(|| UNTITLED_MARKER.to_owned(), |t| t.title.clone())
+}
 
 /// Compact "N units ago" with an ISO-date fallback past 30 days. Negative deltas (clock skew or
 /// future stamps) collapse to 0 so the singular / plural axis stays sane.
@@ -43,7 +58,7 @@ pub(crate) fn format_metadata_line(
 ) -> String {
     let now = OffsetDateTime::now_utc().to_offset(local_offset);
     let when = format_relative_time(last_active_at.to_offset(local_offset), now);
-    let prefix = session_id.get(..ID_PREFIX_WIDTH).unwrap_or(session_id);
+    let prefix = id_prefix(session_id);
     let mut meta = format!("{prefix}{SEPARATOR}{when}");
     if message_count > 0 {
         let unit = if message_count == 1 { "msg" } else { "msgs" };
@@ -63,8 +78,41 @@ pub(crate) fn format_metadata_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::entry::TitleInfo;
 
     use time::macros::datetime;
+
+    // ── id_prefix ──
+
+    #[test]
+    fn id_prefix_returns_first_eight_bytes_or_full_id_when_shorter() {
+        // Pin both the long-id slicing and the short-id fallback so a future change to direct
+        // `&id[..8]` slicing would panic on short ids and break this test.
+        assert_eq!(id_prefix("abcdefghij"), "abcdefgh");
+        assert_eq!(id_prefix("abcd"), "abcd");
+        assert_eq!(id_prefix(""), "");
+    }
+
+    // ── display_title ──
+
+    #[test]
+    fn display_title_uses_title_when_present_else_untitled_marker() {
+        let mut info = SessionInfo {
+            session_id: "abc".to_owned(),
+            cwd: String::new(),
+            last_active_at: datetime!(2026-05-08 09:00:00 UTC),
+            title: None,
+            exit: None,
+            git_branch: None,
+        };
+        assert_eq!(display_title(&info), UNTITLED_MARKER);
+
+        info.title = Some(TitleInfo {
+            title: "Fix auth flow".to_owned(),
+            updated_at: datetime!(2026-05-08 09:00:00 UTC),
+        });
+        assert_eq!(display_title(&info), "Fix auth flow");
+    }
 
     // ── format_relative_time ──
 

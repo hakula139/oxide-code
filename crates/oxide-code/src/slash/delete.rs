@@ -7,7 +7,7 @@ use std::path::Path;
 use super::confirm::ConfirmDeleteSessionModal;
 use super::context::SlashContext;
 use super::registry::{SlashCommand, SlashKind, SlashOutcome};
-use crate::session::display::format_metadata_line;
+use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
 use crate::session::store::SessionStore;
@@ -86,12 +86,6 @@ fn resolve_for_delete(
 }
 
 // ── Display Formatting ──
-
-fn display_title(info: &SessionInfo) -> String {
-    info.title
-        .as_ref()
-        .map_or_else(|| "(untitled)".to_owned(), |t| t.title.clone())
-}
 
 /// Wraps [`format_metadata_line`] with the `/delete`-specific project rule: the confirm modal has
 /// no scope context, so the project always shows when `cwd` is non-empty.
@@ -323,21 +317,6 @@ mod tests {
             assert!(err.contains(&id_a[..8]), "first id in {err}");
             assert!(err.contains(&id_b[..8]), "second id in {err}");
         });
-    }
-
-    // ── display_title ──
-
-    #[test]
-    fn display_title_falls_back_to_untitled_marker_when_title_absent() {
-        let info = SessionInfo {
-            session_id: stamped_id(0xab),
-            cwd: "/work".to_owned(),
-            last_active_at: datetime!(2026-05-08 09:00:00 UTC),
-            title: None,
-            exit: None,
-            git_branch: None,
-        };
-        assert_eq!(display_title(&info), "(untitled)");
     }
 
     // ── metadata_line ──

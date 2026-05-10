@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tracing::warn;
 
+use crate::session::display::id_prefix;
 use crate::session::store::SessionStore;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -22,7 +23,6 @@ use crate::util::text::truncate_to_width;
 
 const TITLE: &str = "Delete this session?";
 const FOOTER_HINT: &str = "[Y] delete   [N] cancel   Esc to cancel";
-const ID_PREFIX_WIDTH: usize = 8;
 /// Width floor so narrow terminals still paint the full body without panicking.
 const MIN_BUDGET: usize = 8;
 
@@ -62,19 +62,13 @@ impl ConfirmDeleteSessionModal {
         }
     }
 
-    fn id_prefix(&self) -> &str {
-        self.session_id
-            .get(..ID_PREFIX_WIDTH)
-            .unwrap_or(&self.session_id)
-    }
-
     /// Run `store.delete`. On Ok, pop and emit a chat-stream confirmation. On Err, stay open with
     /// a sticky inline error that clears on the next non-confirm keypress.
     fn confirm(&mut self) -> ModalKey {
         match self.store.delete(&self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
                 "Deleted session {}: {}",
-                self.id_prefix(),
+                id_prefix(&self.session_id),
                 self.display_title,
             ))),
             Err(e) => {
@@ -102,7 +96,7 @@ impl Modal for ConfirmDeleteSessionModal {
         )));
         lines.push(Line::default());
 
-        let identity = format!("{} — {}", self.id_prefix(), self.display_title);
+        let identity = format!("{} — {}", id_prefix(&self.session_id), self.display_title);
         lines.push(Line::from(Span::styled(
             truncate_to_width(&identity, budget),
             theme.text(),
