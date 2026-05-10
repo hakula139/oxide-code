@@ -435,34 +435,6 @@ mod tests {
         }
     }
 
-    // ── format_session_id_preview ──
-
-    #[test]
-    fn format_session_id_preview_truncates_ids_to_eight_chars() {
-        let ids = [
-            "aaaaaaaaaaa".to_owned(),
-            "bbbbbbbbbbb".to_owned(),
-            "c".to_owned(),
-        ];
-        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
-    }
-
-    #[test]
-    fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
-        let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
-        let out = format_session_id_preview(ids);
-        let short_count = out.split(", ").filter(|s| *s != "...").count();
-        assert_eq!(short_count, 5, "{out:?}");
-        assert!(out.ends_with(", ..."), "{out:?}");
-    }
-
-    #[test]
-    fn format_session_id_preview_no_ellipsis_at_limit() {
-        let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
-        let out = format_session_id_preview(ids);
-        assert!(!out.ends_with(", ..."), "{out:?}");
-    }
-
     // ── resolve_prefix_to_info ──
 
     #[test]
@@ -540,5 +512,33 @@ mod tests {
         let err = resolve_prefix_to_info(&store, "aaaaaaaa", "live").unwrap_err();
         assert!(err.contains("ambiguous prefix"), "{err}");
         assert!(err.contains("aaaaaaaa"), "id preview present: {err}");
+    }
+
+    // ── format_session_id_preview ──
+
+    #[test]
+    fn format_session_id_preview_truncates_ids_to_eight_chars() {
+        let ids = [
+            "aaaaaaaaaaa".to_owned(),
+            "bbbbbbbbbbb".to_owned(),
+            "c".to_owned(),
+        ];
+        assert_eq!(format_session_id_preview(ids), "aaaaaaaa, bbbbbbbb, c");
+    }
+
+    #[test]
+    fn format_session_id_preview_caps_at_five_and_appends_ellipsis() {
+        let ids: Vec<String> = (0..7).map(|i| format!("abcdefgh{i}")).collect();
+        let out = format_session_id_preview(ids);
+        let short_count = out.split(", ").filter(|s| *s != "...").count();
+        assert_eq!(short_count, 5, "{out:?}");
+        assert!(out.ends_with(", ..."), "{out:?}");
+    }
+
+    #[test]
+    fn format_session_id_preview_no_ellipsis_at_limit() {
+        let ids: Vec<String> = (0..5).map(|i| format!("id{i}")).collect();
+        let out = format_session_id_preview(ids);
+        assert!(!out.ends_with(", ..."), "{out:?}");
     }
 }

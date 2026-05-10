@@ -117,7 +117,7 @@ mod tests {
     // ── format_relative_time ──
 
     #[test]
-    fn pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
+    fn format_relative_time_pluralizes_units_and_falls_back_to_iso_date_past_30_days() {
         let now = datetime!(2026-05-08 12:00:00 UTC);
         assert_eq!(
             format_relative_time(now - time::Duration::seconds(1), now),
@@ -165,7 +165,7 @@ mod tests {
     // ── format_metadata_line ──
 
     #[test]
-    fn includes_msg_count_branch_and_project_when_supplied() {
+    fn format_metadata_line_includes_msg_count_branch_and_project_when_supplied() {
         let id = "aabbccdd-eeff-1122-3344-556677889900";
         let line = format_metadata_line(
             id,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn singular_msg_unit_at_count_one() {
+    fn format_metadata_line_singular_msg_unit_at_count_one() {
         let line = format_metadata_line(
             "aabbccdd-eeff-1122-3344-556677889900",
             datetime!(2026-05-08 09:00:00 UTC),
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_msg_count_branch_and_project_when_absent() {
+    fn format_metadata_line_omits_msg_count_branch_and_project_when_absent() {
         let line = format_metadata_line(
             "aabbccdd-eeff-1122-3344-556677889900",
             datetime!(2026-05-08 09:00:00 UTC),
