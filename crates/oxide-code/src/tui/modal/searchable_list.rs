@@ -262,7 +262,11 @@ impl<T: SearchableItem> SearchableList<T> {
 
         if self.visible.is_empty() && !self.query.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("    no matches for `{}`", self.query),
+                format!(
+                    "{}no matches for `{}`",
+                    " ".repeat(SEARCH_PROMPT_WIDTH.into()),
+                    self.query,
+                ),
                 theme.dim(),
             )));
         }
