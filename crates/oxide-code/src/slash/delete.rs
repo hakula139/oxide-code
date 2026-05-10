@@ -240,6 +240,35 @@ mod tests {
     }
 
     #[test]
+    fn execute_widens_to_other_projects_when_current_project_misses() {
+        // Pin the widening path: scoped resolution misses, the all-projects retry finds the
+        // target. Without widening the user would see "no session matching" for a real session.
+        with_isolated_xdg(|dir| {
+            let sessions_dir = dir.join("ox").join("sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            let other = SessionStore::open_at(sessions_dir, "other-project").unwrap();
+            let target_id = stamped_id(0xab);
+            seed_test_session(
+                &other,
+                &target_id,
+                Some("Foreign"),
+                Some(1),
+                datetime!(2026-04-18 09:00:00 UTC),
+            );
+            let mut chat = ChatView::new(&Theme::default(), false);
+            let info = test_session_info();
+            let mut ctx = SlashContext::new(&mut chat, &info);
+
+            let outcome = DeleteCmd.execute(&target_id[..4], &mut ctx).unwrap();
+            assert_eq!(outcome, SlashOutcome::Done);
+            assert!(
+                ctx.take_modal().is_some(),
+                "widened resolution must still push the confirm modal",
+            );
+        });
+    }
+
+    #[test]
     fn execute_with_live_id_prefix_returns_distinct_live_session_error() {
         // The live session id is filtered out of match results, but a prefix that matches only
         // the live id surfaces a distinct error so the user sees the real reason rather than the

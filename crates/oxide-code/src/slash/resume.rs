@@ -1378,6 +1378,26 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prefix_widens_to_other_projects_when_current_project_misses() {
+        // Pin the widening path inside resolve_prefix: scoped match returns None, the all-projects
+        // retry finds the target. Without widening, typing a foreign session id would surface
+        // as "no session matching" rather than resolving cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let other = SessionStore::open_at(dir.path().to_path_buf(), "other-project").unwrap();
+        let target = stamped_id(0xab);
+        seed_session(
+            &other,
+            &target,
+            Some("foreign"),
+            1,
+            datetime!(2026-04-18 09:00:00 UTC),
+        );
+        let store = test_store(dir.path());
+        let resolved = resolve_prefix(&store, &target[..4], "live").unwrap();
+        assert_eq!(resolved, target);
+    }
+
+    #[test]
     fn resolve_prefix_full_id_match_is_unique() {
         // Pasting a full session id is the common power-user case — must round-trip cleanly
         // and not be confused with an ambiguous prefix.

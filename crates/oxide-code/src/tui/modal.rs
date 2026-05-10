@@ -560,4 +560,71 @@ mod tests {
         stack.pop_and_notify();
         assert!(!stack.is_active());
     }
+
+    #[test]
+    fn handle_key_push_take_once_falls_through_to_consumed_after_first_push() {
+        // ScriptedModal's push_child is take-once. A second 'h' press after the child has been
+        // pushed and popped must not double-push.
+        let mut parent = ScriptedModal::new(ModalAction::None);
+        let child = ScriptedModal::new(ModalAction::None);
+        parent.push_child = Some(Box::new(child));
+
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(parent));
+        stack.handle_key(&key('h'));
+        stack.handle_key(&key('c')); // cancel the child, parent regains focus.
+        assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT, "back to parent");
+
+        // Second 'h' press: push_child is now None, so the parent consumes silently rather than
+        // pushing a second nested modal.
+        let outcome = stack.handle_key(&key('h'));
+        assert!(
+            outcome.is_none(),
+            "second push attempt is consumed: got {outcome:?}"
+        );
+        assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT, "no nested modal");
+    }
+
+    // ── Debug for ModalKey ──
+
+    #[test]
+    fn debug_format_distinguishes_each_variant() {
+        // The Debug impl is hand-rolled because Box<dyn Modal> can't derive it. Pin each arm
+        // directly so test panic messages remain useful even if no test actually fires them.
+        assert_eq!(format!("{:?}", ModalKey::Consumed), "Consumed");
+        assert_eq!(format!("{:?}", ModalKey::Cancelled), "Cancelled");
+        assert!(format!("{:?}", ModalKey::Submitted(ModalAction::None)).starts_with("Submitted("));
+        assert!(format!("{:?}", ModalKey::Preview(ModalAction::None)).starts_with("Preview("));
+        let push: ModalKey = ModalKey::Push(Box::new(ScriptedModal::new(ModalAction::None)));
+        assert_eq!(format!("{push:?}"), "Push(<modal>)");
+    }
+
+    // ── Modal::on_focus_regained default ──
+
+    /// Modal that doesn't override `on_focus_regained`, so the default empty body fires on pop.
+    struct BareModal;
+
+    impl Modal for BareModal {
+        fn height(&self, _w: u16) -> u16 {
+            1
+        }
+        fn render(&self, _f: &mut Frame<'_>, _a: Rect, _t: &Theme) {}
+        fn handle_key(&mut self, _e: &KeyEvent) -> ModalKey {
+            ModalKey::Consumed
+        }
+    }
+
+    #[test]
+    fn default_on_focus_regained_is_a_noop_and_does_not_panic() {
+        // Pin that the trait's default empty body is safe to invoke. ScriptedModal overrides the
+        // hook for assertion purposes, so the default arm needs separate coverage.
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(BareModal));
+        stack.push(Box::new(ScriptedModal::new(ModalAction::None)));
+        stack.handle_key(&key('c'));
+        assert!(
+            stack.is_active(),
+            "BareModal still on the stack after child cancel"
+        );
+    }
 }
