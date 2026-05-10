@@ -11,6 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use tracing::warn;
 
 use crate::session::store::SessionStore;
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
@@ -77,6 +78,7 @@ impl ConfirmDeleteSessionModal {
                 self.display_title,
             ))),
             Err(e) => {
+                warn!("delete failed for session {}: {e:#}", self.session_id);
                 self.error = Some(format!("{e:#}"));
                 ModalKey::Consumed
             }
@@ -125,15 +127,16 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
-        // Esc and Ctrl+C are intercepted at the stack level. Any other key clears the sticky
-        // error so the user's next confirm attempt isn't shadowed by the previous failure.
+        // Esc and Ctrl+C are intercepted at the stack level. Sticky error stays visible until the
+        // user makes a deliberate Y / N / Enter choice, so a stray arrow key or modifier-only
+        // event can't wipe the only diagnostic from a failed delete.
         match event.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.confirm(),
-            KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
-            _ => {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                 self.error = None;
-                ModalKey::Consumed
+                self.confirm()
             }
+            KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
+            _ => ModalKey::Consumed,
         }
     }
 }
@@ -303,9 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn confirm_failure_stays_open_with_inline_error_then_clears_on_next_key() {
+    fn confirm_failure_latches_error_until_a_deliberate_y_or_n_choice() {
         // Same-id-as-live triggers store.delete's refusal; modal must stay on screen with the
-        // error visible. A subsequent unrecognized key clears the error so the user can re-attempt.
+        // error visible. Stray keys (arrows, unrecognized chars, modifier events) MUST NOT wipe
+        // the latch — only Y / Enter (re-attempt) or N (cancel) clears it. This pins the
+        // diagnostic against a stray-keystroke race that would otherwise leave the user with no
+        // explanation for why the row reappeared after delete.
         let (_dir, store) = isolated_store();
         let live_id = format!("{:0<36}", "abcd1234");
         seed_test_session(
@@ -330,19 +336,19 @@ mod tests {
             err.contains("refusing to delete the live session"),
             "got: {err}"
         );
-        assert!(
-            store
-                .list()
-                .unwrap()
-                .iter()
-                .any(|s| s.session_id == live_id),
-            "row must still exist after refused delete",
-        );
 
-        // An unrelated key clears the latch so the next attempt isn't shadowed by stale text.
-        let outcome = modal.handle_key(&key(KeyCode::Char('x')));
+        // Stray keys must not wipe the latch.
+        for stray in [KeyCode::Char('x'), KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
+            let outcome = modal.handle_key(&key(stray));
+            assert!(matches!(outcome, ModalKey::Consumed), "{stray:?}");
+            assert!(modal.error.is_some(), "{stray:?} must not clear the latch",);
+        }
+
+        // A deliberate Y re-attempt clears the latch before re-running confirm; the re-attempt
+        // hits the same refusal and re-latches, but it's a fresh diagnostic, not the stale one.
+        let outcome = modal.handle_key(&key(KeyCode::Char('y')));
         assert!(matches!(outcome, ModalKey::Consumed));
-        assert!(modal.error.is_none(), "error cleared on next press");
+        assert!(modal.error.is_some(), "fresh failure re-latches");
     }
 
     #[test]
