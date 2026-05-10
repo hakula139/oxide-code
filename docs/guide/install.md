@@ -4,8 +4,8 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 ## System requirements
 
-- **OS**: macOS 12+, recent Linux (glibc-based; Alpine / musl require source build), or Windows 10+
-- **Architecture**: `x86_64` everywhere; `aarch64` on macOS (Apple Silicon)
+- **OS**: macOS 12+, a recent glibc-based Linux, or Windows 10+ (Alpine / musl-based Linux needs the source-build path)
+- **Architecture**: `x86_64` everywhere, plus `aarch64` on macOS (Apple Silicon)
 - **Network**: outbound HTTPS to `api.anthropic.com`
 - **From-source builds only**: [Rust](https://www.rust-lang.org/tools/install) 1.91+
 
@@ -46,7 +46,7 @@ brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
 brew install oxide-code
 ```
 
-The formula pulls the prebuilt tarball published by `.github/workflows/release.yml`, so the install is binary-only — no Rust toolchain required.
+The formula pulls the prebuilt tarball published by `.github/workflows/release.yml`, so the install is binary-only and needs no Rust toolchain.
 
 ### From source via cargo
 
@@ -80,7 +80,7 @@ inputs.oxide-code.url = "github:hakula139/oxide-code";
 ox --version
 ```
 
-If `ox` is on `PATH`, this prints the version string. If you get `command not found`, the binary didn't land somewhere your shell searches — re-check the move/install step for the path you used.
+If `ox` is on `PATH`, this prints the version string. A `command not found` means the binary didn't land somewhere your shell searches, so re-check the move or install step for the path you used.
 
 ## Update `ox`
 
