@@ -140,6 +140,27 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
     }
 }
 
+/// 36-byte UUID-shaped id seeded from `byte`. Matches the wire shape of real session ids so
+/// `validate_session_id` accepts them and `id_prefix` slicing lines up.
+#[cfg(test)]
+pub(crate) fn stamped_id(byte: u8) -> String {
+    let s = format!("{byte:02x}");
+    format!(
+        "{s}{s}1111-2222-3333-4444-{s}{s}{s}{s}{s}{s}",
+        s = s.repeat(2),
+    )
+}
+
+/// Run `f` with a fresh `XDG_DATA_HOME` so `SessionStore::open` lands in a private tempdir.
+/// Hands the directory back so callers can layer extra stores beneath the same root.
+#[cfg(test)]
+pub(crate) fn with_isolated_xdg<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+    let dir = tempfile::tempdir().unwrap();
+    temp_env::with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
+        f(dir.path())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

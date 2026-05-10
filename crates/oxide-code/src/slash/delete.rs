@@ -103,30 +103,14 @@ fn metadata_line(info: &SessionInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use temp_env::with_var;
     use time::macros::datetime;
 
     use super::*;
     use crate::session::store::seed_test_session;
     use crate::slash::registry::SlashCommand;
-    use crate::slash::test_session_info;
+    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::components::chat::ChatView;
     use crate::tui::theme::Theme;
-
-    fn stamped_id(byte: u8) -> String {
-        let s = format!("{byte:02x}");
-        format!(
-            "{s}{s}1111-2222-3333-4444-{s}{s}{s}{s}{s}{s}",
-            s = s.repeat(2),
-        )
-    }
-
-    fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
-        let dir = tempfile::tempdir().unwrap();
-        with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-            f(dir.path())
-        })
-    }
 
     // ── DeleteCmd metadata ──
 

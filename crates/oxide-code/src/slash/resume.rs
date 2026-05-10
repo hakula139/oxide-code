@@ -380,7 +380,6 @@ fn resolve_prefix(store: &SessionStore, prefix: &str, live_id: &str) -> Result<S
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use temp_env::with_var;
     use time::OffsetDateTime;
     use time::macros::datetime;
 
@@ -388,20 +387,11 @@ mod tests {
     use crate::session::display::UNTITLED_MARKER;
     use crate::session::entry::TitleInfo;
     use crate::session::store::{seed_test_session, test_store};
-    use crate::slash::test_session_info;
+    use crate::slash::{stamped_id, test_session_info, with_isolated_xdg};
     use crate::tui::components::chat::ChatView;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
-    }
-
-    fn stamped_id(byte: u8) -> String {
-        let s = format!("{byte:02x}");
-        // 36-char UUID-ish: `aabb1111-2222-3333-4444-555566667777`. 32 hex digits + 4 dashes.
-        format!(
-            "{s}{s}1111-2222-3333-4444-{s}{s}{s}{s}{s}{s}",
-            s = s.repeat(2),
-        )
     }
 
     fn seed_session(
@@ -418,13 +408,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         (dir, store)
-    }
-
-    fn with_isolated_xdg<R>(f: impl FnOnce(&Path) -> R) -> R {
-        let dir = tempfile::tempdir().unwrap();
-        with_var("XDG_DATA_HOME", Some(dir.path().as_os_str()), || {
-            f(dir.path())
-        })
     }
 
     // ── SessionRow ──
