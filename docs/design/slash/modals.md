@@ -22,9 +22,9 @@ A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable 
 - **Cancelled** — close, no dispatch.
 - **Submitted** — close and forward an action (a `UserAction` through the agent channel, or a no-op when the modal already applied its effect locally).
 - **Previewed** — forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
-- **Pushed** — nest a child modal above the current one; the parent regains focus on pop via `Modal::on_focus_regained` (default no-op). Used by `/resume` to push the confirm-delete modal.
+- **Pushed** — nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
 
-`Submitted` and `Previewed` carry a `ModalAction`, which is one of `None` (no dispatch), `User(UserAction)` (forward to the agent loop), or `SystemMessage(String)` (push a confirmation line into chat after pop). The third lets destructive-action modals report success without going through the agent loop.
+`Submitted` and `Previewed` carry a `ModalAction`: `None` (no dispatch), `User(UserAction)` (forward to the agent loop), or `SystemMessage(String)` (push a confirmation line into chat after pop).
 
 Dispatched actions flow through the same channel as keyboard input, so the modal never needs to know what handler will run on the other side.
 
@@ -39,7 +39,7 @@ Modals shipping today:
 - **`/theme` picker** — live-preview palette picker (over `ListPicker`).
 - **`/rename` editor** — single-line title editor pre-filled with the current title.
 - **`/resume` picker** — searchable session picker (over `SearchableList`).
-- **Confirm-delete modal** — Y/N gate pushed by `/delete <id-prefix>` and `/resume`'s Ctrl+D / Delete. Failures latch as a sticky inline error.
+- **Confirm-delete modal** — Y/N gate pushed by `/delete <id-prefix>` and `/resume`'s Ctrl+D / Delete.
 - **`/status`, `/config`, `/help`** — read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
 
 App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same path as a keyboard `UserAction`.
@@ -56,8 +56,8 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 8. **`ListPicker` is a state + render primitive.** Concrete pickers embed it and forward keys to it. This separates "list selection state" from "what does Enter dispatch", avoiding the boxed-callback pattern while staying broadly reusable. `/model + /effort` and `/theme` both build on it today; future approval prompts will too.
 9. **Read-only kv overviews share `KvOverview`.** `/status`, `/config`, and `/help` all build the same title + sectioned-rows + footer shape, so the layout, key handling, and dismiss live in one place. Per-command files own only the fixture (rows, headings) and a thin constructor, and new overviews are a `Vec<KvSection>` away.
 10. **Read-only modals don't bind Enter.** `KvOverview::handle_key` consumes every key, and Esc / Ctrl+C cancel universally at the stack layer. Enter stays reserved for commit semantics in `ListPicker`-based modals, since binding it to dismiss in `KvOverview` would give the same gesture two meanings across modal types.
-11. **Nested modals via `ModalKey::Push`, not a `&mut ModalStack` parameter.** A push outcome keeps the trait surface narrow (`handle_key` still returns one value) and avoids threading a stack borrow through every modal. The hand-rolled `Debug for ModalKey` exists because `Box<dyn Modal>` can't derive it without forcing every concrete modal to be `Debug`.
-12. **`Modal::on_focus_regained` is a generally-useful hook.** Any picker that opens a sub-modal mutating shared state benefits from refresh-on-pop. Default no-op so existing modals don't change. The `/resume` picker also captures the previously selected row id and re-seeks the cursor through `SearchableList::cursor_to` after reload, so cancel-delete keeps the user on the same row.
+11. **Nested modals via `ModalKey::Push`, not a `&mut ModalStack` parameter.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal. `Debug for ModalKey` is hand-rolled because `Box<dyn Modal>` can't derive it.
+12. **`Modal::on_focus_regained` is a generally-useful hook.** Any picker that opens a sub-modal mutating shared state benefits from refresh-on-pop. Default no-op so existing modals don't change.
 
 ## Per-Modal Notes
 
@@ -66,7 +66,7 @@ App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event
 - **`/theme` picker** — `ThemePicker` wraps `ListPicker<ThemeRow>` over the curated built-in roster and emits `UserAction::PreviewTheme` on every cursor move so the App repaints the chat in the candidate palette without committing. Esc snaps back via the cached `preview_theme_snapshot`; Enter promotes the preview to a `SwapTheme` swap. Numeric `1`–`9` shortcuts jump to a row to match the visual ladder.
 - **`/rename` editor** — `RenameModal` is a single-line text editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap). Render is a fixed five-row stack: title, gap, prompt + buffer, gap, footer hint. Enter on a non-empty trimmed buffer submits `UserAction::Rename`; blank Enter is a silent no-op so the user can keep typing. Cursor clamps to the right edge on overflow.
 - **`/resume` picker** — `ResumePicker` wraps `SearchableList<SessionRow>` and adds a footer line. Each row paints a two-line title + dim metadata block (id prefix · relative time · message count · branch · project) plus a trailing blank. Tab toggles current-project ↔ all-projects and reloads rows; the typed query survives the rebuild. Enter on a focused row submits `UserAction::Resume`; Enter with no selection stays open so the user can Tab the scope or Esc out. Footer surfaces load failures inline so a failure can't disguise itself as "0 sessions". Ctrl+D / Delete on the cursor row pushes `ConfirmDeleteSessionModal`; on focus regain the picker reloads and re-seeks the cursor to the previously selected row.
-- **Confirm-delete modal** — `ConfirmDeleteSessionModal` owns a `SessionStore` clone plus the session id, display title, pre-formatted metadata, and a snapshot of the live session id. Y / Enter calls `SessionStore::delete` synchronously and submits a `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures (permission denied, refused live id) latch into a sticky inline error row that clears only on the next deliberate Y / N choice, so a stray arrow key or modifier-only event can't wipe the diagnostic before the user reads it. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D / Delete.
+- **Confirm-delete modal** — `ConfirmDeleteSessionModal` runs `SessionStore::delete` synchronously on Y / Enter and submits `ModalAction::SystemMessage("Deleted session {id}: {title}")` on success so the user has chat-stream evidence the action ran. Failures latch into a sticky inline error that clears only on a deliberate Y / N choice, so a stray key can't wipe the diagnostic. Pushed by `/delete <id-prefix>` and by `/resume`'s Ctrl+D / Delete.
 - **`/status` overview** — Single-section `KvOverview` of session descriptors (model, effort, cwd, session id, auth, version, cache TTL, show-thinking, show-welcome). Constructed in `slash/status`.
 - **`/config` overview** — Two-section `KvOverview`: "Resolved" (effective config values) and "Source Files" (the layered TOML paths it was assembled from). Path discovery runs per-invocation. Constructed in `slash/config`.
 - **`/help` overview** — Single-section `KvOverview` of every registered command. Aliases parenthesize after the canonical name; `usage()` placeholder appends. Constructed in `slash/help`.
