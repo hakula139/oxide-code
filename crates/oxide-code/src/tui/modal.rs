@@ -34,11 +34,15 @@ pub(crate) trait Modal: Send {
     /// Routes one key event. Returns whether the modal consumed it, was cancelled, or submitted
     /// a typed action; the stack pops on cancel / submit.
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey;
+
+    /// Hook called by the stack when this modal becomes the top entry again after a nested modal
+    /// pops. Default no-op; pickers that need to refresh their data after a sub-modal mutated
+    /// shared state (e.g. the resume picker reloading after delete) override this.
+    fn on_focus_regained(&mut self) {}
 }
 
 // ── Outcomes ──
 
-#[derive(Debug)]
 pub(crate) enum ModalKey {
     Consumed,
     Cancelled,
@@ -46,6 +50,23 @@ pub(crate) enum ModalKey {
     /// Emit `action` without popping — for live-preview modals where cursor moves should mutate
     /// app state without committing.
     Preview(ModalAction),
+    /// Push `modal` onto the stack as a nested overlay; the current modal stays beneath. Used by
+    /// pickers that open a confirm dialog (e.g. delete) without losing their own state.
+    Push(Box<dyn Modal>),
+}
+
+/// Hand-rolled because `Box<dyn Modal>` can't satisfy `Debug` without forcing every impl to derive
+/// it. The `Push` arm prints opaquely; the rest delegate to their inner [`ModalAction`].
+impl std::fmt::Debug for ModalKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Consumed => f.write_str("Consumed"),
+            Self::Cancelled => f.write_str("Cancelled"),
+            Self::Submitted(action) => f.debug_tuple("Submitted").field(action).finish(),
+            Self::Preview(action) => f.debug_tuple("Preview").field(action).finish(),
+            Self::Push(_) => f.write_str("Push(<modal>)"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -135,21 +156,35 @@ impl ModalStack {
             return None;
         }
         if is_universal_cancel(event) {
-            self.stack.pop();
+            self.pop_and_notify();
             return Some(ModalAction::None);
         }
         let outcome = self.stack.last_mut()?.handle_key(event);
         match outcome {
             ModalKey::Consumed => None,
             ModalKey::Cancelled => {
-                self.stack.pop();
+                self.pop_and_notify();
                 Some(ModalAction::None)
             }
             ModalKey::Submitted(action) => {
-                self.stack.pop();
+                self.pop_and_notify();
                 Some(action)
             }
             ModalKey::Preview(action) => Some(action),
+            ModalKey::Push(modal) => {
+                self.stack.push(modal);
+                None
+            }
+        }
+    }
+
+    /// Pops the top entry and calls [`Modal::on_focus_regained`] on the new top, if any. The
+    /// notification lets pickers (e.g. `/resume`) refresh after a nested confirm modal mutated
+    /// shared state.
+    fn pop_and_notify(&mut self) {
+        self.stack.pop();
+        if let Some(top) = self.stack.last_mut() {
+            top.on_focus_regained();
         }
     }
 }
@@ -168,14 +203,24 @@ pub(crate) mod testing {
 
     use super::*;
 
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     /// Emits a fixed action on a sentinel key for exercising `ModalStack`.
     pub(crate) struct ScriptedModal {
         pub(crate) on_submit_key: char,
         pub(crate) on_cancel_key: char,
         pub(crate) on_preview_key: char,
+        pub(crate) on_push_key: char,
         pub(crate) submit_action: ModalAction,
         pub(crate) preview_action: ModalAction,
+        /// `Some` to make `on_push_key` emit `ModalKey::Push(<child>)`. Take-once: subsequent
+        /// presses fall through to `Consumed` so a single test step can't redouble-push.
+        pub(crate) push_child: Option<Box<dyn Modal>>,
         pub(crate) declared_height: u16,
+        /// Shared so tests can read the counter through a sibling clone — the modal itself lives
+        /// inside `Box<dyn Modal>` after pushing onto the stack and isn't directly inspectable.
+        pub(crate) focus_regained_count: Arc<AtomicU32>,
     }
 
     impl ScriptedModal {
@@ -184,9 +229,12 @@ pub(crate) mod testing {
                 on_submit_key: 's',
                 on_cancel_key: 'c',
                 on_preview_key: 'p',
+                on_push_key: 'h',
                 submit_action,
                 preview_action: ModalAction::None,
+                push_child: None,
                 declared_height: 3,
+                focus_regained_count: Arc::new(AtomicU32::new(0)),
             }
         }
     }
@@ -212,14 +260,24 @@ pub(crate) mod testing {
                     std::mem::swap(&mut self.preview_action, &mut taken);
                     ModalKey::Preview(taken)
                 }
+                KeyCode::Char(c) if c == self.on_push_key => match self.push_child.take() {
+                    Some(child) => ModalKey::Push(child),
+                    None => ModalKey::Consumed,
+                },
                 _ => ModalKey::Consumed,
             }
+        }
+
+        fn on_focus_regained(&mut self) {
+            self.focus_regained_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crossterm::event::KeyCode;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -433,5 +491,73 @@ mod tests {
             3 + TOP_BORDER_HEIGHT,
             "inner modal's height resumes (plus border)",
         );
+    }
+
+    #[test]
+    fn handle_key_push_nests_child_modal_without_popping_parent() {
+        // ModalKey::Push must push the child as a new top while the parent stays beneath. Height
+        // flips to the child's; key routing flips to the child too.
+        let mut parent = ScriptedModal::new(ModalAction::None);
+        let mut child = ScriptedModal::new(ModalAction::None);
+        child.declared_height = 7;
+        parent.push_child = Some(Box::new(child));
+
+        let mut stack = ModalStack::new();
+        stack.push(Box::new(parent));
+        assert_eq!(stack.height(80), 3 + TOP_BORDER_HEIGHT, "parent height");
+
+        let outcome = stack.handle_key(&key('h'));
+        assert!(outcome.is_none(), "Push must not surface a ModalAction");
+        assert_eq!(stack.height(80), 7 + TOP_BORDER_HEIGHT, "child becomes top",);
+    }
+
+    #[test]
+    fn pop_notifies_underlying_top_via_on_focus_regained() {
+        // After a nested modal pops (cancel / submit / universal-cancel), the parent regains
+        // focus and gets exactly one on_focus_regained call so it can refresh stale data.
+        use std::sync::atomic::Ordering;
+
+        for (label, exit_key) in [
+            (
+                "Esc universal-cancel",
+                key_with_mods(KeyCode::Esc, KeyModifiers::NONE),
+            ),
+            (
+                "Ctrl+C universal-cancel",
+                key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ),
+            ("modal Cancelled", key('c')),
+            ("modal Submitted", key('s')),
+        ] {
+            let parent = ScriptedModal::new(ModalAction::None);
+            let counter = Arc::clone(&parent.focus_regained_count);
+            let child = ScriptedModal::new(ModalAction::None);
+
+            let mut stack = ModalStack::new();
+            stack.push(Box::new(parent));
+            stack.push(Box::new(child));
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                0,
+                "{label}: pre-push baseline"
+            );
+
+            stack.handle_key(&exit_key);
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                1,
+                "{label}: parent must be notified exactly once after child pops",
+            );
+            assert!(stack.is_active(), "{label}: parent stays on the stack");
+        }
+    }
+
+    #[test]
+    fn empty_stack_pop_and_notify_is_a_noop() {
+        // No active modal → pop on universal-cancel is short-circuited at the empty-stack guard,
+        // so the helper is never reached. Cover the helper's "no top to notify" branch directly.
+        let mut stack = ModalStack::new();
+        stack.pop_and_notify();
+        assert!(!stack.is_active());
     }
 }
