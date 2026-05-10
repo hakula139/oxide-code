@@ -1658,17 +1658,18 @@ mod tests {
     #[test]
     fn modal_system_message_action_pushes_into_chat() {
         // Destructive-action modals (e.g. confirm-delete) report success via SystemMessage so
-        // the user has chat-stream evidence the action ran.
+        // the user has chat-stream evidence the action ran. Pin the body verbatim so a future
+        // routing change that drops the message or pushes an empty block fails here.
         let (mut app, _rx, _agent_tx) = test_app(None);
         let entries_before = app.chat.entry_count();
-        app.apply_modal_action(ModalAction::SystemMessage(
-            "Deleted session abc12345".to_owned(),
-        ));
+        let body = "Deleted session abc12345: Fix auth flow".to_owned();
+        app.apply_modal_action(ModalAction::SystemMessage(body.clone()));
         assert_eq!(
             app.chat.entry_count(),
             entries_before + 1,
             "SystemMessage must push exactly one block",
         );
+        assert_eq!(app.chat.last_system_text(), Some(body.as_str()));
     }
 
     #[test]

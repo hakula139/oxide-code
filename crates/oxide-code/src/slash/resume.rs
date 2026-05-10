@@ -995,7 +995,8 @@ mod tests {
 
     #[test]
     fn tab_widens_scope_to_other_project_sessions_and_preserves_query() {
-        // Bare picker stays scoped; Tab widens AND preserves the typed filter.
+        // Bare picker stays scoped; Tab widens, preserves the typed filter, AND keeps the
+        // live-session out of the widened result so the user can never resume themselves.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         seed_session(
@@ -1013,15 +1014,26 @@ mod tests {
             1,
             datetime!(2026-04-18 09:01:00 UTC),
         );
+        let live_id = stamped_id(0x33);
+        seed_session(
+            &other,
+            &live_id,
+            Some("live-foreign"),
+            1,
+            datetime!(2026-04-18 09:02:00 UTC),
+        );
 
-        let mut picker = ResumePicker::new(store, "live-session-id".to_owned());
+        let mut picker = ResumePicker::new(store, live_id.clone());
         assert_eq!(picker.total, 1, "scoped: only the home project");
         for c in "11".chars() {
             picker.handle_key(&key(KeyCode::Char(c)));
         }
         assert_eq!(picker.list.query(), "11");
         picker.handle_key(&key(KeyCode::Tab));
-        assert_eq!(picker.total, 2, "Tab widens to all projects");
+        assert_eq!(
+            picker.total, 2,
+            "Tab widens to all projects but excludes the live session",
+        );
         assert_eq!(
             picker.list.query(),
             "11",
@@ -1170,6 +1182,11 @@ mod tests {
             picker.list.selected().unwrap().session_id,
             target,
             "cursor moved off the deleted row",
+        );
+        assert_eq!(
+            picker.list.cursor_index(),
+            0,
+            "cursor lands at row 0, the post-reload default",
         );
     }
 
