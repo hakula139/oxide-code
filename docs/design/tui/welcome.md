@@ -40,12 +40,12 @@ Sections: identity ribbon (single line, centered) → body column (env / cwd / s
 
 ### Width ladder
 
-| Cols  | Identity                  | Environment         | Cwd                         | Starter list | Trailer hint |
-| ----- | ------------------------- | ------------------- | --------------------------- | ------------ | ------------ |
-| ≥60   | ribbon `━━━━ oxide-code…` | full line           | tildified, full             | 3 rows       | yes          |
-| 40-59 | wordmark `oxide-code v…`  | full line           | tildified, full             | 3 rows       | yes          |
-| 25-39 | wordmark                  | model + effort only | tildified, center-truncated | hidden       | hidden       |
-| <25   | suppressed                | suppressed          | suppressed                  | suppressed   | suppressed   |
+| Cols  | Identity                    | Environment         | Cwd                         | Starter list | Trailer hint |
+| ----- | --------------------------- | ------------------- | --------------------------- | ------------ | ------------ |
+| ≥60   | ribbon `━━━━ oxide-code...` | full line           | tildified, full             | 3 rows       | yes          |
+| 40-59 | wordmark `oxide-code v...`  | full line           | tildified, full             | 3 rows       | yes          |
+| 25-39 | wordmark                    | model + effort only | tildified, center-truncated | hidden       | hidden       |
+| <25   | suppressed                  | suppressed          | suppressed                  | suppressed   | suppressed   |
 
 Below 25 cols nothing paints, since the terminal is too narrow to read the welcome cleanly. The input field anchors the empty session instead.
 
