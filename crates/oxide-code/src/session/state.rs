@@ -496,6 +496,110 @@ mod tests {
         assert!(!state.first_user_prompt_seen);
     }
 
+    // ── compact_entries ──
+
+    #[test]
+    fn compact_entries_writes_boundary_and_synthetic_message_resetting_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+        state.flush_entries(&rec).unwrap();
+        let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+        state.flush_entries(&rec).unwrap();
+        assert_eq!(state.message_count(), 2);
+
+        let (entries, synthetic_uuid) = state.compact_entries(
+            "summary body",
+            Some("focus on auth".to_owned()),
+            Message::user("post-compact"),
+            now,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            matches!(
+                &entries[0],
+                Entry::Compact {
+                    summary,
+                    pre_message_count: 2,
+                    instructions: Some(i),
+                    ..
+                } if summary == "summary body" && i == "focus on auth"
+            ),
+            "boundary entry must carry summary, pre-count, and instructions verbatim: {:?}",
+            entries[0],
+        );
+        assert!(
+            matches!(
+                &entries[1],
+                Entry::Message {
+                    uuid,
+                    parent_uuid: None,
+                    ..
+                } if *uuid == synthetic_uuid
+            ),
+            "synthetic post-compact message must reset the parent chain: {:?}",
+            entries[1],
+        );
+        assert_eq!(state.message_count(), 1, "post-compact count starts at 1");
+        assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
+    }
+
+    #[test]
+    fn compact_entries_omits_instructions_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+
+        let (entries, _) = state.compact_entries("s", None, Message::user("synth"), now);
+
+        assert!(matches!(
+            &entries[0],
+            Entry::Compact {
+                instructions: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compact_entries_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
+        // The synthetic message itself is user-role; without latching the flag, the next real
+        // record would mistake the post-compact head for the session's first prompt and seed a
+        // duplicate AI title.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+
+        let _ = state.compact_entries("s", None, Message::user("synth"), now);
+
+        assert!(state.first_user_prompt_seen);
+        let (_, seed) = state.queue_message_entries(&Message::user("after"), now, false);
+        assert!(seed.is_none());
+    }
+
+    #[test]
+    fn compact_entries_clears_resume_anchor_so_finish_writes_summary() {
+        // Without clearing initial_message_count, a resumed session whose only post-compact
+        // content is the synthetic head would no-op in finish_entries (count == initial) and
+        // never emit a closing Summary.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        state.initial_message_count = 5;
+        state.message_count = 5;
+        let now = OffsetDateTime::now_utc();
+
+        let _ = state.compact_entries("s", None, Message::user("synth"), now);
+
+        assert_eq!(state.initial_message_count, 0);
+        assert_eq!(state.message_count, 1);
+    }
+
     // ── finish_entries ──
 
     #[test]

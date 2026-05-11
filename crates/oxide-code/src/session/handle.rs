@@ -808,6 +808,89 @@ mod tests {
         );
     }
 
+    // ── compact ──
+
+    #[tokio::test]
+    async fn compact_writes_boundary_and_acks_with_pre_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let handle = start(&store, "m");
+        let sid = handle.session_id().to_owned();
+
+        handle.record_message(Message::user("a")).await;
+        handle.record_message(Message::assistant("b")).await;
+
+        let outcome = handle
+            .compact(
+                "synth summary".to_owned(),
+                Some("focus".to_owned()),
+                Message::user("post"),
+            )
+            .await;
+
+        assert_eq!(outcome.pre_count, 2, "pre_count snapshots before reset");
+        assert!(outcome.failure.is_none(), "healthy actor acks cleanly");
+        handle.finish(Vec::new()).await;
+        drop(handle);
+
+        let content = std::fs::read_to_string(test_session_file(dir.path(), &sid)).unwrap();
+        assert!(
+            content.contains(r#""type":"compact""#),
+            "boundary line on disk: {content}",
+        );
+        assert!(
+            content.contains(r#""summary":"synth summary""#),
+            "summary text on disk: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_actor_gone_surfaces_failure_with_zero_pre_count() {
+        let handle = testing::dead("dead");
+
+        let outcome = handle
+            .compact("s".to_owned(), None, Message::user("synth"))
+            .await;
+
+        assert_eq!(outcome.pre_count, 0, "no actor means no pre-count signal");
+        assert!(
+            outcome.failure.is_some(),
+            "actor-gone surfaces on first call"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_actor_drops_ack_surfaces_actor_gone_failure() {
+        // Exercises the `rx.await` fallback when the actor receives the cmd but never acks.
+        let handle = testing::acks_then_drops("ack-dropped", 0);
+
+        let outcome = handle
+            .compact("s".to_owned(), None, Message::user("synth"))
+            .await;
+
+        assert_eq!(outcome.pre_count, 0);
+        assert!(
+            outcome.failure.is_some(),
+            "dropped ack must surface as actor-gone",
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_actor_ack_path_returns_clean_outcome() {
+        // Complement of the drops-ack test: when the testing actor does ack, the caller sees
+        // a clean outcome. This pins the success path through `testing::acks_then_drops`.
+        let handle = testing::acks_then_drops("ack-clean", 1);
+
+        let outcome = handle
+            .compact("s".to_owned(), None, Message::user("synth"))
+            .await;
+
+        assert!(
+            outcome.failure.is_none(),
+            "acked path must report no failure"
+        );
+    }
+
     // ── finish ──
 
     #[tokio::test]

@@ -637,6 +637,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_compact_writes_boundary_and_synthetic_message_to_disk() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec_a, _) = record_cmd("user one");
+        let (rec_b, _) = record_cmd("user two");
+        let (compact_ack, _compact_rx) = oneshot::channel();
+        let compact_cmd = SessionCmd::Compact {
+            summary: "synth summary".to_owned(),
+            instructions: Some("focus on auth".to_owned()),
+            synthetic_message: Message::user("post"),
+            ack: compact_ack,
+        };
+
+        drive(state, vec![rec_a, rec_b, compact_cmd]).await;
+
+        let path = super::super::store::test_session_file(dir.path(), &session_id);
+        let content = std::fs::read_to_string(path).unwrap();
+        let compact_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"compact""#))
+            .count();
+        let message_count = content
+            .lines()
+            .filter(|l| l.contains(r#""type":"message""#))
+            .count();
+        assert_eq!(compact_count, 1, "exactly one boundary written: {content}");
+        assert_eq!(
+            message_count, 3,
+            "two recorded + one synthetic continuation: {content}",
+        );
+        assert!(
+            content.contains(r#""summary":"synth summary""#),
+            "boundary carries the summary text: {content}",
+        );
+        assert!(
+            content.contains(r#""instructions":"focus on auth""#),
+            "boundary carries the focus instructions: {content}",
+        );
+    }
+
+    #[tokio::test]
+    async fn run_compact_acks_with_pre_compact_message_count() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store, "m");
+        let (rec_a, _) = record_cmd("one");
+        let (rec_b, _) = record_cmd("two");
+        let (compact_ack, compact_rx) = oneshot::channel();
+        let compact_cmd = SessionCmd::Compact {
+            summary: "s".to_owned(),
+            instructions: None,
+            synthetic_message: Message::user("synth"),
+            ack: compact_ack,
+        };
+
+        drive(state, vec![rec_a, rec_b, compact_cmd]).await;
+
+        let outcome = compact_rx.await.unwrap();
+        assert_eq!(
+            outcome.pre_count, 2,
+            "pre_count reports the count BEFORE the compact reset",
+        );
+        assert!(outcome.failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_compact_flush_error_surfaces_in_ack() {
+        // Mirror the Record flush-error path: removing the project dir forces flush to fail
+        // when the writer tries to promote Pending → Active.
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store, "m");
+        let project_dir = super::super::store::test_project_dir(dir.path());
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let (compact_ack, compact_rx) = oneshot::channel();
+        let compact_cmd = SessionCmd::Compact {
+            summary: "s".to_owned(),
+            instructions: None,
+            synthetic_message: Message::user("synth"),
+            ack: compact_ack,
+        };
+
+        drive(state, vec![compact_cmd]).await;
+
+        let outcome = compact_rx.await.unwrap();
+        assert!(
+            outcome.failure.is_some(),
+            "flush error must surface in the Compact ack",
+        );
+    }
+
+    #[tokio::test]
     async fn run_full_turn_produces_byte_compatible_jsonl() {
         // Pins literal JSONL bytes (UUIDs / timestamps / cwd masked) so a field rename would fail.
         let dir = tempdir().unwrap();

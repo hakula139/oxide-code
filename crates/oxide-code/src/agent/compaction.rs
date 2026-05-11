@@ -383,6 +383,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_session_surfaces_stream_error_event() {
+        // Stream that opens cleanly then emits an in-band error frame (rate limit / overload) —
+        // the bail path inside the receive loop, distinct from HTTP-level failures.
+        let body = "event: ping\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-haiku-4-5\"}}\n\nevent: ping\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"servers overloaded\"}}\n\n";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let err = compact_session(&client, &fake_transcript(), None)
+            .await
+            .expect_err("in-band error must propagate");
+        assert!(
+            format!("{err:#}").contains("servers overloaded"),
+            "underlying API error message must thread through: {err:#}",
+        );
+    }
+
+    #[tokio::test]
     async fn compact_session_propagates_http_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

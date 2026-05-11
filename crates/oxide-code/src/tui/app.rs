@@ -1466,6 +1466,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_compact_forwards_to_agent_and_disables_input_until_event() {
+        // Mirror of the Resume gate: the chat is about to be wiped by `apply_session_compacted`,
+        // so the user's input must be parked until SessionCompacted re-enables it.
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        let action = UserAction::Compact {
+            instructions: Some("focus".to_owned()),
+        };
+        app.dispatch_user_action(action.clone());
+
+        let forwarded = rx.recv().await.expect("Compact must reach the agent loop");
+        assert_eq!(forwarded, action);
+        assert!(
+            !app.input.is_enabled(),
+            "input must be gated until the compact event lands",
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_submit_during_cancelling_holds_locally_without_forwarding() {
         // Cancel-window FIFO authority: forwarding a submit during cancel could let it
         // slip ahead of `pending_prompts`. Hold locally until `Cancelled`, then drain.
@@ -2146,6 +2164,74 @@ mod tests {
             "Some(None) title must clear the chrome",
         );
         assert!(app.chat.is_empty());
+    }
+
+    #[test]
+    fn handle_session_compacted_replays_summary_and_clears_pending_calls() {
+        let (mut app, _rx, _agent_tx) = test_app(Some("Pre-compact"));
+        app.chat.push_user_message("pre-compact prompt".to_owned());
+        app.pending_calls.insert(
+            "pending-1".to_owned(),
+            PendingCall {
+                label: "Bash(...)".to_owned(),
+                name: "bash".to_owned(),
+                input: serde_json::json!({}),
+            },
+        );
+
+        app.handle_agent_event(AgentEvent::SessionCompacted {
+            summary: "## Recap\n\nDid the thing.".to_owned(),
+            pre_count: 4,
+            instructions: Some("focus on auth".to_owned()),
+        });
+
+        assert_eq!(
+            app.chat.entry_count(),
+            1,
+            "chat must collapse to the single CompactedBlock",
+        );
+        assert_eq!(
+            app.pending_calls.len(),
+            0,
+            "pending tool calls must drop on compact",
+        );
+        assert_eq!(app.status_bar.status(), &Status::Idle);
+        assert!(app.input.is_enabled(), "compact returns to idle input");
+        assert!(app.dirty);
+    }
+
+    #[tokio::test]
+    async fn handle_session_compacted_drains_queued_prompts_unlike_resume() {
+        // Compact preserves user intent: a queued prompt becomes the first post-compact turn
+        // rather than being dropped (the way `/resume` does, since `/resume` swaps identity).
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.pending_prompts
+            .push_back("queued after compact".to_owned());
+
+        app.handle_agent_event(AgentEvent::SessionCompacted {
+            summary: "s".to_owned(),
+            pre_count: 2,
+            instructions: None,
+        });
+
+        let forwarded = rx.recv().await.expect("drained prompt reaches the agent");
+        assert_eq!(
+            forwarded,
+            UserAction::SubmitPrompt("queued after compact".to_owned()),
+            "queued prompt must drain as the next user turn",
+        );
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn handle_session_compacted_without_instructions_renders_clean_block() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionCompacted {
+            summary: "summary only".to_owned(),
+            pre_count: 2,
+            instructions: None,
+        });
+        assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
     }
 
     #[test]
