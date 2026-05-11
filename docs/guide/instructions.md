@@ -15,13 +15,13 @@ The first file found at each location wins. Use whichever convention your projec
 
 Instruction files are loaded from three scopes:
 
-| Scope            | Path                                                                      | Purpose                                    |
-| ---------------- | ------------------------------------------------------------------------- | ------------------------------------------ |
-| User global      | `~/.claude/CLAUDE.md`                                                     | Personal preferences that apply everywhere |
-| Project          | `<dir>/CLAUDE.md` — every directory from the project root down to the CWD | Team-shared conventions                    |
-| Project (hidden) | `<dir>/.claude/CLAUDE.md` — same walk, inside `.claude/`                  | Same as above, but out of the project root |
+| Scope            | Path                                                                     | Purpose                                    |
+| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------ |
+| User global      | `~/.claude/CLAUDE.md`                                                    | Personal preferences that apply everywhere |
+| Project          | `<dir>/CLAUDE.md`, every directory from the project root down to the CWD | Team-shared conventions                    |
+| Project (hidden) | `<dir>/.claude/CLAUDE.md`, same walk inside `.claude/`                   | Same as above, but out of the project root |
 
-Files closer to your working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load (and merge) in this order: `~/.claude/` → `/repo/` → `/repo/crates/` → `/repo/crates/core/`, checking both the root-level and `.claude/` variants at each step. The project root is the git repository root when available, falling back to the current working directory.
+Files closer to your working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order: `~/.claude/` → `/repo/` → `/repo/crates/` → `/repo/crates/core/`. oxide-code checks both the root-level and `.claude/` variants at each step. The project root is the git repository root when available, falling back to the current working directory.
 
 ## Writing effective instructions
 
@@ -47,4 +47,4 @@ Tips:
 
 - Keep instructions concise, since they consume tokens on every API call.
 - Focus on rules the assistant can't infer from the code itself.
-- Put personal preferences in the global file; put team-shared conventions at the project level.
+- Put personal preferences in the global file. Put team-shared conventions at the project level.

@@ -7,17 +7,23 @@ Research on TUI cancellation, exit, and input queueing across reference projects
 Cancellation rides an `AbortController`. Esc cancels, Ctrl+C is overloaded for cancel-then-exit.
 
 - **Cancel**: Esc aborts via `useCancelRequest.ts` → `abortController.abort('interrupt')`. Partial assistant turn is preserved with an `"Interrupted by user"` synthetic `tool_result` against dangling `tool_use` ids. On resume, `conversationRecovery.ts` transforms to an `interrupted_prompt` plus synthetic user message.
+
 - **Dual-press exit**: `useDoublePress.ts`, 800 ms window for Ctrl+C / Ctrl+D. Esc never exits.
-- **Queue**: Module-level `commandQueue` with priorities (`now > next > later`). Default is `next` (drain between tool waves, not turn-boundary). After every tool wave the queue is snapshotted and converted to `<system-reminder>`-wrapped user messages spliced into `toolResults`. Default Enter does not abort, only `priority === 'now'` triggers abort. Up-arrow / Esc on non-empty queue calls `popAllEditable()`.
+
+- **Queue**: Module-level `commandQueue` with priorities (`now > next > later`). Default is `next` (drain between tool waves, after the current turn). After every tool wave the queue is snapshotted and converted to `<system-reminder>`-wrapped user messages spliced into `toolResults`. Default Enter does not abort. Only `priority === 'now'` triggers abort. Up-arrow / Esc on non-empty queue calls `popAllEditable()`.
 
 ## OpenAI Codex (Rust)
 
 State distributed across `ChatWidget` flags. The protocol layer carries `Op::Interrupt` and `TurnAbortReason`, with no monolithic enum.
 
 - **Cancel**: Esc interrupts and submits pending steers (only if a queued steer exists). Ctrl+C is the general interrupt, deferring to bottom-pane first and then escalating to `AppCommand::interrupt()`. Routes as `Op::Interrupt` through the protocol.
+
 - **Tombstone**: None. On interrupt the partial assistant message is discarded, and queued / pending / rejected steers merge back into the composer.
+
 - **Queue**: Two mechanisms. Enter → `steer_input` → `pending_input` on the active turn state (drained at sampling-iteration boundary, non-disruptive). Tab → `queued_user_messages: VecDeque` (drained at turn boundary via `maybe_send_next_queued_input()`). Alt+Up pops the most recent queued message.
+
 - **Dual-press exit**: Infrastructure exists (1 s timeout) but currently disabled. Ctrl+D is single-press exit.
+
 - **Status**: `StatusIndicatorWidget` shows spinner plus elapsed time plus "Esc to interrupt" hint plus tool name.
 
 ## opencode (TypeScript)
@@ -25,8 +31,11 @@ State distributed across `ChatWidget` flags. The protocol layer carries `Op::Int
 Server-side state machine (`idle | busy | retry`). Each session owns a `Runner` (Effect-TS).
 
 - **Cancel**: Dual-press Esc (5-second window). `Runner.cancel` abort-signals the HTTP stream and tool subprocesses. No tombstone, so the partial assistant message stays mid-render.
+
 - **Queue**: User-selectable `general.followup` setting. **Steer mode** (default): Enter while busy fires `prompt_async` immediately. The new user row persists to the transcript, and the long-lived `runLoop` reloads the transcript and wraps in `<system-reminder>`. **Queue mode** (opt-in): drafts held client-side until the session goes idle, then auto-sent FIFO.
+
 - **Exit**: `app_exit` is single-press when prompt is empty. Dual-press is specifically for interrupt.
+
 - **Status**: 8-frame braille spinner at 80 ms, muted gray. No tool name or elapsed time.
 
 ## Comparison

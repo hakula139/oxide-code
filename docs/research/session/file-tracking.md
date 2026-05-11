@@ -11,14 +11,14 @@ Per-file state: `content`, `timestamp` (mtime ms), `offset`, `limit`, `isPartial
 Invariants (`FileEditTool.ts:275-311`):
 
 1. Edit refuses if no entry exists or entry is `isPartialView: true`.
-2. Edit refuses if `mtime > readTimestamp.timestamp`. For full reads, disk content is re-compared; matching bytes allow the Edit through (Windows cloud-sync workaround). Partial reads always reject on mtime drift.
+2. Edit refuses if `mtime > readTimestamp.timestamp`. For full reads, disk content is re-compared. Matching bytes allow the Edit through (Windows cloud-sync workaround). Partial reads always reject on mtime drift.
 3. Read on cached unchanged file returns a stub instead of repeating bytes.
 
 Resume: rehydrate cache by scanning message history (`queryHelpers.ts:346-501`).
 
 ## OpenAI Codex (Rust)
 
-No explicit cache. Validation deferred to `apply_patch` verification layer (`apply_patch.rs:340-464`). Patch context lines must match current file content; mismatches return `CorrectnessError` to the model. No "must Read first" rule.
+No explicit cache. Validation deferred to `apply_patch` verification layer (`apply_patch.rs:340-464`). Patch context lines must match current file content. Mismatches return `CorrectnessError` to the model. No "must Read first" rule.
 
 ## opencode (TypeScript)
 

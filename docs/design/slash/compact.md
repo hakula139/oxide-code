@@ -52,38 +52,60 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 
 17. **Custom instructions appended verbatim under an "Additional instructions" section in the user message.** Matches Claude Code's pattern: the rubric runs first, then custom instructions follow as steering for the same task.
 
-18. **`CompactedBlock` is a single chat block, not a system message plus summary body pair.** The top-bordered surface gives it a visual identity while keeping it one conceptual unit. The block can later grow a "view full pre-compact transcript" footer or a token-saved indicator without re-architecting around two block types.
+18. **`CompactedBlock` is one chat block.** The top-bordered surface gives compaction a visual identity while keeping the header and summary one conceptual unit. The block can later grow a "view full pre-compact transcript" footer or a token-saved indicator without coordinating two block types.
 
 19. **`echoes_input` returns true.** The user's `> /compact <instructions>` line stays in scrollback above the `CompactedBlock` so the operation is visible in history. Bare `/compact` echoes too, so the prompt line plus boundary block reads as a single coherent operation.
 
 ## Per-Component Notes
 
 - **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `argument_hint = "[instructions]"`. `classify` is always `Mutating`. `echoes_input` returns true. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+
 - **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so the agent loop's `apply_compact` doesn't repeat the trim.
+
 - **`AgentEvent::SessionCompacted { summary, pre_count, instructions }`**: Emitted post-success. `summary` is the rendered body, `pre_count` is for the count header, and `instructions` is forwarded for log / telemetry. App-only reaction. `StdioSink` ignores it (same convention as `SessionResumed`).
+
 - **`agent::compaction::compact_session`**: Async fn taking `&Client`, `&[Message]`, `Option<&str>`, returns `Result<String>`. Composes the system prompt, strips the transcript to user-text plus assistant-text only, builds a one-shot `CreateMessageRequest` with `tools: Vec::new()`, drains the stream into a single `String`, returns the trimmed summary or an error.
+
 - **`SUMMARIZATION_SYSTEM`**, **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Three `&'static str` constants. System prompt is one paragraph. Rubric is the terse list (intent, decisions, code paths touched, current state, next step). Prefix is the next-turn framing prepended to the synthetic message.
+
 - **`apply_compact` (agent loop)**: Drive `compact_session`, surface failure as `AgentEvent::Error`, on success call `session.compact(summary, pre_count, instructions)`, swap in-memory `Vec<Message>` with the synthetic continuation, emit `SessionCompacted`, and surface session-write failure via the existing sink helper.
+
 - **`Entry::Compact`**: New variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case). Rejected gracefully via `Entry::Unknown` for older binaries.
+
 - **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message id, and resets `message_count` to `1`. Acks via `oneshot` like the rest of `SessionCmd`.
+
 - **`session::handle::compact`**: Async API. Snapshots the file tracker, clears it, sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { synthetic_message: Message, finalize_failure: Option<String> }`.
+
 - **`CompactedBlock`**: Chat block with a top-bordered surface, a `Compacted N messages` header (themed `dim`), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer.
+
 - **`apply_session_compacted` (TUI)**: Clears the chat, replays the synthetic continuation as a single `CompactedBlock`, preserves queued prompts (shows count if non-zero via system message), preserves the modal stack, and resumes idle.
+
 - **`chain::pick_chain`**: No change needed. Walking from the latest leaf back via `parent_uuid` naturally stops at the post-compact head because `parent_uuid: None`.
+
 - **`session::sanitize`**: No change needed. The synthetic continuation is a normal `role: user` message with text content, and sanitize drops nothing.
+
 - **`SessionInfo` / `--list`**: No change in v1. Future work surfaces "compacted N times" alongside `Msgs`. Free at write time once `Entry::Compact` lines exist, and a follow-up PR can add the column.
 
 ## Out of Scope / Deferred
 
 - **Auto-compact.** Token-budget oracle, threshold math (95% of effective context window, `(window - max_output) - safety_buffer`), pre-turn check, single-turn circuit breaker, opt-out config knob (`compact.auto = false`). Roadmap-tracked. Lands after manual is shipped and exercised.
+
 - **Live-streamed summary.** `StreamingCompactionBlock` finalizing into `CompactedBlock`, tokenwise rendering, mid-stream cancel handling. v2 polish.
+
 - **Anchored re-compaction (`<previous-summary>` block).** opencode's signature pattern. Genuinely useful for ultra-long sessions, but defer until a user has compacted the same session twice.
+
 - **Microcompact / prune (in-place tool-result body deletion).** Both Claude Code and opencode ship this because their auto-compact is more aggressive. Land after auto-compact.
+
 - **Partial / range compaction.** Claude Code's "summarize from here" / "summarize up to here" via the message selector. Adds a UI surface, a dual-direction summarizer, and a transcript splice. Its own feature.
+
 - **PreCompact / PostCompact hooks.** All three CLIs ship hooks, but oxide-code doesn't have a hook surface yet. Lands with the broader hooks abstraction.
+
 - **`agent.compaction.model` config knob.** Letting users pin compaction to a cheap model (Haiku) while the main session runs Opus. Useful, but defer until users ask.
+
 - **`pre_tokens` field on `Entry::Compact`.** Token-tracking infrastructure lands with auto-compact. Manual compact doesn't need it.
+
 - **Pre-flight `count_tokens` API call.** All three reference CLIs use the API's `usage.total_tokens` from the previous response and accept the drift. When auto-compact ships, follow that convention.
+
 - **`/cost` companion.** Token / cost telemetry surface. Status-bar redesign plus `/cost` listed under "Later" in the roadmap.
 
 ## Sources

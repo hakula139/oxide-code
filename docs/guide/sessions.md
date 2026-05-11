@@ -57,7 +57,7 @@ ox -c --all        # latest session anywhere
 ox -c a1b2 -a      # prefix match across all projects
 ```
 
-Resume from an explicit file path — useful for sessions copied between machines or kept outside the store root:
+Resume from an explicit file path, useful for sessions copied between machines or kept outside the store root:
 
 ```bash
 ox -c ./conversation.jsonl
@@ -72,7 +72,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. Only finalized sessions can be deleted; the live session is excluded.
+Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. Only finalized sessions can be deleted, and the live session is excluded.
 
 ## Titles
 
@@ -86,6 +86,6 @@ On Unix, session files are created with user-only permissions (`0o600`) because 
 
 Sessions are recorded in every mode:
 
-- **TUI** (`ox`) — saved automatically.
-- **Bare REPL** (`ox --no-tui`) — saved automatically.
-- **Headless** (`ox -p "prompt"`) — single-turn session saved (useful for audit trails).
+- **TUI** (`ox`): Saved automatically.
+- **Bare REPL** (`ox --no-tui`): Saved automatically.
+- **Headless** (`ox -p "prompt"`): Single-turn session saved, useful for audit trails.

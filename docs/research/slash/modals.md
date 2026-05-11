@@ -74,14 +74,21 @@ Imperative single-modal API.
 ## Patterns Worth Borrowing for oxide-code
 
 1. **Codex's `BottomPaneView` trait plus view stack.** Idiomatic Rust+Ratatui shape, with a small trait, single owner, and stack semantics that give nesting for free without adding focus-flag bookkeeping. Direct port target.
+
 2. **Codex's generic `ListSelectionView`.** A single picker primitive parameterized by an item trait is what `/model`, `/effort`, `/theme`, future `/agents`, and any approval prompt all want. Beats hand-rolling per command (Claude Code's path).
+
 3. **Two open paths from day one.** Slash-triggered plus agent-triggered. The trait shape is identical for both, with only the call site differing. Codex already does this with `try_consume_approval_request`. Designing the trait for both up front means the future Permission feature drops in without re-shaping.
+
 4. **Async event for completion rather than callback.** Modal pushes a `UserAction` (or richer `ModalEvent`) onto the existing `user_tx` channel. Symmetric with how the rest of oxide-code's UI talks to the agent loop. Avoids the `Box<dyn FnOnce>` and lifetime gymnastics of a callback-based design.
+
 5. **Lazy live-data getters on slash command metadata.** Claude Code's dynamic `description()` lets the popup show `(currently sonnet)` without a refresh hook. Cheap, useful, doesn't require the modal infrastructure.
 
 ## Patterns to Reject
 
 1. **opencode's single-modal-only.** Saves ~30 lines of stack code, but costs every confirm-inside-picker flow forever.
+
 2. **Claude Code's per-command UI hand-rolling.** With ~50 modal commands they need either a shared kit or a lot of duplication. A generic picker primitive scales better. Build it before the second modal lands.
+
 3. **opencode's imperative `dialog.show()` with side-effecting components.** State-mutation-as-result is hard to test in Rust. Prefer typed `ModalAction` returns.
+
 4. **Codex's permanent `ChatComposer` behind every view.** Useful for "preserve typed text across modal dismiss" but adds layout complexity. Only worth it if oxide-code's typing-during-modal turns out to be common. Defer.

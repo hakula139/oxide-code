@@ -7,10 +7,15 @@ Research on TUI patterns across reference projects. Based on [Claude Code](https
 Custom fork of Ink, a React-based terminal rendering library with Yoga Flexbox layout.
 
 - **Streaming**: `StreamingMarkdown` splits at the last block boundary. Monotonic `useRef` boundary, so only the final block re-parses per delta (O(1) amortized). LRU token cache (500 entries). Fast-path regex skip for non-markdown text.
+
 - **Thinking**: Collapsed by default (`"... Thinking"` dim italic). Ctrl+O to expand.
+
 - **Tools**: Polymorphic, with each tool providing `renderToolUseMessage()` / `renderToolUseProgressMessage()`. Status dot animation.
+
 - **Input**: Full vim emulation, command autocomplete, image paste.
+
 - **Scroll**: `ScrollBox` bypasses React for scroll. Height cache per message. `React.memo` on static content. `OffscreenFreeze`.
+
 - **Flickering**: Full-screen redraw on every state change causes severe flicker in long sessions (anthropics/claude-code#1913).
 
 ## OpenAI Codex (Rust + Ratatui)
