@@ -8,13 +8,13 @@ Companions: [commands.md](commands.md), [session/persistence.md](../session/pers
 
 `slash/compact` hosts `CompactCmd`. Bare or whitespace-only args become `None`, and non-empty args trim into a `Some(instructions)` that the agent loop forwards verbatim into the summarization request. Both shapes echo the input line and forward `UserAction::Compact { instructions }`. The classifier is always `Mutating`, so the input is refused mid-turn (the in-flight reply is allowed to finish first).
 
-`agent/compaction` is a small driver module. `compact_session` builds a stripped transcript (user-text-only, see below), composes a one-shot `Client` request with an empty tool registry and a dedicated minimal system prompt, drains the stream into a single `String`, then dispatches a `SessionCmd::Compact` over the actor channel. The driver is its own module rather than agent-loop code so the request shape is testable in isolation.
+`agent/compaction` is a small driver module. `compact_session` builds a stripped transcript (text blocks only, see below), composes a one-shot `Client` request with an empty tool registry and a dedicated minimal system prompt, drains the stream into a single `String`, then dispatches a `SessionCmd::Compact` over the actor channel. The driver is its own module rather than agent-loop code so the request shape is testable in isolation.
 
-`session/handle` gains `compact(summary, pre_count, instructions, parent_anchor) -> CompactOutcome`. The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`), with the synthetic message's `parent_uuid` deliberately set to `None`. `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`. The file tracker is reset to match `/clear`. Pre-compact `FileSnapshot` entries already on disk become inaccessible the same way pre-compact messages do, since `chain` walks back via `parent_uuid` and stops at the post-compact head.
+`session/handle` exposes `compact(summary, instructions, synthetic_message) -> CompactOutcome`. The actor writes one `Entry::Compact` followed by the synthetic post-compact `Entry::Message` (a `role: user` carrying `SUMMARY_PREFIX + summary`), with the synthetic message's `parent_uuid` deliberately set to `None`. `SessionState`'s `last_message_uuid` is reset to the synthetic message's id and `message_count` resets to `1`. The file tracker is reset to match `/clear`. On resume, `load_session_data` also clears sidecars when it sees the new root message so pre-compact `FileSnapshot` and tool metadata entries cannot leak back into the visible tail.
 
 The agent loop adds `apply_compact`: drive the streaming summarization, on success call `session.compact(...)`, replace the in-memory `Vec<Message>` with the synthetic continuation, and emit `AgentEvent::SessionCompacted { summary, pre_count, instructions }`. Failure paths (stream error, empty summary, too-few-messages guard, channel close) emit `AgentEvent::Error` and leave the session untouched. Cancellation routes through the existing cancel infrastructure and emits `AgentEvent::Cancelled` like a regular turn.
 
-The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic continuation as a single `CompactedBlock` (count header plus summary markdown body in a bordered surface), keeps queued prompts (since compact preserves intent), preserves the modal stack, and resumes idle.
+The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic continuation as a single `CompactedBlock` (count header plus summary markdown body in a bordered surface), keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle.
 
 ## Design Decisions
 
@@ -44,7 +44,7 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 
 13. **Refuse mid-turn (`classify = Mutating`).** All three reference CLIs treat manual compaction as a between-turns operation. `Mutating` is the existing oxide-code lever for that. The slash registry refuses if a turn is in flight, and the user retries after the in-flight reply finishes.
 
-14. **Refuse on too-few messages.** The driver requires at least 4 transcript messages (2 user + 2 assistant turns or equivalent), since below that the summary is more verbose than the transcript itself. The refusal surfaces as a system message (`Session is too short to compact`) rather than an error block, since this is a normal state.
+14. **Refuse on too-few messages.** The driver requires at least 4 raw transcript messages and at least 4 text-bearing messages after stripping tool / thinking blocks, since below that the summary is more verbose than the transcript itself. The refusal surfaces as an `AgentEvent::Error` and leaves the session untouched.
 
 15. **Refuse on empty summary.** If the model returns whitespace-only text (model errored quietly, content filter, etc.), surface as an `AgentEvent::Error` and leave the session untouched. Better to retry than to commit a useless summary.
 
@@ -68,17 +68,17 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 
 - **`SUMMARIZATION_SYSTEM`**, **`SUMMARIZATION_USER_RUBRIC`**, **`SUMMARY_PREFIX`**: Three `&'static str` constants. System prompt is one paragraph. Rubric is the terse list (intent, decisions, code paths touched, current state, next step). Prefix is the next-turn framing prepended to the synthetic message.
 
-- **`apply_compact` (agent loop)**: Drive `compact_session`, surface failure as `AgentEvent::Error`, on success call `session.compact(summary, pre_count, instructions)`, swap in-memory `Vec<Message>` with the synthetic continuation, emit `SessionCompacted`, and surface session-write failure via the existing sink helper.
+- **`apply_compact` (agent loop)**: Drive `compact_session`, surface failure as `AgentEvent::Error`, on success synthesize the continuation, call `session.compact(summary, instructions, synthetic_message)`, swap in-memory `Vec<Message>` with the synthetic continuation, emit `SessionCompacted`, and surface session-write failure via the existing sink helper.
 
 - **`Entry::Compact`**: New variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case). Rejected gracefully via `Entry::Unknown` for older binaries.
 
 - **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message id, and resets `message_count` to `1`. Acks via `oneshot` like the rest of `SessionCmd`.
 
-- **`session::handle::compact`**: Async API. Snapshots the file tracker, clears it, sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { synthetic_message: Message, finalize_failure: Option<String> }`.
+- **`session::handle::compact`**: Async API. Sends `SessionCmd::Compact`, awaits the ack, and returns `CompactOutcome { pre_count, failure }`. The caller clears the file tracker only after the boundary flush succeeds.
 
 - **`CompactedBlock`**: Chat block with a top-bordered surface, a `Compacted N messages` header (themed `dim`), and the rendered summary markdown body. No footer. Reuses the existing markdown renderer.
 
-- **`apply_session_compacted` (TUI)**: Clears the chat, replays the synthetic continuation as a single `CompactedBlock`, preserves queued prompts (shows count if non-zero via system message), preserves the modal stack, and resumes idle.
+- **`apply_session_compacted` (TUI)**: Clears the chat, replays the synthetic continuation as a single `CompactedBlock`, keeps queued prompts for the normal idle drain, clears the modal stack, and resumes idle.
 
 - **`chain::pick_chain`**: No change needed. Walking from the latest leaf back via `parent_uuid` naturally stops at the post-compact head because `parent_uuid: None`.
 
@@ -117,7 +117,8 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 - `crates/oxide-code/src/session/actor.rs`: `SessionCmd::Compact` handler.
 - `crates/oxide-code/src/session/entry.rs`: `Entry::Compact` variant.
 - `crates/oxide-code/src/session/handle.rs`: `SessionHandle::compact`, `CompactOutcome`.
-- `crates/oxide-code/src/session/state.rs`: `SessionState::compact` (chain reset).
+- `crates/oxide-code/src/session/store.rs`: resume loader sidecar reset at compact boundaries.
+- `crates/oxide-code/src/session/state.rs`: `compact_entries` and `commit_compact` (chain reset).
 - `crates/oxide-code/src/slash/compact.rs`: `CompactCmd`.
 - `crates/oxide-code/src/slash/registry.rs`: `BUILT_INS` adds `&CompactCmd`.
 - `crates/oxide-code/src/tui/app.rs`: `apply_session_compacted`.
