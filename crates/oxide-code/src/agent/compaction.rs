@@ -70,6 +70,12 @@ pub(crate) async fn compact_session(
     }
 
     let mut messages = strip_to_conversation(transcript);
+    if messages.len() < MIN_MESSAGES_FOR_COMPACT {
+        bail!(
+            "session has too little text to compact ({} text messages, need at least {MIN_MESSAGES_FOR_COMPACT})",
+            messages.len(),
+        );
+    }
     messages.push(Message::user(build_user_message(instructions)));
 
     let mut rx = client.stream_message(&messages, &[SUMMARIZATION_SYSTEM], None, &[])?;
@@ -285,6 +291,37 @@ mod tests {
             .await
             .expect_err("must refuse short transcript");
         assert!(format!("{err:#}").contains("too short to compact"));
+    }
+
+    #[tokio::test]
+    async fn compact_session_refuses_when_stripped_transcript_is_too_short() {
+        let server = MockServer::start().await;
+        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let transcript = vec![
+            Message::user("fix the bug"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_owned(),
+                    name: "read".to_owned(),
+                    input: json!({"path": "/tmp/a"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "file body".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("done"),
+        ];
+
+        let err = compact_session(&client, &transcript, None)
+            .await
+            .expect_err("stripped transcript must still satisfy the useful-work threshold");
+        assert!(format!("{err:#}").contains("too little text"));
     }
 
     #[tokio::test]

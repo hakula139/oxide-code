@@ -403,8 +403,11 @@ impl App {
             return false;
         }
         self.pending_prompts.push_back(text.to_owned());
-        // Skip forwarding while cancelling — the agent resets and we drain locally on idle.
-        !matches!(self.status_bar.status(), Status::Cancelling)
+        // Skip forwarding when no turn can consume queued prompts; drain locally on idle instead.
+        !matches!(
+            self.status_bar.status(),
+            Status::Compacting | Status::Cancelling,
+        )
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -1507,6 +1510,25 @@ mod tests {
             app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
             vec!["typed-during-cancel".to_owned()],
             "held locally; finalize_idle re-fires after Cancelled lands",
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_submit_during_compacting_holds_locally_without_forwarding() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::Compact { instructions: None });
+        rx.recv().await.expect("compact forwarded");
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("typed-during-compact".to_owned()));
+
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "submit during compact must wait for SessionCompacted to drain it",
+        );
+        assert_eq!(
+            app.pending_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["typed-during-compact".to_owned()],
         );
     }
 

@@ -304,6 +304,10 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
                 message,
                 timestamp,
             } => {
+                if parent_uuid.is_none() {
+                    tool_result_metadata.clear();
+                    file_snapshots.clear();
+                }
                 chain.insert(uuid, parent_uuid, message, timestamp);
             }
             Entry::Title {
@@ -700,6 +704,19 @@ mod tests {
         }
     }
 
+    fn sample_snapshot(path: &str) -> Entry {
+        Entry::FileSnapshot {
+            snapshot: FileSnapshot {
+                path: PathBuf::from(path),
+                content_hash: 42,
+                mtime: datetime!(2026-04-16 12:00:00 UTC),
+                size: 10,
+                last_view: crate::file_tracker::LastView::Full,
+                recorded_at: datetime!(2026-04-16 12:00:01 UTC),
+            },
+        }
+    }
+
     // ── SessionStore::open ──
 
     async fn open_in_isolated_env(xdg: &Path) -> SessionStore {
@@ -921,6 +938,78 @@ mod tests {
         assert!(
             matches!(&data.messages[1].content[0], ContentBlock::Text { text } if text == "hi there")
         );
+    }
+
+    #[test]
+    fn load_session_data_resets_sidecars_at_compact_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("compact-sidecars")).unwrap();
+
+        let pre = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                pre,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "pre-compact",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::ToolResultMetadata {
+                tool_use_id: "pre-tool".to_owned(),
+                metadata: ToolMetadata {
+                    title: Some("pre metadata".to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp: datetime!(2026-04-16 12:00:02 UTC),
+            })
+            .unwrap();
+        writer.append(&sample_snapshot("pre.txt")).unwrap();
+        writer
+            .append(&Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                timestamp: datetime!(2026-04-16 12:00:03 UTC),
+            })
+            .unwrap();
+
+        let post = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                post,
+                None,
+                datetime!(2026-04-16 12:00:04 UTC),
+                "post-compact summary",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::ToolResultMetadata {
+                tool_use_id: "post-tool".to_owned(),
+                metadata: ToolMetadata {
+                    title: Some("post metadata".to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp: datetime!(2026-04-16 12:00:05 UTC),
+            })
+            .unwrap();
+        writer.append(&sample_snapshot("post.txt")).unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("compact-sidecars").unwrap();
+        assert_eq!(data.last_uuid, Some(post));
+        assert_eq!(data.messages.len(), 1);
+        assert!(
+            data.tool_result_metadata.contains_key("post-tool"),
+            "post-compact metadata should survive",
+        );
+        assert!(
+            !data.tool_result_metadata.contains_key("pre-tool"),
+            "pre-compact metadata must not leak into replay",
+        );
+        assert_eq!(data.file_snapshots.len(), 1);
+        assert!(data.file_snapshots[0].path.ends_with("post.txt"));
     }
 
     #[test]
