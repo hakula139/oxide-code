@@ -9,6 +9,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | Command                                     | Description                                                                          |
 | ------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `/clear` (aliases `/new`, `/reset`)         | Start a fresh session. The previous one stays resumable via `ox -c`.                 |
+| `/compact [<instructions>]`                 | Compress the conversation into a summary; trailing text steers the focus.            |
 | `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
 | `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.     |
 | `/diff`                                     | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
@@ -27,13 +28,23 @@ Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-State-mutating commands (`/clear`, `/delete`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
+State-mutating commands (`/clear`, `/compact`, `/delete`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
 
 ## Model and Effort
 
 Bare `/model` and `/effort` open pickers; both apply on Enter, cancel on Esc.
 
 `/model <id>` accepts aliases (`opus`, `sonnet`, `haiku` — append `[1m]` for the 1M-context variants), full ids, or any unique suffix or substring. Haiku has no effort tier, so `/effort` on Haiku errors with a recovery hint. See [Configuration](configuration.md) for tier defaults.
+
+## Compaction
+
+`/compact` streams a one-shot summarization request through the live model, then replaces the in-memory transcript with a single boundary block: a header (`Compacted N messages → 1 summary`) plus the rendered summary. The next prompt continues from the summary rather than the full prior chat.
+
+`/compact <instructions>` appends free-text focus instructions to the rubric (e.g., `/compact focus on the build error and how we fixed it`). Useful when only a slice of the work matters going forward.
+
+The summary lands in the JSONL as a `compact` boundary entry plus a synthetic continuation message. Resuming the session via `ox -c` shows only the post-compact tail; the pre-compact transcript stays on disk for archival but is not replayed in chat. The file-change tracker resets on compact, so any `Edit` after a `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
+
+`/compact` refuses on sessions with fewer than 4 messages, when the model returns an empty summary, or while a turn is in flight (it waits for the current reply to finish first).
 
 ## Sessions
 

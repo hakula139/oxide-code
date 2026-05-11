@@ -25,6 +25,7 @@ ox                                          # Start an interactive session
 .
 ├── agent.rs                                # Agent turn loop, stream accumulation, tool dispatch
 ├── agent/
+│   ├── compaction.rs                       # /compact driver: stripped-transcript summarization request + summary-prefix wrapping
 │   └── event.rs                            # AgentEvent, UserAction, AgentSink trait, StdioSink
 ├── client.rs                               # Client module root
 ├── client/
@@ -55,7 +56,7 @@ ox                                          # Start an interactive session
 │   ├── actor.rs                            # Session actor task body + SessionCmd protocol + receive-and-drain batching loop
 │   ├── chain.rs                            # ChainBuilder: UUID-DAG message-chain reconstruction (fork-aware tip pick + parent walk)
 │   ├── display.rs                          # Shared session-listing formatters (relative time, `id · when · N msgs · branch · project` line)
-│   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary) and metadata structs
+│   ├── entry.rs                            # JSONL entry types (Header, Message, Title, Summary, Compact, ToolResultMetadata, FileSnapshot) and metadata structs
 │   ├── handle.rs                           # SessionHandle (cheap-to-clone async API), SharedState, start / resume / roll lifecycle
 │   ├── handle/
 │   │   └── testing.rs                      # Cfg-test SessionHandle constructors for sibling test modules (dead, acks_then_drops)
@@ -71,6 +72,7 @@ ox                                          # Start an interactive session
 ├── slash.rs                                # Slash-command surface root: re-exports + dispatch
 ├── slash/
 │   ├── clear.rs                            # /clear (new, reset) — forwards UserAction::Clear, resets ChatView, drops the AI title
+│   ├── compact.rs                          # /compact [<instructions>] — forwards UserAction::Compact; agent loop drives the summarization
 │   ├── config.rs                           # /config — opens a KvOverview modal of resolved config + layered file paths
 │   ├── confirm.rs                          # ConfirmDeleteSessionModal — destructive-action gate; runs the unlink synchronously on Y, sticky inline error on failure
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
@@ -107,6 +109,7 @@ ox                                          # Start an interactive session
 │   │   │   ├── blocks.rs                   # ChatBlock trait + RenderCtx + icon-prefix helpers
 │   │   │   └── blocks/
 │   │   │       ├── assistant.rs            # AssistantText + AssistantThinking
+│   │   │       ├── compacted.rs            # CompactedBlock — bordered surface; bold accent header (count + optional focus) + markdown summary body
 │   │   │       ├── error.rs                # ErrorBlock
 │   │   │       ├── git_diff.rs             # GitDiffBlock — unified-diff render reusing the Edit-tool `+` / `-` row-bg + line-number gutter
 │   │   │       ├── interrupted.rs          # InterruptedMarker — dim italic `(interrupted)` line on cancel
