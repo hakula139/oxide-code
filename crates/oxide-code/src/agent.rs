@@ -244,7 +244,7 @@ async fn record_drained_prompts(
 
 /// Races `fut` against user actions. Cancel / quit → `TurnAbort`; submits buffer into `pending`.
 /// `fut` must be cancel-safe.
-async fn await_unless_aborted<F, T>(
+pub(crate) async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,

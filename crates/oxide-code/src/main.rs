@@ -16,7 +16,7 @@ mod util;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{ArgGroup, Parser};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -411,15 +411,26 @@ async fn agent_loop_task(
                 .await;
             }
             UserAction::Compact { instructions } => {
-                apply_compact(
+                let outcome = apply_compact(
                     &client,
                     &session,
                     &file_tracker,
                     &mut messages,
                     &sink,
+                    &mut user_rx,
                     instructions,
                 )
                 .await;
+                match outcome {
+                    Ok(()) => {}
+                    Err(TurnAbort::Cancelled) => {
+                        _ = sink.send(AgentEvent::Cancelled);
+                    }
+                    Err(TurnAbort::Quit) => break,
+                    Err(TurnAbort::Failed(e)) => {
+                        _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                    }
+                }
             }
             UserAction::Rename { title } => {
                 apply_rename(&session, &sink, title).await;
@@ -510,23 +521,24 @@ async fn apply_compact(
     file_tracker: &FileTracker,
     messages: &mut Vec<Message>,
     sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
     instructions: Option<String>,
-) {
-    let summary =
-        match agent::compaction::compact_session(client, messages, instructions.as_deref()).await {
-            Ok(s) => s,
-            Err(e) => {
-                _ = sink.send(AgentEvent::Error(format!("Compaction failed: {e:#}")));
-                return;
-            }
-        };
+) -> std::result::Result<(), TurnAbort> {
+    let mut pending_prompts = Vec::new();
+    let summary = agent::await_unless_aborted(
+        agent::compaction::compact_session(client, messages, instructions.as_deref()),
+        user_rx,
+        &mut pending_prompts,
+    )
+    .await?
+    .map_err(|e| TurnAbort::Failed(anyhow!("Compaction failed: {e:#}")))?;
     let synthetic = agent::compaction::synthesize_post_compact_message(&summary);
     let outcome = session
         .compact(summary.clone(), instructions.clone(), synthetic.clone())
         .await;
     sink.session_write_error(outcome.failure.as_deref());
     if outcome.failure.is_some() {
-        return;
+        return Ok(());
     }
     // Reset the file tracker so post-compact Edits require a fresh Read — pre-compact Reads
     // are no longer in the visible transcript and the safety contract has to follow.
@@ -539,6 +551,7 @@ async fn apply_compact(
     }) {
         tracing::error!("session-compacted event dropped: {e}");
     }
+    Ok(())
 }
 
 async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: String) {
