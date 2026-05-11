@@ -1,6 +1,7 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
 //! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
 
+pub(crate) mod compaction;
 pub(crate) mod event;
 
 use std::collections::HashMap;
@@ -243,7 +244,7 @@ async fn record_drained_prompts(
 
 /// Races `fut` against user actions. Cancel / quit → `TurnAbort`; submits buffer into `pending`.
 /// `fut` must be cancel-safe.
-async fn await_unless_aborted<F, T>(
+pub(crate) async fn await_unless_aborted<F, T>(
     fut: F,
     user_rx: &mut mpsc::Receiver<UserAction>,
     pending: &mut Vec<String>,
@@ -265,6 +266,7 @@ where
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
                     | UserAction::Resume { .. }
+                    | UserAction::Compact { .. }
                     | UserAction::Rename { .. }
                     | UserAction::SwapConfig { .. }
                     | UserAction::PreviewTheme { .. }

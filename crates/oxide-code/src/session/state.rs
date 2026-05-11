@@ -141,6 +141,54 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
+    /// Builds the compact-boundary + synthetic post-compact message entries.
+    ///
+    /// The synthetic message is written with `parent_uuid: None` so the loader naturally stops
+    /// walking back at the boundary. State is committed only after the flush succeeds so a failed
+    /// compact cannot leave future writes parented to an unpersisted synthetic UUID.
+    pub(super) fn compact_entries(
+        &self,
+        summary: &str,
+        instructions: Option<String>,
+        synthetic_message: Message,
+        now: OffsetDateTime,
+    ) -> (Vec<Entry>, Uuid) {
+        let pre_count = self.message_count;
+        let synthetic_uuid = Uuid::new_v4();
+        let entries = vec![
+            Entry::Compact {
+                summary: summary.to_owned(),
+                pre_message_count: pre_count,
+                instructions,
+                timestamp: now,
+            },
+            Entry::Message {
+                uuid: synthetic_uuid,
+                parent_uuid: None,
+                message: synthetic_message,
+                timestamp: now,
+            },
+        ];
+        (entries, synthetic_uuid)
+    }
+
+    /// Commits the in-memory compact boundary after the boundary entries have flushed.
+    pub(super) fn commit_compact(&mut self, synthetic_uuid: Uuid) {
+        self.last_message_uuid = Some(synthetic_uuid);
+        self.message_count = 1;
+        // After compact the resumed-message-count anchor no longer applies — the post-compact
+        // tail is a fresh chain. Clear so finish_entries doesn't no-op when the only post-
+        // compact content is the synthetic message itself.
+        self.initial_message_count = 0;
+        // The synthetic message IS a user message, so any post-compact `record_message` should
+        // not retrigger the FirstPrompt-title branch.
+        self.first_user_prompt_seen = true;
+    }
+
+    pub(super) fn message_count(&self) -> u32 {
+        self.message_count
+    }
+
     /// Builds snapshot + summary closing entries, or empty vec for no-op finish.
     pub(super) fn finish_entries(
         &mut self,
@@ -451,6 +499,134 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(seed.is_none());
         assert!(!state.first_user_prompt_seen);
+    }
+
+    // ── compact_entries ──
+
+    #[test]
+    fn compact_entries_writes_boundary_and_synthetic_message_without_committing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+        state.flush_entries(&rec).unwrap();
+        let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+        state.flush_entries(&rec).unwrap();
+        assert_eq!(state.message_count(), 2);
+
+        let (entries, synthetic_uuid) = state.compact_entries(
+            "summary body",
+            Some("focus on auth".to_owned()),
+            Message::user("post-compact"),
+            now,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            matches!(
+                &entries[0],
+                Entry::Compact {
+                    summary,
+                    pre_message_count: 2,
+                    instructions: Some(i),
+                    ..
+                } if summary == "summary body" && i == "focus on auth"
+            ),
+            "boundary entry must carry summary, pre-count, and instructions verbatim: {:?}",
+            entries[0],
+        );
+        assert!(
+            matches!(
+                &entries[1],
+                Entry::Message {
+                    uuid,
+                    parent_uuid: None,
+                    ..
+                } if *uuid == synthetic_uuid
+            ),
+            "synthetic post-compact message must reset the parent chain: {:?}",
+            entries[1],
+        );
+        assert_eq!(
+            state.message_count(),
+            2,
+            "pre-flush count must remain until commit"
+        );
+        assert_ne!(state.last_message_uuid, Some(synthetic_uuid));
+    }
+
+    #[test]
+    fn compact_entries_omits_instructions_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+
+        let (entries, _) = state.compact_entries("s", None, Message::user("synth"), now);
+
+        assert!(matches!(
+            &entries[0],
+            Entry::Compact {
+                instructions: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn commit_compact_resets_chain_and_message_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+        let (rec, _) = state.queue_message_entries(&Message::user("first"), now, false);
+        state.flush_entries(&rec).unwrap();
+        let (rec, _) = state.queue_message_entries(&Message::assistant("reply"), now, false);
+        state.flush_entries(&rec).unwrap();
+
+        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        state.commit_compact(synthetic_uuid);
+
+        assert_eq!(state.last_message_uuid, Some(synthetic_uuid));
+        assert_eq!(state.message_count(), 1);
+    }
+
+    #[test]
+    fn commit_compact_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
+        // The synthetic message itself is user-role; without latching the flag, the next real
+        // record would mistake the post-compact head for the session's first prompt and seed a
+        // duplicate AI title.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        let now = OffsetDateTime::now_utc();
+
+        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        state.commit_compact(synthetic_uuid);
+
+        assert!(state.first_user_prompt_seen);
+        let (_, seed) = state.queue_message_entries(&Message::user("after"), now, false);
+        assert!(seed.is_none());
+    }
+
+    #[test]
+    fn commit_compact_clears_resume_anchor_so_finish_writes_summary() {
+        // Without clearing initial_message_count, a resumed session whose only post-compact
+        // content is the synthetic head would no-op in finish_entries (count == initial) and
+        // never emit a closing Summary.
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut state = SessionState::fresh(store, "m");
+        state.initial_message_count = 5;
+        state.message_count = 5;
+        let now = OffsetDateTime::now_utc();
+
+        let (_, synthetic_uuid) = state.compact_entries("s", None, Message::user("synth"), now);
+        state.commit_compact(synthetic_uuid);
+
+        assert_eq!(state.initial_message_count, 0);
+        assert_eq!(state.message_count, 1);
     }
 
     // ── finish_entries ──

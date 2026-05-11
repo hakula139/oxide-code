@@ -60,6 +60,18 @@ pub(crate) enum Entry {
         #[serde(flatten)]
         snapshot: FileSnapshot,
     },
+    /// Boundary written by `/compact` immediately before the synthetic post-compact `Message`.
+    /// Carries the summary body and the pre-compact message count so listings can surface
+    /// "compacted N → 1" without rescanning the prior tail. Forward-compat: older binaries
+    /// land in `Unknown` and skip the line.
+    Compact {
+        summary: String,
+        pre_message_count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(with = "time::serde::rfc3339")]
+        timestamp: OffsetDateTime,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -361,6 +373,86 @@ mod tests {
         };
         assert_eq!(snapshot.path, std::path::PathBuf::from("/tmp/a.rs"));
         assert_eq!(snapshot.content_hash, 1);
+    }
+
+    // ── Entry::Compact ──
+
+    #[test]
+    fn compact_round_trips_with_instructions() {
+        let entry = Entry::Compact {
+            summary: "user wanted X, did Y, next step Z".to_owned(),
+            pre_message_count: 42,
+            instructions: Some("focus on the build error".to_owned()),
+            timestamp: datetime!(2026-04-16 13:00:00 UTC),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "compact");
+        assert_eq!(json["summary"], "user wanted X, did Y, next step Z");
+        assert_eq!(json["pre_message_count"], 42);
+        assert_eq!(json["instructions"], "focus on the build error");
+        assert_eq!(json["timestamp"], "2026-04-16T13:00:00Z");
+
+        let parsed: Entry = serde_json::from_str(&json.to_string()).unwrap();
+        let Entry::Compact {
+            summary,
+            pre_message_count,
+            instructions,
+            timestamp,
+        } = parsed
+        else {
+            panic!("expected Compact");
+        };
+        assert_eq!(summary, "user wanted X, did Y, next step Z");
+        assert_eq!(pre_message_count, 42);
+        assert_eq!(instructions.as_deref(), Some("focus on the build error"));
+        assert_eq!(timestamp, datetime!(2026-04-16 13:00:00 UTC));
+    }
+
+    #[test]
+    fn compact_omits_instructions_when_none() {
+        let entry = Entry::Compact {
+            summary: "s".to_owned(),
+            pre_message_count: 4,
+            instructions: None,
+            timestamp: datetime!(2026-04-16 13:00:00 UTC),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(
+            json.get("instructions").is_none(),
+            "instructions should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn compact_missing_instructions_defaults_to_none() {
+        let json = r#"{"type":"compact","summary":"s","pre_message_count":4,"timestamp":"2026-04-16T13:00:00Z"}"#;
+        let parsed: Entry = serde_json::from_str(json).unwrap();
+        let Entry::Compact { instructions, .. } = parsed else {
+            panic!("expected Compact");
+        };
+        assert!(instructions.is_none());
+    }
+
+    #[test]
+    fn compact_unknown_field_is_ignored_for_forward_compat() {
+        let json = serde_json::json!({
+            "type": "compact",
+            "summary": "s",
+            "pre_message_count": 4,
+            "timestamp": "2026-04-16T13:00:00Z",
+            "future_field": "from a newer writer",
+        });
+        let parsed: Entry = serde_json::from_value(json).unwrap();
+        let Entry::Compact {
+            summary,
+            pre_message_count,
+            ..
+        } = parsed
+        else {
+            panic!("expected Compact, got {parsed:?}");
+        };
+        assert_eq!(summary, "s");
+        assert_eq!(pre_message_count, 4);
     }
 
     // ── Entry::Unknown ──

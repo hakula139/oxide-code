@@ -24,6 +24,7 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | Document                      | Description                                                   |
 | ----------------------------- | ------------------------------------------------------------- |
 | [Commands](slash/commands.md) | Registry shape, popup UX, execution models                    |
+| [Compact](slash/compact.md)   | Context-compression triggers, prompts, replacement strategies |
 | [Modals](slash/modals.md)     | Picker / dialog primitives across the three CLIs              |
 | [Resume](slash/resume.md)     | CLI flags, picker UX, search / pagination, mid-session reload |
 

@@ -31,6 +31,7 @@ pub(crate) enum Status {
     Idle,
     Streaming,
     ToolRunning { name: String },
+    Compacting,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -161,7 +162,8 @@ impl StatusBar {
             Status::ToolRunning { name } => {
                 self.busy_span(&format!("Running {name} · Esc to interrupt"))
             }
-            Status::Cancelling => self.busy_span("Cancelling..."),
+            Status::Compacting => self.busy_span("Compacting · Esc to interrupt"),
+            Status::Cancelling => self.busy_span("Cancelling"),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
             }
@@ -177,7 +179,7 @@ impl StatusBar {
 fn is_animated(status: &Status) -> bool {
     matches!(
         status,
-        Status::Streaming | Status::ToolRunning { .. } | Status::Cancelling,
+        Status::Streaming | Status::ToolRunning { .. } | Status::Compacting | Status::Cancelling,
     )
 }
 
@@ -421,6 +423,13 @@ mod tests {
         bar.set_status(Status::ToolRunning {
             name: "bash".to_owned(),
         });
+        insta::assert_snapshot!(render_status(&mut bar, 80));
+    }
+
+    #[test]
+    fn render_compacting_shows_spinner_and_status_label() {
+        let mut bar = bar_idle(None, "~/projects/demo");
+        bar.set_status(Status::Compacting);
         insta::assert_snapshot!(render_status(&mut bar, 80));
     }
 

@@ -13,9 +13,9 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 
 use self::blocks::{
-    AssistantText, AssistantThinking, BlockKind, ChatBlock, ErrorBlock, GitDiffBlock,
-    InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock, ToolCallBlock,
-    ToolResultBlock, UserMessage, last_has_width,
+    AssistantText, AssistantThinking, BlockKind, ChatBlock, CompactedBlock, ErrorBlock,
+    GitDiffBlock, InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock,
+    ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::message::Message;
 use crate::session::history::{Interaction, walk_transcript};
@@ -216,6 +216,20 @@ impl ChatView {
     /// Appends informational output from a slash command.
     pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
         self.blocks.push(Box::new(SystemMessageBlock::new(body)));
+    }
+
+    /// Appends a compaction boundary block (`/compact` result).
+    pub(crate) fn push_compacted_block(
+        &mut self,
+        pre_count: u32,
+        instructions: Option<&str>,
+        summary: impl Into<String>,
+    ) {
+        self.blocks.push(Box::new(CompactedBlock::new(
+            pre_count,
+            instructions,
+            summary,
+        )));
     }
 
     /// Appends a unified diff body for display.

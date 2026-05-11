@@ -8,6 +8,7 @@
 //! user-declared config (see `docs/design/slash/commands.md` § Design Decisions 6).
 
 mod clear;
+mod compact;
 mod config;
 mod confirm;
 mod context;
