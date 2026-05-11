@@ -31,6 +31,7 @@ pub(crate) enum Status {
     Idle,
     Streaming,
     ToolRunning { name: String },
+    Compacting,
     Cancelling,
     ExitArmed { until: Instant },
 }
@@ -161,6 +162,7 @@ impl StatusBar {
             Status::ToolRunning { name } => {
                 self.busy_span(&format!("Running {name} · Esc to interrupt"))
             }
+            Status::Compacting => self.busy_span("Compacting conversation · Esc to interrupt"),
             Status::Cancelling => self.busy_span("Cancelling..."),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
@@ -177,7 +179,7 @@ impl StatusBar {
 fn is_animated(status: &Status) -> bool {
     matches!(
         status,
-        Status::Streaming | Status::ToolRunning { .. } | Status::Cancelling,
+        Status::Streaming | Status::ToolRunning { .. } | Status::Compacting | Status::Cancelling,
     )
 }
 

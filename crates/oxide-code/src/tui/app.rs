@@ -307,8 +307,10 @@ impl App {
             }
             UserAction::Compact { .. } => {
                 // Same disable-input window as Resume: between forward and SessionCompacted the
-                // chat is about to be wiped, so a typed prompt would land in dead history.
+                // chat is about to be wiped, so a typed prompt would land in dead history. The
+                // dedicated `Compacting` status flags this as a summarization, not a normal turn.
                 self.input.set_enabled(false);
+                self.status_bar.set_status(Status::Compacting);
                 true
             }
             UserAction::PreviewTheme { name } => {
@@ -1481,6 +1483,7 @@ mod tests {
             !app.input.is_enabled(),
             "input must be gated until the compact event lands",
         );
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
     }
 
     #[tokio::test]
