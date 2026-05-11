@@ -1,6 +1,7 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
 //! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
 
+pub(crate) mod compaction;
 pub(crate) mod event;
 
 use std::collections::HashMap;
@@ -265,6 +266,7 @@ where
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
                     | UserAction::Resume { .. }
+                    | UserAction::Compact { .. }
                     | UserAction::Rename { .. }
                     | UserAction::SwapConfig { .. }
                     | UserAction::PreviewTheme { .. }

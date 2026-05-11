@@ -305,6 +305,12 @@ impl App {
                 self.input.set_enabled(false);
                 true
             }
+            UserAction::Compact { .. } => {
+                // Same disable-input window as Resume: between forward and SessionCompacted the
+                // chat is about to be wiped, so a typed prompt would land in dead history.
+                self.input.set_enabled(false);
+                true
+            }
             UserAction::PreviewTheme { name } => {
                 if let Some(preview) = super::theme::load_builtin(name) {
                     if self.preview_theme_snapshot.is_none() {
@@ -464,6 +470,11 @@ impl App {
                 messages,
                 tool_metadata,
             } => self.apply_session_resumed(id, title, &messages, &tool_metadata),
+            AgentEvent::SessionCompacted {
+                summary,
+                pre_count,
+                instructions,
+            } => self.apply_session_compacted(&summary, pre_count, instructions.as_deref()),
             AgentEvent::ConfigChanged {
                 model_id,
                 effort,
@@ -527,6 +538,33 @@ impl App {
         }
         // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
         // would otherwise carry across the swap.
+        self.modals.clear();
+        self.finalize_idle();
+    }
+
+    /// Repaints chat after `/compact`: clears the prior transcript, prints the boundary header,
+    /// renders the summary as a system message. Queued prompts survive because compact preserves
+    /// the user's intent (unlike `/resume`, which swaps thread identity).
+    fn apply_session_compacted(
+        &mut self,
+        summary: &str,
+        pre_count: u32,
+        instructions: Option<&str>,
+    ) {
+        self.chat.clear_history();
+        self.pending_calls.clear();
+        let header = match instructions {
+            Some(focus) => format!(
+                "Compacted {pre_count} message{plural} → 1 summary (focus: {focus}).",
+                plural = if pre_count == 1 { "" } else { "s" },
+            ),
+            None => format!(
+                "Compacted {pre_count} message{plural} → 1 summary.",
+                plural = if pre_count == 1 { "" } else { "s" },
+            ),
+        };
+        self.chat.push_system_message(header);
+        self.chat.push_system_message(summary.to_owned());
         self.modals.clear();
         self.finalize_idle();
     }

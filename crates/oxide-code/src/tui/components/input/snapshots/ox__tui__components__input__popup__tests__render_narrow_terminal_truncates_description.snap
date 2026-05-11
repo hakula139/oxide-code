@@ -1,14 +1,13 @@
 ---
 source: crates/oxide-code/src/tui/components/input/popup.rs
-assertion_line: 527
 expression: "render_to_backend(&popup, 30)"
 ---
 "──────────────────────────────"
-"/clear   Reset the conversa..."
-"/config  Show resolved config "
-"/delete  Delete a saved ses..."
-"/diff    Show uncommitted w..."
-"/effort  Adjust reasoning e..."
-"/help    List slash commands  "
-"/init    Set up `AGENTS.md`..."
-"/model   Switch the model     "
+"/clear    Reset the convers..."
+"/compact  Compress conversa..."
+"/config   Show resolved config"
+"/delete   Delete a saved se..."
+"/diff     Show uncommitted ..."
+"/effort   Adjust reasoning ..."
+"/help     List slash commands "
+"/init     Set up `AGENTS.md..."

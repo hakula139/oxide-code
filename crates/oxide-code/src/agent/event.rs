@@ -59,6 +59,14 @@ pub(crate) enum AgentEvent {
         messages: Vec<crate::message::Message>,
         tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
     },
+    /// `/compact` finished — summary captures the prior transcript, `pre_count` is for the
+    /// post-compact UI line. The agent loop has already swapped the in-memory transcript to
+    /// the synthetic continuation; the UI clears its chat and replays a single boundary block.
+    SessionCompacted {
+        summary: String,
+        pre_count: u32,
+        instructions: Option<String>,
+    },
     /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
     /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
@@ -82,6 +90,11 @@ pub(crate) enum UserAction {
     /// `/resume <id-prefix>` or picker selection: swap to an existing session in place.
     Resume {
         session_id: String,
+    },
+    /// `/compact [instructions]`: stream a summarization request, replace the in-memory
+    /// transcript with a synthetic continuation, persist a `Compact` JSONL boundary.
+    Compact {
+        instructions: Option<String>,
     },
     /// Manual title from `/rename` or its modal. Suppresses AI title generation for this session.
     Rename {
@@ -194,6 +207,7 @@ impl StdioSink {
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
             | AgentEvent::SessionResumed { .. }
+            | AgentEvent::SessionCompacted { .. }
             | AgentEvent::ConfigChanged { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;

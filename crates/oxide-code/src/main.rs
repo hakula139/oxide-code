@@ -410,6 +410,17 @@ async fn agent_loop_task(
                 )
                 .await;
             }
+            UserAction::Compact { instructions } => {
+                apply_compact(
+                    &client,
+                    &session,
+                    &file_tracker,
+                    &mut messages,
+                    &sink,
+                    instructions,
+                )
+                .await;
+            }
             UserAction::Rename { title } => {
                 apply_rename(&session, &sink, title).await;
             }
@@ -488,6 +499,46 @@ fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
         drifted.len(),
         preview.join(", "),
     )
+}
+
+/// Drives `/compact`: stream the summarization, replace the in-memory transcript with the
+/// synthetic continuation, persist the boundary + synthetic message, surface the post-compact
+/// system event so the TUI can repaint. Errors leave the session untouched.
+async fn apply_compact(
+    client: &Client,
+    session: &SessionHandle,
+    file_tracker: &FileTracker,
+    messages: &mut Vec<Message>,
+    sink: &dyn AgentSink,
+    instructions: Option<String>,
+) {
+    let summary =
+        match agent::compaction::compact_session(client, messages, instructions.as_deref()).await {
+            Ok(s) => s,
+            Err(e) => {
+                _ = sink.send(AgentEvent::Error(format!("Compaction failed: {e:#}")));
+                return;
+            }
+        };
+    let synthetic = agent::compaction::synthesize_post_compact_message(&summary);
+    let outcome = session
+        .compact(summary.clone(), instructions.clone(), synthetic.clone())
+        .await;
+    sink.session_write_error(outcome.failure.as_deref());
+    if outcome.failure.is_some() {
+        return;
+    }
+    // Reset the file tracker so post-compact Edits require a fresh Read — pre-compact Reads
+    // are no longer in the visible transcript and the safety contract has to follow.
+    file_tracker.clear();
+    *messages = vec![synthetic];
+    if let Err(e) = sink.send(AgentEvent::SessionCompacted {
+        summary,
+        pre_count: outcome.pre_count,
+        instructions,
+    }) {
+        tracing::error!("session-compacted event dropped: {e}");
+    }
 }
 
 async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: String) {

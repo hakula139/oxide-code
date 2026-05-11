@@ -108,6 +108,14 @@ pub(crate) struct Outcome {
     pub(crate) failure: Option<String>,
 }
 
+/// Ack from `SessionHandle::compact`. `pre_count` is the message count at the moment the
+/// compact request landed in the actor — the post-compact UI line uses it for the
+/// "compacted N messages → 1 summary" header.
+pub(crate) struct CompactOutcome {
+    pub(crate) pre_count: u32,
+    pub(crate) failure: Option<String>,
+}
+
 impl SessionHandle {
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
@@ -168,6 +176,37 @@ impl SessionHandle {
 
     pub(crate) fn manual_title_set(&self) -> bool {
         self.shared.manual_title_set()
+    }
+
+    /// Write the compact-boundary + synthetic post-compact message, reset the chain anchor.
+    /// Returns `pre_count` for the post-compact UI plus the standard first-failure slot.
+    pub(crate) async fn compact(
+        &self,
+        summary: String,
+        instructions: Option<String>,
+        synthetic_message: Message,
+    ) -> CompactOutcome {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCmd::Compact {
+                summary,
+                instructions,
+                synthetic_message,
+                ack,
+            })
+            .await
+            .is_err()
+        {
+            return CompactOutcome {
+                pre_count: 0,
+                failure: self.actor_gone_failure(),
+            };
+        }
+        rx.await.unwrap_or_else(|_| CompactOutcome {
+            pre_count: 0,
+            failure: self.actor_gone_failure(),
+        })
     }
 
     /// Write the session summary and finalize. Idempotent; no-op on fresh sessions that never

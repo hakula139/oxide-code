@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 use super::super::actor::SessionCmd;
-use super::{Outcome, RecordOutcome, SessionHandle, SharedState};
+use super::{CompactOutcome, Outcome, RecordOutcome, SessionHandle, SharedState};
 
 /// Handle whose actor channel is already closed — every write surfaces actor-gone immediately,
 /// so failure surfacing can be asserted without a real actor.
@@ -76,6 +76,12 @@ pub(crate) fn acks_then_drops(session_id: &str, succeed: usize) -> SessionHandle
                 | SessionCmd::SetManualTitle { ack, .. }
                 | SessionCmd::Finish { ack, .. } => {
                     _ = ack.send(Outcome { failure: None });
+                }
+                SessionCmd::Compact { ack, .. } => {
+                    _ = ack.send(CompactOutcome {
+                        pre_count: 0,
+                        failure: None,
+                    });
                 }
                 SessionCmd::Shutdown { .. } => unreachable!("filtered above"),
                 SessionCmd::Panic => panic!("deliberate actor panic for testing"),

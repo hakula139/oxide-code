@@ -41,6 +41,15 @@ pub(super) enum SessionCmd {
         snapshots: Vec<FileSnapshot>,
         ack: oneshot::Sender<Outcome>,
     },
+    /// `/compact`: write the compaction boundary + synthetic post-compact message in one
+    /// batched flush, reset the chain anchor in `SessionState`, and ack the pre-compact
+    /// message count for the post-compact UI line.
+    Compact {
+        summary: String,
+        instructions: Option<String>,
+        synthetic_message: Message,
+        ack: oneshot::Sender<super::handle::CompactOutcome>,
+    },
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
     Shutdown { ack: oneshot::Sender<()> },
@@ -57,6 +66,10 @@ enum PendingAck {
         ai_title_seed: Option<String>,
     },
     Outcome(oneshot::Sender<Outcome>),
+    Compact {
+        ack: oneshot::Sender<super::handle::CompactOutcome>,
+        pre_count: u32,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -176,6 +189,18 @@ fn absorb(
             entries.extend(state.finish_entries(snapshots, now));
             acks.push(PendingAck::Outcome(ack));
         }
+        SessionCmd::Compact {
+            summary,
+            instructions,
+            synthetic_message,
+            ack,
+        } => {
+            let pre_count = state.message_count();
+            let (compact_entries, _synthetic_uuid) =
+                state.compact_entries(&summary, instructions, synthetic_message, now);
+            entries.extend(compact_entries);
+            acks.push(PendingAck::Compact { ack, pre_count });
+        }
         SessionCmd::Shutdown { ack } => {
             acks.push(PendingAck::Shutdown(ack));
             *should_exit = true;
@@ -196,6 +221,12 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
             }
             PendingAck::Outcome(ack) => {
                 _ = ack.send(Outcome {
+                    failure: surface_failure(failure, shared),
+                });
+            }
+            PendingAck::Compact { ack, pre_count } => {
+                _ = ack.send(super::handle::CompactOutcome {
+                    pre_count,
                     failure: surface_failure(failure, shared),
                 });
             }

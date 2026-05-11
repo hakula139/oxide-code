@@ -141,6 +141,49 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
+    /// Builds the compact-boundary + synthetic post-compact message entries, resetting the
+    /// chain anchor and message count so the next `record_message` starts a fresh DAG. The
+    /// synthetic message is written with `parent_uuid: None` so the loader naturally stops
+    /// walking back at the boundary.
+    pub(super) fn compact_entries(
+        &mut self,
+        summary: &str,
+        instructions: Option<String>,
+        synthetic_message: Message,
+        now: OffsetDateTime,
+    ) -> (Vec<Entry>, Uuid) {
+        let pre_count = self.message_count;
+        let synthetic_uuid = Uuid::new_v4();
+        let entries = vec![
+            Entry::Compact {
+                summary: summary.to_owned(),
+                pre_message_count: pre_count,
+                instructions,
+                timestamp: now,
+            },
+            Entry::Message {
+                uuid: synthetic_uuid,
+                parent_uuid: None,
+                message: synthetic_message,
+                timestamp: now,
+            },
+        ];
+        self.last_message_uuid = Some(synthetic_uuid);
+        self.message_count = 1;
+        // After compact the resumed-message-count anchor no longer applies — the post-compact
+        // tail is a fresh chain. Clear so finish_entries doesn't no-op when the only post-
+        // compact content is the synthetic message itself.
+        self.initial_message_count = 0;
+        // The synthetic message IS a user message, so any post-compact `record_message` should
+        // not retrigger the FirstPrompt-title branch.
+        self.first_user_prompt_seen = true;
+        (entries, synthetic_uuid)
+    }
+
+    pub(super) fn message_count(&self) -> u32 {
+        self.message_count
+    }
+
     /// Builds snapshot + summary closing entries, or empty vec for no-op finish.
     pub(super) fn finish_entries(
         &mut self,
