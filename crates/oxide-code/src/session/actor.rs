@@ -69,6 +69,7 @@ enum PendingAck {
     Compact {
         ack: oneshot::Sender<super::handle::CompactOutcome>,
         pre_count: u32,
+        synthetic_uuid: uuid::Uuid,
     },
     Shutdown(oneshot::Sender<()>),
 }
@@ -114,6 +115,9 @@ pub(super) async fn run(
             }
             Ok(()) => None,
         };
+        if failure.is_none() {
+            commit_acks(&acks, &mut state);
+        }
         deliver_acks(acks, failure.as_deref(), &shared);
         if should_exit {
             break;
@@ -196,10 +200,14 @@ fn absorb(
             ack,
         } => {
             let pre_count = state.message_count();
-            let (compact_entries, _synthetic_uuid) =
+            let (compact_entries, synthetic_uuid) =
                 state.compact_entries(&summary, instructions, synthetic_message, now);
             entries.extend(compact_entries);
-            acks.push(PendingAck::Compact { ack, pre_count });
+            acks.push(PendingAck::Compact {
+                ack,
+                pre_count,
+                synthetic_uuid,
+            });
         }
         SessionCmd::Shutdown { ack } => {
             acks.push(PendingAck::Shutdown(ack));
@@ -207,6 +215,14 @@ fn absorb(
         }
         #[cfg(test)]
         SessionCmd::Panic => panic!("deliberate actor panic for testing"),
+    }
+}
+
+fn commit_acks(acks: &[PendingAck], state: &mut SessionState) {
+    for pending in acks {
+        if let PendingAck::Compact { synthetic_uuid, .. } = pending {
+            state.commit_compact(*synthetic_uuid);
+        }
     }
 }
 
@@ -224,7 +240,11 @@ fn deliver_acks(acks: Vec<PendingAck>, failure: Option<&str>, shared: &SharedSta
                     failure: surface_failure(failure, shared),
                 });
             }
-            PendingAck::Compact { ack, pre_count } => {
+            PendingAck::Compact {
+                ack,
+                pre_count,
+                synthetic_uuid: _,
+            } => {
                 _ = ack.send(super::handle::CompactOutcome {
                     pre_count,
                     failure: surface_failure(failure, shared),
