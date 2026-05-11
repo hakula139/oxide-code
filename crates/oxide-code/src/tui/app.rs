@@ -542,9 +542,10 @@ impl App {
         self.finalize_idle();
     }
 
-    /// Repaints chat after `/compact`: clears the prior transcript, prints the boundary header,
-    /// renders the summary as a system message. Queued prompts survive because compact preserves
-    /// the user's intent (unlike `/resume`, which swaps thread identity).
+    /// Repaints chat after `/compact`: clears the prior transcript and pushes a single
+    /// boundary block carrying the count header + markdown-rendered summary. Queued prompts
+    /// survive because compact preserves the user's intent (unlike `/resume`, which swaps
+    /// thread identity).
     fn apply_session_compacted(
         &mut self,
         summary: &str,
@@ -553,18 +554,8 @@ impl App {
     ) {
         self.chat.clear_history();
         self.pending_calls.clear();
-        let header = match instructions {
-            Some(focus) => format!(
-                "Compacted {pre_count} message{plural} → 1 summary (focus: {focus}).",
-                plural = if pre_count == 1 { "" } else { "s" },
-            ),
-            None => format!(
-                "Compacted {pre_count} message{plural} → 1 summary.",
-                plural = if pre_count == 1 { "" } else { "s" },
-            ),
-        };
-        self.chat.push_system_message(header);
-        self.chat.push_system_message(summary.to_owned());
+        self.chat
+            .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.modals.clear();
         self.finalize_idle();
     }

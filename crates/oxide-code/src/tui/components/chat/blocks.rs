@@ -1,6 +1,7 @@
 //! Chat render blocks — each conversation unit implements [`ChatBlock`].
 
 mod assistant;
+mod compacted;
 mod error;
 mod git_diff;
 mod interrupted;
@@ -10,6 +11,7 @@ mod tool;
 mod user;
 
 pub(super) use assistant::{AssistantText, AssistantThinking};
+pub(super) use compacted::CompactedBlock;
 pub(super) use error::ErrorBlock;
 pub(super) use git_diff::GitDiffBlock;
 pub(super) use interrupted::InterruptedMarker;
