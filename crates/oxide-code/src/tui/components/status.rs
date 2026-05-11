@@ -163,7 +163,7 @@ impl StatusBar {
                 self.busy_span(&format!("Running {name} · Esc to interrupt"))
             }
             Status::Compacting => self.busy_span("Compacting conversation · Esc to interrupt"),
-            Status::Cancelling => self.busy_span("Cancelling..."),
+            Status::Cancelling => self.busy_span("Cancelling"),
             Status::ExitArmed { .. } => {
                 Span::styled("Press Ctrl+C again to exit", self.theme.warning())
             }
