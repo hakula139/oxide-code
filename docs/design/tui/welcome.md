@@ -21,22 +21,26 @@ The minimal `Welcome to ox / Ask anything to begin.` banner gets users to the pr
 
 ## Layout
 
+At 80 cols with the test fixture (`claude-opus-4-7` plain, `xhigh` effort, OAuth), the render is:
+
 ```text
-                          ━━━━ oxide-code v0.1.0 ━━━━
+                           ━━━━ oxide-code v0.1.0 ━━━━
 
-                     Claude Opus 4.7 (1M context) · xhigh effort · OAuth
-                     ~/github/oxide-code
+                  Claude Opus 4.7 · xhigh effort · OAuth
+                  ~/github/oxide-code
 
-                     Try one of:
+                  Try one of:
 
-                       /help    list commands
-                       /init    author or update AGENTS.md
-                       /diff    show staged changes
+                    /help     list commands
+                    /diff     show staged changes
+                    /model    switch model
 
-                     Tip — press / to browse all commands
+                  Tip — ox --continue resumes your last session
 ```
 
-Sections: identity ribbon (single line, centered) → body column (env / cwd / starter list / trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit above the body column.
+Starter rows and the tip are sampled per session from `STARTER_POOL` and `TIP_POOL`, so a different launch shows different picks. `[1m]` model ids render a trailing `(1M context)` suffix on the model line.
+
+Sections: identity ribbon (single line, centered) above a body column (env, cwd, starter list, trailer). Body lines pad to a single shared column width so they all share one left edge under `Paragraph::alignment(Center)`. Without that pad, each line floats to its own visual center and the welcome reads as a "ransom note" stack. The ribbon centers as its own unit, and the body column centers on the same axis because every padded line has the same width.
 
 ### Width ladder
 
