@@ -38,7 +38,7 @@ Failure: stream errors retry up to `stream_max_retries` with a `Reconnecting…`
 
 `/compact` (alias `/summarize`) calls `sdk.client.session.summarize({ sessionID, modelID, providerID })` (`routes/session/index.tsx:538-563`). The slash handler accepts no free-text args; an optional `auto: bool` field on the payload distinguishes manual from auto. The HTTP handler runs `revert.cleanup`, then `SessionCompaction.create`, then `SessionPrompt.loop`.
 
-Compaction runs as a **dedicated agent** named `compaction` — `mode: "primary"`, `hidden: true`, all tools `deny`-permissioned (`agent/agent.ts:227-241`). Its system prompt anchors the operation: _"Summarize only the conversation history you are given..."_ and crucially _"If the prompt includes a `<previous-summary>` block, treat it as the current anchored summary. Update it..."_ — the **anchored** pattern is opencode's signature. The user-facing rubric is a Markdown template with sections in order: Goal · Constraints · Progress · Key Decisions · Next Steps · Critical Context · Relevant Files; terse bullets, preserve exact paths / commands / error strings.
+Compaction runs as a **dedicated agent** named `compaction` — `mode: "primary"`, `hidden: true`, every tool set to `deny` (`agent/agent.ts:227-241`). Its system prompt anchors the operation: _"Summarize only the conversation history you are given..."_ and crucially _"If the prompt includes a `<previous-summary>` block, treat it as the current anchored summary. Update it..."_ — the **anchored** pattern is opencode's signature. The user-facing rubric is a Markdown template with sections in order: Goal · Constraints · Progress · Key Decisions · Next Steps · Critical Context · Relevant Files; terse bullets, preserve exact paths / commands / error strings.
 
 Input messages come from `select`: find the older prefix (head) and exclude ranges between previously-completed `compaction`+`summary` pairs so prior summaries aren't re-summarized. Tool outputs are truncated to 2,000 chars (`TOOL_OUTPUT_MAX_CHARS`); media stripped. Default model is the user's selected one unless `agent.compaction.model` is set.
 
@@ -56,7 +56,7 @@ UX renders a top-bordered box captioned ` Compaction ` (or ` Auto Compaction `) 
 | Auto-compact        | `window - 13k`, default on, env opt-out      | 90% of window, default on                    | `usage ≥ usable`, default on             |
 | Auto check site     | start of every `query()`                     | pre-sampling + mid-turn loop                 | post-finished-turn + mid-stream          |
 | Prompt shape        | 9-section rubric, `<analysis>` + `<summary>` | short paragraph + `summary_prefix` for next  | Markdown template, anchored update       |
-| Anchored re-compact | no                                           | no — prior summaries skipped on rewalk       | yes — `<previous-summary>` block         |
+| Anchored re-compact | no                                           | no — prior summaries skipped on walk-back    | yes — `<previous-summary>` block         |
 | Summarizer model    | same as main loop                            | same as main loop                            | configurable per `agent.compaction`      |
 | Streaming           | yes (fork or fallback)                       | yes (local) / no (remote OpenAI / Azure)     | yes                                      |
 | Replacement shape   | boundary + synthetic user msg + kept tail    | retained user msgs + summary as `role: user` | compaction marker + summary assistant    |
