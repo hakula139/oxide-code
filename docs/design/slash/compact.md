@@ -1,6 +1,6 @@
 # Context Compression / `/compact`
 
-`/compact [instructions]` is manual context compression. Streams a one-shot summarization request through the live model, replaces the in-memory transcript with a synthetic continuation, and persists a `Compact` JSONL boundary so resume only sees the post-compact tail.
+Manual context compression triggered by `/compact [instructions]`. The agent loop streams a one-shot summarization request through the live model, replaces the in-memory transcript with a synthetic continuation, and persists a `Compact` JSONL boundary so resume only sees the post-compact tail.
 
 Companions: [commands.md](commands.md), [session/persistence.md](../session/persistence.md). Underlying research: [research/slash/compact.md](../../research/slash/compact.md).
 
@@ -26,9 +26,9 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 
 4. **Empty tool registry on the compaction request.** Hard-bans tool calls at the API layer rather than relying on prompt-only enforcement. Claude Code's `NO_TOOLS_PREAMBLE` is forceful prose but still relies on the model honoring it. Cleanest is to pass `Vec::new()` for tools so the model cannot call one.
 
-5. **Dedicated minimal system prompt for the compaction request.** The regular system prompt mentions tools, environment, and instructions in a way that primes the model to act rather than summarize. The compaction system prompt is a single sentence (_"You are summarizing a conversation between an engineer and an AI coding assistant. Output ONLY the summary text. Do not call any tools."_), plus the rubric and any custom instructions in the user message.
+5. **Dedicated minimal system prompt for the compaction request.** The regular system prompt mentions tools, environment, and instructions in a way that primes the model to act rather than summarize. The compaction system prompt is a single sentence: _"You are summarizing a conversation between an engineer and an AI coding assistant. Output ONLY the summary text. Do not call any tools."_. The rubric and any custom instructions ride in the user message.
 
-6. **Strip non-conversational blocks from the summarizer input.** Drop `tool_use`, `tool_result`, and thinking blocks before sending the transcript to the summarizer. Codex's pattern is the strictest and the simplest. The assistant text rounds the model already produced are enough for it to reconstruct what was decided. Tool inputs and outputs explode the request size for marginal recall gain, since file paths and decisions are already mentioned in the assistant text around the tool calls.
+6. **Strip non-conversational blocks from the summarizer input.** Drop `tool_use`, `tool_result`, and thinking blocks before sending the transcript to the summarizer. Codex's pattern is the strictest and the simplest. The assistant text the model already produced gives the summarizer enough to reconstruct what was decided. Tool inputs and outputs blow up request size for marginal recall gain, because file paths and decisions are already mentioned in the assistant text around the tool calls.
 
 7. **Synthetic post-compact user message with `parent_uuid: None`.** Materializing the summary as a `role: user` `Message` is the converged answer across all three reference CLIs, since assistant messages can't lead a turn and system blocks are special-cased at the prefix. Setting `parent_uuid: None` on the synthetic head lets the existing `chain` walker stop naturally at the boundary, with no special-case in `chain.rs`. The synthetic message body is `SUMMARY_PREFIX + "\n\n" + summary`, where `SUMMARY_PREFIX` is a curated re-entry framing taken from the Codex template that tells the next-turn model to _use_ the summary rather than re-asking what to do.
 
@@ -50,7 +50,7 @@ The TUI's `App::apply_session_compacted` clears the chat, replays the synthetic 
 
 16. **No `pre_tokens` field in v1.** Token tracking lives next to the auto-compact work. Manual compact doesn't need it, since `pre_message_count` is enough for the post-compact UI line.
 
-17. **Custom instructions appended verbatim under an "Additional instructions" section in the user message.** Matches Claude Code's pattern. The rubric runs first, then custom instructions follow as steering rather than override.
+17. **Custom instructions appended verbatim under an "Additional instructions" section in the user message.** Matches Claude Code's pattern. The rubric runs first, then custom instructions follow as steering for the same task.
 
 18. **`CompactedBlock` is a single chat block, not a system message plus summary body pair.** Visually distinct (top-bordered surface), single conceptual unit. Can later grow a "view full pre-compact transcript" footer or a token-saved indicator without re-architecting around two block types.
 
