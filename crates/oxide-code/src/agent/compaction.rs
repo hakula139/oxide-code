@@ -160,100 +160,6 @@ mod tests {
     use crate::client::anthropic::testing::{Captured, api_key, captured, test_client};
     use crate::message::Role;
 
-    // ── strip_to_conversation ──
-
-    #[test]
-    fn strip_to_conversation_drops_tool_use_and_tool_result_blocks() {
-        let messages = vec![
-            Message::user("hi"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text {
-                        text: "let me check".to_owned(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".to_owned(),
-                        name: "read".to_owned(),
-                        input: json!({"path": "/tmp/a"}),
-                    },
-                ],
-            },
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "t1".to_owned(),
-                    content: "file body".to_owned(),
-                    is_error: false,
-                }],
-            },
-            Message::assistant("done"),
-        ];
-        let stripped = strip_to_conversation(&messages);
-        assert_eq!(stripped.len(), 3, "tool-result-only message dropped");
-        assert!(
-            stripped[1]
-                .content
-                .iter()
-                .all(|b| matches!(b, ContentBlock::Text { .. }))
-        );
-        assert_eq!(stripped[1].content.len(), 1);
-    }
-
-    #[test]
-    fn strip_to_conversation_drops_thinking_blocks() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Thinking {
-                    thinking: "pondering".to_owned(),
-                    signature: "sig".to_owned(),
-                },
-                ContentBlock::Text {
-                    text: "answer".to_owned(),
-                },
-            ],
-        }];
-        let stripped = strip_to_conversation(&messages);
-        assert_eq!(stripped.len(), 1);
-        assert_eq!(stripped[0].content.len(), 1);
-    }
-
-    // ── build_user_message ──
-
-    #[test]
-    fn build_user_message_without_instructions_is_just_the_rubric() {
-        let s = build_user_message(None);
-        assert!(s.contains("Summarize the conversation"));
-        assert!(!s.contains("Additional instructions"));
-    }
-
-    #[test]
-    fn build_user_message_with_instructions_appends_them_under_an_anchor() {
-        let s = build_user_message(Some("focus on the build error"));
-        assert!(s.contains("Additional instructions from the engineer"));
-        assert!(s.contains("focus on the build error"));
-    }
-
-    #[test]
-    fn build_user_message_treats_whitespace_only_instructions_as_absent() {
-        let s = build_user_message(Some("   \n\t  "));
-        assert!(!s.contains("Additional instructions"));
-    }
-
-    // ── synthesize_post_compact_message ──
-
-    #[test]
-    fn synthesize_post_compact_prepends_summary_prefix() {
-        let m = synthesize_post_compact_message("did X, Y, Z");
-        assert_eq!(m.role, Role::User);
-        let ContentBlock::Text { text } = &m.content[0] else {
-            panic!("expected text block");
-        };
-        assert!(text.contains("This conversation has been compacted"));
-        assert!(text.contains("did X, Y, Z"));
-    }
-
     // ── compact_session ──
 
     fn streamed_summary_body(text: &str) -> String {
@@ -461,5 +367,99 @@ mod tests {
             .await
             .expect_err("expected error");
         assert!(format!("{err:#}").contains("500") || format!("{err:#}").contains("server_error"));
+    }
+
+    // ── strip_to_conversation ──
+
+    #[test]
+    fn strip_to_conversation_drops_tool_use_and_tool_result_blocks() {
+        let messages = vec![
+            Message::user("hi"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "let me check".to_owned(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_owned(),
+                        name: "read".to_owned(),
+                        input: json!({"path": "/tmp/a"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_owned(),
+                    content: "file body".to_owned(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant("done"),
+        ];
+        let stripped = strip_to_conversation(&messages);
+        assert_eq!(stripped.len(), 3, "tool-result-only message dropped");
+        assert!(
+            stripped[1]
+                .content
+                .iter()
+                .all(|b| matches!(b, ContentBlock::Text { .. }))
+        );
+        assert_eq!(stripped[1].content.len(), 1);
+    }
+
+    #[test]
+    fn strip_to_conversation_drops_thinking_blocks() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "pondering".to_owned(),
+                    signature: "sig".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_owned(),
+                },
+            ],
+        }];
+        let stripped = strip_to_conversation(&messages);
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0].content.len(), 1);
+    }
+
+    // ── build_user_message ──
+
+    #[test]
+    fn build_user_message_without_instructions_is_just_the_rubric() {
+        let s = build_user_message(None);
+        assert!(s.contains("Summarize the conversation"));
+        assert!(!s.contains("Additional instructions"));
+    }
+
+    #[test]
+    fn build_user_message_with_instructions_appends_them_under_an_anchor() {
+        let s = build_user_message(Some("focus on the build error"));
+        assert!(s.contains("Additional instructions from the engineer"));
+        assert!(s.contains("focus on the build error"));
+    }
+
+    #[test]
+    fn build_user_message_treats_whitespace_only_instructions_as_absent() {
+        let s = build_user_message(Some("   \n\t  "));
+        assert!(!s.contains("Additional instructions"));
+    }
+
+    // ── synthesize_post_compact_message ──
+
+    #[test]
+    fn synthesize_post_compact_prepends_summary_prefix() {
+        let m = synthesize_post_compact_message("did X, Y, Z");
+        assert_eq!(m.role, Role::User);
+        let ContentBlock::Text { text } = &m.content[0] else {
+            panic!("expected text block");
+        };
+        assert!(text.contains("This conversation has been compacted"));
+        assert!(text.contains("did X, Y, Z"));
     }
 }
