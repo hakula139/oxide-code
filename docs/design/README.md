@@ -16,6 +16,7 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | Document                      | Description                                                        |
 | ----------------------------- | ------------------------------------------------------------------ |
 | [Commands](slash/commands.md) | Registry, dispatch, popup, per-command notes                       |
+| [Compact](slash/compact.md)   | `/compact`, summarization driver, `Entry::Compact`, chain reset    |
 | [Modal UI](slash/modals.md)   | `Modal` trait, `ModalStack`, `ListPicker`, model + effort + status |
 | [Resume](slash/resume.md)     | `/resume` picker, `SearchableList` primitive, `roll_into` re-init  |
 
