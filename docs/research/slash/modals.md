@@ -9,14 +9,14 @@ Companion to [commands.md](commands.md), which covers the command-surface shape.
 Modals are React components rendered by Ink. ~50 of ~100 commands are `type: 'local-jsx'`.
 
 - **Discriminator**: `type: 'local-jsx'` on the command record. Lazy module via `load: () => import('./<name>.js')`, so the modal component never loads until the command runs.
-- **Registry shape**: each command directory ships `index.ts` (declarative metadata) plus `<name>.tsx` (the modal component itself). Adding a modal command is one directory.
-- **Lifecycle**: trigger → lazy-load module → mount component via `showSetupDialog(root, render)` → component captures keys (arrows / Enter / Esc) → `onSelect(value)` callback → unmount → result delivered to dispatcher.
-- **State ownership**: per-modal local state (selected index, filter query). No shared modal-state store, and each component is self-contained.
-- **Layering**: modal renders **above** the input area, **not** inside chat scroll. Chat is visible behind. Input is implicitly suppressed because Ink routes keys to the active component.
-- **Result delivery**: callback-driven. Modal calls `onDone(value, { displayMode, shouldQuery })`. `displayMode: 'system'` posts a synthetic `SystemMessageBlock`, and `shouldQuery: true` forwards to the agent loop.
-- **Reusable primitives**: lightweight, with `Box`, `Text`, and `SelectInput`-style hand-rolled lists. No shared `Modal` / `Dialog` wrapper, so each command builds its UI directly with Ink primitives.
-- **Nesting**: supported via React tree (modal can render another modal as a child).
-- **Live data**: dynamic `description` getter on the command record pulls live state (e.g., `Set the AI model (currently ${renderModelName(getMainLoopModel())})`).
+- **Registry shape**: Each command directory ships `index.ts` (declarative metadata) plus `<name>.tsx` (the modal component itself). Adding a modal command is one directory.
+- **Lifecycle**: Trigger → lazy-load module → mount component via `showSetupDialog(root, render)` → component captures keys (arrows / Enter / Esc) → `onSelect(value)` callback → unmount → result delivered to dispatcher.
+- **State ownership**: Per-modal local state (selected index, filter query). No shared modal-state store, and each component is self-contained.
+- **Layering**: Modal renders **above** the input area, **not** inside chat scroll. Chat is visible behind. Input is implicitly suppressed because Ink routes keys to the active component.
+- **Result delivery**: Callback-driven. Modal calls `onDone(value, { displayMode, shouldQuery })`. `displayMode: 'system'` posts a synthetic `SystemMessageBlock`, and `shouldQuery: true` forwards to the agent loop.
+- **Reusable primitives**: Lightweight, with `Box`, `Text`, and `SelectInput`-style hand-rolled lists. No shared `Modal` / `Dialog` wrapper, so each command builds its UI directly with Ink primitives.
+- **Nesting**: Supported via React tree (modal can render another modal as a child).
+- **Live data**: Dynamic `description` getter on the command record pulls live state (e.g., `Set the AI model (currently ${renderModelName(getMainLoopModel())})`).
 
 ## OpenAI Codex (Rust + Ratatui)
 
@@ -24,9 +24,9 @@ Trait-based view stack at the bottom of the frame. The closest stack-wise to oxi
 
 - **Core trait**: `BottomPaneView` (`tui/src/bottom_pane/bottom_pane_view.rs`). Methods: `handle_key_event`, `is_complete`, `completion()`, `on_ctrl_c`, `terminal_title_requires_action`, plus paste / approval / input-request consumption hooks.
 - **View stack**: `BottomPane` owns `view_stack: Vec<Box<dyn BottomPaneView>>` plus a permanent `ChatComposer` that hides while a view is active.
-- **Focus model**: stack presence **is** focus state. Non-empty stack means top view receives keys, while empty stack means composer receives keys. No global flag.
-- **Auto-cascade**: when `view.is_complete()` returns true, `BottomPane` pops the view, re-renders the next one (or composer), and emits the view's `completion()` payload as an `AppEvent`.
-- **Triggers**: two paths.
+- **Focus model**: Stack presence **is** focus state. Non-empty stack means top view receives keys, while empty stack means composer receives keys. No global flag.
+- **Auto-cascade**: When `view.is_complete()` returns true, `BottomPane` pops the view, re-renders the next one (or composer), and emits the view's `completion()` payload as an `AppEvent`.
+- **Triggers**: Two paths.
   1. Slash command match arm pushes a view (`/model`, `/effort`, etc.).
   2. Agent emits `AskForApproval` event, then `BottomPane::try_consume_approval_request()` pushes an `ApprovalOverlay`.
 - **Reusable primitives**:
@@ -34,7 +34,7 @@ Trait-based view stack at the bottom of the frame. The closest stack-wise to oxi
   - `MultiSelectPicker`: checkbox variant.
   - `SelectionTabs`: tab bar across multiple list views.
   - All implement the `Renderable` ratatui-widget trait.
-- **Result delivery**: async via `AppEvent::SubmitApprovalDecision { decision, ... }`. The agent doesn't block, since views drop a typed event on the app event channel.
+- **Result delivery**: Async via `AppEvent::SubmitApprovalDecision { decision, ... }`. The agent doesn't block, since views drop a typed event on the app event channel.
 - **Keymap composition**: `RuntimeKeymap` plus per-view overrides (`ApprovalKeymap` locks Esc to Cancel, while `ListKeymap` adds j/k navigation).
 
 ## opencode (TypeScript + Solid.js + Kobalte)
@@ -42,8 +42,8 @@ Trait-based view stack at the bottom of the frame. The closest stack-wise to oxi
 Imperative single-modal API.
 
 - **Primitive**: `dialog.show(component, onClose?)` from `useDialog()` context. Single active modal, since `.show()` disposes any prior modal before mounting.
-- **Component shape**: dialog components live in `packages/app/src/components/dialog-*.tsx`. Each is a Solid component wrapping a Kobalte `<Dialog>` (overlay, focus trap, accessibility built in).
-- **Trigger pattern**: command's `onSelect` handler does a lazy import then `dialog.show()`:
+- **Component shape**: Dialog components live in `packages/app/src/components/dialog-*.tsx`. Each is a Solid component wrapping a Kobalte `<Dialog>` (overlay, focus trap, accessibility built in).
+- **Trigger pattern**: Command's `onSelect` handler does a lazy import then `dialog.show()`:
 
   ```typescript
   const chooseModel = () => {
@@ -53,10 +53,10 @@ Imperative single-modal API.
   }
   ```
 
-- **Layering**: full-screen modal overlay via Kobalte portal. `z: modal` for dialogs, `z: toast` (higher) for toasts. Input field is rendered outside the portal but is layered under the overlay.
-- **Result delivery**: side effects plus explicit close. Component mutates app state directly (`local.model.set(selected)`) and calls `dialog.close()`. No promise-based result return.
-- **Toast vs dialog**: separate. `showToast({ variant, title, description })` is a different API for non-blocking notifications, never embedded in a dialog.
-- **Nesting**: not supported (rationale: simpler focus management, but blocks confirm-inside-picker UX).
+- **Layering**: Full-screen modal overlay via Kobalte portal. `z: modal` for dialogs, `z: toast` (higher) for toasts. Input field is rendered outside the portal but is layered under the overlay.
+- **Result delivery**: Side effects plus explicit close. Component mutates app state directly (`local.model.set(selected)`) and calls `dialog.close()`. No promise-based result return.
+- **Toast vs dialog**: Separate. `showToast({ variant, title, description })` is a different API for non-blocking notifications, never embedded in a dialog.
+- **Nesting**: Not supported (rationale: simpler focus management, but blocks confirm-inside-picker UX).
 
 ## Comparison
 

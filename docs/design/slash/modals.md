@@ -18,11 +18,11 @@ Three things drove the abstraction:
 
 A modal is `Send` (App lives on tokio) but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of five outcomes:
 
-- **Consumed**: stay open, key handled internally.
-- **Cancelled**: close, no dispatch.
-- **Submitted**: close and forward an action (a `UserAction` through the agent channel, or a no-op when the modal already applied its effect locally).
-- **Previewed**: forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
-- **Pushed**: nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
+- **Consumed**: Stay open, key handled internally.
+- **Cancelled**: Close, no dispatch.
+- **Submitted**: Close and forward an action (a `UserAction` through the agent channel, or a no-op when the modal already applied its effect locally).
+- **Previewed**: Forward an action without closing. Used for live-preview cursor moves like `/theme`, where each Up / Down repaints the chat in the candidate without committing.
+- **Pushed**: Nest a child modal above the current one. The parent regains focus on pop via `Modal::on_focus_regained` (default no-op).
 
 `Submitted` and `Previewed` carry a `ModalAction`: `None` (no dispatch), `User(UserAction)` (forward to the agent loop), or `SystemMessage(String)` (push a confirmation line into chat after pop).
 
@@ -35,12 +35,12 @@ Dispatched actions flow through the same channel as keyboard input, so the modal
 Modals shipping today:
 
 - **Combined `/model + /effort` picker** (over `ListPicker`).
-- **`/effort` slider**: bare `/effort` Speed ↔ Intelligence slider.
-- **`/theme` picker**: live-preview palette picker (over `ListPicker`).
-- **`/rename` editor**: single-line title editor pre-filled with the current title.
-- **`/resume` picker**: searchable session picker (over `SearchableList`).
+- **`/effort` slider**: Bare `/effort` Speed ↔ Intelligence slider.
+- **`/theme` picker**: Live-preview palette picker (over `ListPicker`).
+- **`/rename` editor**: Single-line title editor pre-filled with the current title.
+- **`/resume` picker**: Searchable session picker (over `SearchableList`).
 - **Confirm-delete modal**: Y/N gate pushed by `/delete <id-prefix>` and `/resume`'s Ctrl+D / Delete.
-- **`/status`, `/config`, `/help`**: read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
+- **`/status`, `/config`, `/help`**: Read-only overviews assembled from `KvOverview` + `KvSection` fixtures inside the per-command files.
 
 App owns `ModalStack` and runs the key gate first inside `handle_crossterm_event`, so an active modal sees every key before any other component. `apply_modal_action` then dispatches the result through the same path as a keyboard `UserAction`.
 

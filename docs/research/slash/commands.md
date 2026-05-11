@@ -10,7 +10,7 @@ Declarative registry with three execution modes, lazy-loaded implementations.
 
 - **Registry**: ~100 `Command` records under `src/commands/<name>/index.ts`, ~50 of which are `local-jsx` modals. Metadata: `name`, `aliases`, `description`, `type: 'local' | 'local-jsx' | 'prompt'`, `isEnabled`, `isHidden`, `immediate`, `isSensitive`, `availability`. Each command directory ships its own modal component (`<name>.tsx`) loaded via `load: () => import('./<name>.js')`.
 - **Parser**: `slashCommandParsing.ts` splits on whitespace. Unknown names use Fuse.js (threshold 0.3).
-- **Dispatch**: Three modes. `local` returns `{ resultText, displayMode }`, `local-jsx` returns React JSX (modal pickers), and `prompt` expands to text and submits.
+- **Dispatch**: Three modes determine how a command's return value flows. `local` produces a `{ resultText, displayMode }` payload rendered as a synthetic message, `local-jsx` produces React JSX for inline modal pickers, and `prompt` expands the return string and submits it as a user message.
 - **Output**: Display modes: `'skip'` (no transcript entry), `'system'` (synthetic local-stdout message), `'user'` (default). Meta flag (`isMeta: true`) keeps a message model-visible while hiding from UI.
 - **Autocomplete**: Fuse.js across name, aliases, name parts, descriptions (weights: name 3, alias/part 2, description 0.5). Max 5 items. Re-sorts by tier: exact-name -> exact-alias -> prefix-name -> prefix-alias -> fuzzy.
 - **Custom**: Markdown files in `~/.claude/skills/`, `~/.claude/commands/`, `./.claude/skills/`, `./.claude/commands/` with YAML frontmatter.
