@@ -16,7 +16,7 @@ The direction is simple:
 - Multi-line input with a prompt marker and a status bar showing model, working directory, and run state.
 - Welcome surface on empty chat with identity, environment, and a few starter commands.
 - Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, and structured glob lists. Bash output rides the default truncated-text view.
-- Themable via runtime-loaded TOML — 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) with per-slot overrides.
+- Themable via runtime-loaded TOML, with 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) and per-slot overrides.
 - Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
 
 ### Agent Loop
@@ -38,10 +38,10 @@ The direction is simple:
 
 ### Turn Interruption & Queueing
 
-- Esc / Ctrl+C while busy interrupts the in-flight turn; partial output is preserved with a clear `(interrupted)` marker.
-- Type during a busy turn to queue prompts; queued prompts splice into the same multi-step turn at the next round boundary (between tool calls), so follow-ups land without aborting in-flight work. Tool-less turns drain queued prompts at the turn boundary instead.
+- Esc / Ctrl+C while busy interrupts the in-flight turn. Partial output is preserved with a clear `(interrupted)` marker.
+- Type during a busy turn to queue prompts. Queued prompts splice into the same multi-step turn at the next round boundary (between tool calls), so follow-ups land without aborting in-flight work. Tool-less turns drain queued prompts at the turn boundary instead.
 - Esc on idle pops the most recent queued prompt back into the input for editing.
-- Idle Ctrl+C arms a 1-second exit confirmation; a second press confirms.
+- Idle Ctrl+C arms a 1-second exit confirmation. A second press confirms.
 
 ### System Prompt
 
@@ -51,13 +51,13 @@ The direction is simple:
 ### Session Persistence
 
 - Every conversation saved as JSONL under `$XDG_DATA_HOME/ox/sessions/{project}/`.
-- `ox --list` browses recent sessions (capped at 30 by default; `--limit N` / `--limit 0` overrides). `ox -c` resumes by recency, prefix, or path.
+- `ox --list` browses recent sessions, capped at 30 by default with `--limit N` / `--limit 0` overrides. `ox -c` resumes by recency, prefix, or path.
 - Mid-session `/resume` (alias `/continue`) opens an in-place picker (substring search, Tab toggles current-project ↔ all projects). `/resume <id-prefix>` jumps directly.
 - AI-generated 3-7-word titles land shortly after the first prompt.
 
 ### File-Change Tracking
 
-- Per-session tracker remembers each Read; unchanged re-reads return a cache-hit stub instead of the full body.
+- Per-session tracker remembers each Read. Unchanged re-reads return a cache-hit stub instead of the full body.
 - Edit and Write require a prior full Read and refuse if the on-disk bytes have drifted (xxh64 fallback for cloud-sync mtime touches).
 - Tracker state persists into the session JSONL on clean exit and restores on resume.
 
@@ -67,13 +67,13 @@ The direction is simple:
 - Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
 - Mid-session swaps (`/model`, `/effort`, `/rename`, `/resume`, `/theme`) are session-only, and no slash command writes user config files.
 - Destructive ops (`/delete <id-prefix>`, or Ctrl+D / Delete inside the `/resume` picker) gate behind a Y/N confirm modal. Only finalized sessions can be deleted.
-- Modal UI primitive: focus-grabbing overlays above the input for picker, slider, editor, and read-only kv-overview forms; nested modals layer cleanly. Esc / Ctrl+C cancels any modal.
+- Modal UI primitive: focus-grabbing overlays above the input for picker, slider, editor, and read-only kv-overview forms. Nested modals layer cleanly, and Esc / Ctrl+C cancels any modal.
 
 ### Context Compression
 
 - Manual `/compact [instructions]` streams a one-shot summarization through the live model and replaces the in-memory transcript with a synthetic continuation. Optional trailing instructions steer the focus.
-- Persisted as a dedicated `compact` JSONL boundary plus the synthetic post-compact message; resume sees only the post-compact tail.
-- File tracker resets on compact — Edits after `/compact` require a fresh Read.
+- Persisted as a dedicated `compact` JSONL boundary plus the synthetic post-compact message. Resume sees only the post-compact tail.
+- File tracker resets on compact. Edits after `/compact` require a fresh Read.
 
 ### Authentication & Configuration
 
@@ -133,11 +133,11 @@ Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only,
 ### Status Bar Redesign
 
 - Current bar packs model + status + (optional) title + cwd into a single line. Layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
-- Direction: a richer, possibly multi-segment surface — token / cost meter, queued-prompt indicator, session id glance, theme indicator. Likely needs a layout rethink rather than incremental slot additions.
+- Direction: a richer, possibly multi-segment surface with token / cost meter, queued-prompt indicator, session id glance, and theme indicator. Likely needs a layout rethink rather than incremental slot additions.
 
 ## Not the Goal Right Now
 
 - Multi-provider LLM support (Anthropic only to start).
 - IDE integration or GUI.
 - Plugin system beyond MCP.
-- Feature parity with Claude Code — focus on the core workflow first.
+- Feature parity with Claude Code. Focus on the core workflow first.

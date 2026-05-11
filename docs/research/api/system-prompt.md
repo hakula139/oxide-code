@@ -4,7 +4,7 @@ Research notes on how Claude Code constructs its system prompt. Based on [Claude
 
 ## Section-Based Assembly
 
-Claude Code builds the system prompt from **sections** — discrete units with lazy, memoized resolution. Sections are split into two categories by a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker:
+Claude Code builds the system prompt from **sections**, discrete units with lazy, memoized resolution. Sections are split into two categories by a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker:
 
 - **Static sections** (before the boundary): identity, system guidance, task guidance, tool usage, tone / style. Globally cacheable via prompt caching.
 - **Dynamic sections** (after the boundary): session-specific guidance, CLAUDE.md memory, environment info, MCP instructions, language preference, output style, token budget. Not cacheable.
@@ -12,9 +12,9 @@ Claude Code builds the system prompt from **sections** — discrete units with l
 Resolution pipeline:
 
 1. `getSystemPrompt()` collects section definitions (static + dynamic).
-2. Static sections resolve immediately; dynamic sections are promises with memoization.
+2. Static sections resolve immediately. Dynamic sections are promises with memoization.
 3. `resolveSystemPromptSections()` awaits all section promises.
-4. `buildEffectiveSystemPrompt()` applies priority logic — override > coordinator > agent > custom > default.
+4. `buildEffectiveSystemPrompt()` applies priority logic: override > coordinator > agent > custom > default.
 5. `splitSysPromptPrefix()` splits by cache boundaries and assigns `cacheScope` (`global` / `org` / `null`).
 6. `buildSystemPromptBlocks()` wraps in `TextBlockParam` with `cache_control` for the API.
 
@@ -45,14 +45,14 @@ This walk ensures subdirectory-specific instructions appear later (higher priori
 
 Features:
 
-- **`@include` directives**: `@./relative/path`, `@~/home`, `@/absolute` — recursive include with max depth 5.
-- **Conditional rules**: `.md` files with `paths:` frontmatter — glob-matched to decide inclusion.
+- **`@include` directives**: `@./relative/path`, `@~/home`, `@/absolute`, recursive include with max depth 5.
+- **Conditional rules**: `.md` files with `paths:` frontmatter, glob-matched to decide inclusion.
 - **HTML comment stripping**: Block-level only, via marked lexer.
 - **MEMORY.md truncation**: Lines after 200 are truncated.
 
 ## Context Injection Channels
 
-Claude Code splits dynamic context across two API surfaces, not just the `system` parameter. This is critical for both prompt caching efficiency and compatibility with third-party gateways that impose body size limits on system blocks.
+Claude Code splits dynamic context across two API surfaces. This is critical for prompt caching efficiency and compatibility with third-party gateways that impose body size limits on system blocks.
 
 ### System parameter → static content
 
@@ -128,9 +128,9 @@ Each API request includes a `metadata` field with a `user_id` containing a strin
 
 - `session_id`: UUID v4, generated once per session via `randomUUID()`. Regenerated on conversation clear.
 - `device_id`: Persistent UUID stored in `~/.claude/.user-id` (created once, reused across sessions).
-- `account_uuid`: OAuth account UUID when using OAuth auth; empty string for API key auth.
+- `account_uuid`: OAuth account UUID when using OAuth auth. Empty string for API key auth.
 
-The `user_id` value is `JSON.stringify()`'d — the API receives a string, not a nested object.
+The `user_id` value is `JSON.stringify()`'d. The API receives a string rather than a nested object.
 
 ## Tool Definitions
 
@@ -140,41 +140,41 @@ Tool schemas are sent via the API `tools` parameter, **not** in the system promp
 
 The API supports prompt caching via `cache_control` on `TextBlockParam` blocks. Cache scopes:
 
-- `global` — static instructions identical across all sessions. **First-party only**; 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) for the full invariance rule.
-- _(absent)_ — default org-scoped ephemeral cache. Universally accepted.
-- `null` (no `cache_control`) — dynamic content, not cached.
+- `global`: Static instructions identical across all sessions. **First-party only** because 3P gateways reject a `scope: "global"` block downstream of tool definitions (they render before `system` and taint the cache prefix). See [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) for the full invariance rule.
+- _(absent)_: Default org-scoped ephemeral cache. Universally accepted.
+- `null` (no `cache_control`): Dynamic content excluded from caching.
 
 The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content. Effective caching requires the static prefix to be identical across requests.
 
-oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API; on any other host the static prefix still gets ephemeral caching, just at org level instead of global. The dynamic sections and block order are identical in both modes.
+oxide-code ships `scope: "global"` only when the configured base URL points at the first-party API. On any other host the static prefix still gets ephemeral caching, just at org level instead of global. The dynamic sections and block order are identical in both modes.
 
 ## System Block Layout
 
-The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed — it never appears in the request. oxide-code always emits the same 4-block shape (attribution + identity + static + dynamic); only the `cache_control` on the static block varies by base URL.
+The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. oxide-code always emits the same 4-block shape (attribution + identity + static + dynamic). Only the `cache_control` on the static block varies by base URL.
 
-**First-party base URL** (`api.anthropic.com`) — global cache active:
+**First-party base URL** (`api.anthropic.com`), global cache active:
 
 | #   | Content                          | `cache_control`                          |
 | --- | -------------------------------- | ---------------------------------------- |
-| 0   | Attribution header (OAuth only)  | —                                        |
-| 1   | Identity prefix                  | —                                        |
+| 0   | Attribution header (OAuth only)  | -                                        |
+| 1   | Identity prefix                  | -                                        |
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
-| 3   | Dynamic sections joined (`\n\n`) | —                                        |
+| 3   | Dynamic sections joined (`\n\n`) | -                                        |
 
-**Third-party base URL** (gateway, self-hosted, anything else) — default scope:
+**Third-party base URL** (gateway, self-hosted, anything else), default scope:
 
 | #   | Content                          | `cache_control`         |
 | --- | -------------------------------- | ----------------------- |
-| 0   | Attribution header (OAuth only)  | —                       |
-| 1   | Identity prefix                  | —                       |
+| 0   | Attribution header (OAuth only)  | -                       |
+| 1   | Identity prefix                  | -                       |
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
-| 3   | Dynamic sections joined (`\n\n`) | —                       |
+| 3   | Dynamic sections joined (`\n\n`) | -                       |
 
 Dropping the `scope` field (rather than serializing `scope: "org"` explicitly) is deliberate: org is the absent-field default, the resulting wire shape is what the Anthropic SDK ships for non-global ephemeral caches, and every gateway accepts it.
 
 Static sections (before boundary): intro, system, doing tasks, actions, tools, tone / style, output efficiency. Dynamic sections (after boundary): session guidance, environment, language, MCP instructions, etc.
 
-The attribution header is the billing `x-anthropic-billing-header` block; the identity prefix is `"You are Claude Code, Anthropic's official CLI for Claude."` — matched by `CLI_SYSPROMPT_PREFIXES`.
+The attribution header is the billing `x-anthropic-billing-header` block. The identity prefix is `"You are Claude Code, Anthropic's official CLI for Claude."`, matched by `CLI_SYSPROMPT_PREFIXES`.
 
 ## Request Headers
 
@@ -219,17 +219,17 @@ For the wire-shape side of the check (Stainless headers, billing attestation, be
 
 ## Sources
 
-- `claude-code/src/bootstrap/state.ts` — `getSessionId()`, UUID v4 session ID generation
-- `claude-code/src/constants/prompts.ts` — section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, `<system-reminder>` guidance
-- `claude-code/src/constants/systemPromptSections.ts` — section caching system
-- `claude-code/src/constants/xml.ts` — XML tag constants (`<system-reminder>`, `<local-command-*>`, etc.)
-- `claude-code/src/context.ts` — `getUserContext()` (CLAUDE.md + date), `getSystemContext()` (git status)
-- `claude-code/src/query.ts` — `prependUserContext` / `appendSystemContext` wiring at query time
-- `claude-code/src/services/api/claude.ts` — `queryModel`, `buildSystemPromptBlocks`, `getAPIMetadata()`, `getCacheControl()`
-- `claude-code/src/utils/api.ts` — `splitSysPromptPrefix`, `prependUserContext`, `appendSystemContext`, cache scope assignment
-- `claude-code/src/utils/claudemd.ts` — `getMemoryFiles`, `@include`, conditional rules
-- `claude-code/src/utils/context.ts` — token budgeting, `getUserContext`
-- `claude-code/src/utils/betas.ts` — `getAllModelBetas`, `getMergedBetas`, `shouldUseGlobalCacheScope`
-- `claude-code/src/utils/http.ts` — `getUserAgent()` (`claude-cli/VERSION (USER_TYPE, ENTRYPOINT)`)
-- `claude-code/src/utils/systemPrompt.ts` — `buildEffectiveSystemPrompt`, priority logic
-- `claude-code/src/utils/userAgent.ts` — `getClaudeCodeUserAgent()` (`claude-code/VERSION`)
+- `claude-code/src/bootstrap/state.ts`: `getSessionId()`, UUID v4 session ID generation
+- `claude-code/src/constants/prompts.ts`: section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, `<system-reminder>` guidance
+- `claude-code/src/constants/systemPromptSections.ts`: section caching system
+- `claude-code/src/constants/xml.ts`: XML tag constants (`<system-reminder>`, `<local-command-*>`, etc.)
+- `claude-code/src/context.ts`: `getUserContext()` (CLAUDE.md + date), `getSystemContext()` (git status)
+- `claude-code/src/query.ts`: `prependUserContext` / `appendSystemContext` wiring at query time
+- `claude-code/src/services/api/claude.ts`: `queryModel`, `buildSystemPromptBlocks`, `getAPIMetadata()`, `getCacheControl()`
+- `claude-code/src/utils/api.ts`: `splitSysPromptPrefix`, `prependUserContext`, `appendSystemContext`, cache scope assignment
+- `claude-code/src/utils/claudemd.ts`: `getMemoryFiles`, `@include`, conditional rules
+- `claude-code/src/utils/context.ts`: token budgeting, `getUserContext`
+- `claude-code/src/utils/betas.ts`: `getAllModelBetas`, `getMergedBetas`, `shouldUseGlobalCacheScope`
+- `claude-code/src/utils/http.ts`: `getUserAgent()` (`claude-cli/VERSION (USER_TYPE, ENTRYPOINT)`)
+- `claude-code/src/utils/systemPrompt.ts`: `buildEffectiveSystemPrompt`, priority logic
+- `claude-code/src/utils/userAgent.ts`: `getClaudeCodeUserAgent()` (`claude-code/VERSION`)

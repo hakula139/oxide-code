@@ -10,7 +10,7 @@ A terminal-based AI coding assistant written in Rust, inspired by [Claude Code].
 
 ## Overview
 
-oxide-code is a Rust reimplementation of Claude Code — an interactive CLI agent that helps developers with software engineering tasks. It communicates with LLM APIs to understand codebases, write code, run commands, and manage development workflows directly from the terminal.
+oxide-code is a Rust reimplementation of Claude Code, an interactive CLI agent that helps developers with software engineering tasks. It communicates with LLM APIs to understand codebases, write code, run commands, and manage development workflows directly from the terminal.
 
 ## Status
 

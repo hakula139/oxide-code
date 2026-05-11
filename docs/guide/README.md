@@ -4,7 +4,7 @@ Documentation for using oxide-code (`ox`).
 
 | Document                             | Description                                                |
 | ------------------------------------ | ---------------------------------------------------------- |
-| [Installation](install.md)           | Prebuilt tarball, Homebrew, cargo, Nix — and verify/update |
+| [Installation](install.md)           | Prebuilt tarball, Homebrew, cargo, Nix, verify/update      |
 | [Quickstart](quickstart.md)          | First run, credentials, basic usage                        |
 | [Configuration](configuration.md)    | API credentials, model selection, environment              |
 | [Slash Commands](slash-commands.md)  | Built-in client-side commands and autocomplete             |

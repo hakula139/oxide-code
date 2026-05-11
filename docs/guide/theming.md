@@ -21,13 +21,13 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 
 ## Built-in themes
 
-| Name        | Family     | Variant                |
-| ----------- | ---------- | ---------------------- |
-| `mocha`     | Catppuccin | Dark — neutral default |
-| `macchiato` | Catppuccin | Medium-dark            |
-| `frappe`    | Catppuccin | Medium                 |
-| `latte`     | Catppuccin | Light                  |
-| `material`  | Material   | Dark — M2 baseline     |
+| Name        | Family     | Variant               |
+| ----------- | ---------- | --------------------- |
+| `mocha`     | Catppuccin | Dark, neutral default |
+| `macchiato` | Catppuccin | Medium-dark           |
+| `frappe`    | Catppuccin | Medium                |
+| `latte`     | Catppuccin | Light                 |
+| `material`  | Material   | Dark M2 baseline      |
 
 Each ships as a vendored TOML file [in the source tree][themes-src] and doubles as a copy-paste starting point for custom themes.
 
@@ -57,10 +57,10 @@ Every `fg` / `bg` value, and every bare-string slot, accepts:
 
 ANSI 16-color names accepted (case-insensitive):
 
-- **Standard** — `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` (alias `grey`).
-- **Bright** — `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green` (alias `light_green`), `bright_yellow` (alias `light_yellow`), `bright_blue` (alias `light_blue`), `bright_magenta` (alias `light_magenta`), `bright_cyan` (alias `light_cyan`), `white` (alias `bright_white` / `light_white`).
+- **Standard**: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` (alias `grey`).
+- **Bright**: `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green` (alias `light_green`), `bright_yellow` (alias `light_yellow`), `bright_blue` (alias `light_blue`), `bright_magenta` (alias `light_magenta`), `bright_cyan` (alias `light_cyan`), `white` (alias `bright_white` / `light_white`).
 
-See the [ANSI escape code reference][ansi] for what each name maps to in your terminal's palette. Three-digit hex shorthand (`#fff`) is intentionally rejected — always use the full six digits.
+See the [ANSI escape code reference][ansi] for what each name maps to in your terminal's palette. Three-digit hex shorthand (`#fff`) is intentionally rejected. Always use the full six digits.
 
 [ansi]: https://en.wikipedia.org/wiki/ANSI_escape_code#Colors
 
@@ -72,14 +72,14 @@ A custom theme file must define **every slot**, since a missing slot is a parse 
 
 A theme TOML is a flat document with one entry per slot. Two shapes:
 
-- **Bare color string** — `fg`-only, no modifiers:
+- **Bare color string**: `fg`-only, no modifiers:
 
   ```toml
   user = "#fab387"
   blockquote = "#a6e3a1"
   ```
 
-- **Inline table** — explicit `fg` / `bg` and any modifier flags:
+- **Inline table**: explicit `fg` / `bg` and any modifier flags:
 
   ```toml
   accent = { fg = "#89b4fa", bold = true }
@@ -107,7 +107,7 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 | --------- | ----------------------------------------------------- |
 | `surface` | Chat / input / status panel background fill (bg-only) |
 
-> **Always declare `surface` as an inline table with `bg`** — e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
+> **Always declare `surface` as an inline table with `bg`**, e.g. `surface = { bg = "#1e1e2e" }` or `surface = { bg = "reset" }`. A bare-string `surface = "#1e1e2e"` would route to `fg` (per the slot-definition rules above) and silently repaint every panel's text in the surface color.
 
 ### Semantic accents
 
@@ -143,12 +143,12 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ### Markdown headings
 
-| Slot            | Role                                    |
-| --------------- | --------------------------------------- |
-| `heading_h1`    | H1 — most prominent (bold + underlined) |
-| `heading_h2`    | H2 — bold section header                |
-| `heading_h3`    | H3 — bold italic                        |
-| `heading_minor` | H4–H6 — italic                          |
+| Slot            | Role                                   |
+| --------------- | -------------------------------------- |
+| `heading_h1`    | H1, most prominent (bold + underlined) |
+| `heading_h2`    | H2, bold section header                |
+| `heading_h3`    | H3, bold italic                        |
+| `heading_minor` | H4-H6, italic                          |
 
 ### Markdown body
 
@@ -179,25 +179,25 @@ Each slot maps to one role in the TUI. Override a slot by name to restyle that r
 
 ## Overrides
 
-`[tui.theme.overrides]` is a table of `slot_name = patch` pairs. A patch is _additive_ — only the fields it lists are applied to the base slot.
+`[tui.theme.overrides]` is a table of `slot_name = patch` pairs. A patch is _additive_, so only the fields it lists are applied to the base slot.
 
 ```toml
 [tui.theme.overrides]
-# Bare-string form — patches fg only; bg and modifiers come from the base.
+# Bare-string form patches fg only. bg and modifiers come from the base.
 error = "#ff0000"
-# Inline form — patches just modifiers; fg / bg come from the base.
+# Inline form patches just modifiers. fg / bg come from the base.
 accent = { bold = false }
-# Inline form — patches fg AND adds bold.
+# Inline form patches fg AND adds bold.
 link = { fg = "#ff79c6", bold = true }
 ```
 
 Modifier flags use **three-state semantics**:
 
-| Flag value | Effect on the base modifier         |
-| ---------- | ----------------------------------- |
-| omitted    | no change — base value is preserved |
-| `true`     | sets the bit                        |
-| `false`    | clears the bit                      |
+| Flag value | Effect on the base modifier        |
+| ---------- | ---------------------------------- |
+| omitted    | no change, base value is preserved |
+| `true`     | sets the bit                       |
+| `false`    | clears the bit                     |
 
 So `accent = { bold = false }` removes bold from the base accent without disturbing its color, and `accent = { italic = true }` adds italic without removing the base bold. An entirely empty patch (`accent = {}`) warns and falls back to the base, since rewriting the base with itself is almost always a typo.
 
@@ -205,19 +205,19 @@ So `accent = { bold = false }` removes bold from the base accent without disturb
 
 Bisected severity:
 
-- **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that can't be read, a file with a parse error in the base body — any of these stop oxide-code at startup with a message identifying what went wrong.
+- **Theme selection errors** are fatal. An unknown built-in name with no matching file path, a file that cannot be read, or a file with a parse error in the base body stops oxide-code at startup with a message identifying what went wrong.
 - **Per-slot value errors** warn and fall back. If an override's color string can't be parsed, its slot name isn't recognized, or an inline patch is empty, oxide-code logs a warning to stderr and uses the base slot's value for that role. The TUI still launches.
 
 The default tracing level is `warn`, so per-slot fallback messages surface without requiring `RUST_LOG`. Routing depends on mode:
 
-- **TUI** — diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame.
-- **Bare REPL / headless / `--list`** — diagnostics go to stderr, the natural CLI surface.
+- **TUI**: Diagnostics go to `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`). Routing to a file keeps `warn!` output off the alternate screen, where it would otherwise paint over the rendered frame.
+- **Bare REPL / headless / `--list`**: Diagnostics go to stderr, the natural CLI surface.
 
 Set `RUST_LOG=info` (or `debug`) for more detail.
 
 ## Examples
 
-### Minimal — switch to Latte
+### Minimal: switch to Latte
 
 ```toml
 [tui.theme]
@@ -260,4 +260,4 @@ Useful for transparent / non-truecolor terminals where forcing an RGB foreground
 surface = { bg = "#1e1e2e" }
 ```
 
-Default `surface` uses the terminal background (`reset`). Set a `bg` to give the chat / input / status panels an opaque tint — useful on transparent terminals.
+Default `surface` uses the terminal background (`reset`). Set a `bg` to give the chat / input / status panels an opaque tint, useful on transparent terminals.
