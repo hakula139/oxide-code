@@ -1,6 +1,6 @@
 # Session Resume / Continue (Reference)
 
-Research on session-resume UX: CLI flag plumbing, picker rendering, search and pagination, mid-session reload. Based on [Claude Code](https://github.com/hakula139/claude-code) (local checkout `4b9d30f`; remote pull failed because GitHub reports the repository disabled), [OpenAI Codex](https://github.com/openai/codex) (`79c65f81`), and [opencode](https://github.com/anomalyco/opencode) (`1a28924e`).
+Research on session-resume UX: CLI flag plumbing, picker rendering, search and pagination, mid-session reload. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 Companion to [commands.md](commands.md) and [modals.md](modals.md). Storage-layer notes (JSONL shapes, `parent_uuid` chain, listing scans) live in [session/persistence.md](../session/persistence.md). This file focuses on the _user-facing_ resume surface.
 

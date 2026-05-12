@@ -1,6 +1,6 @@
 # Slash Commands (Reference)
 
-Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code) (local checkout `4b9d30f`; remote pull failed because GitHub reports the repository disabled), [OpenAI Codex](https://github.com/openai/codex) (`79c65f81`), and [opencode](https://github.com/anomalyco/opencode) (`1a28924e`).
+Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 For modal-specific architecture (how `local-jsx` / `BottomPaneView` / `dialog.show()` actually work) see [modals.md](modals.md).
 
