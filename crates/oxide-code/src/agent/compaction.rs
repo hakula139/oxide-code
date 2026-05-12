@@ -79,8 +79,8 @@ pub(crate) async fn compact_session(
             StreamEvent::ContentBlockStart {
                 content_block: ContentBlockInfo::Text { text },
                 ..
-            } => summary.push_str(&text),
-            StreamEvent::ContentBlockDelta {
+            }
+            | StreamEvent::ContentBlockDelta {
                 delta: Delta::TextDelta { text },
                 ..
             } => summary.push_str(&text),
@@ -338,11 +338,11 @@ mod tests {
 
         let body_text = body.as_str();
         assert!(
-            !body_text.contains("\"tool_use\""),
+            !body_text.contains(r#""tool_use""#),
             "tool_use stripped: {body}"
         );
         assert!(
-            !body_text.contains("\"tool_result\""),
+            !body_text.contains(r#""tool_result""#),
             "tool_result stripped: {body}"
         );
         assert!(
