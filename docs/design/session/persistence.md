@@ -8,19 +8,21 @@ Every session is a single `.jsonl` file: one JSON object per line, append-only a
 
 ### Entry Types
 
-| Type      | Position     | Purpose                                                             |
-| --------- | ------------ | ------------------------------------------------------------------- |
-| `header`  | First line   | Session metadata: ID, CWD, model, created timestamp, format version |
-| `message` | Middle lines | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
-| `title`   | Re-appended  | Session title + source. Latest wins                                 |
-| `summary` | Last line    | Exit marker: `message_count` + `updated_at`. Latest wins            |
-| `unknown` | Any          | Catch-all via `#[serde(other)]` for forward-compat                  |
+| Type                   | Position     | Purpose                                                             |
+| ---------------------- | ------------ | ------------------------------------------------------------------- |
+| `header`               | First line   | Session metadata: ID, CWD, model, created timestamp, format version |
+| `message`              | Middle lines | Conversation message with `uuid`, optional `parent_uuid`, timestamp |
+| `title`                | Re-appended  | Session title + source. Latest wins                                 |
+| `tool_result_metadata` | Sidecar      | Display metadata for replaying tool results                         |
+| `file_snapshot`        | Sidecar      | File-tracker state restored on resume when disk state still matches |
+| `compact`              | Boundary     | Summary boundary plus pre-compact count and optional instructions   |
+| `summary`              | Last line    | Exit marker: `message_count` + `updated_at`. Latest wins            |
 
-### Forward Compatibility
+### Schema Invariants
 
-1. **`Entry::Unknown` catch-all.** Unrecognized `type` discriminators parse silently. New entry types land additively.
-2. **`parent_uuid` chain.** Each message links to its predecessor. Future fork feature branches from an arbitrary message without rewriting.
-3. **`version` field.** Bumped on incompatible changes, so readers refuse newer versions.
+1. **Explicit entry schema.** Unknown discriminators are treated as malformed lines by the loader instead of becoming silent compatibility shims.
+2. **`parent_uuid` chain.** Each message links to its predecessor. Concurrent resumes can fork, and the newest-leaf rule resolves the active branch without rewriting history.
+3. **`version` field.** Bump on incompatible changes so older binaries fail fast instead of silently misreading session state.
 
 ## Storage Layout
 
@@ -77,7 +79,7 @@ First failure populates the handle's `RecordOutcome::failure` slot so the agent 
 1. **JSONL, append-only, one file per session.** Crash-safe, streamable, universal.
 2. **Per-project subdirectory.** Listings stay scoped, and `--all` opts into cross-project view.
 3. **`{epoch}-{uuid}.jsonl` naming.** Timestamp prefix for `ls` order, UUID suffix for lookup.
-4. **Forward-compat entry schema.** Tagged union + `#[serde(other)]` + `parent_uuid` DAG + `version` field.
+4. **Explicit entry schema.** Tagged union + `parent_uuid` DAG + `version` field.
 5. **Lazy file creation.** Empty sessions leave no artifact.
 6. **Resume + symmetric sanitization.** Reopen, walk DAG, sanitize, keep every transcript API-valid.
 7. **Fork-on-conflict concurrency, no file lock.** Newest-leaf rule resolves forks, and large interleaved writes are warn-skipped.

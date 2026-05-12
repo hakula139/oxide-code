@@ -32,7 +32,7 @@ At 80 cols with the test fixture (`claude-opus-4-7` plain, `xhigh` effort, OAuth
                   Try one of:
 
                     /help     list commands
-                    /diff     show staged changes
+                    /diff     show git changes
                     /model    switch model
 
                   Tip — ox --continue resumes your last session
@@ -62,7 +62,7 @@ Below 25 cols nothing paints, since the terminal is too narrow to read the welco
 1. **Empty-chat branch stays in `ChatView`, while rendering moves to App.** `ChatView::is_empty()` remains the predicate, and `App::draw_frame` decides which renderer to invoke. The welcome is an ephemeral placeholder in the chat region. Pushing it into `ChatView::blocks` would mix onboarding UI with persisted transcript content and break the `is_empty` check.
 2. **Stateless `paint(frame, area, theme, snapshot)` function.** The welcome owns no state across frames because it's a pure projection of `LiveSessionInfo`, and a struct would only invite caches and lifecycle hooks the welcome doesn't need.
 3. **`WelcomeSnapshot` projects only what the welcome needs.** Model display, effort, auth label, cwd, version, and starter rows. Keeping the shape narrow makes snapshot-test fixtures cheap and decouples the welcome from `LiveSessionInfo` evolution.
-4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising all eleven slash commands defeats the point of "try one of". The 9-entry `STARTER_POOL` and 9-entry `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
+4. **Starter rows sample 3 from a curated pool, plus a randomized tip.** Advertising all thirteen slash commands defeats the point of "try one of". The 9-entry `STARTER_POOL` and 6-entry `TIP_POOL` add variety without becoming a dashboard, and every entry is an action a user can take next. Picks are seeded from `session_id`, so a session is stable while `/clear` yields a fresh pick.
 5. **Curated rows live alongside the welcome.** Adding `is_starter() -> bool` to `SlashCommand` would push welcome-specific curation into every command.
 6. **Editorial ribbon `━━━━ oxide-code v{ver} ━━━━` with no ASCII mark and no animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot (Claude Code) or animation (Codex) is outsized for the value. The ribbon is a single line that anchors horizontally without surrounding the wordmark, giving the welcome typographic identity rather than container chrome. The wordmark itself is `oxide-code` (project name, the brand a migrator searches for) rather than `ox` (binary command).
 7. **Coarse three-tier width ladder (full / collapsed / suppressed).** Codex and Claude Code lean on truncate-and-reflow, while opencode uses flex-shrink. For fixed content, a coarse ladder is simpler than per-element shrink rules.

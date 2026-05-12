@@ -18,7 +18,7 @@ type Starter = (&'static str, &'static str);
 
 const STARTER_POOL: &[Starter] = &[
     ("/clear", "reset conversation"),
-    ("/diff", "show staged changes"),
+    ("/diff", "show git changes"),
     ("/effort", "tune Speed ↔ Intelligence"),
     ("/help", "list commands"),
     ("/init", "author or update AGENTS.md"),

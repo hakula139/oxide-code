@@ -12,7 +12,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 
 2. **mtime + size fast path, content-hash slow path.** Common case (file untouched) is a single `stat()`. When mtime / size differ, re-hash via xxh64. If the hash matches, treat as unchanged (Windows cloud-sync false-positive workaround).
 
-3. **Persist the tracker on session finish, verify on resume.** A new `Entry::FileSnapshot` variant rides the existing JSONL forward-compat. On resume each snapshot is re-`stat()`-checked. Survivors restore into the in-memory tracker, while mismatches drop silently.
+3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL. On resume each snapshot is re-`stat()`-checked. Survivors restore into the in-memory tracker, while mismatches drop silently.
 
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
 
@@ -27,7 +27,7 @@ The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool call
 ## Sources
 
 - `crates/oxide-code/src/file_tracker.rs`: `FileTracker`, `LastView`, `FileSnapshot`, staleness checks, persist / restore.
-- `crates/oxide-code/src/session/entry.rs`: JSONL forward-compat (`Entry::Unknown`, `Entry::FileSnapshot`).
+- `crates/oxide-code/src/session/entry.rs`: `Entry::FileSnapshot`.
 - `crates/oxide-code/src/tool/edit.rs`: Read-before-Edit gate, staleness check.
 - `crates/oxide-code/src/tool/read.rs`: `FileTracker::record_read`, cache-hit stub.
 - `crates/oxide-code/src/tool/write.rs`: Read-before-Write gate.

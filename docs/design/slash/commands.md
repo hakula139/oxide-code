@@ -4,9 +4,10 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 ## Implementation
 
-12 built-ins: `/clear`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
+13 built-ins: `/clear`, `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume`, `/status`, `/theme`. Each lives in its own `slash/<name>.rs` file implementing `SlashCommand`. Adding one is a new file plus an entry in `BUILT_INS` (alphabetical).
 
 - `/clear` rolls the session UUID and clears chat + file tracker.
+- `/compact` compresses the visible transcript into a summary and resets the continuation chain.
 - `/model` swaps the active model mid-session via `Client::set_model`.
 - `/effort` sets an explicit effort tier.
 - `/theme` swaps the TUI palette mid-session, with bare opening a live-preview list picker.
@@ -49,6 +50,8 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 ## Per-Command Notes
 
 - **`/clear`**: Send-first ordering. Forward `UserAction::Clear` first, drop chat history only on success. `AgentEvent::SessionTitleUpdated` carries the originating session id so a slow Haiku title call straddling `/clear` doesn't repaint the cleared session.
+
+- **`/compact`**: Refuses mid-turn, streams a summarization request, writes a compact boundary plus synthetic continuation message, resets the file tracker, and keeps queued prompts for the post-compact turn. Full design: [compact.md](compact.md).
 
 - **`/init`**: Returns `Forward(UserAction::SubmitPrompt(PROMPT))` with a static body asking the model to author / update AGENTS.md. The expanded body is invisible in the live session but recorded in JSONL for resume.
 
