@@ -465,7 +465,9 @@ impl AgentLoopTask {
                 LoopControl::Continue
             }
             UserAction::SwapConfig { model, effort } => {
-                apply_swap_config(&mut self.client, &self.sink, model, effort);
+                if apply_swap_config(&mut self.client, &self.sink, model, effort) {
+                    self.auto_compaction_failures = 0;
+                }
                 LoopControl::Continue
             }
             UserAction::Quit => LoopControl::Stop,
@@ -708,12 +710,12 @@ fn apply_swap_config(
     sink: &dyn AgentSink,
     model: Option<ResolvedModelId>,
     effort: Option<Effort>,
-) {
+) -> bool {
     if let Some(id) = model
         && let Err(e) = client.set_model(id.into_inner())
     {
         _ = sink.send(AgentEvent::Error(format!("Config change failed: {e:#}")));
-        return;
+        return false;
     }
     let resolved = match effort {
         Some(pick) => client.set_effort(pick),
@@ -730,6 +732,7 @@ fn apply_swap_config(
         // wrong after a /model or /effort swap.
         tracing::error!("config-changed event dropped: {e}");
     }
+    true
 }
 
 // ── Bare REPL Mode ──
@@ -989,5 +992,45 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn handle_action_swap_config_resets_auto_compaction_breaker() {
+        let server = MockServer::start().await;
+        let config = test_config(server.uri(), api_key(), "claude-opus-4-7[1m]");
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let session = session::handle::start(&store, "claude-opus-4-7[1m]");
+        let file_tracker = Arc::new(FileTracker::default());
+        let (sink, mut event_rx) = tui::event::channel();
+        let (_user_tx, user_rx) = agent::event::inert_user_action_channel();
+        let mut task = AgentLoopTask {
+            client,
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+            sink,
+            user_rx,
+            session,
+            messages: Vec::new(),
+            store,
+            file_tracker,
+            auto_compaction_failures: 3,
+            last_usage: Some(TokenUsage::new(100_000, 1)),
+        };
+
+        let control = task
+            .handle_action(UserAction::SwapConfig {
+                model: None,
+                effort: Some(Effort::Xhigh),
+            })
+            .await;
+
+        assert!(matches!(control, LoopControl::Continue));
+        assert_eq!(task.auto_compaction_failures, 0);
+        assert_eq!(task.last_usage, Some(TokenUsage::new(100_000, 1)));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(AgentEvent::ConfigChanged { .. })
+        ));
     }
 }

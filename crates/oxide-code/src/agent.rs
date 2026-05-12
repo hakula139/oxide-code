@@ -218,6 +218,7 @@ pub(crate) async fn auto_compact_if_needed(
         return Ok(false);
     }
 
+    _ = sink.send(AgentEvent::AutoCompactionStarted);
     let summary = match await_unless_aborted(
         compaction::compact_session(client, messages, None),
         user_rx,

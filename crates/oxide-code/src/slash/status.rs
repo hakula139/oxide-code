@@ -37,7 +37,7 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         ("Auth".to_owned(), info.config.auth_label.to_owned()),
         ("Version".to_owned(), info.version.to_owned()),
         (
-            "Context Cache".to_owned(),
+            "Prompt Cache TTL".to_owned(),
             info.config.prompt_cache_ttl.to_string(),
         ),
         (

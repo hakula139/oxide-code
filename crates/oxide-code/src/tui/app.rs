@@ -26,7 +26,7 @@ use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
-use crate::config::{CompactionConfig, Effort};
+use crate::config::{CompactionConfig, Effort, display_auto_compaction};
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
@@ -53,6 +53,8 @@ pub(crate) struct App {
     tools: Arc<ToolRegistry>,
     /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
     pending_calls: PendingCalls,
+    /// Prompt already painted for the in-flight turn. Replayed if auto-compaction clears chat.
+    active_prompt: Option<String>,
     /// FIFO of prompts submitted mid-turn. Drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     modals: ModalStack,
@@ -102,6 +104,7 @@ impl App {
             user_tx,
             tools,
             pending_calls: PendingCalls::new(),
+            active_prompt: None,
             pending_prompts: VecDeque::new(),
             modals: ModalStack::new(),
             preview_theme_snapshot: None,
@@ -364,6 +367,9 @@ impl App {
                 }
                 if let Some(action) = synthesized {
                     if matches!(action, UserAction::SubmitPrompt(_)) {
+                        if slash::echoes_input(&parsed) {
+                            self.active_prompt = Some(text.to_owned());
+                        }
                         self.input.set_enabled(false);
                         self.status_bar.set_status(Status::Streaming);
                         self.forward_to_agent(action);
@@ -374,6 +380,7 @@ impl App {
                 return false;
             }
             self.chat.push_user_message(text.to_owned());
+            self.active_prompt = Some(text.to_owned());
             self.input.set_enabled(false);
             self.status_bar.set_status(Status::Streaming);
             return true;
@@ -456,7 +463,12 @@ impl App {
             }
             AgentEvent::Cancelled => {
                 self.chat.push_interrupted_marker();
+                self.active_prompt = None;
                 self.finalize_idle();
+            }
+            AgentEvent::AutoCompactionStarted => {
+                self.set_active_status(Status::Compacting);
+                self.input.set_enabled(false);
             }
             AgentEvent::SessionTitleUpdated { session_id, title } => {
                 if session_id == self.session_info.session_id {
@@ -467,6 +479,7 @@ impl App {
                 self.session_info.session_id = id;
                 self.status_bar.set_title(None);
                 self.chat.clear_history();
+                self.active_prompt = None;
             }
             AgentEvent::SessionResumed {
                 id,
@@ -502,6 +515,7 @@ impl App {
 
     fn finish_turn(&mut self) {
         self.chat.commit_streaming();
+        self.active_prompt = None;
         self.finalize_idle();
     }
 
@@ -520,6 +534,7 @@ impl App {
         self.chat
             .load_history(messages, compact, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
+        self.active_prompt = None;
         // Queued prompts belonged to the previous thread, so resume drops them.
         let dropped = self.pending_prompts.len();
         self.pending_prompts.clear();
@@ -546,8 +561,12 @@ impl App {
         self.pending_calls.clear();
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
+        if automatic && let Some(prompt) = &self.active_prompt {
+            self.chat.push_user_message(prompt.clone());
+        }
         self.clear_modals();
         if !automatic {
+            self.active_prompt = None;
             self.finalize_idle();
         }
     }
@@ -561,12 +580,15 @@ impl App {
     ) {
         let model_changed = model_id != self.session_info.config.model_id;
         let prev_effort = self.session_info.config.effort;
+        let prev_compaction = self.session_info.config.compaction;
         let confirmation = format_config_change(
             &model_id,
             model_changed,
             prev_effort,
             effort,
             requested_effort,
+            prev_compaction,
+            compaction,
         );
         if model_changed {
             self.status_bar
@@ -770,9 +792,11 @@ fn format_config_change(
     prev_effort: Option<crate::config::Effort>,
     new_effort: Option<crate::config::Effort>,
     requested_effort: Option<crate::config::Effort>,
+    prev_compaction: CompactionConfig,
+    new_compaction: CompactionConfig,
 ) -> String {
-    if !model_changed {
-        return match (requested_effort, new_effort) {
+    let message = if !model_changed {
+        match (requested_effort, new_effort) {
             (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
             (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
             (Some(req), None) => {
@@ -780,26 +804,44 @@ fn format_config_change(
             }
             // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
             (None, _) => "Config unchanged.".to_owned(),
-        };
-    }
-    let head = format!(
-        "Switched to {} ({model_id})",
-        crate::model::display_name(model_id)
-    );
-    match (requested_effort, prev_effort, new_effort) {
-        (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
-        (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
-        (Some(req), _, None) => {
-            format!("{head}. Effort unchanged — model has no effort tier (asked for {req}).")
         }
-        (None, None, None) => format!("{head}."),
-        (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
-        (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
-        (None, Some(prev), Some(new)) if new < prev => {
-            format!("{head} · effort {new} (clamped from {prev}).")
+    } else {
+        let head = format!(
+            "Switched to {} ({model_id})",
+            crate::model::display_name(model_id)
+        );
+        match (requested_effort, prev_effort, new_effort) {
+            (Some(req), _, Some(eff)) if req == eff => format!("{head} · effort {eff}."),
+            (Some(req), _, Some(eff)) => format!("{head} · effort {eff} (clamped from {req})."),
+            (Some(req), _, None) => {
+                format!("{head}. Effort unchanged — model has no effort tier (asked for {req}).")
+            }
+            (None, None, None) => format!("{head}."),
+            (None, Some(_), None) => format!("{head}. Effort cleared (model has no effort tier)."),
+            (None, None, Some(eff)) => format!("{head} · effort {eff} (model default)."),
+            (None, Some(prev), Some(new)) if new < prev => {
+                format!("{head} · effort {new} (clamped from {prev}).")
+            }
+            (None, Some(_), Some(eff)) => format!("{head} · effort {eff}."),
         }
-        (None, Some(_), Some(eff)) => format!("{head} · effort {eff}."),
+    };
+    if model_changed && prev_compaction.auto != new_compaction.auto {
+        return append_sentence(
+            message,
+            format!(
+                "Auto compaction {}",
+                display_auto_compaction(new_compaction.auto)
+            ),
+        );
     }
+    message
+}
+
+fn append_sentence(mut message: String, sentence: String) -> String {
+    if message.ends_with('.') {
+        message.pop();
+    }
+    format!("{message}. {sentence}.")
 }
 
 #[cfg(test)]
@@ -890,6 +932,13 @@ mod tests {
                 theme_name: "mocha".to_owned(),
             },
         }
+    }
+
+    fn base_compaction() -> CompactionConfig {
+        CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(155_000),
+        })
     }
 
     /// Minimal modal for layout tests: paints `title` on its only row, ignores keys.
@@ -2015,7 +2064,7 @@ mod tests {
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(
             body,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high.",
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens.",
         );
         assert!(app.dirty);
     }
@@ -2048,7 +2097,15 @@ mod tests {
     fn format_config_change_swap_both_none_omits_effort_clause() {
         // Pin: no `effort` substring at all, never a stray "none"
         // word. Mutation that prints `effort none.` would surface here.
-        let s = format_config_change("claude-haiku-4-5", true, None, None, None);
+        let s = format_config_change(
+            "claude-haiku-4-5",
+            true,
+            None,
+            None,
+            None,
+            base_compaction(),
+            base_compaction(),
+        );
         assert_eq!(s, "Switched to Claude Haiku 4.5 (claude-haiku-4-5).");
     }
 
@@ -2062,6 +2119,8 @@ mod tests {
             Some(crate::config::Effort::Xhigh),
             None,
             None,
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
@@ -2080,6 +2139,8 @@ mod tests {
             None,
             Some(crate::config::Effort::Xhigh),
             None,
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
@@ -2096,6 +2157,8 @@ mod tests {
             Some(crate::config::Effort::Xhigh),
             Some(crate::config::Effort::High),
             None,
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
@@ -2113,6 +2176,8 @@ mod tests {
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::High),
             None,
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
@@ -2130,6 +2195,8 @@ mod tests {
             Some(crate::config::Effort::Medium),
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::Xhigh),
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
@@ -2145,6 +2212,8 @@ mod tests {
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::Xhigh),
             Some(crate::config::Effort::Xhigh),
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(s, "Effort set to xhigh.");
     }
@@ -2157,6 +2226,8 @@ mod tests {
             Some(crate::config::Effort::Medium),
             Some(crate::config::Effort::High),
             Some(crate::config::Effort::Xhigh),
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(s, "Effort set to high (clamped from xhigh).");
     }
@@ -2171,10 +2242,36 @@ mod tests {
             None,
             None,
             Some(crate::config::Effort::High),
+            base_compaction(),
+            base_compaction(),
         );
         assert_eq!(
             s,
             "Effort unchanged — model has no effort tier (asked for high)."
+        );
+    }
+
+    #[test]
+    fn format_config_change_model_swap_mentions_compaction_threshold_change() {
+        let new_compaction =
+            CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(167_000),
+            });
+
+        let s = format_config_change(
+            "claude-sonnet-4-6",
+            true,
+            Some(crate::config::Effort::High),
+            Some(crate::config::Effort::High),
+            None,
+            base_compaction(),
+            new_compaction,
+        );
+
+        assert_eq!(
+            s,
+            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens."
         );
     }
 
@@ -2388,7 +2485,7 @@ mod tests {
     async fn handle_session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.input.set_enabled(false);
-        app.status_bar.set_status(Status::Streaming);
+        app.status_bar.set_status(Status::Compacting);
         app.pending_prompts
             .push_back("queued while busy".to_owned());
 
@@ -2400,13 +2497,51 @@ mod tests {
         });
 
         assert_eq!(app.chat.entry_count(), 1);
-        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
         assert!(!app.input.is_enabled());
         assert_eq!(app.pending_prompts.len(), 1);
         assert!(
             rx.try_recv().is_err(),
             "automatic compact must not drain early"
         );
+    }
+
+    #[test]
+    fn handle_auto_compaction_started_sets_compacting_status() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.dispatch_user_action(UserAction::SubmitPrompt("active question".to_owned()));
+
+        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
+
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
+        assert!(!app.input.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn handle_session_compacted_automatic_replays_active_prompt_after_summary() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+
+        app.dispatch_user_action(UserAction::SubmitPrompt("active question".to_owned()));
+        let forwarded = rx.recv().await.expect("prompt reaches the agent");
+        assert_eq!(
+            forwarded,
+            UserAction::SubmitPrompt("active question".to_owned())
+        );
+        app.handle_agent_event(AgentEvent::AutoCompactionStarted);
+
+        app.handle_agent_event(AgentEvent::SessionCompacted {
+            summary: "auto summary".to_owned(),
+            pre_count: 4,
+            instructions: None,
+            automatic: true,
+        });
+
+        assert_eq!(app.chat.entry_count(), 2);
+        assert_eq!(app.status_bar.status(), &Status::Compacting);
+        assert!(!app.input.is_enabled());
+        let text = rendered_text(&mut app, 80, 10);
+        assert!(text.contains("auto summary"));
+        assert!(text.contains("active question"));
     }
 
     #[test]

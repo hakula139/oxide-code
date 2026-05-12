@@ -407,6 +407,7 @@ pub(crate) fn display_bool(flag: bool) -> &'static str {
 pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
     match (auto.enabled, auto.threshold_tokens) {
         (true, Some(threshold)) => format!("on at {threshold} tokens"),
+        (true, None) => "off (no threshold)".to_owned(),
         _ => "off".to_owned(),
     }
 }
@@ -514,8 +515,14 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
         return Ok(None);
     };
     let threshold = context_window.saturating_mul(u32::from(percent)) / 100;
-    default_auto_threshold_for_window(context_window, max_tokens)
-        .map(|max| validate_auto_threshold_floor(threshold.min(max)))
+    let resolved =
+        default_auto_threshold_for_window(context_window, max_tokens).map(|max| threshold.min(max));
+    resolved
+        .map(|tokens| {
+            validate_auto_threshold_floor(tokens).with_context(|| {
+                format!("auto_threshold_percent={percent} resolves to {tokens} tokens")
+            })
+        })
         .transpose()
 }
 
@@ -1012,6 +1019,8 @@ mod tests {
             .await
             .expect_err("resolved low threshold must fail config load");
         let msg = format!("{err:#}");
+        assert!(msg.contains("auto_threshold_percent=4"), "{msg}");
+        assert!(msg.contains("40000 tokens"), "{msg}");
         assert!(msg.contains("at least 50000 tokens"), "{msg}");
     }
 
@@ -1405,6 +1414,13 @@ mod tests {
                 threshold_tokens: Some(400_000),
             }),
             "off",
+        );
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: None,
+            }),
+            "off (no threshold)",
         );
     }
 

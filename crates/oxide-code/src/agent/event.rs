@@ -47,6 +47,9 @@ pub(crate) enum AgentEvent {
     /// User cancelled mid-turn ([`UserAction::Cancel`]); the in-flight reply is truncated and the
     /// inline [`INTERRUPTED_MARKER`] is rendered.
     Cancelled,
+    /// Automatic compaction started before the submitted prompt runs. TUI switches to compacting
+    /// status while the summarizer request streams.
+    AutoCompactionStarted,
     /// Background title generator finished; UI updates the chrome label.
     SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — a new session UUID is now active.
@@ -207,12 +210,24 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
+            AgentEvent::SessionCompacted {
+                pre_count,
+                automatic,
+                ..
+            } => {
+                let label = if automatic {
+                    "Auto-compacted"
+                } else {
+                    "Compacted"
+                };
+                writeln!(stderr, "{label} {pre_count} messages into summary")?;
+            }
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
+            | AgentEvent::AutoCompactionStarted
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
             | AgentEvent::SessionResumed { .. }
-            | AgentEvent::SessionCompacted { .. }
             | AgentEvent::ConfigChanged { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;
@@ -367,6 +382,7 @@ mod tests {
     fn render_tui_only_events_emit_nothing_on_either_stream() {
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
+            AgentEvent::AutoCompactionStarted,
             AgentEvent::SessionTitleUpdated {
                 session_id: "sid".to_owned(),
                 title: "New title".to_owned(),
@@ -385,6 +401,31 @@ mod tests {
             assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
             assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
         }
+    }
+
+    #[test]
+    fn render_session_compacted_writes_stderr_boundary() {
+        let (_, stderr) = render_one(
+            &test_sink(false),
+            AgentEvent::SessionCompacted {
+                summary: "summary".to_owned(),
+                pre_count: 4,
+                instructions: None,
+                automatic: false,
+            },
+        );
+        assert_eq!(stderr, "Compacted 4 messages into summary\n");
+
+        let (_, stderr) = render_one(
+            &test_sink(false),
+            AgentEvent::SessionCompacted {
+                summary: "summary".to_owned(),
+                pre_count: 4,
+                instructions: None,
+                automatic: true,
+            },
+        );
+        assert_eq!(stderr, "Auto-compacted 4 messages into summary\n");
     }
 
     #[test]
