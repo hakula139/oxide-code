@@ -4,7 +4,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
-3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory.
+3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key` or `client.base_url`.
 4. **Environment variables**: always win.
 
 ## Config file
@@ -13,15 +13,13 @@ All fields are optional. Only specify the values you want to override.
 
 ```toml
 # ~/.config/ox/config.toml (user-wide)
-# or ox.toml in your project root (per-project)
+# or ox.toml in your project root (per-project, except api_key/base_url)
 
 [client]
 model = "claude-sonnet-4-6"
-base_url = "https://api.anthropic.com"
 effort = "high"
 max_tokens = 32000
 prompt_cache_ttl = "1h"
-# api_key = "sk-ant-..."   # see Authentication below, env var is safer
 
 [tui]
 show_thinking = true
@@ -31,8 +29,8 @@ show_thinking = true
 
 | Key                | Type    | Default                     | Description                         |
 | ------------------ | ------- | --------------------------- | ----------------------------------- |
-| `api_key`          | string  | -                           | Anthropic API key                   |
-| `base_url`         | string  | `https://api.anthropic.com` | API base URL                        |
+| `api_key`          | string  | -                           | Anthropic API key; user config only |
+| `base_url`         | string  | `https://api.anthropic.com` | API base URL; user config only      |
 | `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                        |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier        |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response             |
@@ -62,6 +60,10 @@ Tier guide (from the [Opus 4.7 migration guide](https://platform.claude.com/docs
 #### `max_tokens`: response ceiling
 
 When unset, oxide-code derives `max_tokens` from the resolved `effort`: 64 000 for `xhigh` / `max`, 32 000 for `high`, 16 000 otherwise. Setting `max_tokens` explicitly (via TOML or `ANTHROPIC_MAX_TOKENS`) overrides the derivation.
+
+#### `base_url`: endpoint
+
+Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Project `ox.toml` cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
 
 #### `prompt_cache_ttl`: cache duration
 
@@ -112,14 +114,14 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 oxide-code checks three credential sources in order:
 
 1. `ANTHROPIC_API_KEY` environment variable.
-2. `api_key` under `[client]` in a config file.
+2. `api_key` under `[client]` in the user config file.
 3. Claude Code OAuth credentials, if [Claude Code](https://code.claude.com/docs) is installed and signed in:
    - **macOS**: the `"Claude Code-credentials"` Keychain entry (preferred), falling back to `~/.claude/.credentials.json`.
    - **Linux**: `~/.claude/.credentials.json`.
 
    Expired tokens are refreshed automatically. No configuration needed.
 
-Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so a project-local `ox.toml` is easy to commit by accident, and a user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
+Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.toml` resolves by walking up from the current directory, so oxide-code rejects project-level `api_key` and `base_url`; user-level `~/.config/ox/config.toml` is safer but still plaintext on disk.
 
 ## Environment variables
 
