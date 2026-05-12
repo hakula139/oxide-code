@@ -196,6 +196,7 @@ pub(crate) struct CompactionConfig {
 }
 
 impl CompactionConfig {
+    #[cfg(test)]
     pub(crate) const fn disabled() -> Self {
         Self {
             auto: AutoCompactionConfig::disabled(),
@@ -391,7 +392,7 @@ fn resolve_compaction(
     max_tokens: u32,
 ) -> Result<CompactionConfig> {
     let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")
-        .or_else(|| file.as_ref().and_then(|c| c.auto_enabled))
+        .or_else(|| file.as_ref().and_then(|c| c.enabled))
         .unwrap_or(true);
     let auto = if auto_requested {
         resolve_auto_compaction(file.as_ref(), model, max_tokens)?
@@ -422,8 +423,8 @@ fn resolve_auto_threshold(
     let env_tokens = env_u32("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
     let env_percent = env_u8("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
     let env_threshold_set = env_tokens.is_some() || env_percent.is_some();
-    let file_tokens = file.and_then(|c| c.auto_threshold_tokens);
-    let file_percent = file.and_then(|c| c.auto_threshold_percent);
+    let file_tokens = file.and_then(|c| c.threshold_tokens);
+    let file_percent = file.and_then(|c| c.threshold_percent);
     let (tokens, percent) = if env_threshold_set {
         (env_tokens, env_percent)
     } else {
@@ -436,7 +437,7 @@ fn resolve_auto_threshold(
         }
         (Some(tokens), None) => validate_positive_tokens(tokens).map(Some),
         (None, Some(percent)) => threshold_from_percent(percent, model, max_tokens),
-        (None, None) => default_auto_threshold(model, max_tokens),
+        (None, None) => Ok(default_auto_threshold(model, max_tokens)),
     }
 }
 
@@ -458,9 +459,9 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
     Ok(default_auto_threshold_for_window(context_window, max_tokens).map(|max| threshold.min(max)))
 }
 
-fn default_auto_threshold(model: &str, max_tokens: u32) -> Result<Option<u32>> {
-    Ok(crate::model::context_window_for(model)
-        .and_then(|window| default_auto_threshold_for_window(window, max_tokens)))
+fn default_auto_threshold(model: &str, max_tokens: u32) -> Option<u32> {
+    crate::model::context_window_for(model)
+        .and_then(|window| default_auto_threshold_for_window(window, max_tokens))
 }
 
 fn default_auto_threshold_for_window(context_window: u32, max_tokens: u32) -> Option<u32> {
@@ -832,10 +833,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc::indoc! {r"
                 [client.compaction]
                 auto_enabled = false
-            "#},
+            "},
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -848,10 +849,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc::indoc! {r"
                 [client.compaction]
                 auto_enabled = false
-            "#},
+            "},
         );
         let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "1")]);
         let config = temp_env::async_with_vars(vars, Config::load())
@@ -865,10 +866,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc::indoc! {r"
                 [client.compaction]
                 auto_threshold_tokens = 400000
-            "#},
+            "},
         );
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
@@ -895,11 +896,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
-            indoc::indoc! {r#"
+            indoc::indoc! {r"
                 [client.compaction]
                 auto_threshold_tokens = 400000
                 auto_threshold_percent = 40
-            "#},
+            "},
         );
         let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
