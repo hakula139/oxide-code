@@ -25,6 +25,7 @@ ox                                          # Start an interactive session
 .
 ├── agent.rs                                # Agent turn loop, stream accumulation, tool dispatch
 ├── agent/
+│   ├── compact_boundary.rs                 # Compact boundary persistence, file-tracker reset, live transcript replacement
 │   ├── compaction.rs                       # /compact driver: stripped-transcript summarization request + summary-prefix wrapping
 │   └── event.rs                            # AgentEvent, UserAction, AgentSink trait, StdioSink
 ├── client.rs                               # Client module root

@@ -93,7 +93,7 @@ Key files:
 
 ## Patterns to Defer
 
-1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. The first oxide-code version should compact after a complete round and before the next user-visible continuation.
+1. **Mid-turn compaction.** Requires pausing a tool loop or assistant continuation, replacing history, and resuming the same logical turn. The first oxide-code version should compact before recording the next user prompt after a completed turn crosses the trigger.
 
 2. **Microcompact / prune.** Clearing old tool outputs can save tokens, but it is a separate retention policy with its own UI and persistence implications.
 
