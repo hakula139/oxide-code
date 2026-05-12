@@ -43,6 +43,7 @@ impl ChatBlock for ErrorBlock {
         out
     }
 
+    #[cfg(test)]
     fn is_error_marker(&self) -> bool {
         true
     }

@@ -56,7 +56,9 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
     let tracked = if has_head(cwd) {
         run_git_in(cwd, &["diff", "HEAD"])?
     } else {
-        run_git_in(cwd, &["diff", "--cached"])?
+        let cached = run_git_in(cwd, &["diff", "--cached"])?;
+        let unstaged = run_git_in(cwd, &["diff"])?;
+        join_sections(&[cached.as_str(), unstaged.as_str()])
     };
     let untracked = run_git_in(cwd, &["ls-files", "--others", "--exclude-standard"])?;
 
@@ -83,6 +85,15 @@ fn format_diff(tracked: &str, untracked: &str) -> String {
         }
     }
     out
+}
+
+fn join_sections(sections: &[&str]) -> String {
+    sections
+        .iter()
+        .map(|s| s.trim_end_matches('\n'))
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ── Git Helpers ──
@@ -258,6 +269,19 @@ mod tests {
     }
 
     #[test]
+    fn collect_diff_in_fresh_repo_combines_staged_and_unstaged_diffs() {
+        let (_dir, repo) = fresh_repo();
+        std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git_setup(&repo, &["add", "a.txt"]);
+        std::fs::write(repo.join("a.txt"), "staged\nunstaged\n").unwrap();
+
+        let body = collect_diff_in(&repo).unwrap();
+
+        assert!(body.contains("+staged"), "staged add missing: {body}");
+        assert!(body.contains("+unstaged"), "unstaged edit missing: {body}");
+    }
+
+    #[test]
     fn collect_diff_in_after_commit_shows_unstaged_changes() {
         let (_dir, repo) = fresh_repo();
         std::fs::write(repo.join("a.txt"), "first\n").unwrap();
@@ -339,6 +363,13 @@ mod tests {
     fn format_diff_both_empty_yields_empty_string() {
         assert_eq!(format_diff("", ""), "");
         assert_eq!(format_diff("   \n", "  \n"), "");
+    }
+
+    // ── join_sections ──
+
+    #[test]
+    fn join_sections_keeps_non_empty_sections_with_blank_separator() {
+        assert_eq!(join_sections(&["one\n", " \n", "two\n"]), "one\n\ntwo");
     }
 
     // ── inside_git_repo ──

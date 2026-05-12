@@ -77,13 +77,7 @@ pub(super) trait ChatBlock {
         false
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed only by ChatView::last_is_error in tests"
-        )
-    )]
+    #[cfg(test)]
     fn is_error_marker(&self) -> bool {
         false
     }
