@@ -202,7 +202,7 @@ impl InputArea {
         self.last_width.set(textarea_area.width);
 
         let sc = self.textarea.screen_cursor();
-        let cursor_row = to_u16(sc.row);
+        let cursor_row = saturating_u16(sc.row);
         let height = textarea_area.height;
         let prev = self.scroll_top.get();
         let top = if cursor_row < prev {
@@ -214,7 +214,7 @@ impl InputArea {
         };
         self.scroll_top.set(top);
 
-        let raw_cursor_x = textarea_area.x.saturating_add(to_u16(sc.col));
+        let raw_cursor_x = textarea_area.x.saturating_add(saturating_u16(sc.col));
         let cursor_y = textarea_area.y + cursor_row - top;
 
         if let Some(token) = self.ghost_text() {
@@ -337,28 +337,21 @@ impl InputArea {
         )
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "line count fits in u16 for any practical input"
-    )]
     fn visual_line_count(&self) -> u16 {
         let width = self.last_width.get() as usize;
         if width == 0 {
-            return (self.textarea.lines().len() as u16).max(1);
+            return saturating_u16(self.textarea.lines().len()).max(1);
         }
-        self.textarea
+        let count = self
+            .textarea
             .lines()
             .iter()
             .map(|line| {
                 let w = UnicodeWidthStr::width(line.as_str());
-                if w <= width {
-                    1u16
-                } else {
-                    w.div_ceil(width) as u16
-                }
+                if w <= width { 1 } else { w.div_ceil(width) }
             })
-            .sum::<u16>()
-            .max(1)
+            .sum();
+        saturating_u16(count).max(1)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -412,13 +405,9 @@ fn normalize_placeholder(usage: &str) -> String {
     format!("[{inner}]")
 }
 
-/// Lossy `usize → u16` for cursor / column positions, bounded by terminal dimensions.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "cursor / column positions fit in u16 for terminal widths"
-)]
-fn to_u16(n: usize) -> u16 {
-    n as u16
+/// Saturating `usize` to `u16` conversion for terminal dimensions.
+fn saturating_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

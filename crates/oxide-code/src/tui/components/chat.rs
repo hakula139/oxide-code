@@ -355,11 +355,7 @@ impl ChatView {
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
         let text = self.build_text(area.width);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "clamped to u16::MAX; truncation cannot occur"
-        )]
-        let height = text.lines.len().min(u16::MAX as usize) as u16;
+        let height = u16::try_from(text.lines.len()).unwrap_or(u16::MAX);
         self.content_height.set(height);
         let paragraph = Paragraph::new(text)
             .style(self.theme.surface())
