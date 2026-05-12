@@ -795,17 +795,7 @@ fn format_config_change(
     prev_compaction: CompactionConfig,
     new_compaction: CompactionConfig,
 ) -> String {
-    let message = if !model_changed {
-        match (requested_effort, new_effort) {
-            (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
-            (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
-            (Some(req), None) => {
-                format!("Effort unchanged — model has no effort tier (asked for {req}).")
-            }
-            // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
-            (None, _) => "Config unchanged.".to_owned(),
-        }
-    } else {
+    let message = if model_changed {
         let head = format!(
             "Switched to {} ({model_id})",
             crate::model::display_name(model_id)
@@ -824,11 +814,21 @@ fn format_config_change(
             }
             (None, Some(_), Some(eff)) => format!("{head} · effort {eff}."),
         }
+    } else {
+        match (requested_effort, new_effort) {
+            (Some(req), Some(eff)) if req == eff => format!("Effort set to {eff}."),
+            (Some(req), Some(eff)) => format!("Effort set to {eff} (clamped from {req})."),
+            (Some(req), None) => {
+                format!("Effort unchanged — model has no effort tier (asked for {req}).")
+            }
+            // Slash dispatch keeps this unreachable, but a clear fallback beats a panic.
+            (None, _) => "Config unchanged.".to_owned(),
+        }
     };
     if model_changed && prev_compaction.auto != new_compaction.auto {
         return append_sentence(
             message,
-            format!(
+            &format!(
                 "Auto compaction {}",
                 display_auto_compaction(new_compaction.auto)
             ),
@@ -837,7 +837,7 @@ fn format_config_change(
     message
 }
 
-fn append_sentence(mut message: String, sentence: String) -> String {
+fn append_sentence(mut message: String, sentence: &str) -> String {
     if message.ends_with('.') {
         message.pop();
     }
