@@ -67,9 +67,11 @@ cargo build                                        # Build
 cargo clippy --all-targets -- -D warnings          # Lint (pedantic, zero warnings)
 cargo test                                         # Run tests
 cargo llvm-cov --ignore-filename-regex 'main\.rs'  # Check test coverage
+pnpm lint                                          # Lint Markdown
+pnpm spellcheck                                    # Spell check
 ```
 
-CI runs these same checks on every push and pull request via GitHub Actions.
+CI runs fmt, clippy, tests, coverage, Markdown lint, and spellcheck on every push and pull request. `cargo build` is a local quick compile check.
 
 ## License
 

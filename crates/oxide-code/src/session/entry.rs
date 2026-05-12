@@ -8,12 +8,10 @@ use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
 use crate::tool::ToolMetadata;
 
-/// On-disk schema version stamped into every `Header`. Loader rejects files with a higher
-/// version so a downgraded binary fails fast instead of silently dropping unknown fields.
+/// On-disk schema version stamped into every `Header`.
 pub(crate) const CURRENT_VERSION: u32 = 1;
 
-/// One JSONL line — externally tagged on `type` so `serde(other)` lets older readers skip
-/// future variants without aborting the load.
+/// One JSONL line in the session transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Entry {
@@ -23,16 +21,15 @@ pub(crate) enum Entry {
         model: String,
         #[serde(with = "time::serde::rfc3339")]
         created_at: OffsetDateTime,
-        #[serde(default = "default_version")]
         version: u32,
         /// Captured at session start so the resume picker can disambiguate sibling sessions by
-        /// branch context. Older files predate the field — `serde(default)` resolves to `None`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// branch context.
+        #[serde(skip_serializing_if = "Option::is_none")]
         git_branch: Option<String>,
     },
     Message {
         uuid: Uuid,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         parent_uuid: Option<Uuid>,
         message: Message,
         #[serde(with = "time::serde::rfc3339")]
@@ -62,22 +59,15 @@ pub(crate) enum Entry {
     },
     /// Boundary written by `/compact` immediately before the synthetic post-compact `Message`.
     /// Carries the summary body and the pre-compact message count so listings can surface
-    /// "compacted N → 1" without rescanning the prior tail. Forward-compat: older binaries
-    /// land in `Unknown` and skip the line.
+    /// "compacted N → 1" without rescanning the prior tail.
     Compact {
         summary: String,
         pre_message_count: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         instructions: Option<String>,
         #[serde(with = "time::serde::rfc3339")]
         timestamp: OffsetDateTime,
     },
-    #[serde(other)]
-    Unknown,
-}
-
-fn default_version() -> u32 {
-    CURRENT_VERSION
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,8 +105,7 @@ pub(crate) struct SessionInfo {
     pub(crate) last_active_at: OffsetDateTime,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) exit: Option<ExitInfo>,
-    /// Branch the session started on. `None` for older files predating the field or for sessions
-    /// started outside a git repo.
+    /// Branch the session started on, or `None` outside a git repo.
     pub(crate) git_branch: Option<String>,
 }
 
@@ -162,16 +151,6 @@ mod tests {
         assert_eq!(created_at, datetime!(2026-04-16 12:00:00 UTC));
         assert_eq!(version, CURRENT_VERSION);
         assert!(git_branch.is_none());
-    }
-
-    #[test]
-    fn header_missing_version_defaults_to_current() {
-        let json = r#"{"type":"header","session_id":"s","cwd":"/","model":"m","created_at":"2026-04-16T12:00:00Z"}"#;
-        let parsed: Entry = serde_json::from_str(json).unwrap();
-        let Entry::Header { version, .. } = parsed else {
-            panic!("expected Header");
-        };
-        assert_eq!(version, CURRENT_VERSION);
     }
 
     // ── Entry::Message ──
@@ -428,47 +407,6 @@ mod tests {
             json.get("instructions").is_none(),
             "instructions should be omitted when None"
         );
-    }
-
-    #[test]
-    fn compact_missing_instructions_defaults_to_none() {
-        let json = r#"{"type":"compact","summary":"s","pre_message_count":4,"timestamp":"2026-04-16T13:00:00Z"}"#;
-        let parsed: Entry = serde_json::from_str(json).unwrap();
-        let Entry::Compact { instructions, .. } = parsed else {
-            panic!("expected Compact");
-        };
-        assert!(instructions.is_none());
-    }
-
-    #[test]
-    fn compact_unknown_field_is_ignored_for_forward_compat() {
-        let json = serde_json::json!({
-            "type": "compact",
-            "summary": "s",
-            "pre_message_count": 4,
-            "timestamp": "2026-04-16T13:00:00Z",
-            "future_field": "from a newer writer",
-        });
-        let parsed: Entry = serde_json::from_value(json).unwrap();
-        let Entry::Compact {
-            summary,
-            pre_message_count,
-            ..
-        } = parsed
-        else {
-            panic!("expected Compact, got {parsed:?}");
-        };
-        assert_eq!(summary, "s");
-        assert_eq!(pre_message_count, 4);
-    }
-
-    // ── Entry::Unknown ──
-
-    #[test]
-    fn unknown_discriminator_parses_as_unknown_variant() {
-        let json = r#"{"type":"future_type","data":"something"}"#;
-        let parsed: Entry = serde_json::from_str(json).unwrap();
-        assert!(matches!(parsed, Entry::Unknown));
     }
 
     // ── JSONL format ──

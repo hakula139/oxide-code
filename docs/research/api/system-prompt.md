@@ -1,6 +1,6 @@
 # System Prompt Architecture
 
-Research notes on how Claude Code constructs its system prompt. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87).
+Research notes on how Claude Code constructs its system prompt. Based on [Claude Code](https://github.com/hakula139/claude-code).
 
 ## Section-Based Assembly
 
@@ -150,13 +150,13 @@ oxide-code ships `scope: "global"` only when the configured base URL points at t
 
 ## System Block Layout
 
-The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. oxide-code always emits the same 4-block shape (attribution + identity + static + dynamic). Only the `cache_control` on the static block varies by base URL.
+The flat sections array gets transformed into the block layout actually sent to the API. The boundary marker is consumed and never appears in the request. Agentic streaming emits the same 4-block shape (billing / attribution + identity + static + dynamic). The billing block is unconditional for gateway compatibility; only the `cache_control` on the static block varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
 | #   | Content                          | `cache_control`                          |
 | --- | -------------------------------- | ---------------------------------------- |
-| 0   | Attribution header (OAuth only)  | -                                        |
+| 0   | Billing / attribution header     | -                                        |
 | 1   | Identity prefix                  | -                                        |
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral", scope: "global" }` |
 | 3   | Dynamic sections joined (`\n\n`) | -                                        |
@@ -165,7 +165,7 @@ The flat sections array gets transformed into the block layout actually sent to 
 
 | #   | Content                          | `cache_control`         |
 | --- | -------------------------------- | ----------------------- |
-| 0   | Attribution header (OAuth only)  | -                       |
+| 0   | Billing / attribution header     | -                       |
 | 1   | Identity prefix                  | -                       |
 | 2   | Static sections joined (`\n\n`)  | `{ type: "ephemeral" }` |
 | 3   | Dynamic sections joined (`\n\n`) | -                       |

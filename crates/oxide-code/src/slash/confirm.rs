@@ -1,7 +1,7 @@
 //! Destructive-action confirm modal scoped to session deletion. Generalize when a second use
 //! case lands.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -34,7 +34,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     /// decoupled from `time::OffsetDateTime` formatting.
     metadata: String,
     live_session_id: String,
-    /// Sticky error from a failed delete attempt. Cleared on next press.
+    /// Sticky error from a failed delete attempt. Kept until a deliberate confirm or cancel key.
     error: Option<String>,
 }
 
@@ -57,7 +57,7 @@ impl ConfirmDeleteSessionModal {
     }
 
     /// Run `store.delete`. On Ok, pop and emit a chat-stream confirmation. On Err, stay open with
-    /// a sticky inline error that clears on the next non-confirm keypress.
+    /// a sticky inline error.
     fn confirm(&mut self) -> ModalKey {
         match self.store.delete(&self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(
@@ -119,14 +119,22 @@ impl Modal for ConfirmDeleteSessionModal {
         // user makes a deliberate Y / N / Enter choice, so a stray arrow key or modifier-only
         // event can't wipe the only diagnostic from a failed delete.
         match event.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+            KeyCode::Char('y' | 'Y') if is_plain_char(event) => {
                 self.error = None;
                 self.confirm()
             }
-            KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
+            KeyCode::Enter if event.modifiers.is_empty() => {
+                self.error = None;
+                self.confirm()
+            }
+            KeyCode::Char('n' | 'N') if is_plain_char(event) => ModalKey::Cancelled,
             _ => ModalKey::Consumed,
         }
     }
+}
+
+fn is_plain_char(event: &KeyEvent) -> bool {
+    event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT
 }
 
 #[cfg(test)]
@@ -139,6 +147,10 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
+    }
+
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
     }
 
     fn isolated_store() -> (tempfile::TempDir, SessionStore) {
@@ -270,6 +282,28 @@ mod tests {
             outcome,
             ModalKey::Submitted(ModalAction::SystemMessage(_)),
         ));
+    }
+
+    #[test]
+    fn control_y_and_control_enter_do_not_confirm_delete() {
+        let (_dir, store) = isolated_store();
+        let mut modal = seed_modal(&store, "abcd1234", "Fix auth");
+        let id_kept = modal.session_id.clone();
+
+        for event in [
+            modified_key(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            modified_key(KeyCode::Enter, KeyModifiers::CONTROL),
+        ] {
+            assert!(matches!(modal.handle_key(&event), ModalKey::Consumed));
+        }
+        assert!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|s| s.session_id == id_kept),
+            "modified confirmation keys must not delete the session",
+        );
     }
 
     #[test]

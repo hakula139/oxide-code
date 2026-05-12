@@ -32,7 +32,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 7. **Synthetic post-compact user message with `parent_uuid: None`.** Materializing the summary as a `role: user` `Message` is the converged answer across all three reference CLIs, since assistant messages can't lead a turn and system blocks are special-cased at the prefix. Setting `parent_uuid: None` on the synthetic head lets the existing `chain` walker stop naturally at the boundary, with no special-case in `chain.rs`. The synthetic message body is `SUMMARY_PREFIX + "\n\n" + summary`, where `SUMMARY_PREFIX` is a curated re-entry framing taken from the Codex template that tells the next-turn model to _use_ the summary rather than re-asking what to do.
 
-8. **New `Entry::Compact` JSONL variant.** Carries `summary`, `pre_message_count`, optional `instructions`, and `timestamp`. Position: written immediately before the synthetic post-compact `Entry::Message`. Loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail. The `Compact` line is metadata for `--list` (so listings can show "compacted N -> 1") and for future "view full pre-compact transcript" tooling. `Entry::Unknown` catch-all means older binaries skip it gracefully.
+8. **`Entry::Compact` JSONL boundary.** Carries `summary`, `pre_message_count`, optional `instructions`, and `timestamp`. Position: written immediately before the synthetic post-compact `Entry::Message`. Loader treats the compact entry as a chain reset, keeps `CompactInfo` for resume display, and only accepts messages that belong to the new tail.
 
 9. **Same session id, do not roll.** All three reference CLIs converged on this. `/clear` rolls (intent reset), while `/compact` preserves (intent retained, context compressed). The JSONL file, session id, project, and title all carry through unchanged. The chain reset is purely an in-memory or replay concern.
 
@@ -58,7 +58,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `argument_hint = "[instructions]"`. `classify` is always `Mutating`. `echoes_input` returns true. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` returns true while the request is in flight; the final compact event repaints chat to the boundary block. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
 
 - **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so the agent loop's `apply_compact` doesn't repeat the trim.
 
@@ -70,7 +70,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 - **`apply_compact` (agent loop)**: Drive `compact_session`, surface failure as `AgentEvent::Error`, on success synthesize the continuation, call `session.compact(summary, instructions, synthetic_message)`, swap in-memory `Vec<Message>` with the synthetic continuation, emit `SessionCompacted`, and surface session-write failure via the existing sink helper.
 
-- **`Entry::Compact`**: New variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case). Rejected gracefully via `Entry::Unknown` for older binaries.
+- **`Entry::Compact`**: Variant on the externally-tagged `Entry` enum. Fields: `summary: String`, `pre_message_count: u32`, `instructions: Option<String>`, `timestamp: OffsetDateTime`. Tagged `"type": "compact"` (lowercase, snake_case).
 
 - **`SessionCmd::Compact`**: Actor command carrying the new state. Writes `Entry::Compact` and the synthetic post-compact `Entry::Message` in one batched flush, resets `last_message_uuid` to the synthetic message id, resets `message_count` to `1`, and forces a batch flush before later queued commands run. Acks via `oneshot` like the rest of `SessionCmd`.
 

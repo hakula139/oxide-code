@@ -464,8 +464,10 @@ fn spawn_actor(state: SessionState) -> SessionHandle {
 mod tests {
     use super::super::store::{test_session_file, test_store};
     use super::*;
-    use crate::file_tracker::FileTracker;
-    use crate::file_tracker::testing::record_tracked_file;
+    use crate::file_tracker::{
+        FileTracker, GateError, GatePurpose,
+        testing::{record_tracked_file, seed_full_read},
+    };
     use crate::message::{ContentBlock, Role};
 
     // ── SharedState ──
@@ -1194,7 +1196,7 @@ mod tests {
         let tracker = FileTracker::default();
         let seed = dir.path().join("seed.txt");
         std::fs::write(&seed, b"hello").unwrap();
-        crate::file_tracker::testing::seed_full_read(&tracker, &seed);
+        seed_full_read(&tracker, &seed);
         assert!(!tracker.snapshot_all().is_empty(), "tracker seeded");
 
         let mut session = start(&store, "test-model");
@@ -1273,7 +1275,7 @@ mod tests {
         // Seed a tracker snapshot so we can pin that load failure preserves it.
         let seed = dir.path().join("seed.txt");
         std::fs::write(&seed, b"hello").unwrap();
-        crate::file_tracker::testing::seed_full_read(&tracker, &seed);
+        seed_full_read(&tracker, &seed);
         let snapshot_count_before = tracker.snapshot_all().len();
 
         let mut session = start(&store, "test-model");
@@ -1327,7 +1329,7 @@ mod tests {
         let target_seed = dir.path().join("target.txt");
         std::fs::write(&target_seed, b"target body").unwrap();
         let target_tracker = FileTracker::default();
-        crate::file_tracker::testing::seed_full_read(&target_tracker, &target_seed);
+        seed_full_read(&target_tracker, &target_seed);
         let target_snapshots = target_tracker.snapshot_all();
         target.finish(target_snapshots).await;
         drop(target);
@@ -1335,7 +1337,7 @@ mod tests {
         // Live session with a distinct snapshot already in the tracker.
         let live_seed = dir.path().join("live.txt");
         std::fs::write(&live_seed, b"live body").unwrap();
-        crate::file_tracker::testing::seed_full_read(&tracker, &live_seed);
+        seed_full_read(&tracker, &live_seed);
         let mut session = start(&store, "test-model");
         let original_id = session.session_id().to_owned();
         session.record_message(Message::user("live")).await;
@@ -1576,14 +1578,8 @@ mod tests {
         let resumed = resume(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
+        let result = resumed_tracker.verify_current_content(&path_a, b"alpha", GatePurpose::Edit);
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]
@@ -1600,25 +1596,23 @@ mod tests {
         handle.finish(tracker.snapshot_all()).await;
         drop(handle);
 
-        // Bump mtime / size before resume so the snapshot stat mismatches and the entry drops.
+        // Change content before resume so the snapshot drops.
         std::fs::write(&path_a, b"externally edited bytes").unwrap();
 
         let resumed_tracker = FileTracker::default();
         let resumed = resume(&store, &session_id).unwrap();
         resumed_tracker.restore_verified(resumed.file_snapshots);
 
-        let meta = std::fs::metadata(&path_a).unwrap();
-        let check = resumed_tracker.check_stat(
+        let result = resumed_tracker.verify_current_content(
             &path_a,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
+            b"externally edited bytes",
+            GatePurpose::Edit,
         );
         assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
+            result,
+            Err(GateError::NeverRead {
                 path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
+                purpose: GatePurpose::Edit,
             }),
             "drifted file must hit the must-read-first gate",
         );
@@ -1645,17 +1639,12 @@ mod tests {
         // restore_verified must drop silently; the tracker should
         // end up empty for this path rather than panic.
         resumed_tracker.restore_verified(resumed.file_snapshots);
-        let check = resumed_tracker.check_stat(
-            &path_a,
-            std::time::UNIX_EPOCH,
-            0,
-            crate::file_tracker::GatePurpose::Edit,
-        );
+        let result = resumed_tracker.verify_current_content(&path_a, b"", GatePurpose::Edit);
         assert_eq!(
-            check,
-            Err(crate::file_tracker::GateError::NeverRead {
+            result,
+            Err(GateError::NeverRead {
                 path: path_a.clone(),
-                purpose: crate::file_tracker::GatePurpose::Edit,
+                purpose: GatePurpose::Edit,
             }),
         );
     }

@@ -1,6 +1,6 @@
 # Context Compression / `/compact` (Reference)
 
-Research on how `/compact` (context compression via summarization) is implemented across Claude Code, OpenAI Codex, and opencode. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode) (v1.3.15).
+Research on how `/compact` (context compression via summarization) is implemented across Claude Code, OpenAI Codex, and opencode. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 Companion to [commands.md](commands.md). Storage-layer notes (JSONL entry shape, resume semantics) live in [session/persistence.md](../session/persistence.md). This file focuses on the _summarization_ surface: trigger, prompt, replacement strategy, auto-fire policy.
 

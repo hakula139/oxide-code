@@ -1,5 +1,6 @@
 ---
 source: crates/oxide-code/src/tui/components/welcome.rs
+assertion_line: 432
 expression: "render(80, 14, &snap)"
 ---
 "                                                                                "
@@ -11,7 +12,7 @@ expression: "render(80, 14, &snap)"
 "                  Try one of:                                                   "
 "                                                                                "
 "                    /help     list commands                                     "
-"                    /diff     show staged changes                               "
+"                    /diff     show git changes                                  "
 "                    /model    switch model                                      "
 "                                                                                "
 "                  Tip — ox --continue resumes your last session                 "

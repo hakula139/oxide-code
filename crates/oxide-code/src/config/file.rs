@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -111,15 +111,15 @@ fn merge_section<T>(base: Option<T>, other: Option<T>, merge: fn(T, T) -> T) -> 
 
 // ── Loading ──
 
-/// Loads + merges user and project TOML; project wins. Errors propagate so typos don't surface as
-/// downstream "no credentials" errors.
+/// Loads + merges user and project TOML. Project config wins for non-secret fields; credential
+/// and endpoint settings are user/env-only so a checkout cannot redirect secrets via `ox.toml`.
 pub(super) fn load() -> Result<FileConfig> {
     let user = user_config_path()
         .map(|p| load_file(&p))
         .transpose()?
         .flatten();
     let project = find_project_config()
-        .map(|p| load_file(&p))
+        .map(|p| load_project_file(&p))
         .transpose()?
         .flatten();
 
@@ -128,6 +128,37 @@ pub(super) fn load() -> Result<FileConfig> {
         Some(p) => base.merge(p),
         None => base,
     })
+}
+
+fn load_project_file(path: &Path) -> Result<Option<FileConfig>> {
+    let config = load_file(path)?;
+    if let Some(config) = &config {
+        reject_project_secrets(config, path)?;
+    }
+    Ok(config)
+}
+
+fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
+    let Some(client) = &config.client else {
+        return Ok(());
+    };
+
+    let mut blocked = Vec::new();
+    if client.api_key.is_some() {
+        blocked.push("client.api_key");
+    }
+    if client.base_url.is_some() {
+        blocked.push("client.base_url");
+    }
+    if blocked.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} cannot set {}; move credential and endpoint settings to ~/.config/ox/config.toml or environment variables",
+        path.display(),
+        blocked.join(", "),
+    )
 }
 
 /// `Ok(None)` when missing; `Err` when present but unreadable or malformed.
@@ -507,6 +538,71 @@ mod tests {
         let err = load_file(&path).expect_err("misplaced field should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
+    }
+
+    // ── load_project_file ──
+
+    #[test]
+    fn load_project_file_rejects_api_key_and_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                api_key = "sk-project"
+                base_url = "https://capture.invalid"
+            "#},
+        )
+        .unwrap();
+
+        let err = load_project_file(&path).expect_err("project secrets must be blocked");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("client.api_key"), "{msg}");
+        assert!(msg.contains("client.base_url"), "{msg}");
+        assert!(msg.contains("~/.config/ox/config.toml"), "{msg}");
+    }
+
+    #[test]
+    fn load_project_file_allows_non_secret_client_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+                max_tokens = 8192
+            "#},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project settings should parse")
+            .expect("file exists");
+        let client = config.client.expect("client section present");
+        assert_eq!(client.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(client.max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn load_project_file_allows_tui_only_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {"
+                [tui]
+                show_welcome = false
+            "},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project UI settings should parse")
+            .expect("file exists");
+        assert!(config.client.is_none());
+        assert_eq!(config.tui.unwrap().show_welcome, Some(false));
     }
 
     // ── find_project_config_from ──

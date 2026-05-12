@@ -22,12 +22,8 @@ impl SlashCommand for EffortCmd {
         "Adjust reasoning effort"
     }
 
-    fn classify(&self, args: &str) -> SlashKind {
-        if args.trim().is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Mutating
-        }
+    fn classify(&self, _args: &str) -> SlashKind {
+        SlashKind::Mutating
     }
 
     fn echoes_input(&self, args: &str) -> bool {
@@ -103,9 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_on_args() {
-        assert_eq!(EffortCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(EffortCmd.classify("   "), SlashKind::ReadOnly);
+    fn classify_is_mutating_for_modal_and_direct_forms() {
+        assert_eq!(EffortCmd.classify(""), SlashKind::Mutating);
+        assert_eq!(EffortCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(EffortCmd.classify("xhigh"), SlashKind::Mutating);
     }
 

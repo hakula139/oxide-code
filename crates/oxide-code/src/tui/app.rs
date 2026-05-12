@@ -208,14 +208,21 @@ impl App {
     fn apply_modal_action(&mut self, action: ModalAction) {
         match action {
             // Cancel: revert any in-flight theme preview to the snapshot taken on open.
-            ModalAction::None => {
-                if let Some(theme) = self.preview_theme_snapshot.take() {
-                    self.apply_theme(&theme);
-                }
-            }
+            ModalAction::None => self.cancel_theme_preview(),
             ModalAction::User(user_action) => self.dispatch_user_action(user_action),
             ModalAction::SystemMessage(msg) => self.chat.push_system_message(msg),
         }
+    }
+
+    fn cancel_theme_preview(&mut self) {
+        if let Some(theme) = self.preview_theme_snapshot.take() {
+            self.apply_theme(&theme);
+        }
+    }
+
+    fn clear_modals(&mut self) {
+        self.cancel_theme_preview();
+        self.modals.clear();
     }
 
     /// Repaints every theme-styled component for a mid-session theme swap.
@@ -530,7 +537,7 @@ impl App {
                 plural = if dropped == 1 { "" } else { "s" },
             ));
         }
-        self.modals.clear();
+        self.clear_modals();
         self.finalize_idle();
     }
 
@@ -546,7 +553,7 @@ impl App {
         self.pending_calls.clear();
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
-        self.modals.clear();
+        self.clear_modals();
         self.finalize_idle();
     }
 
@@ -1633,19 +1640,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_bare_slash_during_busy_opens_modal_picker() {
-        // Bare `/model` is ReadOnly so it dispatches mid-turn into the picker modal. (`/effort` is
-        // always Mutating after the typed-arg-only refactor; its bare-form busy path is covered by
-        // `dispatch_arg_bearing_slash_during_busy_refuses_locally`.)
-        let (mut app, _rx, _agent_tx) = test_app(None);
-        app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+    async fn dispatch_config_modal_slash_during_busy_refuses_locally() {
+        for (cmd, gate_phrase) in [
+            ("/model", "/model runs only when idle"),
+            ("/effort", "/effort runs only when idle"),
+        ] {
+            let (mut app, mut rx, _agent_tx) = test_app(None);
+            app.dispatch_user_action(UserAction::SubmitPrompt("active".to_owned()));
+            rx.recv().await.expect("active submit forwarded");
 
-        app.dispatch_user_action(UserAction::SubmitPrompt("/model".to_owned()));
+            app.dispatch_user_action(UserAction::SubmitPrompt(cmd.to_owned()));
 
-        assert!(
-            app.modals.is_active(),
-            "bare /model must push a modal mid-turn",
-        );
+            assert!(
+                !app.modals.is_active(),
+                "{cmd}: modal must not open mid-turn"
+            );
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{cmd}: action must not reach user_tx mid-turn",
+            );
+            let body = app.chat.last_system_text().expect("refusal system message");
+            assert!(body.contains(gate_phrase), "{cmd}: refusal: {body}");
+        }
     }
 
     #[tokio::test]
@@ -1699,6 +1715,22 @@ mod tests {
             "snapshot consumed on cancel",
         );
         assert_eq!(app.theme.text, original.text, "theme rolled back to mocha");
+    }
+
+    #[test]
+    fn clearing_modal_stack_rolls_back_theme_preview() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        let original = app.theme.clone();
+        app.push_modal(Box::new(ScriptedModal::new(ModalAction::None)));
+        app.dispatch_user_action(UserAction::PreviewTheme {
+            name: "latte".to_owned(),
+        });
+
+        app.clear_modals();
+
+        assert!(!app.modals.is_active());
+        assert!(app.preview_theme_snapshot.is_none());
+        assert_eq!(app.theme.text, original.text);
     }
 
     #[test]
@@ -2169,7 +2201,7 @@ mod tests {
             id: "resumed".to_owned(),
             title: None,
             messages: vec![
-                Message::user("This conversation has been compacted.\n\ninternal summary"),
+                crate::agent::compaction::synthesize_post_compact_message("internal summary"),
                 Message::assistant("post-compact reply"),
             ],
             compact: Some(CompactInfo {

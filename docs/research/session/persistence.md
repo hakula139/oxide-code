@@ -1,6 +1,6 @@
 # Session Persistence (Reference)
 
-Research on session storage patterns. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87) and [OpenAI Codex](https://github.com/openai/codex).
+Research on session storage patterns. Based on [Claude Code](https://github.com/hakula139/claude-code) and [OpenAI Codex](https://github.com/openai/codex).
 
 ## Claude Code (TypeScript)
 

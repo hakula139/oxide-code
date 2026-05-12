@@ -1,6 +1,6 @@
 # Slash Commands (Reference)
 
-Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on client-side command surfaces. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 For modal-specific architecture (how `local-jsx` / `BottomPaneView` / `dialog.show()` actually work) see [modals.md](modals.md).
 
@@ -33,9 +33,9 @@ Single strum-derived `enum SlashCommand` (~50 variants) with per-variant methods
 
 ## opencode (TypeScript)
 
-Slim `CommandOption[]` from a React hook (~12 built-ins).
+Slash entries are derived from the command palette and keymap rather than a fixed slash-only table.
 
-- **Registry**: `id`, `title`, `description`, `category`, `keybind`, `slash`, `onSelect`, `disabled`.
+- **Registry**: `CommandPaletteProvider.slashes()` walks reachable palette entries, route commands, and server commands. Slash metadata comes from `slashName` / `slashAliases`; the same action can also have keybindings and palette-only metadata.
 - **Parser**: Regex `^\/(\S*)$` (line start only, normal mode). `@` for file mentions, `!` for shell mode.
 - **Dispatch**: Built-in closures + server-side `client.session.command()` for custom.
 - **Output**: `showToast()` for notifications, `dialog.show()` for pickers.
@@ -48,5 +48,5 @@ Slim `CommandOption[]` from a React hook (~12 built-ins).
 | ----------- | --------------------------- | -------- | -------------- | --------------------- | ----------------------------------- | ---------------------------- |
 | Claude Code | declarative `Command[]`     | ~100     | submit handler | three modes           | synthetic messages w/ display modes | yes (markdown + YAML)        |
 | Codex       | strum enum + impl methods   | ~55      | input layer    | one big `match`       | synthetic `history_cell`            | no                           |
-| opencode    | `CommandOption[]` from hook | ~12      | input layer    | closures + server     | toast / dialog / synthetic message  | yes (server-published)       |
-| oxide-code  | trait + `&[&dyn]` slice     | 11       | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | not yet (namespace reserved) |
+| opencode    | palette-derived slash rows  | dynamic  | input layer    | closures + server     | toast / dialog / synthetic message  | yes (server-published)       |
+| oxide-code  | trait + `&[&dyn]` slice     | 13       | submit handler | `SlashOutcome` return | `SystemMessageBlock` / `ErrorBlock` | not yet (namespace reserved) |

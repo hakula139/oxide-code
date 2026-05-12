@@ -1,6 +1,6 @@
 # File Change Tracking (Reference)
 
-Research on stale-file edit prevention across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on stale-file edit prevention across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 ## Claude Code (TypeScript)
 
@@ -31,4 +31,4 @@ Per-file `Semaphore` lock (`edit.ts:36-46`). No content / timestamp cache. Edit 
 | Claude Code | LRU per session    | strict           | mtime + content fallback | rehydrate from history | LRUCache (single-thread JS) |
 | Codex       | none               | none             | apply-time patch context | implicit (rollout)     | `Mutex<SessionState>`       |
 | opencode    | per-file semaphore | none             | string-match failure     | n/a                    | per-file `Semaphore`        |
-| oxide-code  | per-session hash   | strict           | mtime + xxh64 fallback   | persist + verify       | `Arc<Mutex<HashMap>>`       |
+| oxide-code  | per-session hash   | strict           | xxh64 before mutation    | persist + verify       | `Arc<Mutex<HashMap>>`       |

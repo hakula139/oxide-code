@@ -243,7 +243,7 @@ mod tests {
         let info = crate::slash::test_session_info();
         let mut ctx = ctx_with_title(&mut chat, &info, None);
 
-        let _ = RenameCmd.execute("", &mut ctx).unwrap();
+        _ = RenameCmd.execute("", &mut ctx).unwrap();
         let mut modal = ctx.take_modal().expect("modal opens");
         let result = modal.handle_key(&KeyEvent::from(KeyCode::Enter));
         assert!(

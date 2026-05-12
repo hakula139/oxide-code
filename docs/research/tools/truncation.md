@@ -1,6 +1,6 @@
 # Tool Output Truncation (Reference)
 
-Research on tool output bounding across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on tool output bounding across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 ## Claude Code (TypeScript)
 
@@ -37,4 +37,4 @@ When either limit trips: take head or tail slice, write full output to temp file
 | Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)    | yes               |
 | Codex       | per-tool     | varies       | none       | varies (or none)  | no                 | n/a               |
 | opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint)  | no                |
-| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail + spill | no                 | yes               |
+| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail         | no                 | yes               |

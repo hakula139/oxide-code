@@ -1,6 +1,6 @@
 # Slash-Command Modals (Reference)
 
-Research on the modal / picker / dialog primitives that turn slash commands into interactive surfaces (live model picker, theme switcher, permission prompt). Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on the modal / picker / dialog primitives that turn slash commands into interactive surfaces (live model picker, theme switcher, permission prompt). Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 Companion to [commands.md](commands.md), which covers the command-surface shape. This file focuses on the interactive UI.
 

@@ -23,7 +23,7 @@ pub(crate) const DEFAULT_THEME: &str = "mocha";
 // ── Auth ──
 
 /// Resolved credential. First source wins, in order: `ANTHROPIC_API_KEY` env, `client.api_key`
-/// in the config file, then OAuth (macOS Keychain → `~/.claude/.credentials.json`).
+/// in the user config file, then OAuth (macOS Keychain → `~/.claude/.credentials.json`).
 #[derive(Debug, Clone)]
 pub(crate) enum Auth {
     ApiKey(String),
@@ -222,7 +222,7 @@ impl Config {
         } else {
             let token = oauth::load_token().await.context(
                 "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
-                 ox.toml, or sign in with Claude Code (checks macOS Keychain and \
+                 ~/.config/ox/config.toml, or sign in with Claude Code (checks macOS Keychain and \
                  ~/.claude/.credentials.json)",
             )?;
             Auth::OAuth(token)
@@ -235,6 +235,7 @@ impl Config {
         let base_url = env::string("ANTHROPIC_BASE_URL")
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        validate_base_url(&base_url)?;
 
         let caps = crate::model::capabilities_for(&model);
 
@@ -244,10 +245,14 @@ impl Config {
         };
         let effort = caps.resolve_effort(effort_pick);
 
-        let max_tokens = env::string("ANTHROPIC_MAX_TOKENS")
-            .and_then(|v| v.parse().ok())
-            .or(client.max_tokens)
-            .unwrap_or_else(|| default_max_tokens(effort));
+        let max_tokens = match env::string("ANTHROPIC_MAX_TOKENS") {
+            Some(raw) => raw
+                .parse::<u32>()
+                .with_context(|| format!("ANTHROPIC_MAX_TOKENS={raw:?}"))?,
+            None => client
+                .max_tokens
+                .unwrap_or_else(|| default_max_tokens(effort)),
+        };
 
         let show_thinking = env::bool("OX_SHOW_THINKING")
             .or(tui.show_thinking)
@@ -326,6 +331,23 @@ fn default_max_tokens(effort: Option<Effort>) -> u32 {
         Some(Effort::High) => 32_000,
         _ => 16_000,
     }
+}
+
+fn validate_base_url(raw: &str) -> Result<()> {
+    let url = reqwest::Url::parse(raw).with_context(|| format!("invalid base URL {raw:?}"))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_url(&url) => Ok(()),
+        "http" => bail!("base URL must use https unless it points at localhost"),
+        scheme => bail!("base URL must use http or https, got {scheme:?}"),
+    }
+}
+
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
 }
 
 #[cfg(test)]
@@ -650,7 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_invalid_max_tokens_env_falls_through_to_file() {
+    async fn load_invalid_max_tokens_env_errors() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
@@ -660,13 +682,12 @@ mod tests {
             "},
         );
         let vars = env_vars(vec![xdg(&dir), env("ANTHROPIC_MAX_TOKENS", "not-a-number")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
+        let err = temp_env::async_with_vars(vars, Config::load())
             .await
-            .unwrap();
-        assert_eq!(
-            config.max_tokens, 128,
-            "unparsable env must fall through to file value",
-        );
+            .expect_err("invalid max-token env should fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ANTHROPIC_MAX_TOKENS"), "{msg}");
+        assert!(msg.contains("not-a-number"), "{msg}");
     }
 
     #[tokio::test]
@@ -818,6 +839,51 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
         assert!(msg.contains("insane"), "{msg}");
+    }
+
+    // ── Config::load / base URL validation ──
+
+    #[tokio::test]
+    async fn load_rejects_plain_http_base_url_unless_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-loopback http must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("https"), "{msg}");
+        assert!(msg.contains("localhost"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_non_http_base_url_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-http schemes must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("http or https"), "{msg}");
+        assert!(msg.contains("ftp"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8080");
     }
 
     // ── Config::load / prompt_cache_ttl ──

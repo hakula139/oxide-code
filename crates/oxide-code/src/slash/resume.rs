@@ -19,7 +19,7 @@ use crate::agent::event::UserAction;
 use crate::session::display::{display_title, format_metadata_line};
 use crate::session::entry::SessionInfo;
 use crate::session::resolver::resolve_prefix_to_info;
-use crate::session::store::SessionStore;
+use crate::session::store::{DEFAULT_SESSION_LIST_LIMIT, SessionStore};
 use crate::tui::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::tui::modal::{Modal, ModalAction, ModalKey};
 use crate::tui::theme::Theme;
@@ -153,7 +153,10 @@ impl ResumePicker {
     }
 
     fn reload(&mut self) {
-        let page = match self.store.list_paged(None, self.all) {
+        let page = match self
+            .store
+            .list_paged(Some(DEFAULT_SESSION_LIST_LIMIT), self.all)
+        {
             Ok(p) => {
                 self.load_error = None;
                 p
@@ -696,6 +699,26 @@ mod tests {
     }
 
     // ── ResumePicker::reload ──
+
+    #[test]
+    fn reload_uses_shared_default_session_list_cap() {
+        let (_dir, store) = isolated_store();
+        for i in 0..=DEFAULT_SESSION_LIST_LIMIT {
+            seed_session(
+                &store,
+                &stamped_id(u8::try_from(i + 1).unwrap()),
+                Some("session"),
+                1,
+                datetime!(2026-04-18 09:00:00 UTC)
+                    + time::Duration::seconds(i64::try_from(i).unwrap()),
+            );
+        }
+
+        let picker = ResumePicker::new(store, "live-session-id".to_owned());
+
+        assert_eq!(picker.total, DEFAULT_SESSION_LIST_LIMIT);
+        assert_eq!(picker.list.visible_len(), DEFAULT_SESSION_LIST_LIMIT);
+    }
 
     #[test]
     fn reload_sets_load_error_and_clears_rows_when_list_paged_fails() {

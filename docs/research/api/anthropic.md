@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87) and testing against the production API.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API.
 
 ## Authentication Methods
 
@@ -86,7 +86,7 @@ Key rules:
 - **Haiku one-shots** (title generation, compaction classifier): Strip agentic markers entirely. `claude-code-20250219` is re-added only when the call is agentic.
 - **`prompt-caching-scope` ships unconditionally.** The header alone is a server-side no-op without a matching `cache_control.scope` field, but 3P gateways fingerprint its absence. oxide-code therefore emits the beta on every agentic request and gates only the body-side `cache_control.scope: "global"` on `is_first_party_base_url()` (see [Prompt Caching Scope](#prompt-caching-scope) for why).
 - **`context-1m` is user opt-in via `[1m]`.** Appending `[1m]` to the model string (e.g., `claude-opus-4-7[1m]`) adds the 1M beta and strips the tag before the request hits the wire. Family-based auto-enable would 400 on subscriptions or gateways that do not carry 1M access. Convention matches Claude Code.
-- **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. The per-level ceiling (`xhigh` on 4.7, `max` on Opus 4.6 / 4.7) is separately encoded in `Capabilities::effort_xhigh` / `effort_max`.
+- **`effort` is Opus 4.6+ and Sonnet 4.6+ only.** Opus 4.5 and older, Sonnet 4.5 and older, and all Haiku variants reject it per upstream's `modelSupportsEffort`. Per-model support is encoded in `Capabilities::supported_efforts`; `accepts_effort`, `clamp_effort`, and `default_effort` keep user picks and defaults inside that set.
 - **`effort` and `context-management` betas need a body field.** Sending the header alone is a silent no-op: the request runs at the server default. See [Agentic Request Body Fields](#agentic-request-body-fields) for the matching `output_config.effort` and `context_management.edits` shapes. oxide-code pairs each capability with both its beta and its body field so the two stay in sync.
 - **`structured-outputs` is per-version and caller-opt-in.** The upstream allowlist is Opus 4.1 / 4.5 / 4.6+, Sonnet 4.5 / 4.6+, Haiku 4.5. The beta ships only when a caller supplies an `output_config.format` (today: the AI-title generator). The body field and header are paired on the same capability flag. A schema passed to an unsupported model silently falls back to free-form text, mirroring the `[1m]` × `context_1m` silent-strip pattern.
 - **Unknown model aliases** fall through substring matching on the family stem. `claude-opus-5-x` would miss every row and ship with only the identity / caching betas. Bump the `MODELS` table when a new family lands.
@@ -237,7 +237,7 @@ GA as of Opus 4.6. Controls the intelligence-vs-latency tier of agentic turns vi
 ```
 
 - **The `effort-2025-11-24` beta header is necessary but not sufficient.** oxide-code used to send the header without the body field. The header became a no-op and the model ran at an undefined default.
-- **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7-only. The `Capabilities::effort_max` / `effort_xhigh` flags encode this. `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
+- **Per-model ceiling.** `max` is Opus-only, and Sonnet 4.6 400s on it. `xhigh` is Opus 4.7-only. `Capabilities::supported_efforts` encodes the allowed set, and `Capabilities::clamp_effort` clamps a user pick down to the highest supported level at or below it.
 - **Per-model default.** Claude Code 2.1.119 sends `xhigh` on Opus 4.7, `high` on Opus 4.6 and Sonnet 4.6, omits the field entirely on earlier models. oxide-code mirrors this via `Capabilities::default_effort`.
 - **`max_tokens` should scale with effort.** Claude Code uses 64 K on Opus 4.7 at `xhigh`, 32 K on Sonnet 4.6 at `high`. oxide-code's `default_max_tokens(effort)` matches the upper tiers and uses 16 K otherwise when the user hasn't set `ANTHROPIC_MAX_TOKENS` explicitly.
 
@@ -317,7 +317,7 @@ Claude Code uses the Anthropic TypeScript SDK with `authToken` (not `apiKey`) fo
 - Includes `x-stainless-*` headers (SDK telemetry).
 - Retries on `x-should-retry: true` responses with exponential backoff.
 
-For raw HTTP (as in oxide-code), replicate the headers manually. The `?beta=true` query parameter and `x-stainless-*` headers are not required.
+For raw HTTP (as in oxide-code), replicate the headers manually. oxide-code mirrors `?beta=true` and Stainless-shaped headers where gateway compatibility matters.
 
 ## Token Refresh
 

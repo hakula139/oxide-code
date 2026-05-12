@@ -12,7 +12,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.            |
 | `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
 | `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.     |
-| `/diff`                                     | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
+| `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.          |
 | `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
 | `/help`                                     | Open a read-only modal listing available commands.                                   |
 | `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |
@@ -28,7 +28,7 @@ Double the leading slash. Typing `//etc` sends the literal `/etc`.
 
 ## Mid-Turn Behavior
 
-State-mutating commands (`/clear`, `/compact`, `/delete`, `/init`, and the typed-arg forms of `/effort`, `/model`, `/rename`, `/resume`, `/theme`) wait for the current turn to finish. Read-only commands and the bare modal-opening forms run anytime.
+State-mutating commands are refused while a turn is in flight; retry after the turn finishes. That includes `/clear`, `/compact`, `/delete`, `/init`, `/rename`, `/resume`, typed `/theme <name>`, and both bare and typed forms of `/effort` and `/model`. Read-only commands (`/config`, `/diff`, `/help`, `/status`) and the bare `/theme` picker run immediately.
 
 ## Model and Effort
 
@@ -44,7 +44,7 @@ Bare `/model` and `/effort` open pickers. Both apply on Enter and cancel on Esc.
 
 The summary lands in the JSONL as a `compact` boundary entry plus a synthetic continuation message. Resuming via `ox -c` shows only the post-compact tail. The pre-compact transcript stays on disk for archival but is not replayed in chat. The file-change tracker resets on compact, so any `Edit` after `/compact` requires a fresh `Read`. Queued prompts survive the compaction.
 
-`/compact` refuses on sessions with fewer than 4 messages, when the model returns an empty summary, or while a turn is in flight (it waits for the current reply to finish first).
+`/compact` refuses on sessions with fewer than 4 messages, when the model returns an empty summary, or while a turn is in flight.
 
 ## Sessions
 
@@ -52,7 +52,7 @@ The summary lands in the JSONL as a `compact` boundary entry plus a synthetic co
 
 `/resume` opens a searchable session picker. Type to filter by id, title, or project, press Tab to widen the scope from current-project to all projects, and press Enter to resume the highlighted session. `/resume <id-prefix>` jumps directly, and ambiguous prefixes list candidates. Switching sessions preserves the running TUI: chat repopulates and the next prompt continues that thread.
 
-Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. Only finalized sessions can be deleted.
+Inside the picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. The live session is excluded; any saved non-live session matched by id prefix can be deleted.
 
 ## Theme
 

@@ -104,7 +104,8 @@ fn glob_title(output: Option<&str>) -> String {
     match output {
         Some("No files found") | None => "No files found".into(),
         Some(text) => {
-            let count = text.lines().filter(|l| !l.starts_with('(')).count();
+            let body = glob_output_body(text).unwrap_or(text.trim_end());
+            let count = body.lines().filter(|l| !l.trim().is_empty()).count();
             let word = if count == 1 { "file" } else { "files" };
             format!("Found {count} {word}")
         }
@@ -196,14 +197,8 @@ fn build_files_view(
         });
     }
 
-    let (body, footer_total) = match trimmed.rsplit_once("\n\n") {
-        Some((body, footer)) if is_truncation_footer(footer) => {
-            (body, parse_total_from_footer(footer))
-        }
-        // Unknown trailing prose: fall through rather than absorb it as a path.
-        Some(_) => return None,
-        None => (trimmed, None),
-    };
+    let body = glob_output_body(trimmed)?;
+    let footer_total = glob_footer_total(trimmed);
 
     let files: Vec<String> = body.lines().map(str::to_owned).collect();
     if files.is_empty() {
@@ -225,6 +220,20 @@ fn build_files_view(
 
 fn is_truncation_footer(footer: &str) -> bool {
     footer.starts_with("(Showing ")
+}
+
+fn glob_output_body(content: &str) -> Option<&str> {
+    let trimmed = content.trim_end();
+    match trimmed.rsplit_once("\n\n") {
+        Some((body, footer)) if is_truncation_footer(footer) => Some(body),
+        Some(_) => None,
+        None => Some(trimmed),
+    }
+}
+
+fn glob_footer_total(content: &str) -> Option<usize> {
+    let (_, footer) = content.trim_end().rsplit_once("\n\n")?;
+    parse_total_from_footer(footer)
 }
 
 fn parse_total_from_footer(footer: &str) -> Option<usize> {
@@ -285,6 +294,20 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(output.metadata.truncated_total, Some(total));
+    }
+
+    // ── glob_title ──
+
+    #[test]
+    fn glob_title_counts_paths_without_truncation_footer_separator() {
+        let body = indoc! {"
+            a.txt
+            b.txt
+
+            (Showing 2 of 3 matches. Use a more specific pattern.)"
+        };
+
+        assert_eq!(glob_title(Some(body)), "Found 2 files");
     }
 
     // ── glob_files ──

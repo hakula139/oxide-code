@@ -14,7 +14,7 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebind `Client::set_session_id`, emit `AgentEvent::SessionResumed { id, title, messages, tool_metadata }`, then surface the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
-`SessionStore::list_paged` is the new entry point: stat every candidate file, sort by mtime desc, truncate to the cap, then `read_session_info` only the survivors. `ListPage` carries the surviving sessions and the pre-truncation total. `list()` / `list_all()` survive as thin wrappers. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit to widen)` when the cap clipped output.
+`SessionStore::list_paged` is the new entry point: stat every candidate file, sort by mtime desc, truncate to the cap, then `read_session_info` only the survivors. `ListPage` carries the surviving sessions and the pre-truncation total. `list()` / `list_all()` survive as thin wrappers. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit N or --limit 0 to disable the cap)` when the cap clipped output.
 
 ## Design Decisions
 
@@ -42,7 +42,7 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 
 12. **30-row default page, no background load-more in v1.** Codex's near-bottom prefetch is genuinely nice but adds a non-trivial state machine for marginal gain at typical session counts. More than 30 sessions in a project is search territory anyway.
 
-13. **Listing API consolidates `list()` / `list_all()` into `list_paged(limit, all)`.** Existing wrappers stay for back-compat. The win is cap-before-tail-scan ordering: for 1000 sessions, only the first N files get parsed.
+13. **Listing API centralizes pagination in `list_paged(limit, all)`.** The win is cap-before-tail-scan ordering: for 1000 sessions, only the first N files get parsed.
 
 14. **`--list --limit 0` opts back into unbounded listing.** Scripts piping output need the full set, so `0` is the explicit opt-out rather than a magic large default.
 
@@ -72,7 +72,7 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
-- **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The footer line `... and N more (use --limit to widen)` appears only when the cap clipped output.
+- **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The footer line `... and N more (use --limit N or --limit 0 to disable the cap)` appears only when the cap clipped output.
 
 ## Out of Scope / Deferred
 

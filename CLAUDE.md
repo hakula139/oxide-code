@@ -45,7 +45,7 @@ ox                                          # Start an interactive session
 ├── file_tracker.rs                         # Per-session FileTracker: Read-before-Edit gate, mtime+xxh64 staleness check, persist-on-finish + verify-on-resume
 ├── main.rs                                 # CLI entry point, mode dispatch (TUI / REPL / headless), signal handling
 ├── message.rs                              # Conversation message types
-├── model.rs                                # Ground-truth table: marketing name, cutoff, capabilities. `marketing_or_id` unknown-id fallback
+├── model.rs                                # Ground-truth table: display name, cutoff, capabilities, and unknown raw-id fallback
 ├── prompt.rs                               # System prompt builder (section assembly)
 ├── prompt/
 │   ├── environment.rs                      # Runtime environment detection (platform, git, date, knowledge cutoff)
@@ -77,7 +77,7 @@ ox                                          # Start an interactive session
 │   ├── confirm.rs                          # ConfirmDeleteSessionModal: destructive-action gate. Runs the unlink synchronously on Y, sticky inline error on failure
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
 │   ├── delete.rs                           # /delete <id-prefix>: typed-arg form, resolves prefix, pushes ConfirmDeleteSessionModal. Bare /delete rejected
-│   ├── diff.rs                             # /diff: `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
+│   ├── diff.rs                             # /diff: uncommitted git changes + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort: bare opens the slider. `/effort <level>` resolves the typed-arg shortcut
 │   ├── effort_slider.rs                    # EffortSlider: Speed ↔ Intelligence horizontal slider, opened by bare /effort
 │   ├── help.rs                             # /help: opens a KvOverview modal listing every registered command
@@ -129,6 +129,7 @@ ox                                          # Start an interactive session
 │   │   ├── input/
 │   │   │   ├── popup.rs                    # Slash-command autocomplete overlay: dim non-selected, bold selected, alias parens
 │   │   │   └── snapshots/                  # `cargo insta` baselines for popup render tests
+│   │   ├── snapshots/                      # `cargo insta` baselines for chat, input, status, and welcome render tests
 │   │   ├── status.rs                       # Status bar (model, spinner, status, working directory)
 │   │   └── welcome.rs                      # Empty-state welcome screen: identity ribbon + body column, themed via `accent`/`text`/`dim`
 │   ├── cursor.rs                           # `place_clamped`: shared right-edge-clamp cursor placement for input surfaces
@@ -144,6 +145,7 @@ ox                                          # Start an interactive session
 │   │   ├── list_picker.rs                  # Generic ListPicker<T: PickerItem>: cursor + render primitive used by concrete pickers
 │   │   └── searchable_list.rs              # Generic SearchableList<T: SearchableItem>: substring filter + scrollable viewport for searchable pickers
 │   ├── pending_calls.rs                    # Tool-call correlation state for streaming and transcript resume
+│   ├── snapshots/                          # `cargo insta` baselines for full App frame render tests
 │   ├── terminal.rs                         # Terminal init / restore, synchronized output, panic hook
 │   ├── theme.rs                            # Theme palette (Slot{fg,bg,modifiers} per role) + style helpers + LazyLock-cached Mocha default
 │   ├── theme/
@@ -166,7 +168,7 @@ ox                                          # Start an interactive session
 
 - [`docs/README.md`](docs/README.md): top-level index of design specs, research notes, user guides, and the roadmap.
 - [`docs/guide/`](docs/guide/): user-facing docs (installation, quickstart, configuration, slash commands, instructions, sessions, theming).
-- [`docs/design/`](docs/design/) and [`docs/research/`](docs/research/): internal architecture decisions and external research, both organized by topic (api, session, slash, tools, tui). Each subdirectory has its own README with per-doc summaries.
+- [`docs/design/`](docs/design/) and [`docs/research/`](docs/research/): internal architecture decisions and external research, indexed by `docs/design/README.md` and `docs/research/README.md`.
 - [`docs/roadmap.md`](docs/roadmap.md): working features, current focus, and explicit non-goals.
 
 ## Coding Conventions
