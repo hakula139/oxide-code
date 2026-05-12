@@ -25,14 +25,14 @@ pub(crate) enum SlashOutcome {
     Forward(UserAction),
 }
 
-/// Drives busy-gating: only `ReadOnly` may dispatch mid-turn; the App defers `Mutating` and
+/// Drives busy-gating: only `ReadOnly` may dispatch mid-turn; the App refuses `Mutating` and
 /// rejects `Unknown` while a stream is in flight.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlashKind {
     /// Pure local read (chat output / modal open). Safe to run during streaming.
     ReadOnly,
     /// Touches session state or forwards a `UserAction` that races the in-flight client.
-    /// Deferred until the agent is idle.
+    /// Refused until the agent is idle.
     Mutating,
     /// Returned only by the free dispatcher when the name doesn't resolve. Trait impls never
     /// produce this variant.

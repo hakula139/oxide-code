@@ -33,12 +33,8 @@ impl SlashCommand for ModelCmd {
         "Switch the model"
     }
 
-    fn classify(&self, args: &str) -> SlashKind {
-        if args.trim().is_empty() {
-            SlashKind::ReadOnly
-        } else {
-            SlashKind::Mutating
-        }
+    fn classify(&self, _args: &str) -> SlashKind {
+        SlashKind::Mutating
     }
 
     fn echoes_input(&self, args: &str) -> bool {
@@ -212,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_on_args() {
-        assert_eq!(ModelCmd.classify(""), SlashKind::ReadOnly);
-        assert_eq!(ModelCmd.classify("   "), SlashKind::ReadOnly);
+    fn classify_is_mutating_for_picker_and_direct_forms() {
+        assert_eq!(ModelCmd.classify(""), SlashKind::Mutating);
+        assert_eq!(ModelCmd.classify("   "), SlashKind::Mutating);
         assert_eq!(ModelCmd.classify("opus"), SlashKind::Mutating);
         assert_eq!(ModelCmd.classify("claude-opus-4-7"), SlashKind::Mutating);
     }
