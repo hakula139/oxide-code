@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use agent::event::{AgentEvent, AgentSink, StdioSink, UserAction, inert_user_action_channel};
-use agent::{TurnAbort, agent_turn};
+use agent::{AutoCompact, TokenUsage, TurnAbort, agent_turn};
 use client::anthropic::Client;
 use config::{Config, Effort};
 use file_tracker::FileTracker;
@@ -342,14 +342,50 @@ async fn agent_loop_task(
     file_tracker: Arc<FileTracker>,
 ) -> Result<()> {
     let mut messages: Vec<Message> = resumed_messages;
+    let mut auto_compaction_failures = 0_u8;
+    let mut last_usage = None;
 
     while let Some(action) = user_rx.recv().await {
         match action {
             UserAction::SubmitPrompt(text) => {
+                let mut pre_prompt_pending = Vec::new();
+                let pre_prompt_compact = auto_compact_before_prompt(
+                    &client,
+                    &session,
+                    &file_tracker,
+                    &mut messages,
+                    &sink,
+                    &mut user_rx,
+                    &mut pre_prompt_pending,
+                    &mut auto_compaction_failures,
+                    last_usage,
+                )
+                .await;
+                match pre_prompt_compact {
+                    Ok(true) => last_usage = None,
+                    Ok(false) => {}
+                    Err(TurnAbort::Cancelled) => {
+                        _ = sink.send(AgentEvent::Cancelled);
+                        continue;
+                    }
+                    Err(TurnAbort::Quit) => break,
+                    Err(TurnAbort::Failed(e)) => {
+                        _ = sink.send(AgentEvent::Error(format!("{e:#}")));
+                        continue;
+                    }
+                }
+
                 let user_msg = Message::user(&text);
                 let outcome = session.record_message(user_msg.clone()).await;
                 sink.session_write_error(outcome.failure.as_deref());
                 messages.push(user_msg);
+                agent::record_drained_prompts(
+                    pre_prompt_pending.drain(..),
+                    &mut messages,
+                    &session,
+                    &sink,
+                )
+                .await;
 
                 if let Some(seed) = outcome.ai_title_seed {
                     session::title_generator::spawn(
@@ -369,10 +405,16 @@ async fn agent_loop_task(
                     &sink,
                     &session,
                     &mut user_rx,
+                    Some(AutoCompact {
+                        config: client.compaction().auto,
+                        failures: &mut auto_compaction_failures,
+                        file_tracker: &file_tracker,
+                    }),
                 )
                 .await;
                 match outcome {
-                    Ok(()) => {
+                    Ok(report) => {
+                        last_usage = report.usage;
                         _ = sink.send(AgentEvent::TurnComplete);
                     }
                     Err(TurnAbort::Cancelled) => {
@@ -396,6 +438,8 @@ async fn agent_loop_task(
                 sink.session_write_error(outcome.finalize_failure.as_deref());
                 client.set_session_id(outcome.new_id.clone());
                 messages.clear();
+                auto_compaction_failures = 0;
+                last_usage = None;
                 if let Err(e) = sink.send(AgentEvent::SessionRolled { id: outcome.new_id }) {
                     // /clear succeeded server-side but the TUI never sees the new id — surfaces as
                     // a stuck "old session" header. Error-level so the log makes it findable.
@@ -413,6 +457,8 @@ async fn agent_loop_task(
                     &session_id,
                 )
                 .await;
+                auto_compaction_failures = 0;
+                last_usage = None;
             }
             UserAction::Compact { instructions } => {
                 let outcome = apply_compact(
@@ -426,7 +472,11 @@ async fn agent_loop_task(
                 )
                 .await;
                 match outcome {
-                    Ok(()) => {}
+                    Ok(true) => {
+                        auto_compaction_failures = 0;
+                        last_usage = None;
+                    }
+                    Ok(false) => {}
                     Err(TurnAbort::Cancelled) => {
                         _ = sink.send(AgentEvent::Cancelled);
                     }
@@ -517,6 +567,38 @@ fn format_drift_warning(drifted: &[std::path::PathBuf]) -> String {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pre-prompt auto-compaction needs the live session state and the shared failure counter"
+)]
+async fn auto_compact_before_prompt(
+    client: &Client,
+    session: &SessionHandle,
+    file_tracker: &FileTracker,
+    messages: &mut Vec<Message>,
+    sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+    failures: &mut u8,
+    usage: Option<TokenUsage>,
+) -> std::result::Result<bool, TurnAbort> {
+    agent::auto_compact_if_needed(
+        client,
+        session,
+        messages,
+        sink,
+        user_rx,
+        pending,
+        Some(&mut AutoCompact {
+            config: client.compaction().auto,
+            failures,
+            file_tracker,
+        }),
+        usage,
+    )
+    .await
+}
+
 /// Drives `/compact`: stream the summarization, replace the in-memory transcript with the
 /// synthetic continuation, persist the boundary + synthetic message, surface the post-compact
 /// system event so the TUI can repaint. Errors leave the session untouched.
@@ -528,7 +610,7 @@ async fn apply_compact(
     sink: &dyn AgentSink,
     user_rx: &mut mpsc::Receiver<UserAction>,
     instructions: Option<String>,
-) -> std::result::Result<(), TurnAbort> {
+) -> std::result::Result<bool, TurnAbort> {
     let mut pending_prompts = Vec::new();
     let summary = agent::await_unless_aborted(
         agent::compaction::compact_session(client, messages, instructions.as_deref()),
@@ -537,26 +619,15 @@ async fn apply_compact(
     )
     .await?
     .map_err(|e| TurnAbort::Failed(anyhow!("Compaction failed: {e:#}")))?;
-    let synthetic = agent::compaction::synthesize_post_compact_message(&summary);
-    let outcome = session
-        .compact(summary.clone(), instructions.clone(), synthetic.clone())
-        .await;
-    sink.session_write_error(outcome.failure.as_deref());
-    if outcome.failure.is_some() {
-        return Ok(());
-    }
-    // Reset the file tracker so post-compact Edits require a fresh Read — pre-compact Reads
-    // are no longer in the visible transcript and the safety contract has to follow.
-    file_tracker.clear();
-    *messages = vec![synthetic];
-    if let Err(e) = sink.send(AgentEvent::SessionCompacted {
+    Ok(agent::compaction::replace_session_with_summary(
+        session,
+        file_tracker,
+        messages,
+        sink,
         summary,
-        pre_count: outcome.pre_count,
         instructions,
-    }) {
-        tracing::error!("session-compacted event dropped: {e}");
-    }
-    Ok(())
+    )
+    .await)
 }
 
 async fn apply_rename(session: &SessionHandle, sink: &dyn AgentSink, title: String) {
@@ -616,6 +687,8 @@ async fn bare_repl(
     let mut messages: Vec<Message> = resumed_messages;
     let mut shutdown_fired = false;
     let (_user_tx, mut user_rx) = inert_user_action_channel();
+    let mut auto_compaction_failures = 0_u8;
+    let mut last_usage = None;
 
     let result: Result<()> = async {
         loop {
@@ -639,10 +712,37 @@ async fn bare_repl(
                 continue;
             }
 
+            let mut pre_prompt_pending = Vec::new();
+            match auto_compact_before_prompt(
+                client,
+                &session,
+                &file_tracker,
+                &mut messages,
+                &sink,
+                &mut user_rx,
+                &mut pre_prompt_pending,
+                &mut auto_compaction_failures,
+                last_usage,
+            )
+            .await
+            {
+                Ok(true) => last_usage = None,
+                Ok(false) => {}
+                Err(TurnAbort::Cancelled | TurnAbort::Quit) => continue,
+                Err(TurnAbort::Failed(e)) => return Err(e),
+            }
+
             let user_msg = Message::user(&input);
             let outcome = session.record_message(user_msg.clone()).await;
             sink.session_write_error(outcome.failure.as_deref());
             messages.push(user_msg);
+            agent::record_drained_prompts(
+                pre_prompt_pending.drain(..),
+                &mut messages,
+                &session,
+                &sink,
+            )
+            .await;
             let prompt = prompt::build_prompt(model).await;
             let turn = agent_turn(
                 client,
@@ -652,6 +752,11 @@ async fn bare_repl(
                 &sink,
                 &session,
                 &mut user_rx,
+                Some(AutoCompact {
+                    config: client.compaction().auto,
+                    failures: &mut auto_compaction_failures,
+                    file_tracker: &file_tracker,
+                }),
             );
             let turn_result = tokio::select! {
                 r = turn => r,
@@ -662,7 +767,8 @@ async fn bare_repl(
                 }
             };
             match turn_result {
-                Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
+                Ok(report) => last_usage = report.usage,
+                Err(TurnAbort::Cancelled | TurnAbort::Quit) => {}
                 Err(TurnAbort::Failed(e)) => return Err(e),
             }
             _ = sink.send(AgentEvent::TurnComplete);
@@ -700,6 +806,7 @@ async fn headless(
     let prompt = prompt::build_prompt(model).await;
     let mut shutdown_fired = false;
     let (_user_tx, mut user_rx) = inert_user_action_channel();
+    let mut auto_compaction_failures = 0_u8;
     let turn = agent_turn(
         client,
         &tools,
@@ -708,10 +815,15 @@ async fn headless(
         &sink,
         &session,
         &mut user_rx,
+        Some(AutoCompact {
+            config: client.compaction().auto,
+            failures: &mut auto_compaction_failures,
+            file_tracker: &file_tracker,
+        }),
     );
     let result: Result<()> = tokio::select! {
         r = turn => match r {
-            Ok(()) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
+            Ok(_) | Err(TurnAbort::Cancelled | TurnAbort::Quit) => Ok(()),
             Err(TurnAbort::Failed(e)) => Err(e),
         },
         () = shutdown_signal() => {

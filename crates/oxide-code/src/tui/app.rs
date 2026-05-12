@@ -807,7 +807,9 @@ mod tests {
     fn test_session_info() -> LiveSessionInfo {
         // `test-model` is intentionally unknown so `display_name` falls back to the literal
         // id, keeping insta snapshots stable.
-        use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
+        use crate::config::{
+            AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
+        };
 
         LiveSessionInfo {
             cwd: "~/test".to_owned(),
@@ -820,6 +822,12 @@ mod tests {
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
+                compaction: CompactionConfig {
+                    auto: AutoCompactionConfig {
+                        enabled: true,
+                        threshold_tokens: Some(155_000),
+                    },
+                },
                 show_thinking: false,
                 show_welcome: true,
                 theme_name: "mocha".to_owned(),

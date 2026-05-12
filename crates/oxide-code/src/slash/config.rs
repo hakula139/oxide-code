@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_bool, display_effort, file};
+use crate::config::{display_auto_compaction, display_bool, display_effort, file};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
 
@@ -53,6 +53,10 @@ fn build_modal(
         (
             "Prompt Cache TTL".to_owned(),
             cfg.prompt_cache_ttl.to_string(),
+        ),
+        (
+            "Auto Compaction".to_owned(),
+            display_auto_compaction(cfg.compaction.auto),
         ),
         (
             "Show Thinking".to_owned(),
@@ -123,11 +127,11 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 8 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 10 + 1 + 4 + 2 = 19.
+        // title + blank + (heading + blank + 9 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 11 + 1 + 4 + 2 = 20.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 19);
+        assert_eq!(m.height(80), 20);
     }
 
     // ── display_path ──

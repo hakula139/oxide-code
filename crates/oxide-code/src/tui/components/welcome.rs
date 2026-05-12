@@ -326,7 +326,9 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::config::{ConfigSnapshot, Effort, PromptCacheTtl};
+    use crate::config::{
+        AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
+    };
     use crate::slash::LiveSessionInfo;
 
     const TEST_SEED: u64 = 0x00C0_FFEE;
@@ -343,6 +345,12 @@ mod tests {
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
+                compaction: CompactionConfig {
+                    auto: AutoCompactionConfig {
+                        enabled: true,
+                        threshold_tokens: Some(967_000),
+                    },
+                },
                 show_thinking: false,
                 show_welcome: true,
                 theme_name: "mocha".to_owned(),

@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::config::{Auth, Config, Effort};
+use crate::config::{Auth, CompactionConfig, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -145,6 +145,10 @@ impl Client {
 
     pub(crate) fn effort(&self) -> Option<Effort> {
         self.config.effort
+    }
+
+    pub(crate) fn compaction(&self) -> CompactionConfig {
+        self.config.compaction
     }
 
     #[cfg(test)]

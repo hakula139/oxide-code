@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::Client;
-use crate::config::{Auth, Config, PromptCacheTtl};
+use crate::config::{Auth, CompactionConfig, Config, PromptCacheTtl};
 use crate::tui::theme::Theme;
 
 /// Minimal [`Config`] for unit / wiremock tests.
@@ -15,6 +15,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
         effort: None,
         max_tokens: 128,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
+        compaction: CompactionConfig::disabled(),
         thinking: None,
         show_thinking: false,
         show_welcome: true,

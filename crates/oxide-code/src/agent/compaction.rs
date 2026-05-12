@@ -6,9 +6,12 @@
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 
+use crate::agent::event::{AgentEvent, AgentSink};
 use crate::client::anthropic::Client;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
+use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
+use crate::session::handle::SessionHandle;
 
 /// Minimum messages required for compaction to be worthwhile. Below this, the summary is
 /// usually longer than the transcript itself.
@@ -142,6 +145,36 @@ pub(crate) fn synthesize_post_compact_message(summary: &str) -> Message {
 
         {summary}
     ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()})
+}
+
+/// Persists a compact boundary and swaps the live transcript to the synthetic summary root.
+pub(crate) async fn replace_session_with_summary(
+    session: &SessionHandle,
+    file_tracker: &FileTracker,
+    messages: &mut Vec<Message>,
+    sink: &dyn AgentSink,
+    summary: String,
+    instructions: Option<String>,
+) -> bool {
+    let synthetic = synthesize_post_compact_message(&summary);
+    let outcome = session
+        .compact(summary.clone(), instructions.clone(), synthetic.clone())
+        .await;
+    sink.session_write_error(outcome.failure.as_deref());
+    if outcome.failure.is_some() {
+        return false;
+    }
+
+    file_tracker.clear();
+    *messages = vec![synthetic];
+    if let Err(e) = sink.send(AgentEvent::SessionCompacted {
+        summary,
+        pre_count: outcome.pre_count,
+        instructions,
+    }) {
+        tracing::error!("session-compacted event dropped: {e}");
+    }
+    true
 }
 
 /// Removes the synthetic summary prefix from a resumed post-compact root message.

@@ -16,6 +16,9 @@ pub(crate) struct ModelInfo {
     pub(crate) capabilities: Capabilities,
 }
 
+const STANDARD_CONTEXT_WINDOW: u32 = 200_000;
+const CONTEXT_1M_WINDOW: u32 = 1_000_000;
+
 // ── Capabilities ──
 
 /// Per-model gate set consumed by the wire-builder (header + body fields), the slash commands
@@ -206,6 +209,17 @@ pub(crate) fn capabilities_for(model: &str) -> Capabilities {
     lookup(model)
         .map(|info| info.capabilities)
         .unwrap_or_default()
+}
+
+/// Effective context window for known Claude models. `[1m]` opts into the 1M beta only on
+/// models that advertise that capability; unknown raw ids stay disabled for auto-compaction.
+pub(crate) fn context_window_for(model: &str) -> Option<u32> {
+    let info = lookup(model)?;
+    if model.ends_with("[1m]") && info.capabilities.context_1m {
+        Some(CONTEXT_1M_WINDOW)
+    } else {
+        Some(STANDARD_CONTEXT_WINDOW)
+    }
 }
 
 /// Human-facing label: the row's [`ModelInfo::display_name`] plus a ` (1M context)` suffix on
@@ -496,6 +510,25 @@ mod tests {
         ] {
             assert!(lookup(unknown).is_none(), "{unknown} must not resolve");
         }
+    }
+
+    // ── context_window_for ──
+
+    #[test]
+    fn context_window_for_known_models_defaults_to_standard_window() {
+        assert_eq!(context_window_for("claude-opus-4-7"), Some(200_000));
+        assert_eq!(context_window_for("claude-haiku-4-5"), Some(200_000));
+    }
+
+    #[test]
+    fn context_window_for_1m_suffix_requires_model_capability() {
+        assert_eq!(context_window_for("claude-opus-4-7[1m]"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-haiku-4-5[1m]"), Some(200_000));
+    }
+
+    #[test]
+    fn context_window_for_unknown_model_is_none() {
+        assert_eq!(context_window_for("claude-future-9"), None);
     }
 
     // ── display_name ──

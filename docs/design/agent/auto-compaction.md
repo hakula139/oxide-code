@@ -21,7 +21,7 @@ The agent loop records the maximum observed token usage from each stream:
 - `message_start.message.usage.input_tokens + output_tokens`;
 - `message_delta.usage.input_tokens + output_tokens`.
 
-Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input and output values separately and computes `total = input + output`. This is a trigger signal, not billing telemetry. Missing usage means "do not auto-compact".
+Anthropic's delta usage often carries only output tokens, so stream processing keeps the latest non-zero input and output values separately and computes `total = input + output`. Treat this value only as the auto-compaction trigger signal; it is unsuitable for billing telemetry. Missing usage means "do not auto-compact".
 
 ## Threshold
 
@@ -45,19 +45,22 @@ The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and ke
 Config surface:
 
 ```toml
-[client.auto_compact]
-enabled = true
+[client.compaction]
+auto_enabled = true
+auto_threshold_tokens = 400000
+# or:
+auto_threshold_percent = 40
 ```
 
 Environment:
 
-| Variable                  | Effect                                       |
-| ------------------------- | -------------------------------------------- |
-| `OX_AUTO_COMPACT`         | Overrides `client.auto_compact.enabled`      |
-| `OX_DISABLE_AUTO_COMPACT` | Disables automatic compaction only           |
-| `OX_DISABLE_COMPACT`      | Disables automatic compaction and `/compact` |
+| Variable                                 | Effect                                      |
+| ---------------------------------------- | ------------------------------------------- |
+| `OX_COMPACTION_AUTO_ENABLED`             | Overrides `client.compaction.auto_enabled`  |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`    | Absolute automatic trigger threshold        |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`   | Percent of the model context window         |
 
-`OX_DISABLE_COMPACT` is reserved for parity with Claude Code's "all compaction off" switch. It should not remove `/compact` from help; the command should return an actionable error when invoked.
+Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
 
 ## Trigger Flow
 
@@ -98,6 +101,6 @@ During TUI auto-compaction, the status bar uses the existing `Compacting` state.
 - Mid-turn compaction while a model response still needs tool follow-up.
 - Microcompact / prune for old tool-result bodies.
 - Anchored re-compaction that updates a previous summary in place.
-- Configurable auto-compaction threshold or compaction model.
+- Separate compaction model.
 - Token / cost status-bar redesign.
 - Hook integration.

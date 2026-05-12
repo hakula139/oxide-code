@@ -44,7 +44,7 @@ Triggers:
 
 The token signal is `Session::get_total_token_usage()`, which combines cached last API token usage with estimates after the last model-generated item. Local compaction streams a normal model request. OpenAI / Azure providers use a remote compaction path, and a newer feature-gated path expects a `context_compaction` response item.
 
-Codex exposes configuration for `model_context_window`, `model_auto_compact_token_limit`, and `compact_prompt`. The auto limit is absolute, not a percentage, then clamped by model metadata. Hooks can run before and after manual or automatic compaction.
+Codex exposes configuration for `model_context_window`, `model_auto_compact_token_limit`, and `compact_prompt`. The auto limit is absolute; percentage values are not part of that surface. Hooks can run before and after manual or automatic compaction.
 
 Key files:
 
@@ -89,7 +89,7 @@ Key files:
 
 5. **Circuit-break automatic failures.** Automatic failures should not spam chat or repeatedly hit the API when the session is too large to summarize.
 
-6. **Keep manual `/compact` independent.** Auto opt-out should not disable manual compaction unless the user explicitly disables all compaction.
+6. **Keep manual `/compact` independent.** Auto opt-out should not disable manual compaction.
 
 ## Patterns to Defer
 

@@ -3,7 +3,7 @@
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_bool, display_effort};
+use crate::config::{display_auto_compaction, display_bool, display_effort};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 
 pub(super) struct StatusCmd;
@@ -39,6 +39,10 @@ fn build_modal(info: &LiveSessionInfo) -> KvOverview {
         (
             "Context Cache".to_owned(),
             info.config.prompt_cache_ttl.to_string(),
+        ),
+        (
+            "Auto Compaction".to_owned(),
+            display_auto_compaction(info.config.compaction.auto),
         ),
         (
             "Show Thinking".to_owned(),
@@ -91,7 +95,7 @@ mod tests {
     fn build_modal_renders_one_row_per_session_descriptor() {
         let info = test_session_info();
         let m = build_modal(&info);
-        // Title + blank + 9 rows + blank + footer = 13.
-        assert_eq!(m.height(80), 13);
+        // Title + blank + 10 rows + blank + footer = 14.
+        assert_eq!(m.height(80), 14);
     }
 }

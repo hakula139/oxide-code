@@ -6,6 +6,7 @@ pub(crate) mod event;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
@@ -13,13 +14,16 @@ use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink, UserAction};
 use crate::client::anthropic::Client;
-use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
+use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent, Usage};
+use crate::config::AutoCompactionConfig;
+use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
+const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
 
@@ -51,6 +55,12 @@ pub(crate) trait AgentClient: Send + Sync {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>>;
+
+    fn compact_session<'a>(
+        &'a self,
+        transcript: &'a [Message],
+        instructions: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 }
 
 impl AgentClient for Client {
@@ -63,9 +73,49 @@ impl AgentClient for Client {
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         Client::stream_message(self, messages, system_sections, user_context, tools)
     }
+
+    fn compact_session<'a>(
+        &'a self,
+        transcript: &'a [Message],
+        instructions: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(compaction::compact_session(self, transcript, instructions))
+    }
 }
 
 // ── Agent Turn ──
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TokenUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl TokenUsage {
+    pub(crate) const fn total_tokens(self) -> u32 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    fn observe(&mut self, usage: &Usage) {
+        if usage.input_tokens > 0 {
+            self.input_tokens = usage.input_tokens;
+        }
+        if usage.output_tokens > 0 {
+            self.output_tokens = usage.output_tokens;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TurnReport {
+    pub(crate) usage: Option<TokenUsage>,
+}
+
+pub(crate) struct AutoCompact<'a> {
+    pub(crate) config: AutoCompactionConfig,
+    pub(crate) failures: &'a mut u8,
+    pub(crate) file_tracker: &'a FileTracker,
+}
 
 /// Drives one user prompt to a final assistant text reply.
 ///
@@ -88,21 +138,25 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
-) -> AbortResult<()> {
+    mut auto_compact: Option<AutoCompact<'_>>,
+) -> AbortResult<TurnReport> {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
+    let mut latest_usage = None;
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
         let StreamOutcome {
             blocks,
             parse_errors,
+            usage,
         } = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
             &mut pending_prompts,
         )
         .await??;
+        latest_usage = usage.or(latest_usage);
 
         let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
@@ -114,7 +168,9 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(());
+            return Ok(TurnReport {
+                usage: latest_usage,
+            });
         }
 
         let (results, sidecars) = run_tool_round(
@@ -134,6 +190,17 @@ pub(crate) async fn agent_turn(
         commit_round_writes(session, sink, &assistant_msg, &tool_result_msg, sidecars).await;
         messages.push(assistant_msg);
         messages.push(tool_result_msg);
+        auto_compact_if_needed(
+            client,
+            session,
+            messages,
+            sink,
+            user_rx,
+            &mut pending_prompts,
+            auto_compact.as_mut(),
+            usage,
+        )
+        .await?;
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
@@ -141,6 +208,59 @@ pub(crate) async fn agent_turn(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "auto-compaction needs the same live turn state as manual compaction plus the latest usage signal"
+)]
+pub(crate) async fn auto_compact_if_needed(
+    client: &dyn AgentClient,
+    session: &SessionHandle,
+    messages: &mut Vec<Message>,
+    sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+    auto: Option<&mut AutoCompact<'_>>,
+    usage: Option<TokenUsage>,
+) -> AbortResult<bool> {
+    let Some(auto) = auto else {
+        return Ok(false);
+    };
+    let Some(usage) = usage else {
+        return Ok(false);
+    };
+    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
+        || !auto.config.should_trigger(usage.total_tokens())
+    {
+        return Ok(false);
+    }
+
+    let summary =
+        match await_unless_aborted(client.compact_session(messages, None), user_rx, pending).await?
+        {
+            Ok(summary) => summary,
+            Err(e) => {
+                *auto.failures += 1;
+                warn!("auto-compaction failed: {e:#}");
+                return Ok(false);
+            }
+        };
+    let compacted = compaction::replace_session_with_summary(
+        session,
+        auto.file_tracker,
+        messages,
+        sink,
+        summary,
+        None,
+    )
+    .await;
+    if compacted {
+        *auto.failures = 0;
+    } else {
+        *auto.failures += 1;
+    }
+    Ok(compacted)
 }
 
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
@@ -228,7 +348,7 @@ async fn dispatch_tool_call(
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
-async fn record_drained_prompts(
+pub(crate) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
     session: &SessionHandle,
@@ -363,6 +483,7 @@ fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
 struct StreamOutcome {
     blocks: Vec<ContentBlock>,
     parse_errors: HashMap<String, String>,
+    usage: Option<TokenUsage>,
 }
 
 async fn stream_response(
@@ -381,11 +502,19 @@ async fn stream_response(
     )?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
+    let mut usage = TokenUsage::default();
+    let mut saw_usage = false;
 
     while let Some(event) = rx.recv().await {
         let event = event.context("stream error")?;
 
         match event {
+            StreamEvent::MessageStart { message } => {
+                if let Some(observed) = message.usage {
+                    usage.observe(&observed);
+                    saw_usage = true;
+                }
+            }
             StreamEvent::ContentBlockStart {
                 index,
                 content_block,
@@ -409,11 +538,19 @@ async fn stream_response(
             StreamEvent::Error { error } => {
                 bail!("API error ({}): {}", error.error_type, error.message);
             }
+            StreamEvent::MessageDelta {
+                usage: Some(observed),
+                ..
+            } => {
+                usage.observe(&observed);
+                saw_usage = true;
+            }
             _ => {}
         }
     }
 
     let mut outcome = StreamOutcome::default();
+    outcome.usage = saw_usage.then_some(usage);
     for acc in blocks.into_iter().flatten() {
         let (block, parse_error) = acc.into_content_block();
         outcome.parse_errors.extend(parse_error);
@@ -503,9 +640,10 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::test_client;
     use crate::client::anthropic::wire::{
-        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
+        ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StreamEvent, Usage,
     };
-    use crate::config::{Auth, Effort};
+    use crate::config::{Auth, AutoCompactionConfig, Effort};
+    use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::session::handle::{self, SessionHandle};
@@ -568,6 +706,14 @@ mod tests {
             }
             Ok(rx)
         }
+
+        fn compact_session<'a>(
+            &'a self,
+            _transcript: &'a [Message],
+            _instructions: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async { Ok("auto summary".to_owned()) })
+        }
     }
 
     fn text_turn(text: &str) -> Vec<StreamEvent> {
@@ -618,6 +764,41 @@ mod tests {
         ]
     }
 
+    fn text_turn_with_usage(text: &str, input_tokens: u32, output_tokens: u32) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: text.into() },
+            },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some("end_turn".into()),
+                },
+                usage: Some(Usage {
+                    input_tokens: 0,
+                    output_tokens,
+                }),
+            },
+            StreamEvent::MessageStop,
+        ]
+    }
+
     fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
         vec![
             StreamEvent::ContentBlockStart {
@@ -636,6 +817,30 @@ mod tests {
             StreamEvent::ContentBlockStop { index: 0 },
             StreamEvent::MessageStop,
         ]
+    }
+
+    fn tool_use_turn_with_usage(
+        id: &str,
+        name: &str,
+        input_json: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<StreamEvent> {
+        let mut events = tool_use_turn(id, name, input_json);
+        events.insert(
+            0,
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens,
+                    }),
+                },
+            },
+        );
+        events
     }
 
     /// Echoes its input; exercises the tool-dispatch path without subprocess machinery.
@@ -744,6 +949,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -781,6 +987,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -814,6 +1021,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -852,6 +1060,7 @@ mod tests {
             &sink,
             &session,
             &mut user_rx,
+            None,
         )
         .await
         .unwrap();
@@ -869,6 +1078,31 @@ mod tests {
             })
             .collect();
         assert_eq!(streamed, ["Hello immediately"]);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_reports_latest_stream_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn_with_usage("Hello!", 100, 7)]);
+        let tools = ToolRegistry::new(Vec::new());
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
     }
 
     #[tokio::test]
@@ -891,6 +1125,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -930,6 +1165,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_auto_compacts_after_tool_round_crosses_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn_with_usage("tool_1", "echo", r#"{"v":1}"#, 9, 2),
+            text_turn_with_usage("Done", 1, 2),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut failures = 0;
+        let mut messages = vec![
+            Message::user("run echo"),
+            Message::assistant("earlier"),
+            Message::user("continue"),
+        ];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            Some(AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
+        assert_eq!(failures, 0);
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::SessionCompacted { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Done"));
+    }
+
+    #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
         // Pre-loaded SubmitPrompt is consumed during the round; at the boundary the agent splices
         // the queued text as a trailing user message and emits PromptDrained.
@@ -956,6 +1244,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1017,6 +1306,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1066,6 +1356,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -1095,6 +1386,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("quit must surface as Err(Quit)");
@@ -1123,6 +1415,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("dead channel must surface as Err(Quit)");
@@ -1163,6 +1456,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             )
             .await
             .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
@@ -1201,6 +1495,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             ),
             async {
                 started.notified().await;
@@ -1251,6 +1546,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1290,6 +1586,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1343,6 +1640,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .expect_err("cap must trip");
@@ -1376,6 +1674,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .expect_err("api error must propagate");
@@ -1419,6 +1718,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1478,6 +1778,7 @@ data: {"type":"message_stop"}
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
