@@ -1,6 +1,6 @@
 # Tool Output Truncation (Reference)
 
-Research on tool output bounding across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
+Research on tool output bounding across reference codebases. Based on [Claude Code](https://github.com/hakula139/claude-code), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode).
 
 ## Claude Code (TypeScript)
 

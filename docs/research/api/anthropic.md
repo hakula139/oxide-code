@@ -1,6 +1,6 @@
 # Anthropic API Authentication
 
-Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87) and testing against the production API.
+Research notes on how to authenticate with the Anthropic Messages API using OAuth tokens from Claude Code. These findings are based on reverse-engineering [Claude Code](https://github.com/hakula139/claude-code) and testing against the production API.
 
 ## Authentication Methods
 
