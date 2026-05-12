@@ -300,6 +300,7 @@ struct SessionDataBuilder {
     compact: Option<CompactInfo>,
     latest_title: Option<TitleInfo>,
     compact_tail_uuids: Option<HashSet<Uuid>>,
+    compact_tail_accepts_sidecars: bool,
     tool_result_metadata: HashMap<String, ToolMetadata>,
     file_snapshots: Vec<FileSnapshot>,
 }
@@ -311,6 +312,7 @@ impl SessionDataBuilder {
             compact: None,
             latest_title: None,
             compact_tail_uuids: None,
+            compact_tail_accepts_sidecars: true,
             tool_result_metadata: HashMap::new(),
             file_snapshots: Vec::new(),
         }
@@ -342,10 +344,10 @@ impl SessionDataBuilder {
                 tool_use_id,
                 metadata,
                 ..
-            } => {
+            } if self.accepts_sidecar() => {
                 self.tool_result_metadata.insert(tool_use_id, metadata);
             }
-            Entry::FileSnapshot { snapshot } => {
+            Entry::FileSnapshot { snapshot } if self.accepts_sidecar() => {
                 self.file_snapshots.push(snapshot);
             }
             Entry::Compact {
@@ -367,7 +369,11 @@ impl SessionDataBuilder {
         timestamp: OffsetDateTime,
         line_no: u32,
     ) {
-        if !self.accepts_compact_tail_message(uuid, parent_uuid) {
+        let accepted = self.accepts_compact_tail_message(uuid, parent_uuid);
+        if self.compact_tail_uuids.is_some() {
+            self.compact_tail_accepts_sidecars = accepted;
+        }
+        if !accepted {
             warn!("skipping pre-compact branch append at line {line_no}");
             return;
         }
@@ -391,6 +397,10 @@ impl SessionDataBuilder {
         accepted
     }
 
+    fn accepts_sidecar(&self) -> bool {
+        self.compact_tail_uuids.is_none() || self.compact_tail_accepts_sidecars
+    }
+
     fn reset_at_compact(
         &mut self,
         summary: String,
@@ -404,6 +414,7 @@ impl SessionDataBuilder {
             instructions,
         });
         self.compact_tail_uuids = Some(HashSet::new());
+        self.compact_tail_accepts_sidecars = false;
         self.clear_sidecars();
     }
 
@@ -1154,6 +1165,94 @@ mod tests {
                 instructions: Some("focus".to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn load_session_data_skips_sidecars_after_rejected_compact_tail_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store
+            .create(&sample_header("compact-stale-sidecars"))
+            .unwrap();
+
+        let pre = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                pre,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "pre-compact",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: None,
+                timestamp: datetime!(2026-04-16 12:00:02 UTC),
+            })
+            .unwrap();
+
+        let synthetic = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                synthetic,
+                None,
+                datetime!(2026-04-16 12:00:03 UTC),
+                "synthetic summary",
+            ))
+            .unwrap();
+        writer
+            .append(&sample_message_at(
+                Uuid::new_v4(),
+                Some(pre),
+                datetime!(2026-04-16 12:00:04 UTC),
+                "stale old-chain append",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::ToolResultMetadata {
+                tool_use_id: "stale-tool".to_owned(),
+                metadata: ToolMetadata {
+                    title: Some("stale metadata".to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp: datetime!(2026-04-16 12:00:05 UTC),
+            })
+            .unwrap();
+        writer.append(&sample_snapshot("stale.txt")).unwrap();
+
+        let valid = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                valid,
+                Some(synthetic),
+                datetime!(2026-04-16 12:00:07 UTC),
+                "valid post-compact append",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::ToolResultMetadata {
+                tool_use_id: "valid-tool".to_owned(),
+                metadata: ToolMetadata {
+                    title: Some("valid metadata".to_owned()),
+                    ..ToolMetadata::default()
+                },
+                timestamp: datetime!(2026-04-16 12:00:08 UTC),
+            })
+            .unwrap();
+        writer.append(&sample_snapshot("valid.txt")).unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("compact-stale-sidecars").unwrap();
+        assert_eq!(data.last_uuid, Some(valid));
+        assert!(data.tool_result_metadata.contains_key("valid-tool"));
+        assert!(
+            !data.tool_result_metadata.contains_key("stale-tool"),
+            "metadata following a rejected compact-tail message must not survive",
+        );
+        assert_eq!(data.file_snapshots.len(), 1);
+        assert!(data.file_snapshots[0].path.ends_with("valid.txt"));
     }
 
     #[test]

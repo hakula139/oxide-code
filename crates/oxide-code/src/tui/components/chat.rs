@@ -17,6 +17,7 @@ use self::blocks::{
     GitDiffBlock, InterruptedMarker, RenderCtx, StreamingAssistant, SystemMessageBlock,
     ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
+use crate::agent::compaction::strip_synthetic_post_compact_prefix;
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
 use crate::session::history::{Interaction, walk_transcript};
@@ -75,15 +76,16 @@ impl ChatView {
         metadata_by_tool_use_id: &HashMap<String, ToolMetadata>,
         tools: &ToolRegistry,
     ) {
-        let messages = match compact {
-            Some(info) => {
-                self.push_compacted_block(
-                    info.pre_message_count,
-                    info.instructions.as_deref(),
-                    info.summary.clone(),
-                );
-                messages.get(1..).unwrap_or_default()
-            }
+        let compact_messages = compact.map(|info| {
+            self.push_compacted_block(
+                info.pre_message_count,
+                info.instructions.as_deref(),
+                info.summary.clone(),
+            );
+            post_compact_display_messages(messages)
+        });
+        let messages = match &compact_messages {
+            Some(messages) => messages.as_slice(),
             None => messages,
         };
         let mut pending = PendingCalls::new();
@@ -472,6 +474,17 @@ impl ChatView {
     }
 }
 
+fn post_compact_display_messages(messages: &[Message]) -> Vec<Message> {
+    let mut messages = messages.to_vec();
+    if let Some(first) = messages.first_mut()
+        && strip_synthetic_post_compact_prefix(first)
+        && first.content.is_empty()
+    {
+        messages.remove(0);
+    }
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -793,7 +806,7 @@ mod tests {
 
         chat.load_history(
             &[
-                Message::user("This conversation has been compacted.\n\ninternal summary"),
+                crate::agent::compaction::synthesize_post_compact_message("internal summary"),
                 Message::assistant("post-compact reply"),
             ],
             Some(&compact),
@@ -807,6 +820,32 @@ mod tests {
         assert!(text.contains("Kept the important decisions."));
         assert!(text.contains("post-compact reply"));
         assert!(!text.contains("internal summary"));
+    }
+
+    #[test]
+    fn load_history_keeps_real_prompt_merged_into_compact_root() {
+        let mut chat = test_chat();
+        let compact = CompactInfo {
+            summary: "Kept the important decisions.".to_owned(),
+            pre_message_count: 4,
+            instructions: None,
+        };
+        let mut merged = crate::agent::compaction::synthesize_post_compact_message("internal");
+        merged.content.push(ContentBlock::Text {
+            text: "real follow-up".to_owned(),
+        });
+
+        chat.load_history(
+            &[merged, Message::assistant("post-compact reply")],
+            Some(&compact),
+            &HashMap::new(),
+            &test_tools(),
+        );
+
+        let text = all_text(&chat);
+        assert!(text.contains("real follow-up"));
+        assert!(text.contains("post-compact reply"));
+        assert!(!text.contains("internal"));
     }
 
     #[test]
