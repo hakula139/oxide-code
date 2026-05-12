@@ -72,6 +72,7 @@ The direction is simple:
 ### Context Compression
 
 - Manual `/compact [instructions]` streams a one-shot summarization through the live model and replaces the in-memory transcript with a synthetic continuation. Optional trailing instructions steer the focus.
+- Auto-compaction is enabled by default and triggers when observed response usage crosses the resolved threshold. `[client.compaction]` and `OX_COMPACTION_AUTO_*` can disable or tune the automatic trigger.
 - Persisted as a dedicated `compact` JSONL boundary plus the synthetic post-compact message. Resume sees only the post-compact tail.
 - File tracker resets on compact. Edits after `/compact` require a fresh Read.
 
@@ -88,10 +89,6 @@ The direction is simple:
 - Per-tool approval prompts before destructive actions (bash, write, edit).
 - Project-level allowlists to auto-approve trusted commands.
 - Plan mode: read-only review of the agent's proposed changes before any tool runs.
-
-### Auto-Compaction
-
-- Fire `/compact` automatically when the running token usage approaches the model's context window. Threshold math (effective context window minus reserved-output buffer), per-turn check at sampling boundaries, single-turn circuit breaker, and a config knob for opt-out.
 
 ### Slash Commands (continuation)
 

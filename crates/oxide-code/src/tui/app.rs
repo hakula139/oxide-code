@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::{Stream, StreamExt};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
 use super::components::chat::ChatView;
@@ -29,7 +30,7 @@ use crate::message::Message;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
-use crate::util::text::truncate_to_width;
+use crate::util::text::{center_truncate_to_width, truncate_to_width};
 
 /// Tick interval for animation frames and render coalescing (~60 FPS).
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -643,6 +644,7 @@ impl App {
             welcome::paint(frame, chunks[1], &self.theme, &snap);
         } else {
             self.chat.render(frame, chunks[1]);
+            self.render_jump_overlay(frame, chunks[1]);
         }
         if preview_height > 0 {
             self.render_preview(frame, chunks[2]);
@@ -689,6 +691,43 @@ impl App {
             area,
         );
     }
+
+    fn render_jump_overlay(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        if !self.chat.is_scrolled_up() || area.width < 25 || area.height == 0 {
+            return;
+        }
+
+        let new_count = self.chat.new_content_since_pause();
+        let label = jump_overlay_label(new_count, usize::from(area.width));
+        let style = if new_count == 0 {
+            self.theme.dim()
+        } else {
+            self.theme.accent()
+        };
+        let band = Rect {
+            y: area.y + area.height.saturating_sub(1),
+            height: 1,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, style)))
+                .style(self.theme.surface())
+                .alignment(Alignment::Right),
+            band,
+        );
+    }
+}
+
+fn jump_overlay_label(new_count: u32, width: usize) -> String {
+    if width < 40 {
+        return "↓ (ctrl+End)".to_owned();
+    }
+    let label = match new_count {
+        0 => "Jump to bottom (ctrl+End) ↓".to_owned(),
+        1 => "1 new message (ctrl+End) ↓".to_owned(),
+        n => format!("{n} new messages (ctrl+End) ↓"),
+    };
+    center_truncate_to_width(&label, width.saturating_sub(2))
 }
 
 /// Renders a queued prompt as a dim ghost, capped at `body_width` columns.
@@ -2803,6 +2842,30 @@ mod tests {
             .join("\n")
     }
 
+    fn long_chat_block() -> String {
+        use std::fmt::Write as _;
+
+        let mut body = String::new();
+        for i in 0..30 {
+            _ = writeln!(body, "line {i:02} of a long chat block");
+        }
+        body
+    }
+
+    // ── jump_overlay_label ──
+
+    #[test]
+    fn jump_overlay_label_renders_idle_and_new_content_variants() {
+        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_uses_short_form_below_full_width() {
+        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
+    }
+
     #[test]
     fn draw_frame_lays_out_status_chat_and_input_in_order() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
@@ -2830,6 +2893,42 @@ mod tests {
         app.dispatch_user_action(UserAction::SubmitPrompt("working...".into()));
         app.handle_agent_event(AgentEvent::StreamToken("part".into()));
         insta::assert_snapshot!(render_app(&mut app, 60, 8));
+    }
+
+    #[test]
+    fn draw_frame_auto_scroll_on_hides_jump_overlay() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+
+        let text = rendered_text(&mut app, 60, 10);
+        assert!(!text.contains("Jump to bottom"), "{text}");
+    }
+
+    #[test]
+    fn draw_frame_scrolled_up_shows_jump_overlay() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+
+        app.chat
+            .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+        let text = rendered_text(&mut app, 60, 10);
+
+        assert!(text.contains("Jump to bottom"), "{text}");
+    }
+
+    #[test]
+    fn draw_frame_scrolled_up_counts_new_content() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.chat.push_system_message(long_chat_block());
+        _ = render_app(&mut app, 60, 10);
+        app.chat
+            .handle_event(&key_event(KeyCode::PageUp, KeyModifiers::NONE));
+
+        app.chat.push_error("background update");
+        let text = rendered_text(&mut app, 60, 10);
+
+        assert!(text.contains("1 new message"), "{text}");
     }
 
     #[test]
