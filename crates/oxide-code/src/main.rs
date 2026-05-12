@@ -271,13 +271,15 @@ async fn run_tui(
         theme,
         session_info,
         show_thinking,
-        resumed_title,
         agent_rx,
         user_tx,
-        &resumed_messages,
-        resumed_compact.as_ref(),
-        &resumed_tool_metadata,
         Arc::clone(&tools),
+        tui::app::AppHistory {
+            messages: &resumed_messages,
+            compact: resumed_compact.as_ref(),
+            tool_metadata: &resumed_tool_metadata,
+            title: resumed_title,
+        },
     );
 
     let agent_handle = {

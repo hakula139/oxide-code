@@ -60,31 +60,36 @@ pub(crate) struct App {
     dirty: bool,
 }
 
+pub(crate) struct AppHistory<'a> {
+    pub(crate) messages: &'a [Message],
+    pub(crate) compact: Option<&'a CompactInfo>,
+    pub(crate) tool_metadata: &'a HashMap<String, ToolMetadata>,
+    pub(crate) title: Option<String>,
+}
+
 impl App {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "ctor wires the full surface: display config, IPC channels, resumed state, and tool registry"
-    )]
     pub(crate) fn new(
         theme: &Theme,
         session_info: LiveSessionInfo,
         show_thinking: bool,
-        title: Option<String>,
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
-        history: &[Message],
-        history_compact: Option<&CompactInfo>,
-        history_metadata: &HashMap<String, ToolMetadata>,
         tools: Arc<ToolRegistry>,
+        history: AppHistory<'_>,
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(history, history_compact, history_metadata, tools.as_ref());
+        chat.load_history(
+            history.messages,
+            history.compact,
+            history.tool_metadata,
+            tools.as_ref(),
+        );
         let mut status_bar = StatusBar::new(
             theme,
             session_info.display_name().into_owned(),
             session_info.cwd.clone(),
         );
-        status_bar.set_title(title);
+        status_bar.set_title(history.title);
         Self {
             theme: theme.clone(),
             status_bar,
@@ -779,13 +784,15 @@ mod tests {
             &Theme::default(),
             test_session_info(),
             false,
-            title.map(ToOwned::to_owned),
             agent_rx,
             user_tx,
-            &[],
-            None,
-            &HashMap::new(),
             tools,
+            AppHistory {
+                messages: &[],
+                compact: None,
+                tool_metadata: &HashMap::new(),
+                title: title.map(ToOwned::to_owned),
+            },
         );
         (app, user_rx, agent_tx)
     }
