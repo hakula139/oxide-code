@@ -6,11 +6,14 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
+const PIPE_CAPTURE_BYTES: usize = super::MAX_OUTPUT_BYTES;
+const PIPE_READ_CHUNK_BYTES: usize = 8 * 1024;
 
 const NO_OUTPUT_MARKER: &str = "(no output)";
 
@@ -110,7 +113,7 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return ToolOutput {
@@ -124,8 +127,13 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     #[cfg(unix)]
     let pgid = child.id();
 
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
+    let stdout = child.stdout.take().expect("stdout configured as piped");
+    let stderr = child.stderr.take().expect("stderr configured as piped");
+    let stdout_task = tokio::spawn(read_capped_pipe(stdout));
+    let stderr_task = tokio::spawn(read_capped_pipe(stderr));
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
         Ok(Err(e)) => {
             return ToolOutput {
                 content: format!("Failed to execute command: {e}"),
@@ -137,6 +145,8 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             // kill_on_drop handles bash; killpg catches detached grandchildren in the same group.
             #[cfg(unix)]
             kill_process_group(pgid);
+            stdout_task.abort();
+            stderr_task.abort();
             return ToolOutput {
                 content: format!("Command timed out after {}ms", timeout.as_millis()),
                 is_error: true,
@@ -145,22 +155,42 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         }
     };
 
-    let exit_code = output.status.code();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = match collect_pipe(stdout_task).await {
+        Ok(output) => output,
+        Err(e) => {
+            return ToolOutput {
+                content: format!("Failed to read command stdout: {e}"),
+                is_error: true,
+                metadata: ToolMetadata::default(),
+            };
+        }
+    };
+    let stderr = match collect_pipe(stderr_task).await {
+        Ok(output) => output,
+        Err(e) => {
+            return ToolOutput {
+                content: format!("Failed to read command stderr: {e}"),
+                is_error: true,
+                metadata: ToolMetadata::default(),
+            };
+        }
+    };
+
+    let exit_code = status.code();
 
     let mut content = String::new();
+    let stdout = render_pipe(&stdout, true);
+    let stderr = render_pipe(&stderr, false);
     if !stdout.is_empty() {
-        let trimmed = stdout.trim_start_matches('\n').trim_end();
-        content.push_str(trimmed);
+        content.push_str(&stdout);
     }
     if !stderr.is_empty() {
         if !content.is_empty() {
             content.push('\n');
         }
-        content.push_str(stderr.trim());
+        content.push_str(&stderr);
     }
-    if !output.status.success() {
+    if !status.success() {
         let code = exit_code.unwrap_or(-1);
         if !content.is_empty() {
             content.push_str("\n\n");
@@ -180,6 +210,63 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         is_error: false,
         metadata: ToolMetadata::default(),
     }
+}
+
+// ── Pipe Capture ──
+
+#[derive(Debug, PartialEq, Eq)]
+struct CapturedPipe {
+    bytes: Vec<u8>,
+    omitted: usize,
+}
+
+async fn read_capped_pipe<R>(mut reader: R) -> std::io::Result<CapturedPipe>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut omitted = 0;
+    let mut buf = [0; PIPE_READ_CHUNK_BYTES];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        let remaining = PIPE_CAPTURE_BYTES.saturating_sub(bytes.len());
+        let keep = remaining.min(n);
+        bytes.extend_from_slice(&buf[..keep]);
+        omitted += n - keep;
+    }
+    Ok(CapturedPipe { bytes, omitted })
+}
+
+async fn collect_pipe(
+    task: tokio::task::JoinHandle<std::io::Result<CapturedPipe>>,
+) -> std::io::Result<CapturedPipe> {
+    task.await.map_err(std::io::Error::other)?
+}
+
+fn render_pipe(pipe: &CapturedPipe, trim_start_newlines: bool) -> String {
+    let text = String::from_utf8_lossy(&pipe.bytes);
+    let mut text = text.trim_end();
+    if trim_start_newlines {
+        text = text.trim_start_matches('\n');
+    } else {
+        text = text.trim();
+    }
+
+    let mut rendered = text.to_owned();
+    if pipe.omitted > 0 {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        _ = write!(
+            rendered,
+            "(stream truncated: {} bytes omitted)",
+            pipe.omitted
+        );
+    }
+    rendered
 }
 
 // ── Process Group Cleanup ──
@@ -275,6 +362,21 @@ mod tests {
         assert_eq!(output.content, "(no output)");
     }
 
+    #[tokio::test]
+    async fn execute_large_output_is_bounded_while_pipe_is_drained() {
+        let bytes = PIPE_CAPTURE_BYTES + 1024;
+        let output = run_default(&format!("yes x | head -c {bytes}")).await;
+
+        assert!(!output.is_error);
+        assert!(
+            output.content.len() <= PIPE_CAPTURE_BYTES + 128,
+            "output should stay near the pipe cap, got {} bytes",
+            output.content.len(),
+        );
+        assert!(output.content.contains("stream truncated"));
+        assert!(output.content.contains("1024 bytes omitted"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_timeout_kills_backgrounded_children() {
@@ -298,6 +400,21 @@ mod tests {
         assert!(
             !marker.exists(),
             "backgrounded descendant was not killed: marker file was created",
+        );
+    }
+
+    // ── render_pipe ──
+
+    #[test]
+    fn render_pipe_appends_truncation_marker_after_captured_text() {
+        let pipe = CapturedPipe {
+            bytes: b"\nhello\n".to_vec(),
+            omitted: 7,
+        };
+
+        assert_eq!(
+            render_pipe(&pipe, true),
+            "hello\n(stream truncated: 7 bytes omitted)",
         );
     }
 }
