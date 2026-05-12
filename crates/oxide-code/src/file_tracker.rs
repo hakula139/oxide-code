@@ -374,6 +374,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, UNIX_EPOCH};
@@ -822,7 +824,34 @@ mod tests {
         };
 
         let tracker = FileTracker::default();
-        tracker.restore_verified(vec![snap]);
+        let dropped = tracker.restore_verified(vec![snap]);
+        assert_eq!(dropped, vec![path.clone()]);
+        assert!(tracker.lock().get(&path).is_none());
+    }
+
+    #[test]
+    fn restore_verified_same_size_content_drift_drops_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"new").unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: xxh64(b"old", HASH_SEED),
+            mtime: OffsetDateTime::from(meta.modified().unwrap()),
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::default();
+        let dropped = tracker.restore_verified(vec![snap]);
+        assert_eq!(
+            dropped,
+            vec![path.clone()],
+            "same-size writes must still be detected by content hash",
+        );
         assert!(tracker.lock().get(&path).is_none());
     }
 
@@ -863,6 +892,31 @@ mod tests {
 
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap]);
+        assert!(tracker.lock().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_verified_unreadable_file_drops_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, b"content").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: xxh64(b"content", HASH_SEED),
+            mtime: OffsetDateTime::from(meta.modified().unwrap()),
+            size: meta.len(),
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let tracker = FileTracker::default();
+        let dropped = tracker.restore_verified(vec![snap]);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(dropped, vec![path.clone()]);
         assert!(tracker.lock().is_empty());
     }
 

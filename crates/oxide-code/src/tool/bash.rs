@@ -286,6 +286,7 @@ fn kill_process_group(pgid: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     // ── run ──
 
@@ -301,6 +302,21 @@ mod tests {
         let output = run(serde_json::json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("Invalid input"));
+    }
+
+    #[tokio::test]
+    async fn run_attaches_description_to_metadata_title() {
+        let tool = BashTool;
+        let output = tool
+            .run(serde_json::json!({
+                "command": "echo hello",
+                "description": "Print greeting",
+            }))
+            .await;
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, "hello");
+        assert_eq!(output.metadata.title.as_deref(), Some("Print greeting"));
     }
 
     #[tokio::test]
@@ -405,6 +421,34 @@ mod tests {
 
     // ── render_pipe ──
 
+    #[tokio::test]
+    async fn read_capped_pipe_bounds_retained_bytes_and_counts_omitted() {
+        let (mut writer, reader) = tokio::io::duplex(PIPE_CAPTURE_BYTES + 16);
+        let input = vec![b'x'; PIPE_CAPTURE_BYTES + 16];
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&input).await.unwrap();
+        });
+
+        let pipe = read_capped_pipe(reader).await.unwrap();
+        writer_task.await.unwrap();
+
+        assert_eq!(pipe.bytes.len(), PIPE_CAPTURE_BYTES);
+        assert!(pipe.bytes.iter().all(|&b| b == b'x'));
+        assert_eq!(pipe.omitted, 16);
+    }
+
+    #[tokio::test]
+    async fn collect_pipe_surfaces_join_failure() {
+        let task =
+            tokio::spawn(async { std::future::pending::<std::io::Result<CapturedPipe>>().await });
+        task.abort();
+
+        let err = collect_pipe(task)
+            .await
+            .expect_err("join error should surface");
+        assert!(err.to_string().contains("cancelled"), "{err}");
+    }
+
     #[test]
     fn render_pipe_appends_truncation_marker_after_captured_text() {
         let pipe = CapturedPipe {
@@ -415,6 +459,29 @@ mod tests {
         assert_eq!(
             render_pipe(&pipe, true),
             "hello\n(stream truncated: 7 bytes omitted)",
+        );
+    }
+
+    #[test]
+    fn render_pipe_trims_stderr_edges_and_keeps_internal_newlines() {
+        let pipe = CapturedPipe {
+            bytes: b"\nerr\nmore\n\n".to_vec(),
+            omitted: 0,
+        };
+
+        assert_eq!(render_pipe(&pipe, false), "err\nmore");
+    }
+
+    #[test]
+    fn render_pipe_renders_marker_when_every_byte_was_omitted() {
+        let pipe = CapturedPipe {
+            bytes: Vec::new(),
+            omitted: 3,
+        };
+
+        assert_eq!(
+            render_pipe(&pipe, true),
+            "(stream truncated: 3 bytes omitted)"
         );
     }
 }

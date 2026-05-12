@@ -585,6 +585,26 @@ mod tests {
         assert_eq!(client.max_tokens, Some(8192));
     }
 
+    #[test]
+    fn load_project_file_allows_tui_only_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {"
+                [tui]
+                show_welcome = false
+            "},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project UI settings should parse")
+            .expect("file exists");
+        assert!(config.client.is_none());
+        assert_eq!(config.tui.unwrap().show_welcome, Some(false));
+    }
+
     // ── find_project_config_from ──
 
     #[test]

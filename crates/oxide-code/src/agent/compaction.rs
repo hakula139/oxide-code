@@ -530,4 +530,31 @@ mod tests {
         assert!(!strip_synthetic_post_compact_prefix(&mut m));
         assert_eq!(m.content.len(), 1);
     }
+
+    #[test]
+    fn strip_synthetic_post_compact_prefix_leaves_assistant_messages() {
+        let mut m = Message::assistant(format!(
+            "{}\n\nnot a synthetic user root",
+            SUMMARY_PREFIX.trim(),
+        ));
+
+        assert!(!strip_synthetic_post_compact_prefix(&mut m));
+        assert_eq!(m.role, Role::Assistant);
+        assert_eq!(m.content.len(), 1);
+    }
+
+    #[test]
+    fn strip_synthetic_post_compact_prefix_leaves_non_text_first_block() {
+        let mut m = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".to_owned(),
+                content: SUMMARY_PREFIX.trim().to_owned(),
+                is_error: false,
+            }],
+        };
+
+        assert!(!strip_synthetic_post_compact_prefix(&mut m));
+        assert!(matches!(m.content[0], ContentBlock::ToolResult { .. }));
+    }
 }

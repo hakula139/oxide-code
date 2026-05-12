@@ -859,6 +859,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_rejects_non_http_base_url_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-http schemes must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("http or https"), "{msg}");
+        assert!(msg.contains("ftp"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn load_accepts_loopback_http_base_url_for_local_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
