@@ -1583,7 +1583,10 @@ mod tests {
             meta.len(),
             crate::file_tracker::GatePurpose::Edit,
         );
-        assert_eq!(check, Ok(crate::file_tracker::StatCheck::Pass));
+        assert!(matches!(
+            check,
+            Ok(crate::file_tracker::StatCheck::NeedsBytes { .. }),
+        ));
     }
 
     #[tokio::test]

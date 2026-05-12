@@ -202,10 +202,9 @@ async fn edit_file(
     let content_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    if let StatCheck::NeedsBytes { stored_hash } = stat_check {
-        FileTracker::verify_drift_bytes(file_path, &content_bytes, stored_hash, GatePurpose::Edit)
-            .map_err(|e| e.to_string())?;
-    }
+    let StatCheck::NeedsBytes { stored_hash } = stat_check;
+    FileTracker::verify_drift_bytes(file_path, &content_bytes, stored_hash, GatePurpose::Edit)
+        .map_err(|e| e.to_string())?;
     let content =
         String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
 

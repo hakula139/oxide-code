@@ -1,18 +1,18 @@
 # File Change Tracking
 
-Read-before-Edit gate, mtime + xxh64 staleness detection, persistence across session resume.
+Read-before-Edit gate, xxh64 staleness detection, persistence across session resume.
 
 ## Implementation
 
-The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker. Edit and Write enforce the Read-before-Edit gate and mtime + xxh64 staleness check. Tracker state persists to JSONL on session finish and verifies on resume.
+The `FileTracker` is a per-session `Arc<Mutex<HashMap>>` shared across tool calls. Read populates the tracker. Edit and Write enforce the Read-before-Edit gate and rehash the current bytes before mutation. Tracker state persists to JSONL on session finish and verifies by content hash on resume.
 
 ## Design Decisions
 
 1. **Strict Read-before-Edit gate.** Edit and Write refuse if the file has not been fully Read in this session. Soft warnings the model can ignore defeat the purpose.
 
-2. **mtime + size fast path, content-hash slow path.** Common case (file untouched) is a single `stat()`. When mtime / size differ, re-hash via xxh64. If the hash matches, treat as unchanged (Windows cloud-sync false-positive workaround).
+2. **Content hash is the gate.** Mutating tools always rehash the current bytes before writing. `(mtime, size)` is useful for metadata and diagnostics, but it is not a correctness proof because same-size writes can preserve timestamps.
 
-3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL. On resume each snapshot is re-`stat()`-checked. Survivors restore into the in-memory tracker, while mismatches drop silently.
+3. **Persist the tracker on session finish, verify on resume.** `Entry::FileSnapshot` stores the tracker state in JSONL. On resume each snapshot is rehashed. Survivors restore into the in-memory tracker, while mismatches drop silently.
 
 4. **Per-session scope.** Tracker created with the session, dropped on finish. No cross-process sharing.
 

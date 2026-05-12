@@ -1,4 +1,4 @@
-//! Per-session Read-before-Edit gate with mtime + xxh64 staleness detection.
+//! Per-session Read-before-Edit gate with xxh64 staleness detection.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,9 +22,8 @@ const HASH_SEED: u64 = 0;
 ///   session.
 /// - **Full read required**: a partial (offset / limit) Read does not satisfy the gate; the agent
 ///   must Read the file in full before mutating it.
-/// - **Freshness**: if (mtime, size) drifted since the recorded Read, the caller must rehash the
-///   current bytes via [`Self::verify_drift_bytes`]; only matching xxh64 content qualifies as an
-///   unchanged file.
+/// - **Freshness**: mutating tools must rehash the current bytes via
+///   [`Self::verify_drift_bytes`]; only matching xxh64 content qualifies as an unchanged file.
 ///
 /// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
 /// resume — see [`Self::restore_verified`].
@@ -105,12 +104,12 @@ impl FileTracker {
         RecordRead::Inserted
     }
 
-    /// Fast-path gate: `Pass` if stat matches, `NeedsBytes` if rehash required.
+    /// Validates the Read-before-Edit gate and returns the hash the caller must verify.
     pub(crate) fn check_stat(
         &self,
         path: &Path,
-        current_mtime: SystemTime,
-        current_size: u64,
+        _current_mtime: SystemTime,
+        _current_size: u64,
         purpose: GatePurpose,
     ) -> Result<StatCheck, GateError> {
         let by_path = self.lock();
@@ -126,13 +125,9 @@ impl FileTracker {
                 purpose,
             });
         }
-        if entry.mtime == current_mtime && entry.size == current_size {
-            Ok(StatCheck::Pass)
-        } else {
-            Ok(StatCheck::NeedsBytes {
-                stored_hash: entry.content_hash,
-            })
-        }
+        Ok(StatCheck::NeedsBytes {
+            stored_hash: entry.content_hash,
+        })
     }
 
     /// Rehashes `bytes` against `stored_hash`; passes if content unchanged despite stat drift.
@@ -202,8 +197,8 @@ impl FileTracker {
         self.lock().clear();
     }
 
-    /// Rehydrates from session JSONL on resume. Each snapshot must still match disk on (mtime,
-    /// size) — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
+    /// Rehydrates from session JSONL on resume. Each snapshot must still match disk by content
+    /// hash — drifted or missing files are dropped, forcing a fresh Read before any mutation. On
     /// duplicate paths the entry with the newer `recorded_at` wins. Returns the dropped paths so
     /// the caller can warn the user that those files need a fresh Read.
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
@@ -223,10 +218,20 @@ impl FileTracker {
                     continue;
                 }
             };
-            let stored_mtime = SystemTime::from(snap.mtime);
-            if current_size != snap.size || current_mtime != stored_mtime {
+            let current_bytes = match std::fs::read(&snap.path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    warn!(
+                        "dropping tracked file {} (read failed, will require fresh Read): {e}",
+                        snap.path.display()
+                    );
+                    dropped.push(snap.path);
+                    continue;
+                }
+            };
+            if xxh64(&current_bytes, HASH_SEED) != snap.content_hash {
                 warn!(
-                    "dropping tracked file {} (drift: stored {}b/mtime vs current {}b/mtime)",
+                    "dropping tracked file {} (content drift: stored {}b/mtime vs current {}b/mtime)",
                     snap.path.display(),
                     snap.size,
                     current_size,
@@ -243,7 +248,7 @@ impl FileTracker {
                     FileState {
                         content_hash: snap.content_hash,
                         mtime: current_mtime,
-                        size: snap.size,
+                        size: current_size,
                         last_view: snap.last_view,
                         recorded_at: snap.recorded_at,
                     },
@@ -267,8 +272,8 @@ impl FileTracker {
 // ── FileSnapshot ──
 
 /// JSONL-persisted record of one tracked file. Written into the session log on `finish` and read
-/// back on resume by [`FileTracker::restore_verified`], which re-stats each path before
-/// re-admitting the entry to the live tracker.
+/// back on resume by [`FileTracker::restore_verified`], which rehashes each path before
+/// re-admitting it to the live tracker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSnapshot {
     pub(crate) path: PathBuf,
@@ -294,15 +299,13 @@ pub(crate) enum RecordRead {
     CacheHit,
 }
 
-/// Outcome of the cheap stat-only freshness check.
+/// Outcome of the tracker precondition check.
 ///
-/// `Pass` — `(mtime, size)` matches the recorded snapshot; the gate is satisfied without
-/// re-reading bytes. `NeedsBytes { stored_hash }` — stat drifted; the caller must rehash the
-/// current file contents and call [`FileTracker::verify_drift_bytes`] to confirm whether the
-/// content actually changed.
+/// The caller must rehash the current file contents and call
+/// [`FileTracker::verify_drift_bytes`] before mutating the file. Relying on `(mtime, size)` alone
+/// can miss same-size writes that preserve timestamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatCheck {
-    Pass,
     NeedsBytes { stored_hash: u64 },
 }
 
@@ -464,13 +467,18 @@ mod tests {
     // ── check_stat ──
 
     #[test]
-    fn check_stat_full_match_passes() {
+    fn check_stat_full_match_requires_hash_verification() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
         let check = tracker.check_stat(path, mtime, 5, GatePurpose::Edit);
-        assert_eq!(check, Ok(StatCheck::Pass));
+        assert_eq!(
+            check,
+            Ok(StatCheck::NeedsBytes {
+                stored_hash: xxh64(b"hello", HASH_SEED),
+            }),
+        );
     }
 
     #[test]
@@ -694,7 +702,12 @@ mod tests {
             meta.len(),
             GatePurpose::Edit,
         );
-        assert_eq!(check, Ok(StatCheck::Pass));
+        assert_eq!(
+            check,
+            Ok(StatCheck::NeedsBytes {
+                stored_hash: xxh64(b"updated", HASH_SEED),
+            }),
+        );
     }
 
     #[tokio::test]
@@ -814,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_verified_mtime_drift_drops_snapshot() {
+    fn restore_verified_mtime_drift_keeps_matching_content_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"alpha").unwrap();
@@ -832,8 +845,8 @@ mod tests {
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![snap]);
         assert!(
-            tracker.lock().get(&path).is_none(),
-            "mtime mismatch must drop the snapshot even when size matches",
+            tracker.lock().get(&path).is_some(),
+            "mtime mismatch alone must not drop a content-matching snapshot",
         );
     }
 
@@ -908,18 +921,22 @@ mod tests {
         std::fs::write(&path, b"x").unwrap();
         let meta = std::fs::metadata(&path).unwrap();
         let mtime_dt = OffsetDateTime::from(meta.modified().unwrap());
+        let content_hash = xxh64(b"x", HASH_SEED);
 
         let older = FileSnapshot {
             path: path.clone(),
-            content_hash: 1,
+            content_hash,
             mtime: mtime_dt,
             size: meta.len(),
-            last_view: LastView::Full,
+            last_view: LastView::Partial {
+                offset: 1,
+                limit: 1,
+            },
             recorded_at: OffsetDateTime::UNIX_EPOCH,
         };
         let newer = FileSnapshot {
             path: path.clone(),
-            content_hash: 2,
+            content_hash,
             mtime: mtime_dt,
             size: meta.len(),
             last_view: LastView::Full,
@@ -929,12 +946,16 @@ mod tests {
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![older.clone(), newer.clone()]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
-        assert_eq!(stored.content_hash, 2, "newer recorded_at wins");
+        assert_eq!(stored.last_view, LastView::Full, "newer recorded_at wins");
 
         let tracker = FileTracker::default();
         tracker.restore_verified(vec![newer, older]);
         let stored = tracker.lock().get(&path).cloned().unwrap();
-        assert_eq!(stored.content_hash, 2, "older does not displace newer");
+        assert_eq!(
+            stored.last_view,
+            LastView::Full,
+            "older does not displace newer",
+        );
     }
 
     // ── Concurrency ──
