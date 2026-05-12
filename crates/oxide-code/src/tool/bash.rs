@@ -8,6 +8,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use super::{Tool, ToolMetadata, ToolOutput, extract_input_field, title_case};
 
@@ -124,15 +126,15 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
         }
     };
 
-    #[cfg(unix)]
     let pgid = child.id();
 
     let stdout = child.stdout.take().expect("stdout configured as piped");
     let stderr = child.stderr.take().expect("stderr configured as piped");
-    let stdout_task = tokio::spawn(read_capped_pipe(stdout));
-    let stderr_task = tokio::spawn(read_capped_pipe(stderr));
+    let mut stdout_task = tokio::spawn(read_capped_pipe(stdout));
+    let mut stderr_task = tokio::spawn(read_capped_pipe(stderr));
+    let deadline = Instant::now() + timeout;
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
             return ToolOutput {
@@ -142,20 +144,14 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             };
         }
         Err(_) => {
-            // kill_on_drop handles bash; killpg catches detached grandchildren in the same group.
-            #[cfg(unix)]
-            kill_process_group(pgid);
-            stdout_task.abort();
-            stderr_task.abort();
-            return ToolOutput {
-                content: format!("Command timed out after {}ms", timeout.as_millis()),
-                is_error: true,
-                metadata: ToolMetadata::default(),
-            };
+            return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
         }
     };
 
-    let stdout = match collect_pipe(stdout_task).await {
+    let Ok(stdout) = tokio::time::timeout_at(deadline, collect_pipe(&mut stdout_task)).await else {
+        return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
+    };
+    let stdout = match stdout {
         Ok(output) => output,
         Err(e) => {
             return ToolOutput {
@@ -165,7 +161,10 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
             };
         }
     };
-    let stderr = match collect_pipe(stderr_task).await {
+    let Ok(stderr) = tokio::time::timeout_at(deadline, collect_pipe(&mut stderr_task)).await else {
+        return timeout_output(timeout, pgid, &stdout_task, &stderr_task);
+    };
+    let stderr = match stderr {
         Ok(output) => output,
         Err(e) => {
             return ToolOutput {
@@ -212,6 +211,23 @@ async fn execute(command: &str, timeout: Duration) -> ToolOutput {
     }
 }
 
+fn timeout_output(
+    timeout: Duration,
+    pgid: Option<u32>,
+    stdout_task: &JoinHandle<std::io::Result<CapturedPipe>>,
+    stderr_task: &JoinHandle<std::io::Result<CapturedPipe>>,
+) -> ToolOutput {
+    // kill_on_drop handles bash; kill_process_group catches detached grandchildren on Unix.
+    kill_process_group(pgid);
+    stdout_task.abort();
+    stderr_task.abort();
+    ToolOutput {
+        content: format!("Command timed out after {}ms", timeout.as_millis()),
+        is_error: true,
+        metadata: ToolMetadata::default(),
+    }
+}
+
 // ── Pipe Capture ──
 
 #[derive(Debug, PartialEq, Eq)]
@@ -241,7 +257,7 @@ where
 }
 
 async fn collect_pipe(
-    task: tokio::task::JoinHandle<std::io::Result<CapturedPipe>>,
+    task: &mut JoinHandle<std::io::Result<CapturedPipe>>,
 ) -> std::io::Result<CapturedPipe> {
     task.await.map_err(std::io::Error::other)?
 }
@@ -282,6 +298,9 @@ fn kill_process_group(pgid: Option<u32>) {
     };
     _ = killpg(Pid::from_raw(pgid_signed), Signal::SIGKILL);
 }
+
+#[cfg(not(unix))]
+fn kill_process_group(_pgid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -419,7 +438,21 @@ mod tests {
         );
     }
 
-    // ── render_pipe ──
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_timeout_covers_background_pipe_holders() {
+        let start = std::time::Instant::now();
+        let output = execute("sleep 5 & echo done", Duration::from_millis(100)).await;
+
+        assert!(output.is_error, "expected timeout");
+        assert_eq!(output.content, "Command timed out after 100ms");
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "timeout did not cover pipe collection",
+        );
+    }
+
+    // ── read_capped_pipe ──
 
     #[tokio::test]
     async fn read_capped_pipe_bounds_retained_bytes_and_counts_omitted() {
@@ -437,17 +470,21 @@ mod tests {
         assert_eq!(pipe.omitted, 16);
     }
 
+    // ── collect_pipe ──
+
     #[tokio::test]
     async fn collect_pipe_surfaces_join_failure() {
-        let task =
+        let mut task =
             tokio::spawn(async { std::future::pending::<std::io::Result<CapturedPipe>>().await });
         task.abort();
 
-        let err = collect_pipe(task)
+        let err = collect_pipe(&mut task)
             .await
             .expect_err("join error should surface");
         assert!(err.to_string().contains("cancelled"), "{err}");
     }
+
+    // ── render_pipe ──
 
     #[test]
     fn render_pipe_appends_truncation_marker_after_captured_text() {
