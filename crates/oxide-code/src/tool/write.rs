@@ -174,7 +174,7 @@ async fn check_gate(file_path: &Path, path: &str, tracker: &FileTracker) -> Resu
 mod tests {
     use super::*;
     use crate::file_tracker::{
-        LastView,
+        LastView, MAX_TRACKED_FILE_SIZE,
         testing::{seed_full_read, tracker},
     };
 
@@ -396,6 +396,42 @@ mod tests {
             err.contains("is a directory"),
             "expected directory rejection, got: {err}",
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_non_regular_file_before_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "expected non-regular-file rejection, got: {err}",
+        );
+        assert!(!is_new);
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_oversized_file_before_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+
+        let (result, is_new) =
+            write_file(path.to_str().unwrap(), "content", &FileTracker::default()).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected size-limit rejection, got: {err}",
+        );
+        assert!(!is_new);
     }
 
     #[cfg(unix)]

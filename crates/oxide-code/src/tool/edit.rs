@@ -1094,6 +1094,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_file_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = edit_file(
+            dir.path().to_str().unwrap(),
+            "a",
+            "b",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("is a directory"),
+            "expected directory rejection, got: {err}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_rejects_non_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let err = edit_file(
+            path.to_str().unwrap(),
+            "a",
+            "b",
+            false,
+            &FileTracker::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("not a regular file"),
+            "expected non-regular-file rejection, got: {err}",
+        );
+    }
+
+    #[tokio::test]
     async fn edit_file_rejects_too_large_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");

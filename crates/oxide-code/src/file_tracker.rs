@@ -427,6 +427,84 @@ mod tests {
 
     use super::*;
 
+    // ── TrackableFileError Display ──
+
+    #[test]
+    fn trackable_file_error_display_names_directory() {
+        let err = TrackableFileError::Directory;
+        assert_eq!(err.to_string(), "not a regular file: directory");
+    }
+
+    #[test]
+    fn trackable_file_error_display_names_non_regular_file() {
+        let err = TrackableFileError::NonRegular;
+        assert_eq!(err.to_string(), "not a regular file");
+    }
+
+    #[test]
+    fn trackable_file_error_display_names_size_limit() {
+        let err = TrackableFileError::TooLarge { size: 12, max: 10 };
+        assert_eq!(
+            err.to_string(),
+            "too large to verify (12 bytes, max 10 bytes)"
+        );
+    }
+
+    // ── validate_trackable_file ──
+
+    #[test]
+    fn validate_trackable_file_accepts_regular_file_at_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracked.rs");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+
+        assert_eq!(validate_trackable_file(&metadata), Ok(()));
+    }
+
+    #[test]
+    fn validate_trackable_file_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = std::fs::metadata(dir.path()).unwrap();
+
+        assert_eq!(
+            validate_trackable_file(&metadata),
+            Err(TrackableFileError::Directory)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_trackable_file_rejects_non_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+
+        assert_eq!(
+            validate_trackable_file(&metadata),
+            Err(TrackableFileError::NonRegular)
+        );
+    }
+
+    #[test]
+    fn validate_trackable_file_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.rs");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+
+        assert_eq!(
+            validate_trackable_file(&metadata),
+            Err(TrackableFileError::TooLarge {
+                size: MAX_TRACKED_FILE_SIZE + 1,
+                max: MAX_TRACKED_FILE_SIZE,
+            }),
+        );
+    }
+
     // ── record_read ──
 
     #[test]
