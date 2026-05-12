@@ -1,6 +1,7 @@
 //! Session actor — owns [`SessionState`] + writer, drains [`SessionCmd`]s, batches one flush
-//! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush;
-//! isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
+//! per `recv()` wakeup. Receive-and-drain coalesces a turn's queued cmds before the first flush,
+//! except `/compact`, which ends the batch so later cmds see the committed synthetic root.
+//! Isolated writes flush immediately. No interval timer — see `docs/design/session/persistence.md`.
 
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use super::entry::Entry;
-use super::handle::{Outcome, RecordOutcome, SharedState};
+use super::handle::{CompactOutcome, Outcome, RecordOutcome, SharedState};
 use super::state::SessionState;
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -48,7 +49,7 @@ pub(super) enum SessionCmd {
         summary: String,
         instructions: Option<String>,
         synthetic_message: Message,
-        ack: oneshot::Sender<super::handle::CompactOutcome>,
+        ack: oneshot::Sender<CompactOutcome>,
     },
     /// Drains pending writes, acks, then exits the actor loop so shutdown returns without
     /// waiting for orphaned clones to drop.
@@ -67,11 +68,16 @@ enum PendingAck {
     },
     Outcome(oneshot::Sender<Outcome>),
     Compact {
-        ack: oneshot::Sender<super::handle::CompactOutcome>,
+        ack: oneshot::Sender<CompactOutcome>,
         pre_count: u32,
         synthetic_uuid: uuid::Uuid,
     },
     Shutdown(oneshot::Sender<()>),
+}
+
+enum BatchFlow {
+    Continue,
+    FlushNow,
 }
 
 /// Actor task body. Owns [`SessionState`] (which owns the writer); absorbs each `recv`-and-drain
@@ -86,7 +92,7 @@ pub(super) async fn run(
         let mut entries: Vec<Entry> = Vec::new();
         let mut acks: Vec<PendingAck> = Vec::new();
         let mut should_exit = false;
-        absorb(
+        let mut flow = absorb(
             first,
             &mut entries,
             &mut acks,
@@ -94,10 +100,11 @@ pub(super) async fn run(
             &shared,
             &mut should_exit,
         );
-        // try_recv only drains what is already queued; cmds arriving after this loop wait for
-        // the next `recv().await` (and form a new batch). Coalescing without an interval timer.
-        while let Ok(next) = rx.try_recv() {
-            absorb(
+        // Compact is a batch barrier: following records must see the committed synthetic root.
+        while matches!(flow, BatchFlow::Continue)
+            && let Ok(next) = rx.try_recv()
+        {
+            flow = absorb(
                 next,
                 &mut entries,
                 &mut acks,
@@ -132,7 +139,7 @@ fn absorb(
     state: &mut SessionState,
     shared: &SharedState,
     should_exit: &mut bool,
-) {
+) -> BatchFlow {
     let now = OffsetDateTime::now_utc();
     match cmd {
         SessionCmd::Record { msg, ack } => {
@@ -140,6 +147,7 @@ fn absorb(
                 state.queue_message_entries(&msg, now, shared.manual_title_set());
             entries.extend(msg_entries);
             acks.push(PendingAck::Record { ack, ai_title_seed });
+            BatchFlow::Continue
         }
         SessionCmd::ToolMetadata { items, ack } => {
             // Default metadata adds no display fields; skip to avoid bloating the transcript.
@@ -161,12 +169,13 @@ fn absorb(
                 // Empty / all-default batch — nothing to flush.
                 _ = ack.send(Outcome { failure: None });
             }
+            BatchFlow::Continue
         }
         SessionCmd::AppendAiTitle { title, ack } => {
             // Re-check: a `/rename` can flip the latch after the generator already queued this.
             if shared.manual_title_set() {
                 _ = ack.send(Outcome { failure: None });
-                return;
+                return BatchFlow::Continue;
             }
             entries.push(Entry::Title {
                 title,
@@ -174,6 +183,7 @@ fn absorb(
                 updated_at: now,
             });
             acks.push(PendingAck::Outcome(ack));
+            BatchFlow::Continue
         }
         SessionCmd::SetManualTitle { title, ack } => {
             shared.mark_manual_title_set();
@@ -188,10 +198,12 @@ fn absorb(
                     acks.push(PendingAck::Outcome(ack));
                 }
             }
+            BatchFlow::Continue
         }
         SessionCmd::Finish { snapshots, ack } => {
             entries.extend(state.finish_entries(snapshots, now));
             acks.push(PendingAck::Outcome(ack));
+            BatchFlow::Continue
         }
         SessionCmd::Compact {
             summary,
@@ -208,10 +220,12 @@ fn absorb(
                 pre_count,
                 synthetic_uuid,
             });
+            BatchFlow::FlushNow
         }
         SessionCmd::Shutdown { ack } => {
             acks.push(PendingAck::Shutdown(ack));
             *should_exit = true;
+            BatchFlow::Continue
         }
         #[cfg(test)]
         SessionCmd::Panic => panic!("deliberate actor panic for testing"),
@@ -722,6 +736,36 @@ mod tests {
             "pre_count reports the count BEFORE the compact reset",
         );
         assert!(outcome.failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_compact_flushes_before_following_record() {
+        let dir = tempdir().unwrap();
+        let store = test_store(dir.path());
+        let state = SessionState::fresh(store.clone(), "m");
+        let session_id = state.session_id.to_string();
+        let (rec_before, _) = record_cmd("before compact");
+        let (compact_ack, _compact_rx) = oneshot::channel();
+        let compact_cmd = SessionCmd::Compact {
+            summary: "s".to_owned(),
+            instructions: None,
+            synthetic_message: Message::user("synthetic summary"),
+            ack: compact_ack,
+        };
+        let (rec_after, _) = record_cmd("after compact");
+
+        drive(state, vec![rec_before, compact_cmd, rec_after]).await;
+
+        let data = store.load_session_data(&session_id).unwrap();
+        assert_eq!(data.messages.len(), 2);
+        assert!(matches!(
+            &data.messages[0].content[0],
+            crate::message::ContentBlock::Text { text } if text == "synthetic summary"
+        ));
+        assert!(matches!(
+            &data.messages[1].content[0],
+            crate::message::ContentBlock::Text { text } if text == "after compact"
+        ));
     }
 
     #[tokio::test]

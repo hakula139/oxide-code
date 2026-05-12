@@ -141,11 +141,7 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Builds the compact-boundary + synthetic post-compact message entries.
-    ///
-    /// The synthetic message is written with `parent_uuid: None` so the loader naturally stops
-    /// walking back at the boundary. State is committed only after the flush succeeds so a failed
-    /// compact cannot leave future writes parented to an unpersisted synthetic UUID.
+    /// Builds the compact boundary and synthetic post-compact root message.
     pub(super) fn compact_entries(
         &self,
         summary: &str,
@@ -172,16 +168,13 @@ impl SessionState {
         (entries, synthetic_uuid)
     }
 
-    /// Commits the in-memory compact boundary after the boundary entries have flushed.
+    /// Anchors future messages to the post-compact root.
     pub(super) fn commit_compact(&mut self, synthetic_uuid: Uuid) {
         self.last_message_uuid = Some(synthetic_uuid);
         self.message_count = 1;
-        // After compact the resumed-message-count anchor no longer applies — the post-compact
-        // tail is a fresh chain. Clear so finish_entries doesn't no-op when the only post-
-        // compact content is the synthetic message itself.
+        // The compacted tail is a fresh chain, so finish must write its own closing Summary.
         self.initial_message_count = 0;
-        // The synthetic message IS a user message, so any post-compact `record_message` should
-        // not retrigger the FirstPrompt-title branch.
+        // The synthetic root is user-role but must not seed a duplicate first-prompt title.
         self.first_user_prompt_seen = true;
     }
 
@@ -594,9 +587,6 @@ mod tests {
 
     #[test]
     fn commit_compact_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
-        // The synthetic message itself is user-role; without latching the flag, the next real
-        // record would mistake the post-compact head for the session's first prompt and seed a
-        // duplicate AI title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -612,9 +602,6 @@ mod tests {
 
     #[test]
     fn commit_compact_clears_resume_anchor_so_finish_writes_summary() {
-        // Without clearing initial_message_count, a resumed session whose only post-compact
-        // content is the synthetic head would no-op in finish_entries (count == initial) and
-        // never emit a closing Summary.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
