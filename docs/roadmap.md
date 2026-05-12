@@ -4,9 +4,9 @@ oxide-code is still early. This roadmap is the high-level product view: what wor
 
 The direction is simple:
 
-- Build a fast terminal AI coding assistant for real project work.
-- Keep the assistant transparent about context, tools, sessions, and state.
-- Grow the product carefully so daily workflows stay understandable.
+- Keep the terminal as the primary interface: streaming chat, tool output, and session controls stay keyboard-first.
+- Keep context and state visible: model, instructions, compaction, queued prompts, and session identity should be inspectable from the UI.
+- Add workflow depth only when it fits the current agent-harness model.
 
 ## Working Today
 

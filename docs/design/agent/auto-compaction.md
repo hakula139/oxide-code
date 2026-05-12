@@ -58,7 +58,7 @@ Environment:
 
 Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
 
-Explicit token thresholds must be at least `50_000` tokens and, for models with known context windows, no higher than the model-derived safe trigger. Percent thresholds must be 1-100 and are capped by the same safe trigger after they resolve to tokens. Lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
+Explicit token thresholds must be at least `50_000` tokens and, for models with known context windows, no higher than the model-derived safe trigger. Percent thresholds must be 1-100, are capped by the same safe trigger after they resolve to tokens, and must still resolve to at least `50_000` tokens. Lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
 
 ## Trigger Flow
 
@@ -68,8 +68,9 @@ The main loop owns the automatic trigger because it can compact before a new pro
 2. The main loop stores that usage as the pending automatic trigger signal.
 3. When the next `SubmitPrompt` arrives, `auto_compact_before_prompt` checks the stored usage before recording the prompt.
 4. If the total crosses the threshold, it calls the same compact driver used by `/compact`.
-5. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
-6. On failure, the loop increments the auto-compaction failure counter and records the new prompt against the unchanged transcript.
+5. The agent loop emits `AutoCompactionStarted` so the TUI can show compaction status while the summarizer runs.
+6. On success, `compact_boundary` persists the compact boundary, clears the file tracker, replaces `messages` with the synthetic post-compact message, and emits `SessionCompacted`.
+7. On failure, the loop increments the auto-compaction failure counter and records the new prompt against the unchanged transcript.
 
 The failure counter is per agent-loop task. Three consecutive automatic failures disable further automatic attempts for the current session. Manual `/compact` does not consult this counter and resets it on success.
 
