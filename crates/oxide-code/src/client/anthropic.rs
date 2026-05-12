@@ -396,7 +396,7 @@ mod tests {
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
-    use crate::config::{Effort, ThinkingConfig};
+    use crate::config::{AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig};
 
     // ── Fixtures ──
 
@@ -476,6 +476,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_exposes_compaction_config() {
+        let mut config = test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL);
+        config.compaction = CompactionConfig {
+            auto: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(123_456),
+            },
+        };
+        let client = Client::new(config, None).unwrap();
+
+        assert_eq!(client.compaction().auto.threshold_tokens, Some(123_456));
     }
 
     #[test]

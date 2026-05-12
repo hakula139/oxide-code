@@ -697,6 +697,28 @@ mod tests {
         }
     }
 
+    struct FailingCompactClient;
+
+    impl AgentClient for FailingCompactClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            unreachable!("auto-compaction tests do not stream turns")
+        }
+
+        fn compact_session<'a>(
+            &'a self,
+            _transcript: &'a [Message],
+            _instructions: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            Box::pin(async { Err(anyhow!("summarizer unavailable")) })
+        }
+    }
+
     impl AgentClient for FakeClient {
         fn stream_message(
             &self,
@@ -936,6 +958,165 @@ mod tests {
     /// Handle whose actor channel is closed; every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
+    }
+
+    // ── auto_compact_if_needed ──
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_skips_without_auto_state_usage_or_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(Vec::new());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let absent = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            None,
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!absent);
+
+        let missing_usage = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!missing_usage);
+
+        let below_threshold = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(100),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!below_threshold);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(failures, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_summarizer_failure_without_replacing_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
+        let session = dead_test_session();
+        let client = FakeClient::new(Vec::new());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("Session write failed")))
+        );
     }
 
     #[tokio::test]

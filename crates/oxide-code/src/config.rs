@@ -910,6 +910,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_compaction_rejects_zero_auto_threshold_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "0"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("zero threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("greater than zero"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_out_of_range_auto_threshold_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "101"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("out-of-range threshold percent must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("between 1 and 100"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_percent_for_unknown_model_disables_auto_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "custom-model"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(!config.compaction.auto.enabled);
+        assert_eq!(config.compaction.auto.threshold_tokens, None);
+    }
+
+    #[tokio::test]
     async fn load_invalid_max_tokens_env_errors() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
@@ -1232,6 +1275,46 @@ mod tests {
     fn display_bool_names_the_two_flag_states() {
         assert_eq!(display_bool(true), "on");
         assert_eq!(display_bool(false), "off");
+    }
+
+    // ── display_auto_compaction ──
+
+    #[test]
+    fn display_auto_compaction_names_enabled_threshold_or_off() {
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(400_000),
+            }),
+            "on at 400000 tokens",
+        );
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: false,
+                threshold_tokens: Some(400_000),
+            }),
+            "off",
+        );
+    }
+
+    // ── AutoCompactionConfig::should_trigger ──
+
+    #[test]
+    fn should_trigger_requires_enabled_threshold_and_enough_tokens() {
+        let enabled = AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(10),
+        };
+        assert!(enabled.should_trigger(10));
+        assert!(!enabled.should_trigger(9));
+        assert!(!AutoCompactionConfig::disabled().should_trigger(100));
+        assert!(
+            !AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: None,
+            }
+            .should_trigger(100)
+        );
     }
 
     // ── default_max_tokens ──
