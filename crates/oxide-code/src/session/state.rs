@@ -1,4 +1,4 @@
-//! In-memory session state owned by the actor. Pure data — no tokio; I/O hides behind
+//! In-memory session state owned by the actor. Pure data with no tokio. I/O hides behind
 //! [`WriterStatus`] so lifecycle transitions test without a runtime.
 
 use std::sync::Arc;
@@ -21,8 +21,7 @@ const MAX_TITLE_LEN: usize = 80;
 // ── SessionState ──
 
 /// Pure-data lifecycle owned by [`super::actor::run`]. All I/O happens through
-/// [`SessionWriter`] held inside [`WriterStatus`]; the rest is bookkeeping the actor mutates
-/// between batches. Never shared across tasks — the actor is the sole owner.
+/// [`SessionWriter`] held inside [`WriterStatus`]. The actor owns the remaining bookkeeping.
 pub(super) struct SessionState {
     pub(super) session_id: Arc<str>,
     store: SessionStore,
@@ -36,10 +35,7 @@ pub(super) struct SessionState {
     finished: bool,
 }
 
-/// Writer lifecycle. `Pending` defers file creation until the first non-empty flush — a
-/// `/rename`-then-quit leaves nothing on disk. `deferred_title` holds the latest rename
-/// (last-wins) and flushes with the header on first promotion. `Broken` reopens via
-/// `open_append` on the next batch.
+/// Writer lifecycle. `Pending` defers file creation until the first non-empty flush.
 enum WriterStatus {
     Pending {
         header: Entry,
@@ -67,9 +63,8 @@ impl SessionState {
         }
     }
 
-    /// Resumed sessions land directly in `Active`. Pass `first_user_prompt_seen = true` whenever
-    /// the disk already holds a title or any user message — otherwise the next recorded message
-    /// will push a duplicate `FirstPrompt` entry.
+    /// Resumed sessions land directly in `Active`. Set `first_user_prompt_seen` when disk already
+    /// holds a title or user message.
     pub(super) fn resumed(
         store: SessionStore,
         session_id: String,
@@ -101,7 +96,7 @@ impl SessionState {
         None
     }
 
-    /// Builds entries for one message; returns AI-title seed on first user-text.
+    /// Builds entries for one message and returns the AI-title seed on first user text.
     /// `manual_title_set` skips both the `FirstPrompt` push and the AI-title seed.
     pub(super) fn queue_message_entries(
         &mut self,
@@ -115,9 +110,9 @@ impl SessionState {
         if !self.first_user_prompt_seen
             && let Some(text) = extract_user_text(message)
         {
-            // Latch before queueing anything — a flush failure must not replay this branch.
+            // Latch before queueing anything. A flush failure must not replay this branch.
             self.first_user_prompt_seen = true;
-            // `/rename` already queued the UserProvided title; skip the FirstPrompt + AI seed.
+            // `/rename` already queued the UserProvided title. Skip the FirstPrompt + AI seed.
             if !manual_title_set {
                 ai_title_seed = Some(text.to_owned());
                 entries.push(Entry::Title {
@@ -141,11 +136,7 @@ impl SessionState {
         (entries, ai_title_seed)
     }
 
-    /// Builds the compact-boundary + synthetic post-compact message entries.
-    ///
-    /// The synthetic message is written with `parent_uuid: None` so the loader naturally stops
-    /// walking back at the boundary. State is committed only after the flush succeeds so a failed
-    /// compact cannot leave future writes parented to an unpersisted synthetic UUID.
+    /// Builds the compact boundary and synthetic post-compact root message.
     pub(super) fn compact_entries(
         &self,
         summary: &str,
@@ -172,16 +163,13 @@ impl SessionState {
         (entries, synthetic_uuid)
     }
 
-    /// Commits the in-memory compact boundary after the boundary entries have flushed.
+    /// Anchors future messages to the post-compact root.
     pub(super) fn commit_compact(&mut self, synthetic_uuid: Uuid) {
         self.last_message_uuid = Some(synthetic_uuid);
         self.message_count = 1;
-        // After compact the resumed-message-count anchor no longer applies — the post-compact
-        // tail is a fresh chain. Clear so finish_entries doesn't no-op when the only post-
-        // compact content is the synthetic message itself.
+        // The compacted tail is a fresh chain, so finish must write its own closing Summary.
         self.initial_message_count = 0;
-        // The synthetic message IS a user message, so any post-compact `record_message` should
-        // not retrigger the FirstPrompt-title branch.
+        // The synthetic root is user-role but must not seed a duplicate first-prompt title.
         self.first_user_prompt_seen = true;
     }
 
@@ -199,7 +187,7 @@ impl SessionState {
             return Vec::new();
         }
         self.finished = true;
-        // Writer may still be Pending in a batched Finish; key off message_count instead.
+        // Writer may still be Pending in a batched Finish. Key off message_count instead.
         if self.message_count == 0 {
             return Vec::new();
         }
@@ -217,7 +205,7 @@ impl SessionState {
         entries
     }
 
-    /// Writes entries in one flush; transitions to Broken on failure so next batch reopens.
+    /// Writes entries in one flush. Transitions to Broken on failure so next batch reopens.
     /// On first `Pending` → `Active` promotion, any deferred title flushes ahead of `entries`
     /// as a `UserProvided` entry stamped at flush time.
     pub(super) fn flush_entries(&mut self, entries: &[Entry]) -> Result<()> {
@@ -274,8 +262,7 @@ fn new_header(model: &str) -> (String, Entry) {
     let session_id = Uuid::new_v4().to_string();
     let cwd = current_dir_string();
     // Skipped under `cfg(test)` so byte-compatible JSONL snapshots and seeded fixtures don't
-    // depend on the working tree's branch — every test site that needs a non-`None` branch
-    // supplies its own fixture via direct `Entry::Header` construction.
+    // depend on the working tree's branch. Tests that need a branch supply it in the fixture.
     let git_branch = if cfg!(test) {
         None
     } else {
@@ -293,8 +280,7 @@ fn new_header(model: &str) -> (String, Entry) {
 }
 
 /// Best-effort branch name via `git rev-parse --abbrev-ref HEAD`. Returns `None` when not in a
-/// repo, when git is missing, or when HEAD is detached (returned as the literal `HEAD` — surfaced
-/// as `None` so the metadata column doesn't show a useless `· HEAD`).
+/// repo, when git is missing, or when HEAD is detached.
 fn current_git_branch(cwd: &str) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -594,9 +580,6 @@ mod tests {
 
     #[test]
     fn commit_compact_marks_first_user_prompt_seen_so_post_compact_record_skips_title() {
-        // The synthetic message itself is user-role; without latching the flag, the next real
-        // record would mistake the post-compact head for the session's first prompt and seed a
-        // duplicate AI title.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -612,9 +595,6 @@ mod tests {
 
     #[test]
     fn commit_compact_clears_resume_anchor_so_finish_writes_summary() {
-        // Without clearing initial_message_count, a resumed session whose only post-compact
-        // content is the synthetic head would no-op in finish_entries (count == initial) and
-        // never emit a closing Summary.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -731,8 +711,8 @@ mod tests {
 
     // ── flush_entries ──
 
-    // `/dev/full` drives a real ENOSPC on every write — Linux-only, so the test gates rather
-    // than smuggle in a failing-writer trait.
+    // `/dev/full` drives a real ENOSPC on every write. Linux-only, so the test gates instead of
+    // smuggling in a failing-writer trait.
     #[cfg(target_os = "linux")]
     #[test]
     fn flush_entries_active_writer_flush_failure_transitions_to_broken() {
@@ -790,10 +770,8 @@ mod tests {
 
     #[test]
     fn flush_entries_pending_create_failure_preserves_deferred_title() {
-        // The next batch must retry create rather than open_append a file that was never
-        // created — and the deferred title must survive into the retry. A regression that
-        // restored `Pending { deferred_title: None }` on rollback would silently drop the
-        // user's `/rename`.
+        // The next batch must retry create rather than append a file that was never created. The
+        // deferred title must survive into the retry.
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         let mut state = SessionState::fresh(store, "m");
@@ -838,9 +816,7 @@ mod tests {
 
     #[test]
     fn current_git_branch_in_a_real_repo_returns_the_branch_name() {
-        // Skipped silently if `git` isn't on PATH so CI without git doesn't fail — production
-        // path correctly returns `None` in that case. An empty repo's rev-parse would return the
-        // literal `HEAD`, so we make a commit first.
+        // Skipped silently if `git` isn't on PATH so CI without git doesn't fail.
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
         let Ok(status) = std::process::Command::new("git")
@@ -892,7 +868,7 @@ mod tests {
         assert_eq!(parse_git_branch(true, &[0xff, 0xfe, b'\n']), None);
         assert_eq!(parse_git_branch(true, b""), None);
         assert_eq!(parse_git_branch(true, b"   \n"), None);
-        // `HEAD` is rev-parse's detached-HEAD output — useless in the picker.
+        // `HEAD` is rev-parse's detached-HEAD output, which is useless in the picker.
         assert_eq!(parse_git_branch(true, b"HEAD\n"), None);
     }
 

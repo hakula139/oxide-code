@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::actor::{self, SessionCmd};
+use super::entry::CompactInfo;
 use super::sanitize::sanitize_resumed_messages;
 use super::state::{SessionState, extract_user_text};
 use super::store::{
@@ -294,6 +295,7 @@ impl SessionHandle {
 pub(crate) struct ResumedSession {
     pub(crate) handle: SessionHandle,
     pub(crate) messages: Vec<Message>,
+    pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     /// Persisted tracker snapshots; passed to `FileTracker::restore_verified` so the
@@ -340,6 +342,7 @@ pub(crate) async fn roll(
 #[derive(Debug)]
 pub(crate) struct RollIntoOutcome {
     pub(crate) messages: Vec<Message>,
+    pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<String>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) finalize_failure: Option<String>,
@@ -367,6 +370,7 @@ pub(crate) async fn roll_into(
     let ResumedSession {
         handle: target_handle,
         messages,
+        compact,
         title,
         tool_result_metadata,
         file_snapshots,
@@ -380,6 +384,7 @@ pub(crate) async fn roll_into(
     let finalize_failure = old_session.finalize(old_snapshots).await;
     Ok(RollIntoOutcome {
         messages,
+        compact,
         title,
         tool_result_metadata,
         finalize_failure,
@@ -434,6 +439,7 @@ fn from_resumed_data(
     Ok(ResumedSession {
         handle,
         messages: data.messages,
+        compact: data.compact,
         title,
         tool_result_metadata: data.tool_result_metadata,
         file_snapshots: data.file_snapshots,

@@ -57,6 +57,7 @@ pub(crate) enum AgentEvent {
         id: String,
         title: Option<String>,
         messages: Vec<crate::message::Message>,
+        compact: Option<crate::session::entry::CompactInfo>,
         tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
     },
     /// `/compact` finished — summary captures the prior transcript, `pre_count` is for the

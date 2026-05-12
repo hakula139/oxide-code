@@ -1,6 +1,6 @@
 //! Session file I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::chain::ChainBuilder;
-use super::entry::{CURRENT_VERSION, Entry, ExitInfo, SessionInfo, TitleInfo};
+use super::entry::{CURRENT_VERSION, CompactInfo, Entry, ExitInfo, SessionInfo, TitleInfo};
 use super::path::{UNKNOWN_PROJECT_DIR, sanitize_cwd};
 use crate::file_tracker::FileSnapshot;
 use crate::message::Message;
@@ -257,10 +257,7 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
     let file =
         File::open(path).with_context(|| format!("session not found: {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut chain = ChainBuilder::new();
-    let mut latest_title: Option<TitleInfo> = None;
-    let mut tool_result_metadata: HashMap<String, ToolMetadata> = HashMap::new();
-    let mut file_snapshots: Vec<FileSnapshot> = Vec::new();
+    let mut builder = SessionDataBuilder::new();
     let mut buf = Vec::new();
     let mut line_no: u32 = 0;
 
@@ -292,6 +289,34 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
                 continue;
             }
         };
+        builder.apply_entry(entry, line_no)?;
+    }
+
+    Ok(builder.finish())
+}
+
+struct SessionDataBuilder {
+    chain: ChainBuilder,
+    compact: Option<CompactInfo>,
+    latest_title: Option<TitleInfo>,
+    compact_tail_uuids: Option<HashSet<Uuid>>,
+    tool_result_metadata: HashMap<String, ToolMetadata>,
+    file_snapshots: Vec<FileSnapshot>,
+}
+
+impl SessionDataBuilder {
+    fn new() -> Self {
+        Self {
+            chain: ChainBuilder::new(),
+            compact: None,
+            latest_title: None,
+            compact_tail_uuids: None,
+            tool_result_metadata: HashMap::new(),
+            file_snapshots: Vec::new(),
+        }
+    }
+
+    fn apply_entry(&mut self, entry: Entry, line_no: u32) -> Result<()> {
         match entry {
             Entry::Header { version, .. } if version > CURRENT_VERSION => {
                 bail!(
@@ -303,43 +328,101 @@ pub(crate) fn load_session_data_from_path(path: &Path) -> Result<SessionData> {
                 parent_uuid,
                 message,
                 timestamp,
-            } => {
-                if parent_uuid.is_none() {
-                    tool_result_metadata.clear();
-                    file_snapshots.clear();
-                }
-                chain.insert(uuid, parent_uuid, message, timestamp);
-            }
+            } => self.insert_message(uuid, parent_uuid, message, timestamp, line_no),
             Entry::Title {
                 title, updated_at, ..
-            } if latest_title
+            } if self
+                .latest_title
                 .as_ref()
                 .is_none_or(|cur| updated_at > cur.updated_at) =>
             {
-                latest_title = Some(TitleInfo { title, updated_at });
+                self.latest_title = Some(TitleInfo { title, updated_at });
             }
             Entry::ToolResultMetadata {
                 tool_use_id,
                 metadata,
                 ..
             } => {
-                tool_result_metadata.insert(tool_use_id, metadata);
+                self.tool_result_metadata.insert(tool_use_id, metadata);
             }
             Entry::FileSnapshot { snapshot } => {
-                file_snapshots.push(snapshot);
+                self.file_snapshots.push(snapshot);
             }
+            Entry::Compact {
+                summary,
+                pre_message_count,
+                instructions,
+                ..
+            } => self.reset_at_compact(summary, pre_message_count, instructions),
             _ => {}
         }
+        Ok(())
     }
 
-    let (messages, last_uuid) = chain.resolve();
-    Ok(SessionData {
-        messages,
-        last_uuid,
-        title: latest_title,
-        tool_result_metadata,
-        file_snapshots,
-    })
+    fn insert_message(
+        &mut self,
+        uuid: Uuid,
+        parent_uuid: Option<Uuid>,
+        message: Message,
+        timestamp: OffsetDateTime,
+        line_no: u32,
+    ) {
+        if !self.accepts_compact_tail_message(uuid, parent_uuid) {
+            warn!("skipping pre-compact branch append at line {line_no}");
+            return;
+        }
+        if parent_uuid.is_none() {
+            self.clear_sidecars();
+        }
+        self.chain.insert(uuid, parent_uuid, message, timestamp);
+    }
+
+    fn accepts_compact_tail_message(&mut self, uuid: Uuid, parent_uuid: Option<Uuid>) -> bool {
+        let Some(tail_uuids) = &mut self.compact_tail_uuids else {
+            return true;
+        };
+        let accepted = match parent_uuid {
+            None => tail_uuids.is_empty(),
+            Some(parent) => tail_uuids.contains(&parent),
+        };
+        if accepted {
+            tail_uuids.insert(uuid);
+        }
+        accepted
+    }
+
+    fn reset_at_compact(
+        &mut self,
+        summary: String,
+        pre_message_count: u32,
+        instructions: Option<String>,
+    ) {
+        self.chain = ChainBuilder::new();
+        self.compact = Some(CompactInfo {
+            summary,
+            pre_message_count,
+            instructions,
+        });
+        self.compact_tail_uuids = Some(HashSet::new());
+        self.clear_sidecars();
+    }
+
+    fn clear_sidecars(&mut self) {
+        self.tool_result_metadata.clear();
+        self.file_snapshots.clear();
+    }
+
+    fn finish(self) -> SessionData {
+        let (messages, last_uuid) = self.chain.resolve();
+        SessionData {
+            messages,
+            last_uuid,
+            compact: self.compact,
+            title: self.latest_title,
+            tool_result_metadata: self.tool_result_metadata,
+            file_snapshots: self.file_snapshots,
+        }
+    }
 }
 
 /// Reads just the `session_id` from a session file's header line.
@@ -468,6 +551,7 @@ impl SessionWriter {
 pub(crate) struct SessionData {
     pub(crate) messages: Vec<Message>,
     pub(crate) last_uuid: Option<Uuid>,
+    pub(crate) compact: Option<CompactInfo>,
     pub(crate) title: Option<TitleInfo>,
     pub(crate) tool_result_metadata: HashMap<String, ToolMetadata>,
     pub(crate) file_snapshots: Vec<FileSnapshot>,
@@ -1010,6 +1094,66 @@ mod tests {
         );
         assert_eq!(data.file_snapshots.len(), 1);
         assert!(data.file_snapshots[0].path.ends_with("post.txt"));
+    }
+
+    #[test]
+    fn load_session_data_ignores_newer_old_chain_messages_after_compact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut writer = store.create(&sample_header("compact-generation")).unwrap();
+
+        let pre = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                pre,
+                None,
+                datetime!(2026-04-16 12:00:01 UTC),
+                "pre-compact",
+            ))
+            .unwrap();
+        writer
+            .append(&Entry::Compact {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: Some("focus".to_owned()),
+                timestamp: datetime!(2026-04-16 12:00:02 UTC),
+            })
+            .unwrap();
+
+        let synthetic = Uuid::new_v4();
+        writer
+            .append(&sample_message_at(
+                synthetic,
+                None,
+                datetime!(2026-04-16 12:00:03 UTC),
+                "synthetic summary",
+            ))
+            .unwrap();
+        writer
+            .append(&sample_message_at(
+                Uuid::new_v4(),
+                Some(pre),
+                datetime!(2026-04-16 12:00:05 UTC),
+                "stale old-chain append",
+            ))
+            .unwrap();
+        drop(writer);
+
+        let data = store.load_session_data("compact-generation").unwrap();
+        assert_eq!(data.last_uuid, Some(synthetic));
+        assert_eq!(data.messages.len(), 1);
+        assert!(matches!(
+            &data.messages[0].content[0],
+            ContentBlock::Text { text } if text == "synthetic summary"
+        ));
+        assert_eq!(
+            data.compact,
+            Some(CompactInfo {
+                summary: "summary".to_owned(),
+                pre_message_count: 1,
+                instructions: Some("focus".to_owned()),
+            })
+        );
     }
 
     #[test]

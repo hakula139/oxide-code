@@ -101,6 +101,13 @@ pub(crate) struct ExitInfo {
     pub(crate) updated_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompactInfo {
+    pub(crate) summary: String,
+    pub(crate) pre_message_count: u32,
+    pub(crate) instructions: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SessionInfo {
     pub(crate) session_id: String,

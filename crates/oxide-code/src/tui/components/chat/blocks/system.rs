@@ -1,12 +1,11 @@
 //! Slash-command output block — `▎` left-bar in `accent` + body in `text`. Errors use
 //! [`super::ErrorBlock`] so info output is visually distinct from failures.
 
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx};
-use crate::tui::glyphs::{BAR, TOOL_BORDER_PREFIX};
+use super::{ChatBlock, RenderCtx, bar_continuation_prefix};
+use crate::tui::glyphs::TOOL_BORDER_PREFIX;
 use crate::tui::wrap::wrap_line;
 
 /// Output from a locally-dispatched slash command.
@@ -30,7 +29,7 @@ impl ChatBlock for SystemMessageBlock {
         let bar_style = ctx.theme.accent();
         let body_style = ctx.theme.text();
         let width = usize::from(ctx.width);
-        let cont_prefix = bar_continuation_prefix(bar_style);
+        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_PREFIX, bar_style);
         let indent = TOOL_BORDER_PREFIX.width();
         let mut out = Vec::new();
         for body_line in self.text.lines() {
@@ -51,19 +50,12 @@ impl ChatBlock for SystemMessageBlock {
     }
 }
 
-fn bar_continuation_prefix(bar_style: Style) -> Vec<Span<'static>> {
-    let bar_pos = TOOL_BORDER_PREFIX
-        .find(BAR)
-        .expect("TOOL_BORDER_PREFIX contains BAR");
-    let trailing = &TOOL_BORDER_PREFIX[bar_pos + BAR.len()..];
-    vec![Span::styled(BAR, bar_style), Span::raw(trailing.to_owned())]
-}
-
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::tui::glyphs::BAR;
     use crate::tui::theme::Theme;
 
     fn ctx_at(width: u16, theme: &Theme) -> RenderCtx<'_> {
@@ -127,8 +119,6 @@ mod tests {
         let lines = block.render(&ctx_at(16, &theme));
         assert!(lines.len() >= 2, "expected wrap, got {lines:#?}");
         for (i, line) in lines.iter().enumerate() {
-            // First row: bar+space as one span. Continuation splits to [bar, space] so the bar
-            // keeps the `accent` style.
             let head = &line.spans[0];
             let content = head.content.as_ref();
             assert!(

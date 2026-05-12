@@ -1,14 +1,11 @@
-//! Post-`/compact` boundary block. Bordered surface with a count header (`Compacted N messages
-//! → 1 summary`) plus the markdown-rendered summary body. The summary IS user-visible prose, so
-//! the body runs through `render_markdown` rather than the plain bar-prefixed wrap that
-//! [`super::SystemMessageBlock`] uses.
+//! Post-`/compact` boundary block.
 
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{ChatBlock, RenderCtx, prepend_markdown_prefix};
-use crate::tui::glyphs::{BAR, TOOL_BORDER_PREFIX};
+use super::{ChatBlock, RenderCtx, bar_continuation_prefix, prepend_markdown_prefix};
+use crate::tui::glyphs::TOOL_BORDER_PREFIX;
 use crate::tui::markdown::render_markdown;
 use crate::tui::wrap::wrap_line;
 
@@ -46,7 +43,7 @@ impl ChatBlock for CompactedBlock {
         let width = usize::from(ctx.width);
         let bar_width = TOOL_BORDER_PREFIX.width();
         let md_width = width.saturating_sub(bar_width);
-        let cont_prefix = bar_continuation_prefix();
+        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_PREFIX, bar_style);
 
         let mut out: Vec<Line<'static>> = Vec::new();
 
@@ -79,14 +76,6 @@ impl ChatBlock for CompactedBlock {
 
         out
     }
-}
-
-fn bar_continuation_prefix() -> Vec<Span<'static>> {
-    let bar_pos = TOOL_BORDER_PREFIX
-        .find(BAR)
-        .expect("TOOL_BORDER_PREFIX contains BAR");
-    let trailing = &TOOL_BORDER_PREFIX[bar_pos + BAR.len()..];
-    vec![Span::raw(BAR.to_owned()), Span::raw(trailing.to_owned())]
 }
 
 #[cfg(test)]
@@ -203,5 +192,19 @@ mod tests {
             text.contains("(focus: the build error)"),
             "header: {text:?}"
         );
+    }
+
+    #[test]
+    fn render_wrapped_header_keeps_bar_accent() {
+        let theme = Theme::default();
+        let block = CompactedBlock::new(42, Some("focus on a long failing build transcript"), "");
+        let lines = block.render(&ctx_at(24, &theme));
+
+        assert!(lines.len() > 1, "header should wrap: {lines:?}");
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            let bar = &line.spans[0];
+            assert_eq!(bar.content.as_ref(), "▎", "row {i}: {line:?}");
+            assert_eq!(bar.style, theme.accent(), "row {i}: {line:?}");
+        }
     }
 }

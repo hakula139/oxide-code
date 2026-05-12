@@ -17,9 +17,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{BlockKind, ChatBlock, RenderCtx};
+use super::{BlockKind, ChatBlock, RenderCtx, bar_continuation_prefix};
 use crate::tool::ToolResultView;
-use crate::tui::glyphs::{BAR, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
+use crate::tui::glyphs::{TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR, TOOL_SUCCESS};
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -47,7 +47,7 @@ impl ToolCallBlock {
 impl ChatBlock for ToolCallBlock {
     fn render(&self, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let border_style = ctx.theme.tool_border();
-        let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
+        let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
         let line = Line::from(vec![
             Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
             Span::styled(self.icon.to_owned(), ctx.theme.tool_icon()),
@@ -158,7 +158,7 @@ fn render_status_line(
         (TOOL_SUCCESS, ctx.theme.success())
     };
     let border_style = border_style_for(ctx.theme, is_error);
-    let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
+    let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let line = Line::from(vec![
         Span::styled(TOOL_BORDER_PREFIX.to_owned(), border_style),
         Span::styled(indicator, indicator_style),
@@ -171,18 +171,6 @@ fn render_status_line(
         TOOL_BORDER_CONT.width(),
         Some(&cont_prefix),
     ));
-}
-
-/// Continuation prefix that keeps `▎` aligned under the original prefix.
-fn border_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
-    let bar_pos = prefix.find(BAR).expect("prefix must contain ▎ bar");
-    let left = &prefix[..bar_pos];
-    let right = &prefix[bar_pos + BAR.len()..];
-    vec![
-        Span::raw(left.to_owned()),
-        Span::styled(BAR, bar_style),
-        Span::raw(right.to_owned()),
-    ]
 }
 
 fn border_style_for(theme: &Theme, is_error: bool) -> Style {
@@ -203,21 +191,7 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Style;
-
     use super::*;
-
-    // ── border_continuation_prefix ──
-
-    #[test]
-    fn border_continuation_prefix_preserves_bar_position() {
-        let style = Style::default();
-        let spans = border_continuation_prefix(TOOL_BORDER_PREFIX, style);
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content, "");
-        assert_eq!(spans[1].content, BAR);
-        assert_eq!(spans[2].content, " ");
-    }
 
     // ── truncate_to_bytes ──
 

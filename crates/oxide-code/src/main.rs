@@ -244,6 +244,7 @@ async fn run_tui(
     let ResumedSession {
         handle: session,
         messages: resumed_messages,
+        compact: resumed_compact,
         title: resumed_title,
         tool_result_metadata: resumed_tool_metadata,
         file_snapshots: _,
@@ -270,12 +271,15 @@ async fn run_tui(
         theme,
         session_info,
         show_thinking,
-        resumed_title,
         agent_rx,
         user_tx,
-        &resumed_messages,
-        &resumed_tool_metadata,
         Arc::clone(&tools),
+        tui::app::AppHistory {
+            messages: &resumed_messages,
+            compact: resumed_compact.as_ref(),
+            tool_metadata: &resumed_tool_metadata,
+            title: resumed_title,
+        },
     );
 
     let agent_handle = {
@@ -473,6 +477,7 @@ async fn apply_resume(
         id: new_id,
         title: outcome.title,
         messages: outcome.messages,
+        compact: outcome.compact,
         tool_metadata: outcome.tool_result_metadata,
     }) {
         // Channel closed mid-resume leaves the TUI on the OLD chat. Pinpoint the desync.
