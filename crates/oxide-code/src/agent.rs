@@ -124,10 +124,6 @@ pub(crate) struct AutoCompact<'a> {
 /// - [`TurnAbort::Cancelled`] / [`TurnAbort::Quit`] on the matching [`UserAction`].
 /// - [`TurnAbort::Failed`] for stream errors, tool-dispatch failures, or hitting
 ///   [`MAX_TOOL_ROUNDS`] without a final response.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the turn driver keeps the live mutable state explicit at the call site"
-)]
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,

@@ -26,6 +26,7 @@ use super::pending_calls::{PendingCall, PendingCalls, result_header};
 use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
+use crate::config::{CompactionConfig, Effort};
 use crate::message::Message;
 use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
@@ -490,25 +491,7 @@ impl App {
                 effort,
                 compaction,
                 requested_effort,
-            } => {
-                let model_changed = model_id != self.session_info.config.model_id;
-                let prev_effort = self.session_info.config.effort;
-                let confirmation = format_config_change(
-                    &model_id,
-                    model_changed,
-                    prev_effort,
-                    effort,
-                    requested_effort,
-                );
-                if model_changed {
-                    self.status_bar
-                        .set_model(crate::model::display_name(&model_id).into_owned());
-                }
-                self.session_info.config.model_id = model_id;
-                self.session_info.config.effort = effort;
-                self.session_info.config.compaction = compaction;
-                self.chat.push_system_message(confirmation);
-            }
+            } => self.apply_config_changed(model_id, effort, compaction, requested_effort),
             AgentEvent::Error(msg) => {
                 self.chat.push_error(&msg);
                 self.finish_turn();
@@ -567,6 +550,32 @@ impl App {
         if !automatic {
             self.finalize_idle();
         }
+    }
+
+    fn apply_config_changed(
+        &mut self,
+        model_id: String,
+        effort: Option<Effort>,
+        compaction: CompactionConfig,
+        requested_effort: Option<Effort>,
+    ) {
+        let model_changed = model_id != self.session_info.config.model_id;
+        let prev_effort = self.session_info.config.effort;
+        let confirmation = format_config_change(
+            &model_id,
+            model_changed,
+            prev_effort,
+            effort,
+            requested_effort,
+        );
+        if model_changed {
+            self.status_bar
+                .set_model(crate::model::display_name(&model_id).into_owned());
+        }
+        self.session_info.config.model_id = model_id;
+        self.session_info.config.effort = effort;
+        self.session_info.config.compaction = compaction;
+        self.chat.push_system_message(confirmation);
     }
 
     /// Resets to idle, clears orphan calls, re-enables input, and drains queued prompts.

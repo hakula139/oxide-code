@@ -709,11 +709,11 @@ fn apply_swap_config(
     model: Option<ResolvedModelId>,
     effort: Option<Effort>,
 ) {
-    if let Some(id) = model {
-        if let Err(e) = client.set_model(id.into_inner()) {
-            _ = sink.send(AgentEvent::Error(format!("Config change failed: {e:#}")));
-            return;
-        }
+    if let Some(id) = model
+        && let Err(e) = client.set_model(id.into_inner())
+    {
+        _ = sink.send(AgentEvent::Error(format!("Config change failed: {e:#}")));
+        return;
     }
     let resolved = match effort {
         Some(pick) => client.set_effort(pick),
