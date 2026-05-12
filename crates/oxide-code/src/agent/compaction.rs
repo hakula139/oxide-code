@@ -1,17 +1,13 @@
-//! `/compact` driver: streams a one-shot summarization request through the live [`Client`] and
-//! returns the trimmed summary text. The driver itself does not touch session state — that is
-//! the caller's job (see `apply_compact` in the agent-loop dispatch).
+//! `/compact` summarization request builder and stream collector.
 //!
-//! Wire shape: an empty tool list and a dedicated minimal system prompt so the model cannot
-//! attempt a tool call mid-summary. The transcript is stripped to text-only content blocks
-//! before sending — tool-use, tool-result, and thinking blocks are dropped. The rubric (and
-//! optional user instructions) ride as a final user message after the stripped transcript.
+//! Compaction sends text-only transcript messages, a dedicated summarization system prompt, and
+//! no tool definitions. Session mutation happens in the agent loop after the summary succeeds.
 
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 
 use crate::client::anthropic::Client;
-use crate::client::anthropic::wire::{Delta, StreamEvent};
+use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message};
 
 /// Minimum messages required for compaction to be worthwhile. Below this, the summary is
@@ -21,7 +17,7 @@ const MIN_MESSAGES_FOR_COMPACT: usize = 4;
 /// System prompt for the summarization request. Deliberately narrow — the surrounding
 /// `SYSTEM_PROMPT_PREFIX` ("You are Claude Code...") is added by the client; this section
 /// reframes the model's job for the compaction turn.
-pub(crate) const SUMMARIZATION_SYSTEM: &str = indoc! {r"
+const SUMMARIZATION_SYSTEM: &str = indoc! {r"
     You are summarizing a conversation between a software engineer and an AI coding assistant.
 
     Output ONLY the summary text. Do not call any tools. Do not ask clarifying questions. Do not
@@ -31,7 +27,7 @@ pub(crate) const SUMMARIZATION_SYSTEM: &str = indoc! {r"
 
 /// User-message rubric. Five short asks; the model converges on the right shape without the
 /// numbered-section ceremony Claude Code uses.
-pub(crate) const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
+const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
     Summarize the conversation above so another instance of yourself can pick up where this one
     left off. Capture, in this order:
 
@@ -48,7 +44,7 @@ pub(crate) const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
 /// Prepended to the synthetic post-compact user message materializing the summary into the
 /// next turn. Phrasing tells the next-turn model to use the summary rather than re-asking what
 /// to do — without this prefix the next turn often redundantly clarifies intent.
-pub(crate) const SUMMARY_PREFIX: &str = indoc! {r"
+const SUMMARY_PREFIX: &str = indoc! {r"
     This conversation has been compacted. The summary below covers the prior work; continue
     from here without re-asking the engineer what to do.
 "};
@@ -83,13 +79,16 @@ pub(crate) async fn compact_session(
     let mut summary = String::new();
     while let Some(event) = rx.recv().await {
         match event? {
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockInfo::Text { text },
+                ..
+            } => summary.push_str(&text),
             StreamEvent::ContentBlockDelta {
                 delta: Delta::TextDelta { text },
                 ..
             } => summary.push_str(&text),
             StreamEvent::Error { error } => bail!("API error during compaction: {}", error.message),
             StreamEvent::MessageStop => break,
-            // ContentBlockStart/Stop, MessageStart/Delta, Ping, thinking deltas, etc. — ignore.
             _ => {}
         }
     }
@@ -163,12 +162,16 @@ mod tests {
     // ── compact_session ──
 
     fn streamed_summary_body(text: &str) -> String {
+        streamed_summary_body_parts("", text)
+    }
+
+    fn streamed_summary_body_parts(start_text: &str, delta_text: &str) -> String {
         use std::fmt::Write as _;
 
         let frames = [
             json!({"type": "message_start", "message": {"id": "m", "model": "claude-haiku-4-5"}}).to_string(),
-            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}).to_string(),
-            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}).to_string(),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": start_text}}).to_string(),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta_text}}).to_string(),
             json!({"type": "content_block_stop", "index": 0}).to_string(),
             json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}).to_string(),
             json!({"type": "message_stop"}).to_string(),
@@ -251,6 +254,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_session_collects_initial_text_from_content_block_start() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(streamed_summary_body_parts("  fixed", " login bug  \n"))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
+        let summary = compact_session(&client, &fake_transcript(), None)
+            .await
+            .unwrap();
+        assert_eq!(summary, "fixed login bug");
+    }
+
+    #[tokio::test]
     async fn compact_session_empty_summary_errors() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -302,6 +325,14 @@ mod tests {
                 },
             ],
         };
+        transcript.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_owned(),
+                content: "file body".to_owned(),
+                is_error: false,
+            }],
+        });
         compact_session(&client, &transcript, Some("focus on auth"))
             .await
             .unwrap();
@@ -327,15 +358,19 @@ mod tests {
 
     #[tokio::test]
     async fn compact_session_surfaces_stream_error_event() {
-        // Stream that opens cleanly then emits an in-band error frame (rate limit / overload) —
-        // the bail path inside the receive loop, distinct from HTTP-level failures.
-        let body = "event: ping\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-haiku-4-5\"}}\n\nevent: ping\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"servers overloaded\"}}\n\n";
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(body)
+                    .set_body_string(indoc! {r#"
+                        event: ping
+                        data: {"type":"message_start","message":{"id":"m","model":"claude-haiku-4-5"}}
+
+                        event: ping
+                        data: {"type":"error","error":{"type":"overloaded_error","message":"servers overloaded"}}
+
+                    "#})
                     .insert_header("content-type", "text/event-stream"),
             )
             .mount(&server)
