@@ -1,6 +1,6 @@
 //! Background AI title generator. After the first user prompt, asks Haiku for a 3-7 word title,
 //! persists it as an `AiGenerated` `Entry::Title`, and emits `AgentEvent::SessionTitleUpdated`.
-//! Failures warn-log only — the first-prompt title stays on disk. Fresh sessions only.
+//! Failures warn-log only, so the first-prompt title stays on disk. Fresh sessions only.
 
 use anyhow::{Context, Result, bail};
 use indoc::indoc;
@@ -17,16 +17,18 @@ use crate::session::handle::SessionHandle;
 /// Haiku model used for title generation. Cheap enough to fire on every fresh session.
 const HAIKU_MODEL: &str = "claude-haiku-4-5";
 
-/// Output budget — 40 tokens comfortably fits the 3-7 word JSON envelope.
+/// Output budget. 40 tokens comfortably fits the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 40;
 
-/// Clamp on the prompt — long first messages with pasted code stay cheap to title.
+/// Clamp on the prompt. Long first messages with pasted code stay cheap to title.
 const MAX_PROMPT_CHARS: usize = 1_000;
 
 /// Title prompt. The paired JSON-schema output format ([`title_output_format`]) enforces
 /// the `{"title": ...}` shape regardless of how the model would otherwise respond.
 const SYSTEM_PROMPT: &str = indoc! {r#"
-    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns.
+    Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this
+    coding session. The title should be clear enough that the user recognizes the session in a list.
+    Use sentence case: capitalize only the first word and proper nouns.
 
     Return JSON with a single "title" field.
 
@@ -37,7 +39,7 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
     {"title": "Refactor API client error handling"}
 
     Bad (too vague): {"title": "Code changes"}
-    Bad (too long): {"title": "Investigate and fix the issue where the login button does not respond on mobile devices"}
+    Bad (too long): {"title": "Investigate and fix why the mobile login button no longer responds"}
     Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 "#};
 
@@ -45,7 +47,7 @@ const SYSTEM_PROMPT: &str = indoc! {r#"
 
 /// Fire-and-forget: spawns a detached tokio task and returns immediately. The task asks Haiku
 /// for a title, appends it to `session`, and emits `SessionTitleUpdated` through `sink`. All
-/// failures (HTTP, parse, write) warn-log and drop — the first-prompt title persists, so the
+/// failures (HTTP, parse, write) warn-log and drop. The first-prompt title persists, so the
 /// session is never left without a title. `first_prompt` is tail-truncated to
 /// [`MAX_PROMPT_CHARS`] to keep cost bounded on long pasted code.
 pub(crate) fn spawn<S>(client: Client, session: SessionHandle, sink: S, first_prompt: String)
@@ -83,16 +85,15 @@ async fn generate_and_record(
         .context("Haiku completion failed")?;
     let title = parse_title(&raw).context("Haiku returned a malformed title")?;
 
-    // Skip if the user ran `/rename` while Haiku was thinking; otherwise the status bar would
-    // briefly flash the AI title before the actor drops it.
+    // Skip if the user ran `/rename` while Haiku was thinking.
     if session.manual_title_set() {
         return Ok(());
     }
     let outcome = session.append_ai_title(title.clone()).await;
     if let Some(failure) = outcome.failure.as_deref() {
         if !session.is_actor_alive() {
-            // Session was finalized (e.g., /clear or /resume) before this background task
-            // returned. Warn-log; surfacing into the next session's UI would mislead the user.
+            // Session was finalized before this task returned. Surfacing into the next session's
+            // UI would mislead the user.
             warn!("title-gen append after session shutdown: {failure}");
             return Ok(());
         }

@@ -11,7 +11,7 @@ const INSTRUCTION_FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 /// Tool-agnostic subdirectories walked alongside each location (e.g. `<dir>/.claude/CLAUDE.md`).
 const INSTRUCTION_DIRS: &[&str] = &[".claude"];
 
-/// Candidates tried in order at a single location; the first hit wins.
+/// Candidates tried in order at a single location. The first hit wins.
 struct Slot {
     candidates: Vec<PathBuf>,
     label: &'static str,
@@ -73,7 +73,7 @@ fn candidate_slots(cwd: Option<&Path>, project_root: Option<&Path>) -> Vec<Slot>
     slots
 }
 
-/// Every directory from `root` down to `cwd` inclusive; `[root]` when `cwd` is outside or `None`.
+/// Every directory from `root` down to `cwd` inclusive. Falls back to `[root]`.
 fn walk_root_to_cwd(root: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     let Some(cwd) = cwd else {
         return vec![root.to_path_buf()];

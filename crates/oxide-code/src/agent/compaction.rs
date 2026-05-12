@@ -14,22 +14,20 @@ use crate::message::{ContentBlock, Message};
 /// usually longer than the transcript itself.
 const MIN_MESSAGES_FOR_COMPACT: usize = 4;
 
-/// System prompt for the summarization request. Deliberately narrow — the surrounding
-/// `SYSTEM_PROMPT_PREFIX` ("You are Claude Code...") is added by the client; this section
-/// reframes the model's job for the compaction turn.
+/// System prompt for the summarization request. The client still adds the regular Claude Code
+/// prefix, so this only reframes the compaction turn.
 const SUMMARIZATION_SYSTEM: &str = indoc! {r"
     You are summarizing a conversation between a software engineer and an AI coding assistant.
 
-    Output ONLY the summary text. Do not call any tools. Do not ask clarifying questions. Do not
-    address the engineer directly. Write in plain prose; markdown bullets are fine where they
-    aid readability.
+    Output ONLY the summary text. Do not call any tools. Do not ask clarifying questions. Do
+    not address the engineer directly. Write in plain prose. Markdown bullets are fine where
+    they aid readability.
 "};
 
-/// User-message rubric. Five short asks; the model converges on the right shape without the
-/// numbered-section ceremony Claude Code uses.
+/// User-message rubric. Five short asks keep the summary compact without named sections.
 const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
-    Summarize the conversation above so another instance of yourself can pick up where this one
-    left off. Capture, in this order:
+    Summarize the conversation above so another instance of yourself can pick up where this one left
+    off. Capture, in this order:
 
     1. The engineer's overall intent and any constraints they stated.
     2. Key technical decisions made and why.
@@ -37,16 +35,15 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
     4. Current state: what is done, what is in progress, what is blocked.
     5. The next concrete step, if one is obvious.
 
-    Be concise — terse bullets beat paragraphs. Preserve exact identifiers, file paths, error
-    strings, and command lines verbatim.
+    Be concise. Terse bullets beat paragraphs. Preserve exact identifiers, file paths, error strings,
+    and command lines verbatim.
 "};
 
-/// Prepended to the synthetic post-compact user message materializing the summary into the
-/// next turn. Phrasing tells the next-turn model to use the summary rather than re-asking what
-/// to do — without this prefix the next turn often redundantly clarifies intent.
+/// Prefix for the synthetic post-compact user message. It tells the next turn to continue from
+/// the summary.
 const SUMMARY_PREFIX: &str = indoc! {r"
-    This conversation has been compacted. The summary below covers the prior work; continue
-    from here without re-asking the engineer what to do.
+    This conversation has been compacted. The summary below covers the prior work. Continue from here
+    without re-asking the engineer what to do.
 "};
 
 /// Drives the compaction request. Returns the trimmed summary text on success.
@@ -138,9 +135,7 @@ fn build_user_message(instructions: Option<&str>) -> String {
     }
 }
 
-/// Composes the synthetic post-compact user message. The boundary marker plus the summary
-/// itself; lands in the JSONL as a normal `Entry::Message` and in the next turn's `messages`
-/// array as the new chain head.
+/// Composes the synthetic post-compact root message for the next turn.
 pub(crate) fn synthesize_post_compact_message(summary: &str) -> Message {
     Message::user(formatdoc! {"
         {prefix}

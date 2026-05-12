@@ -1,5 +1,5 @@
-//! `/init` — synthesizes a prompt asking the model to author or update the project's
-//! `AGENTS.md` / `CLAUDE.md`.
+//! `/init` synthesizes a prompt asking the model to author or update the project's `AGENTS.md`
+//! / `CLAUDE.md`.
 
 use indoc::indoc;
 
@@ -29,60 +29,52 @@ impl SlashCommand for InitCmd {
     }
 }
 
-/// System prompt template for `/init` — instructs the model to author a fresh `AGENTS.md` (or
-/// propose a diff against an existing one) grounded in files it actually reads, with explicit
-/// exclusion rules to avoid generic / boilerplate output.
+/// Prompt template asking the model to author or revise project instructions from real files.
 const PROMPT: &str = indoc! {r"
-    Please analyze this codebase and create an `AGENTS.md` file at the project
-    root that future AI coding assistants will read when working on it.
+    Please analyze this codebase and create an `AGENTS.md` file at the project root that future AI
+    coding assistants will read when working on it.
 
-    If neither `AGENTS.md` nor `CLAUDE.md` exists, create `AGENTS.md`. If one
-    already exists, do not overwrite it — propose specific improvements as a
-    diff and explain why each change matters. If both exist, update each in
-    place rather than migrating between them.
+    If neither `AGENTS.md` nor `CLAUDE.md` exists, create `AGENTS.md`. If one already exists, do not
+    overwrite it. Propose specific improvements as a diff and explain why each change matters. If
+    both exist, update each in place rather than migrating between them.
 
     Include only what an agent would get wrong without it:
 
-    1. Build / lint / test commands the agent can't infer from manifest files.
-       Include any flags or sequences that differ from the language defaults
-       (e.g., how to run a single test).
-    2. High-level architecture that requires reading multiple files to
-       understand — modules, layering, ownership, and the data flow between
-       them.
-    3. Project-specific conventions that diverge from language defaults
-       (import grouping, error-handling style, naming, blank-line rules).
-    4. External constraints the code can't reveal — required env vars,
-       platform-only behavior, services that must be running, workflow steps
-       the agent can't infer.
+    1. Build / lint / test commands the agent can't infer from manifest files. Include any flags or
+       sequences that differ from the language defaults (e.g., how to run a single test).
+    2. High-level architecture that requires reading multiple files to understand: modules,
+       layering, ownership, and the data flow between them.
+    3. Project-specific conventions that diverge from language defaults (import grouping,
+       error-handling style, naming, blank-line rules).
+    4. External constraints the code can't reveal: required env vars, platform-only behavior,
+       services that must be running, workflow steps the agent can't infer.
 
     Exclude:
 
     - Standard language conventions the agent already knows (`cargo test`,
       `npm test`, etc.).
-    - File-by-file structure or component lists — these are discoverable via
-      `glob` / `ls`.
+    - File-by-file structure or component lists. These are discoverable via `glob` / `ls`.
     - Generic development advice (`write tests`, `handle errors`).
-    - Information that changes frequently — reference the source file by
-      relative path so the agent reads the current version.
-    - Sections you can't ground in files you actually read (no fabricated
-      `Common Tasks`, `Tips for Development`, or `Support` headers).
+    - Information that changes frequently. Reference the source file by relative path so the agent
+      reads the current version.
+    - Sections you can't ground in files you actually read. Do not fabricate `Common Tasks`, `Tips
+      for Development`, or `Support` headers.
 
-    Be specific. `Use 2-space indentation in TypeScript` is better than `Format
-    code properly`. Don't restate the same fact in multiple sections. Every
-    line should answer `what would a fresh agent get wrong without this?` —
-    if the answer is `nothing`, cut the line.
+    Be specific. `Use 2-space indentation in TypeScript` is better than `Format code properly`.
+    Don't restate the same fact in multiple sections. Every line should answer `what would a fresh
+    agent get wrong without this?` If the answer is `nothing`, cut the line.
 
-    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or
-    `.github/copilot-instructions.md` exists, extract the load-bearing parts
-    (commands, conventions, gotchas) and merge them into `AGENTS.md` without
-    duplication. Skip prose that restates language defaults.
+    If a `README.md`, `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md` exists,
+    extract the load-bearing parts (commands, conventions, gotchas) and merge them into `AGENTS.md`
+    without duplication. Skip prose that restates language defaults.
 
     Prefix the file with:
 
     ```
     # AGENTS.md
 
-    This file provides guidance to AI coding assistants (Claude Code, Codex, oxide-code, and others) when working with code in this repository.
+    This file provides guidance to AI coding assistants (Claude Code, Codex, oxide-code, and
+    others) when working with code in this repository.
     ```
 "};
 
@@ -125,7 +117,7 @@ mod tests {
         };
         assert!(p.contains("AGENTS.md") && p.contains("CLAUDE.md"), "{p}");
         assert!(
-            p.contains("already exists") && p.contains("not overwrite"),
+            p.contains("already exists") && p.contains("do not") && p.contains("overwrite it"),
             "{p}"
         );
     }

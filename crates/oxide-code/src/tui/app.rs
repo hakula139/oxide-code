@@ -51,11 +51,10 @@ pub(crate) struct App {
     tools: Arc<ToolRegistry>,
     /// Correlates `ToolCallStart` with its matching `ToolCallEnd`.
     pending_calls: PendingCalls,
-    /// FIFO of prompts submitted mid-turn; drained at turn boundaries.
+    /// FIFO of prompts submitted mid-turn. Drained at turn boundaries.
     pending_prompts: VecDeque<String>,
     modals: ModalStack,
-    /// Saved theme captured when a `/theme` picker opens; restored if the modal cancels so
-    /// live-preview moves don't leak into the rest of the session.
+    /// Theme saved when a `/theme` picker opens. Restored if the modal cancels.
     preview_theme_snapshot: Option<Theme>,
     should_quit: bool,
     dirty: bool,
@@ -64,7 +63,7 @@ pub(crate) struct App {
 impl App {
     #[expect(
         clippy::too_many_arguments,
-        reason = "ctor wires the full surface (display config, IPC channels, resumed state, tool registry); a builder would obscure which dependencies App owns"
+        reason = "ctor wires the full surface: display config, IPC channels, resumed state, and tool registry"
     )]
     pub(crate) fn new(
         theme: &Theme,
@@ -124,11 +123,8 @@ impl App {
         self.render(terminal)?;
 
         loop {
-            // Three concurrent sources race to wake the loop. `select!` picks pseudo-randomly
-            // among ready arms, which is the property we want — neither input nor agent output
-            // can starve the other under sustained load. The tick arm is the only one that
-            // renders; per-event handlers just flip `dirty`, so render work is paced by the
-            // 60 FPS clock instead of event volume.
+            // Three sources can wake the loop. The tick arm is the only renderer, so handlers only
+            // mark `dirty` and render work stays paced by the 60 FPS clock.
             tokio::select! {
                     event = crossterm_events.next() => {
                     if let Some(Ok(event)) = event {
@@ -138,7 +134,7 @@ impl App {
                 event = self.agent_rx.recv() => {
                     match event {
                         Some(event) => self.handle_agent_event(event),
-                        // Channel closed = agent task gone; quit instead of spinning.
+                        // Agent channel closed. Quit instead of spinning.
                         None => self.should_quit = true,
                     }
                 }
@@ -167,10 +163,7 @@ impl App {
     // ── Event Handling ──
 
     fn handle_crossterm_event(&mut self, event: &Event) {
-        // Modal gate: while any modal is on screen, all key events route to it exclusively —
-        // never the input area or chat. Mouse / resize still fall through so the user can scroll
-        // chat under an overlay. The early return keeps the modal's key from also being seen by
-        // the input on the same frame.
+        // Modal keys belong to the top overlay. Mouse and resize events still reach chat.
         if let Event::Key(key) = event
             && self.modals.is_active()
         {
@@ -235,7 +228,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Cancel if busy; pop queue if idle and buffer empty; else no-op.
+    /// Cancels if busy, restores one queued prompt if idle, or no-ops.
     fn handle_esc(&mut self) {
         if !self.input.is_enabled() {
             self.dispatch_user_action(UserAction::Cancel);
@@ -258,7 +251,7 @@ impl App {
         self.forward_to_agent(action);
     }
 
-    /// Sends `action` to the agent loop; channel errors surface as a chat error block.
+    /// Sends `action` to the agent loop. Channel errors surface as chat error blocks.
     fn forward_to_agent(&mut self, action: UserAction) {
         if let Err(e) = self.user_tx.try_send(action) {
             match e {
@@ -276,7 +269,7 @@ impl App {
         }
     }
 
-    /// Applies UI-state changes; returns whether to forward to the agent.
+    /// Applies UI-state changes and returns whether to forward to the agent.
     fn apply_action_locally(&mut self, action: &UserAction) -> bool {
         match action {
             UserAction::SubmitPrompt(text) => self.handle_submit_prompt(text),
@@ -301,16 +294,10 @@ impl App {
             }
             UserAction::Clear | UserAction::Rename { .. } | UserAction::SwapConfig { .. } => true,
             UserAction::Resume { .. } => {
-                // Disable input until the SessionResumed event fires — otherwise a typed prompt
-                // in the gap between forward and event would push into chat, then get wiped by
-                // `apply_session_resumed`'s `clear_history`.
                 self.input.set_enabled(false);
                 true
             }
             UserAction::Compact { .. } => {
-                // Same disable-input window as Resume: between forward and SessionCompacted the
-                // chat is about to be wiped, so a typed prompt would land in dead history. The
-                // dedicated `Compacting` status flags this as a summarization, not a normal turn.
                 self.input.set_enabled(false);
                 self.status_bar.set_status(Status::Compacting);
                 true
@@ -341,9 +328,8 @@ impl App {
         }
     }
 
-    /// Returns whether the submitted text should also forward to the agent. Slash commands always
-    /// return false — they emit synthesized actions through `dispatch_user_action` /
-    /// `forward_to_agent` directly. Plain prompts return true while idle, false while cancelling.
+    /// Returns whether submitted text should also forward to the agent. Slash commands emit their
+    /// own synthesized actions, so plain prompts are the only forwarded submissions.
     fn handle_submit_prompt(&mut self, text: &str) -> bool {
         if self.input.is_enabled() {
             if let Some(parsed) = slash::parse_slash(text) {
@@ -368,8 +354,6 @@ impl App {
                         self.status_bar.set_status(Status::Streaming);
                         self.forward_to_agent(action);
                     } else {
-                        // TUI-only synthesized actions (e.g. SwapTheme) flow through dispatch
-                        // so the local arm runs; forwarding to the agent would drop them.
                         self.dispatch_user_action(action);
                     }
                 }
@@ -405,7 +389,6 @@ impl App {
             return false;
         }
         self.pending_prompts.push_back(text.to_owned());
-        // Skip forwarding when no turn can consume queued prompts; drain locally on idle instead.
         !matches!(
             self.status_bar.status(),
             Status::Compacting | Status::Cancelling,
@@ -518,8 +501,7 @@ impl App {
         self.finalize_idle();
     }
 
-    /// Mid-session resume: rebinds the session, repopulates the chat from the target's transcript,
-    /// and discards in-flight UI state. Pairs with `roll_into` on the agent loop.
+    /// Mid-session resume: rebinds the session and rebuilds chat from the target transcript.
     fn apply_session_resumed(
         &mut self,
         id: String,
@@ -534,27 +516,21 @@ impl App {
         self.chat
             .load_history(messages, compact, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
-        // Drop queued prompts (they belong to the previous thread); surface the count so the
-        // user knows their Enter-committed work didn't carry over. `/clear` (SessionRolled)
-        // keeps them — same identity, just a fresh slate.
+        // Queued prompts belonged to the previous thread, so resume drops them.
         let dropped = self.pending_prompts.len();
         self.pending_prompts.clear();
         if dropped > 0 {
             self.chat.push_system_message(format!(
-                "{dropped} queued prompt{plural} discarded — typed for the previous session.",
+                "{dropped} queued prompt{plural} discarded. Typed for the previous session.",
                 plural = if dropped == 1 { "" } else { "s" },
             ));
         }
-        // Belt-and-suspenders: the picker auto-pops on Submit, but a future nested overlay
-        // would otherwise carry across the swap.
         self.modals.clear();
         self.finalize_idle();
     }
 
-    /// Repaints chat after `/compact`: clears the prior transcript and pushes a single
-    /// boundary block carrying the count header + markdown-rendered summary. Queued prompts
-    /// survive because compact preserves the user's intent (unlike `/resume`, which swaps
-    /// thread identity).
+    /// Repaints chat after `/compact` with one boundary block. Queued prompts survive because the
+    /// session identity stays the same.
     fn apply_session_compacted(
         &mut self,
         summary: &str,
@@ -569,7 +545,7 @@ impl App {
         self.finalize_idle();
     }
 
-    /// Resets to idle: clears orphan calls, re-enables input, drains queued prompts.
+    /// Resets to idle, clears orphan calls, re-enables input, and drains queued prompts.
     fn finalize_idle(&mut self) {
         self.pending_calls.clear();
         self.status_bar.set_status(Status::Idle);
@@ -626,7 +602,7 @@ impl App {
     fn draw_frame(&mut self, frame: &mut ratatui::Frame<'_>) -> ratatui::layout::Rect {
         let preview_height = self.preview_height();
         let modal_height = self.modals.height(frame.area().width);
-        // Modal owns focus — input + popup are unreachable, so collapse them.
+        // Modal owns focus, so input and popup bands collapse.
         let modal_active = modal_height > 0;
         let popup_height = if modal_active {
             0
@@ -957,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_events_marks_dirty_when_spinner_frame_advances() {
-        // Streaming spinner flips after 5 * 16ms = 80ms; sleep past that to drive `tick()` truthy.
+        // Sleep past the spinner interval so `tick()` reports a visible frame change.
         let (mut app, _rx, agent_tx) = test_app(None);
         app.status_bar.set_status(Status::Streaming);
         app.dirty = false;
@@ -1155,7 +1131,7 @@ mod tests {
 
     #[tokio::test]
     async fn modal_gate_intercepts_keys_before_input_sees_them() {
-        // While a modal is on screen, keys land on the modal only — never the input.
+        // Modal keys must not reach input.
         let (mut app, mut rx, _agent_tx) = test_app(None);
         app.push_modal(Box::new(ScriptedModal::new(ModalAction::User(
             UserAction::Cancel,
@@ -1429,10 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_swap_config_forwards_to_agent_through_user_tx() {
-        // Modal-emitted SwapConfig must reach the agent loop so it can call
-        // `apply_swap_config` and emit `ConfigChanged`. The earlier `=> false` arm in
-        // `apply_action_locally` swallowed it silently — caused empty title bar updates after
-        // picker submit. Pin both axes.
+        // Modal-emitted SwapConfig must reach the agent loop so it can emit `ConfigChanged`.
         for action in [
             UserAction::SwapConfig {
                 model: Some(crate::model::ResolvedModelId::new(
