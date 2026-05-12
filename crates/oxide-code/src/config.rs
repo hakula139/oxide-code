@@ -19,6 +19,7 @@ const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
 const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
+const MIN_AUTO_COMPACTION_THRESHOLD_TOKENS: u32 = 50_000;
 /// Mirrors the fallback `loader::resolve_theme` applies when no `[tui.theme] base` is set.
 pub(crate) const DEFAULT_THEME: &str = "mocha";
 
@@ -435,15 +436,18 @@ fn resolve_auto_threshold(
         (Some(_), Some(_)) => {
             bail!("set only one of auto_threshold_tokens or auto_threshold_percent for compaction")
         }
-        (Some(tokens), None) => validate_positive_tokens(tokens).map(Some),
+        (Some(tokens), None) => validate_auto_threshold_tokens(tokens).map(Some),
         (None, Some(percent)) => threshold_from_percent(percent, model, max_tokens),
         (None, None) => Ok(default_auto_threshold(model, max_tokens)),
     }
 }
 
-fn validate_positive_tokens(tokens: u32) -> Result<u32> {
-    if tokens == 0 {
-        bail!("auto compaction threshold must be greater than zero");
+fn validate_auto_threshold_tokens(tokens: u32) -> Result<u32> {
+    if tokens < MIN_AUTO_COMPACTION_THRESHOLD_TOKENS {
+        bail!(
+            "auto compaction threshold must be at least \
+             {MIN_AUTO_COMPACTION_THRESHOLD_TOKENS} tokens"
+        );
     }
     Ok(tokens)
 }
@@ -456,7 +460,9 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
         return Ok(None);
     };
     let threshold = context_window.saturating_mul(u32::from(percent)) / 100;
-    Ok(default_auto_threshold_for_window(context_window, max_tokens).map(|max| threshold.min(max)))
+    default_auto_threshold_for_window(context_window, max_tokens)
+        .map(|max| validate_auto_threshold_tokens(threshold.min(max)))
+        .transpose()
 }
 
 fn default_auto_threshold(model: &str, max_tokens: u32) -> Option<u32> {
@@ -920,7 +926,39 @@ mod tests {
             .await
             .expect_err("zero threshold must fail config load");
         let msg = format!("{err:#}");
-        assert!(msg.contains("greater than zero"), "{msg}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_too_low_auto_threshold_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_threshold_tokens = 49999
+            "},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("low threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_too_low_auto_threshold_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7[1m]"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "4"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("resolved low threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
     }
 
     #[tokio::test]

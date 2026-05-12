@@ -62,6 +62,8 @@ Environment:
 
 Manual `/compact` remains available. The config controls only whether automatic compaction triggers and where that trigger fires. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious.
 
+Explicit thresholds must resolve to at least `50_000` tokens. Lower values create frequent summarization loops, extra latency, and avoidable summary loss long before context pressure exists.
+
 ## Trigger Flow
 
 `agent_turn` owns the automatic trigger because it has the live transcript, token usage, session handle, file tracker, sink, and user-action receiver.
