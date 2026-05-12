@@ -1,6 +1,7 @@
 //! Per-session Read-before-Edit gate with xxh64 staleness detection.
 
 use std::collections::HashMap;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -11,6 +12,7 @@ use tracing::warn;
 use xxhash_rust::xxh64::xxh64;
 
 const HASH_SEED: u64 = 0;
+pub(crate) const MAX_TRACKED_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 // ── FileTracker ──
 
@@ -22,8 +24,8 @@ const HASH_SEED: u64 = 0;
 ///   session.
 /// - **Full read required**: a partial (offset / limit) Read does not satisfy the gate; the agent
 ///   must Read the file in full before mutating it.
-/// - **Freshness**: mutating tools must rehash the current bytes via
-///   [`Self::verify_drift_bytes`]; only matching xxh64 content qualifies as an unchanged file.
+/// - **Freshness**: mutating tools must pass the current bytes through
+///   [`Self::verify_current_content`]; only matching xxh64 content qualifies as unchanged.
 ///
 /// State is persisted into the session JSONL as [`FileSnapshot`]s and re-verified against disk on
 /// resume — see [`Self::restore_verified`].
@@ -50,9 +52,8 @@ pub(crate) enum LastView {
     Partial { offset: usize, limit: usize },
 }
 
-/// Which mutating tool is asking for the gate. Carried into [`GateError`] purely so the rendered
-/// error message reads `"... before editing it"` vs `"... before writing to it"` — `verb()` is the
-/// only consumer.
+/// Which mutating tool is asking for the gate. Carried into [`GateError`] so rendered errors can
+/// name the blocked action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatePurpose {
     Edit,
@@ -66,6 +67,43 @@ impl GatePurpose {
             Self::Write => "writing to",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackableFileError {
+    Directory,
+    NonRegular,
+    TooLarge { size: u64, max: u64 },
+}
+
+impl std::fmt::Display for TrackableFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Directory => f.write_str("not a regular file: directory"),
+            Self::NonRegular => f.write_str("not a regular file"),
+            Self::TooLarge { size, max } => {
+                write!(f, "too large to verify ({size} bytes, max {max} bytes)")
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_trackable_file(metadata: &Metadata) -> Result<(), TrackableFileError> {
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        return Err(TrackableFileError::Directory);
+    }
+    if !file_type.is_file() {
+        return Err(TrackableFileError::NonRegular);
+    }
+    let size = metadata.len();
+    if size > MAX_TRACKED_FILE_SIZE {
+        return Err(TrackableFileError::TooLarge {
+            size,
+            max: MAX_TRACKED_FILE_SIZE,
+        });
+    }
+    Ok(())
 }
 
 impl FileTracker {
@@ -104,14 +142,13 @@ impl FileTracker {
         RecordRead::Inserted
     }
 
-    /// Validates the Read-before-Edit gate and returns the hash the caller must verify.
-    pub(crate) fn check_stat(
+    /// Validates the Read-before-Edit gate against the current on-disk bytes.
+    pub(crate) fn verify_current_content(
         &self,
         path: &Path,
-        _current_mtime: SystemTime,
-        _current_size: u64,
+        current_bytes: &[u8],
         purpose: GatePurpose,
-    ) -> Result<StatCheck, GateError> {
+    ) -> Result<(), GateError> {
         let by_path = self.lock();
         let Some(entry) = by_path.get(path) else {
             return Err(GateError::NeverRead {
@@ -125,19 +162,7 @@ impl FileTracker {
                 purpose,
             });
         }
-        Ok(StatCheck::NeedsBytes {
-            stored_hash: entry.content_hash,
-        })
-    }
-
-    /// Rehashes `bytes` against `stored_hash`; passes if content unchanged despite stat drift.
-    pub(crate) fn verify_drift_bytes(
-        path: &Path,
-        bytes: &[u8],
-        stored_hash: u64,
-        purpose: GatePurpose,
-    ) -> Result<(), GateError> {
-        if xxh64(bytes, HASH_SEED) == stored_hash {
+        if xxh64(current_bytes, HASH_SEED) == entry.content_hash {
             Ok(())
         } else {
             Err(GateError::ContentDrifted {
@@ -204,14 +229,43 @@ impl FileTracker {
     pub(crate) fn restore_verified(&self, snapshots: Vec<FileSnapshot>) -> Vec<PathBuf> {
         let mut by_path = self.lock();
         let mut dropped = Vec::new();
+
+        let mut latest = HashMap::<PathBuf, FileSnapshot>::new();
         for snap in snapshots {
-            let (current_size, current_mtime) = match std::fs::metadata(&snap.path)
-                .and_then(|m| m.modified().map(|t| (m.len(), t)))
-            {
-                Ok(stats) => stats,
+            let replace = latest
+                .get(&snap.path)
+                .is_none_or(|cur| snap.recorded_at >= cur.recorded_at);
+            if replace {
+                latest.insert(snap.path.clone(), snap);
+            }
+        }
+
+        for snap in latest.into_values() {
+            let metadata = match std::fs::metadata(&snap.path) {
+                Ok(metadata) => metadata,
                 Err(e) => {
                     warn!(
                         "dropping tracked file {} (stat failed, will require fresh Read): {e}",
+                        snap.path.display()
+                    );
+                    dropped.push(snap.path);
+                    continue;
+                }
+            };
+            let current_size = metadata.len();
+            if let Err(err) = validate_trackable_file(&metadata) {
+                warn!(
+                    "dropping tracked file {} ({err}, will require fresh Read)",
+                    snap.path.display()
+                );
+                dropped.push(snap.path);
+                continue;
+            }
+            let current_mtime = match metadata.modified() {
+                Ok(mtime) => mtime,
+                Err(e) => {
+                    warn!(
+                        "dropping tracked file {} (mtime failed, will require fresh Read): {e}",
                         snap.path.display()
                     );
                     dropped.push(snap.path);
@@ -231,7 +285,7 @@ impl FileTracker {
             };
             if xxh64(&current_bytes, HASH_SEED) != snap.content_hash {
                 warn!(
-                    "dropping tracked file {} (content drift: stored {}b/mtime vs current {}b/mtime)",
+                    "dropping tracked file {} (content drift: stored {}b vs current {}b)",
                     snap.path.display(),
                     snap.size,
                     current_size,
@@ -255,6 +309,7 @@ impl FileTracker {
                 );
             }
         }
+        dropped.sort();
         dropped
     }
 
@@ -299,23 +354,13 @@ pub(crate) enum RecordRead {
     CacheHit,
 }
 
-/// Outcome of the tracker precondition check.
-///
-/// The caller must rehash the current file contents and call
-/// [`FileTracker::verify_drift_bytes`] before mutating the file. Relying on `(mtime, size)` alone
-/// can miss same-size writes that preserve timestamps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StatCheck {
-    NeedsBytes { stored_hash: u64 },
-}
-
 /// Reasons the Read-before-Edit / Write gate refuses a tool call. Each variant's `#[error]`
 /// message tells the model exactly how to recover (Read first / Read in full / re-Read).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GateError {
-    #[error("File {} has not been read in this session. Use the Read tool first before {} it.", .path.display(), .purpose.verb())]
+    #[error("File {} needs a full Read before {} it.", .path.display(), .purpose.verb())]
     NeverRead { path: PathBuf, purpose: GatePurpose },
-    #[error("File {} has only been read partially (with offset / limit). Read the full file before {} it.", .path.display(), .purpose.verb())]
+    #[error("File {} was read with offset / limit. Read the full file before {} it.", .path.display(), .purpose.verb())]
     PartialRead { path: PathBuf, purpose: GatePurpose },
     #[error("File {} has been modified externally since it was last read. Re-read it before {} it.", .path.display(), .purpose.verb())]
     ContentDrifted { path: PathBuf, purpose: GatePurpose },
@@ -466,28 +511,25 @@ mod tests {
         assert_eq!(next, RecordRead::CacheHit);
     }
 
-    // ── check_stat ──
+    // ── verify_current_content ──
 
     #[test]
-    fn check_stat_full_match_requires_hash_verification() {
+    fn verify_current_content_full_match_passes() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
-        let check = tracker.check_stat(path, mtime, 5, GatePurpose::Edit);
-        assert_eq!(
-            check,
-            Ok(StatCheck::NeedsBytes {
-                stored_hash: xxh64(b"hello", HASH_SEED),
-            }),
-        );
+
+        let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
+
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
-    fn check_stat_no_entry_errors_never_read() {
+    fn verify_current_content_no_entry_errors_never_read() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let result = tracker.check_stat(path, UNIX_EPOCH, 0, GatePurpose::Edit);
+        let result = tracker.verify_current_content(path, b"", GatePurpose::Edit);
         assert_eq!(
             result,
             Err(GateError::NeverRead {
@@ -498,10 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_no_entry_carries_write_purpose_for_write_gate() {
+    fn verify_current_content_no_entry_carries_write_purpose() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
-        let result = tracker.check_stat(path, UNIX_EPOCH, 0, GatePurpose::Write);
+        let result = tracker.verify_current_content(path, b"", GatePurpose::Write);
         assert_eq!(
             result,
             Err(GateError::NeverRead {
@@ -512,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_partial_view_errors_partial_read() {
+    fn verify_current_content_partial_view_errors_partial_read() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         _ = tracker.record_read(
@@ -525,7 +567,7 @@ mod tests {
                 limit: 1,
             },
         );
-        let result = tracker.check_stat(path, UNIX_EPOCH, 5, GatePurpose::Edit);
+        let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
         assert_eq!(
             result,
             Err(GateError::PartialRead {
@@ -536,61 +578,30 @@ mod tests {
     }
 
     #[test]
-    fn check_stat_mtime_drift_produces_stored_hash() {
+    fn verify_current_content_matching_bytes_ignore_stat_drift() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
 
-        let drifted_mtime = mtime + Duration::from_secs(1);
-        let check = tracker.check_stat(path, drifted_mtime, 5, GatePurpose::Edit);
+        let result = tracker.verify_current_content(path, b"hello", GatePurpose::Edit);
 
         assert_eq!(
-            check,
-            Ok(StatCheck::NeedsBytes {
-                stored_hash: xxh64(b"hello", HASH_SEED),
-            }),
-            "mtime drift surfaces the stored hash for the caller to confirm",
+            result,
+            Ok(()),
+            "matching content stays safe even when metadata would drift",
         );
     }
 
     #[test]
-    fn check_stat_size_drift_produces_stored_hash() {
+    fn verify_current_content_divergent_bytes_rejects_content_drift() {
         let tracker = FileTracker::default();
         let path = Path::new("/tmp/a.rs");
         let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         _ = tracker.record_read(path, b"hello", mtime, 5, LastView::Full);
 
-        let check = tracker.check_stat(path, mtime, 999, GatePurpose::Edit);
+        let result = tracker.verify_current_content(path, b"world", GatePurpose::Edit);
 
-        assert_eq!(
-            check,
-            Ok(StatCheck::NeedsBytes {
-                stored_hash: xxh64(b"hello", HASH_SEED),
-            }),
-            "size drift surfaces the stored hash even when mtime matched",
-        );
-    }
-
-    // ── verify_drift_bytes ──
-
-    #[test]
-    fn verify_drift_bytes_phantom_drift_passes() {
-        let stored = xxh64(b"hello", HASH_SEED);
-        let result = FileTracker::verify_drift_bytes(
-            Path::new("/tmp/a.rs"),
-            b"hello",
-            stored,
-            GatePurpose::Edit,
-        );
-        assert_eq!(result, Ok(()));
-    }
-
-    #[test]
-    fn verify_drift_bytes_divergent_rejects_content_drifted() {
-        let path = Path::new("/tmp/a.rs");
-        let stored = xxh64(b"old", HASH_SEED);
-        let result = FileTracker::verify_drift_bytes(path, b"new", stored, GatePurpose::Edit);
         assert_eq!(
             result,
             Err(GateError::ContentDrifted {
@@ -610,7 +621,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/a.rs"), "path is named: {msg}");
-        assert!(msg.contains("not been read"));
+        assert!(msg.contains("needs a full Read"));
         assert!(msg.contains("editing"));
     }
 
@@ -621,7 +632,7 @@ mod tests {
             purpose: GatePurpose::Write,
         };
         let msg = err.to_string();
-        assert!(msg.contains("not been read"));
+        assert!(msg.contains("needs a full Read"));
         assert!(msg.contains("writing to"));
     }
 
@@ -633,7 +644,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/a.rs"), "path is named: {msg}");
-        assert!(msg.contains("partially"));
+        assert!(msg.contains("offset / limit"));
         assert!(msg.contains("Read the full file"));
     }
 
@@ -697,19 +708,8 @@ mod tests {
         std::fs::write(&path, b"updated").unwrap();
         tracker.record_modify_after_write(&path, b"updated").await;
 
-        let meta = std::fs::metadata(&path).unwrap();
-        let check = tracker.check_stat(
-            &path,
-            meta.modified().unwrap(),
-            meta.len(),
-            GatePurpose::Edit,
-        );
-        assert_eq!(
-            check,
-            Ok(StatCheck::NeedsBytes {
-                stored_hash: xxh64(b"updated", HASH_SEED),
-            }),
-        );
+        let result = tracker.verify_current_content(&path, b"updated", GatePurpose::Edit);
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]
@@ -921,6 +921,49 @@ mod tests {
     }
 
     #[test]
+    fn restore_verified_non_regular_file_drops_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subdir");
+        std::fs::create_dir(&path).unwrap();
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: 0,
+            mtime: OffsetDateTime::UNIX_EPOCH,
+            size: 0,
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::default();
+        let dropped = tracker.restore_verified(vec![snap]);
+
+        assert_eq!(dropped, vec![path.clone()]);
+        assert!(tracker.lock().is_empty());
+    }
+
+    #[test]
+    fn restore_verified_too_large_file_drops_snapshot_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.rs");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
+        let snap = FileSnapshot {
+            path: path.clone(),
+            content_hash: 0,
+            mtime: OffsetDateTime::UNIX_EPOCH,
+            size: MAX_TRACKED_FILE_SIZE + 1,
+            last_view: LastView::Full,
+            recorded_at: OffsetDateTime::now_utc(),
+        };
+
+        let tracker = FileTracker::default();
+        let dropped = tracker.restore_verified(vec![snap]);
+
+        assert_eq!(dropped, vec![path.clone()]);
+        assert!(tracker.lock().is_empty());
+    }
+
+    #[test]
     fn restore_verified_returns_paths_of_dropped_snapshots() {
         let dir = tempfile::tempdir().unwrap();
         let kept_path = dir.path().join("kept.rs");
@@ -962,14 +1005,14 @@ mod tests {
         let dropped = tracker.restore_verified(snaps);
         assert_eq!(
             dropped,
-            vec![drifted_path, missing_path],
+            vec![missing_path, drifted_path],
             "both the size-drifted and the missing snapshots must be reported",
         );
         assert!(tracker.lock().contains_key(&kept_path));
     }
 
     #[test]
-    fn restore_verified_keeps_newer_recorded_at_on_duplicate_path() {
+    fn restore_verified_verifies_only_newest_snapshot_per_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, b"x").unwrap();
@@ -979,7 +1022,7 @@ mod tests {
 
         let older = FileSnapshot {
             path: path.clone(),
-            content_hash,
+            content_hash: xxh64(b"stale", HASH_SEED),
             mtime: mtime_dt,
             size: meta.len(),
             last_view: LastView::Partial {
@@ -998,12 +1041,14 @@ mod tests {
         };
 
         let tracker = FileTracker::default();
-        tracker.restore_verified(vec![older.clone(), newer.clone()]);
+        let dropped = tracker.restore_verified(vec![older.clone(), newer.clone()]);
+        assert!(dropped.is_empty());
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(stored.last_view, LastView::Full, "newer recorded_at wins");
 
         let tracker = FileTracker::default();
-        tracker.restore_verified(vec![newer, older]);
+        let dropped = tracker.restore_verified(vec![newer, older]);
+        assert!(dropped.is_empty());
         let stored = tracker.lock().get(&path).cloned().unwrap();
         assert_eq!(
             stored.last_view,

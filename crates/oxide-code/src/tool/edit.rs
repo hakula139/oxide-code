@@ -12,9 +12,7 @@ use super::{
     DiffChunk, DiffLine, Tool, ToolMetadata, ToolOutput, ToolResultView, extract_input_field,
     summarize_path_call,
 };
-use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
-
-const MAX_EDIT_FILE_SIZE: u64 = 10 * 1024 * 1024;
+use crate::file_tracker::{FileTracker, GatePurpose, TrackableFileError, validate_trackable_file};
 
 pub(crate) struct EditTool {
     tracker: Arc<FileTracker>,
@@ -183,27 +181,13 @@ async fn edit_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    if metadata.len() > MAX_EDIT_FILE_SIZE {
-        let mb = super::bytes_to_mb(metadata.len());
-        let limit_mb = MAX_EDIT_FILE_SIZE / (1024 * 1024);
-        return Err(format!(
-            "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-             Use the bash tool for large-file edits.",
-        ));
-    }
-
-    let pre_mtime = metadata
-        .modified()
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
-    let stat_check = tracker
-        .check_stat(file_path, pre_mtime, metadata.len(), GatePurpose::Edit)
-        .map_err(|e| e.to_string())?;
+    validate_edit_target(path, &metadata)?;
 
     let content_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    let StatCheck::NeedsBytes { stored_hash } = stat_check;
-    FileTracker::verify_drift_bytes(file_path, &content_bytes, stored_hash, GatePurpose::Edit)
+    tracker
+        .verify_current_content(file_path, &content_bytes, GatePurpose::Edit)
         .map_err(|e| e.to_string())?;
     let content =
         String::from_utf8(content_bytes).map_err(|e| format!("Error reading {path}: {e}"))?;
@@ -260,6 +244,26 @@ async fn edit_file(
     Ok((message, match_count, chunks))
 }
 
+fn validate_edit_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
+    match validate_trackable_file(metadata) {
+        Ok(()) => Ok(()),
+        Err(TrackableFileError::Directory) => Err(format!(
+            "{path} is a directory. Use the glob tool to list directory contents."
+        )),
+        Err(TrackableFileError::NonRegular) => Err(format!(
+            "{path} is not a regular file (fifo, socket, or device). Refusing to edit.",
+        )),
+        Err(TrackableFileError::TooLarge { size, max }) => {
+            let mb = super::bytes_to_mb(size);
+            let limit_mb = max / (1024 * 1024);
+            Err(format!(
+                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+                 Use the bash tool for large-file edits.",
+            ))
+        }
+    }
+}
+
 // ── Diff Production ──
 
 fn build_diff_chunks(
@@ -280,7 +284,7 @@ fn build_diff_chunks(
             let cumulative_shift = idx
                 .cast_signed()
                 .checked_mul(shift_per_match)
-                .expect("cumulative line-shift fits in isize for sub-MAX_EDIT_FILE_SIZE inputs");
+                .expect("cumulative line-shift fits in isize for tracked-size inputs");
             let new_line = original_line
                 .checked_add_signed(cumulative_shift)
                 .expect("post-edit line number stays positive for real match positions");
@@ -397,8 +401,10 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::LastView;
-    use crate::file_tracker::testing::{tracker, tracker_seeded};
+    use crate::file_tracker::{
+        LastView, MAX_TRACKED_FILE_SIZE,
+        testing::{tracker, tracker_seeded},
+    };
 
     // ── result_view ──
 
@@ -651,7 +657,7 @@ mod tests {
 
         assert!(output.is_error);
         assert!(
-            output.content.contains("not been read"),
+            output.content.contains("needs a full Read"),
             "expected must-read-first rejection, got: {}",
             output.content,
         );
@@ -955,7 +961,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.contains("not been read"),
+            err.contains("needs a full Read"),
             "expected must-read-first rejection, got: {err}",
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
@@ -1025,7 +1031,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.contains("partially"),
+            err.contains("offset / limit"),
             "expected partial-view rejection, got: {err}",
         );
     }
@@ -1092,7 +1098,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
         let err = edit_file(
             path.to_str().unwrap(),

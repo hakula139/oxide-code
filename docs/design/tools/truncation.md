@@ -13,11 +13,11 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 
 ### Per-tool view-shape caps
 
-- **bash**: No per-tool byte cap (rides the dispatcher).
+- **bash**: Drains stdout / stderr while retaining `MAX_OUTPUT_BYTES` per pipe so large streams cannot block on a full OS pipe. The dispatcher cap still applies to the combined output.
 - **edit / write**: No output truncation because success messages are tiny.
 - **glob**: `MAX_RESULTS = 100` matches. Footer: `(Showing N of TOTAL matches.)`.
 - **grep**: Per-line `truncate_line`, per-mode row cap at `DEFAULT_HEAD_LIMIT = 250`, user-overridable. File-size pre-gate at `MAX_GREP_FILE_SIZE = 1 MB`.
-- **read**: Per-line `truncate_line` (500 chars), row cap at `DEFAULT_LINE_LIMIT = 2000`, mid-loop byte budget. File-size pre-gate at `MAX_READ_FILE_SIZE = 10 MB`.
+- **read**: Per-line `truncate_line` (500 chars), row cap at `DEFAULT_LINE_LIMIT = 2000`, mid-loop byte budget. File-size pre-gate at `MAX_TRACKED_FILE_SIZE = 10 MB`.
 
 ## Design Decisions
 
@@ -31,4 +31,5 @@ Two-layer truncation: per-tool view-shape caps + centralized byte-budget safety 
 - `crates/oxide-code/src/tool.rs`: `ToolRegistry::run`, `cap_output()`, `MAX_OUTPUT_BYTES`, `truncate_line()`.
 - `crates/oxide-code/src/tool/glob.rs`: `MAX_RESULTS`, `truncated_total` setter.
 - `crates/oxide-code/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_GREP_FILE_SIZE`.
-- `crates/oxide-code/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `MAX_READ_FILE_SIZE`.
+- `crates/oxide-code/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
+- `crates/oxide-code/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`.

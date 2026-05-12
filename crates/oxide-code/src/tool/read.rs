@@ -12,11 +12,11 @@ use super::{
     ReadExcerptLine, Tool, ToolMetadata, ToolOutput, ToolResultView, display_cwd_path,
     extract_input_field, summarize_path_call,
 };
-use crate::file_tracker::{CACHE_HIT_STUB, FileTracker, LastView, RecordRead};
+use crate::file_tracker::{
+    CACHE_HIT_STUB, FileTracker, LastView, RecordRead, TrackableFileError, validate_trackable_file,
+};
 
 const DEFAULT_LINE_LIMIT: usize = 2000;
-
-const MAX_READ_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 const EMPTY_FILE_MARKER: &str = "(empty file)";
 
@@ -118,7 +118,7 @@ async fn run(raw: serde_json::Value, tracker: Arc<FileTracker>) -> ToolOutput {
 /// Reads `path` as text and returns a tab-separated `LINENO\tTEXT` excerpt.
 ///
 /// Refuses directories, non-regular files (FIFO / socket / device — these can report `len() == 0`
-/// and would otherwise bypass the size gate), files larger than `MAX_READ_FILE_SIZE`, and files
+/// and would otherwise bypass the size gate), files larger than `MAX_TRACKED_FILE_SIZE`, and files
 /// with a NUL byte in the first 8 KiB. A leading UTF-8 BOM is stripped before line splitting.
 ///
 /// Records the read with the [`FileTracker`] so a follow-up Edit / Write can clear the
@@ -134,27 +134,7 @@ async fn read_file(
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
 
-    // Pseudo-files report len() == 0, bypassing the size gate.
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        return Err(format!(
-            "{path} is a directory, not a file. Use the glob tool to list directory contents."
-        ));
-    }
-    if !file_type.is_file() {
-        return Err(format!(
-            "{path} is not a regular file (fifo, socket, or device); refusing to read.",
-        ));
-    }
-
-    if metadata.len() > MAX_READ_FILE_SIZE {
-        let mb = super::bytes_to_mb(metadata.len());
-        let limit_mb = MAX_READ_FILE_SIZE / (1024 * 1024);
-        return Err(format!(
-            "File is too large ({mb:.1} MB, max {limit_mb} MB). \
-             Use offset and limit to read specific portions.",
-        ));
-    }
+    validate_read_target(path, &metadata)?;
 
     let bytes = tokio::fs::read(path)
         .await
@@ -211,6 +191,27 @@ async fn read_file(
 
     let outcome = tracker.record_read(Path::new(path), &bytes, mtime, size, view);
     Ok(stub_or(outcome, &output).into_owned())
+}
+
+fn validate_read_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
+    // Pseudo-files report len() == 0, bypassing the size gate.
+    match validate_trackable_file(metadata) {
+        Ok(()) => Ok(()),
+        Err(TrackableFileError::Directory) => Err(format!(
+            "{path} is a directory. Use the glob tool to list directory contents."
+        )),
+        Err(TrackableFileError::NonRegular) => Err(format!(
+            "{path} is not a regular file (fifo, socket, or device). Refusing to read.",
+        )),
+        Err(TrackableFileError::TooLarge { size, max }) => {
+            let mb = super::bytes_to_mb(size);
+            let limit_mb = max / (1024 * 1024);
+            Err(format!(
+                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+                 Use offset and limit to read specific portions.",
+            ))
+        }
+    }
 }
 
 fn stub_or(outcome: RecordRead, body: &str) -> std::borrow::Cow<'_, str> {
@@ -286,7 +287,7 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
-    use crate::file_tracker::testing::tracker;
+    use crate::file_tracker::{GatePurpose, MAX_TRACKED_FILE_SIZE, testing::tracker};
 
     // ── run ──
 
@@ -321,17 +322,8 @@ mod tests {
         .await;
         assert!(!output.is_error);
 
-        let meta = std::fs::metadata(&path).unwrap();
-        let check = tracker.check_stat(
-            &path,
-            meta.modified().unwrap(),
-            meta.len(),
-            crate::file_tracker::GatePurpose::Edit,
-        );
-        assert!(matches!(
-            check,
-            Ok(crate::file_tracker::StatCheck::NeedsBytes { .. }),
-        ));
+        let result = tracker.verify_current_content(&path, b"hello\n", GatePurpose::Edit);
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]
@@ -509,7 +501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("huge.txt");
         let f = std::fs::File::create(&path).unwrap();
-        f.set_len(MAX_READ_FILE_SIZE + 1).unwrap();
+        f.set_len(MAX_TRACKED_FILE_SIZE + 1).unwrap();
 
         let err = read_file(path.to_str().unwrap(), None, None, &FileTracker::default())
             .await

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use super::{Tool, ToolOutput, extract_input_field, summarize_path_call};
-use crate::file_tracker::{FileTracker, GatePurpose, StatCheck};
+use crate::file_tracker::{FileTracker, GatePurpose, TrackableFileError, validate_trackable_file};
 
 pub(crate) struct WriteTool {
     tracker: Arc<FileTracker>,
@@ -107,7 +107,13 @@ async fn write_file(
     let is_new = pre_meta.is_none();
 
     if let Some(meta) = &pre_meta
-        && let Err(msg) = check_gate(file_path, meta, path, tracker).await
+        && let Err(msg) = validate_write_target(path, meta)
+    {
+        return (Err(msg), false);
+    }
+
+    if pre_meta.is_some()
+        && let Err(msg) = check_gate(file_path, path, tracker).await
     {
         return (Err(msg), is_new);
     }
@@ -134,23 +140,32 @@ async fn write_file(
     (Ok(msg), is_new)
 }
 
-async fn check_gate(
-    file_path: &Path,
-    meta: &std::fs::Metadata,
-    path: &str,
-    tracker: &FileTracker,
-) -> Result<(), String> {
-    let mtime = meta
-        .modified()
-        .map_err(|e| format!("Error reading {path}: {e}"))?;
-    let stat_check = tracker
-        .check_stat(file_path, mtime, meta.len(), GatePurpose::Write)
-        .map_err(|e| e.to_string())?;
-    let StatCheck::NeedsBytes { stored_hash } = stat_check;
+fn validate_write_target(path: &str, metadata: &std::fs::Metadata) -> Result<(), String> {
+    match validate_trackable_file(metadata) {
+        Ok(()) => Ok(()),
+        Err(TrackableFileError::Directory) => Err(format!(
+            "{path} is a directory. Use the glob tool to list directory contents."
+        )),
+        Err(TrackableFileError::NonRegular) => Err(format!(
+            "{path} is not a regular file (fifo, socket, or device). Refusing to write.",
+        )),
+        Err(TrackableFileError::TooLarge { size, max }) => {
+            let mb = super::bytes_to_mb(size);
+            let limit_mb = max / (1024 * 1024);
+            Err(format!(
+                "File is too large ({mb:.1} MB, max {limit_mb} MB). \
+                 Use the bash tool for large-file writes.",
+            ))
+        }
+    }
+}
+
+async fn check_gate(file_path: &Path, path: &str, tracker: &FileTracker) -> Result<(), String> {
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("Error reading {path}: {e}"))?;
-    FileTracker::verify_drift_bytes(file_path, &bytes, stored_hash, GatePurpose::Write)
+    tracker
+        .verify_current_content(file_path, &bytes, GatePurpose::Write)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -158,8 +173,10 @@ async fn check_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_tracker::LastView;
-    use crate::file_tracker::testing::{seed_full_read, tracker};
+    use crate::file_tracker::{
+        LastView,
+        testing::{seed_full_read, tracker},
+    };
 
     // ── run ──
 
@@ -211,7 +228,7 @@ mod tests {
         assert_eq!(
             output.metadata.title.as_deref(),
             Some("Updated existing.txt"),
-            "overwrite must surface as Updated, not Created",
+            "overwrite should surface as Updated",
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
@@ -263,7 +280,7 @@ mod tests {
         .await;
         let err = result.unwrap_err();
         assert!(
-            err.contains("not been read"),
+            err.contains("needs a full Read"),
             "expected must-read-first error, got: {err}",
         );
         assert!(!is_new);
@@ -366,8 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_file_unread_directory_hits_strict_gate() {
-        // No Read entry → the gate fires before the OS would reject the write.
+    async fn write_file_rejects_directory_before_gate() {
         let dir = tempfile::tempdir().unwrap();
         let (result, _) = write_file(
             dir.path().to_str().unwrap(),
@@ -377,8 +393,8 @@ mod tests {
         .await;
         let err = result.unwrap_err();
         assert!(
-            err.contains("not been read"),
-            "expected must-read-first rejection for unread directory, got: {err}",
+            err.contains("is a directory"),
+            "expected directory rejection, got: {err}",
         );
     }
 
