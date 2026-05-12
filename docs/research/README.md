@@ -12,6 +12,12 @@ Organized by topic. Each subdirectory mirrors the corresponding directory in [`d
 | [Extended Thinking](api/extended-thinking.md) | Content block types, signatures, round-tripping    |
 | [System Prompt](api/system-prompt.md)         | Section assembly, CLAUDE.md, caching, block layout |
 
+## Agent Loop
+
+| Document                                    | Description                                           |
+| ------------------------------------------- | ----------------------------------------------------- |
+| [Auto-Compaction](agent/auto-compaction.md) | Automatic compaction thresholds, triggers, fail-safes |
+
 ## Session
 
 | Document                                         | Description                                  |
