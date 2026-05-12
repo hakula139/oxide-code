@@ -44,6 +44,7 @@ pub(crate) async fn resolve_session(
         return Ok(ResumedSession {
             handle: handle::start(store, model),
             messages: Vec::new(),
+            compact: None,
             title: None,
             tool_result_metadata: std::collections::HashMap::new(),
             file_snapshots: Vec::new(),

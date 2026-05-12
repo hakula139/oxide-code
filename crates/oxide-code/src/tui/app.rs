@@ -26,6 +26,7 @@ use super::terminal::{Tui, draw_sync};
 use super::theme::Theme;
 use crate::agent::event::{AgentEvent, UserAction};
 use crate::message::Message;
+use crate::session::entry::CompactInfo;
 use crate::slash::{self, LiveSessionInfo, SlashContext, SlashKind};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::util::text::truncate_to_width;
@@ -73,11 +74,12 @@ impl App {
         agent_rx: mpsc::Receiver<AgentEvent>,
         user_tx: mpsc::Sender<UserAction>,
         history: &[Message],
+        history_compact: Option<&CompactInfo>,
         history_metadata: &HashMap<String, ToolMetadata>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let mut chat = ChatView::new(theme, show_thinking);
-        chat.load_history(history, history_metadata, tools.as_ref());
+        chat.load_history(history, history_compact, history_metadata, tools.as_ref());
         let mut status_bar = StatusBar::new(
             theme,
             session_info.display_name().into_owned(),
@@ -473,8 +475,9 @@ impl App {
                 id,
                 title,
                 messages,
+                compact,
                 tool_metadata,
-            } => self.apply_session_resumed(id, title, &messages, &tool_metadata),
+            } => self.apply_session_resumed(id, title, compact.as_ref(), &messages, &tool_metadata),
             AgentEvent::SessionCompacted {
                 summary,
                 pre_count,
@@ -521,6 +524,7 @@ impl App {
         &mut self,
         id: String,
         title: Option<String>,
+        compact: Option<&CompactInfo>,
         messages: &[Message],
         tool_metadata: &HashMap<String, ToolMetadata>,
     ) {
@@ -528,7 +532,7 @@ impl App {
         self.status_bar.set_title(title);
         self.chat.clear_history();
         self.chat
-            .load_history(messages, tool_metadata, self.tools.as_ref());
+            .load_history(messages, compact, tool_metadata, self.tools.as_ref());
         self.pending_calls.clear();
         // Drop queued prompts (they belong to the previous thread); surface the count so the
         // user knows their Enter-committed work didn't carry over. `/clear` (SessionRolled)
@@ -803,6 +807,7 @@ mod tests {
             agent_rx,
             user_tx,
             &[],
+            None,
             &HashMap::new(),
             tools,
         );
@@ -2134,6 +2139,7 @@ mod tests {
             id: "resumed-session".to_owned(),
             title: Some("Resumed title".to_owned()),
             messages,
+            compact: None,
             tool_metadata: HashMap::new(),
         });
 
@@ -2166,6 +2172,7 @@ mod tests {
             id: "resumed".to_owned(),
             title: None,
             messages: vec![Message::user("only msg")],
+            compact: None,
             tool_metadata: HashMap::new(),
         });
         assert_eq!(
@@ -2176,12 +2183,39 @@ mod tests {
     }
 
     #[test]
+    fn handle_session_resumed_with_compact_replays_boundary_block() {
+        let (mut app, _rx, _agent_tx) = test_app(None);
+        app.handle_agent_event(AgentEvent::SessionResumed {
+            id: "resumed".to_owned(),
+            title: None,
+            messages: vec![
+                Message::user("This conversation has been compacted.\n\ninternal summary"),
+                Message::assistant("post-compact reply"),
+            ],
+            compact: Some(CompactInfo {
+                summary: "Compact summary".to_owned(),
+                pre_message_count: 4,
+                instructions: None,
+            }),
+            tool_metadata: HashMap::new(),
+        });
+
+        assert_eq!(app.chat.entry_count(), 2);
+        let text = rendered_text(&mut app, 80, 12);
+        assert!(text.contains("Compacted 4 messages"));
+        assert!(text.contains("Compact summary"));
+        assert!(text.contains("post-compact reply"));
+        assert!(!text.contains("internal summary"));
+    }
+
+    #[test]
     fn handle_session_resumed_with_no_title_clears_stale_chrome() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Stale"));
         app.handle_agent_event(AgentEvent::SessionResumed {
             id: "resumed".to_owned(),
             title: None,
             messages: Vec::new(),
+            compact: None,
             tool_metadata: HashMap::new(),
         });
         assert!(

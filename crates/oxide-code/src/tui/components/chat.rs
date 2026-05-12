@@ -18,6 +18,7 @@ use self::blocks::{
     ToolCallBlock, ToolResultBlock, UserMessage, last_has_width,
 };
 use crate::message::Message;
+use crate::session::entry::CompactInfo;
 use crate::session::history::{Interaction, walk_transcript};
 use crate::tool::{ToolMetadata, ToolRegistry, ToolResultView};
 use crate::tui::pending_calls::{FALLBACK_RESULT_HEADER, PendingCall, PendingCalls, result_header};
@@ -70,9 +71,21 @@ impl ChatView {
     pub(crate) fn load_history(
         &mut self,
         messages: &[Message],
+        compact: Option<&CompactInfo>,
         metadata_by_tool_use_id: &HashMap<String, ToolMetadata>,
         tools: &ToolRegistry,
     ) {
+        let messages = match compact {
+            Some(info) => {
+                self.push_compacted_block(
+                    info.pre_message_count,
+                    info.instructions.as_deref(),
+                    info.summary.clone(),
+                );
+                messages.get(1..).unwrap_or_default()
+            }
+            None => messages,
+        };
         let mut pending = PendingCalls::new();
         let default_metadata = ToolMetadata::default();
         for interaction in walk_transcript(messages) {
@@ -585,6 +598,7 @@ mod tests {
         let mut chat = test_chat();
         chat.load_history(
             &[Message::user("hello"), Message::assistant("hi there")],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -635,6 +649,7 @@ mod tests {
                     ],
                 },
             ],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -677,6 +692,7 @@ mod tests {
                 },
                 Message::assistant("reply"),
             ],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -706,6 +722,7 @@ mod tests {
                     is_error: true,
                 }],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -731,6 +748,7 @@ mod tests {
                     },
                 ],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -754,6 +772,7 @@ mod tests {
                     text: "  \n  ".to_owned(),
                 }],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -763,8 +782,35 @@ mod tests {
     #[test]
     fn load_history_empty_slice_is_noop() {
         let mut chat = test_chat();
-        chat.load_history(&[], &HashMap::new(), &test_tools());
+        chat.load_history(&[], None, &HashMap::new(), &test_tools());
         assert!(chat.blocks.is_empty());
+    }
+
+    #[test]
+    fn load_history_renders_compact_boundary_and_hides_synthetic_root() {
+        let mut chat = test_chat();
+        let compact = CompactInfo {
+            summary: "Kept the important decisions.".to_owned(),
+            pre_message_count: 4,
+            instructions: Some("focus on auth".to_owned()),
+        };
+
+        chat.load_history(
+            &[
+                Message::user("This conversation has been compacted.\n\ninternal summary"),
+                Message::assistant("post-compact reply"),
+            ],
+            Some(&compact),
+            &HashMap::new(),
+            &test_tools(),
+        );
+
+        assert_eq!(chat.blocks.len(), 2);
+        let text = all_text(&chat);
+        assert!(text.contains("Compacted 4 messages"));
+        assert!(text.contains("Kept the important decisions."));
+        assert!(text.contains("post-compact reply"));
+        assert!(!text.contains("internal summary"));
     }
 
     #[test]
@@ -784,6 +830,7 @@ mod tests {
                     },
                 ],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -805,6 +852,7 @@ mod tests {
                     input: serde_json::json!({"arg": "value"}),
                 }],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -826,6 +874,7 @@ mod tests {
                     input: serde_json::json!({"query": "rust"}),
                 }],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -850,6 +899,7 @@ mod tests {
                     },
                 ],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -875,6 +925,7 @@ mod tests {
                     },
                 ],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -919,7 +970,7 @@ mod tests {
                 ..crate::tool::ToolMetadata::default()
             },
         );
-        chat.load_history(&history, &metadata_map, &tools);
+        chat.load_history(&history, None, &metadata_map, &tools);
         let text = all_text(&chat);
         assert!(
             text.contains("✓ Edited f.rs"),
@@ -947,6 +998,7 @@ mod tests {
                     },
                 ],
             }],
+            None,
             &HashMap::new(),
             &test_tools(),
         );
@@ -2353,7 +2405,7 @@ mod tests {
                 ],
             },
         ];
-        chat.load_history(&history, &HashMap::new(), &tools);
+        chat.load_history(&history, None, &HashMap::new(), &tools);
         insta::assert_snapshot!(render_chat(&mut chat, 60, 10));
     }
 
