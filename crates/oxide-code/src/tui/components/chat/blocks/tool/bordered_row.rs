@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::RenderCtx;
-use super::{TOOL_BORDER_CONT, border_continuation_prefix};
+use super::TOOL_BORDER_CONT;
+use crate::tui::components::chat::blocks::bar_continuation_prefix;
 use crate::tui::wrap::wrap_line;
 
 /// Emits a bar-prefixed row, wrapping under the bar at `ctx.width`.
@@ -18,7 +19,7 @@ pub(in super::super) fn render(
     text: impl Into<String>,
     text_style: Style,
 ) {
-    let cont_prefix = border_continuation_prefix(TOOL_BORDER_CONT, border_style);
+    let cont_prefix = bar_continuation_prefix(TOOL_BORDER_CONT, border_style);
     let line = Line::from(vec![
         Span::styled(TOOL_BORDER_CONT.to_owned(), border_style),
         Span::styled(text.into(), text_style),
@@ -61,7 +62,7 @@ mod tests {
 
     #[test]
     fn render_wraps_long_text_under_bar() {
-        // Continuation lines must keep the bar aligned via `border_continuation_prefix`.
+        // Continuation lines must keep the bar aligned.
         let theme = Theme::default();
         let ctx = RenderCtx {
             width: 12,

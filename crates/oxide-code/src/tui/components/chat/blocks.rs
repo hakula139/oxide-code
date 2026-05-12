@@ -24,6 +24,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::tui::glyphs::BAR;
 use crate::tui::theme::Theme;
 use crate::tui::wrap::wrap_line;
 
@@ -131,6 +132,23 @@ pub(super) fn prepend_markdown_prefix(
     out
 }
 
+/// Continuation prefix that keeps the shared left bar styled after wrapping.
+pub(super) fn bar_continuation_prefix(prefix: &str, bar_style: Style) -> Vec<Span<'static>> {
+    let bar_pos = prefix.find(BAR).expect("prefix must contain bar glyph");
+    let left = &prefix[..bar_pos];
+    let right = &prefix[bar_pos + BAR.len()..];
+
+    let mut spans = Vec::with_capacity(3);
+    if !left.is_empty() {
+        spans.push(Span::raw(left.to_owned()));
+    }
+    spans.push(Span::styled(BAR, bar_style));
+    if !right.is_empty() {
+        spans.push(Span::raw(right.to_owned()));
+    }
+    spans
+}
+
 pub(super) fn last_has_width(lines: &[Line<'_>]) -> bool {
     lines.last().is_some_and(|l| l.width() > 0)
 }
@@ -202,5 +220,21 @@ mod tests {
         assert_eq!(result.spans[0].content, "◉ ");
         assert_eq!(result.spans[0].style.fg, Some(Color::Blue));
         assert_eq!(result.spans[1].content, "content");
+    }
+
+    // ── bar_continuation_prefix ──
+
+    #[test]
+    fn bar_continuation_prefix_preserves_bar_position_and_style() {
+        let style = Style::default().fg(Color::Blue);
+        let result = bar_continuation_prefix("  ▎   ", style);
+
+        let text: String = result.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "  ▎   ");
+        let bar = result
+            .iter()
+            .find(|s| s.content == BAR)
+            .expect("bar span present");
+        assert_eq!(bar.style, style);
     }
 }
