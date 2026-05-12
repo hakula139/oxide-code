@@ -136,12 +136,10 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
             effort: Some(Effort::High),
             max_tokens: 32_000,
             prompt_cache_ttl: PromptCacheTtl::OneHour,
-            compaction: CompactionConfig {
-                auto: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(155_000),
-                },
-            },
+            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(155_000),
+            }),
             show_thinking: false,
             show_welcome: true,
             theme_name: "mocha".to_owned(),

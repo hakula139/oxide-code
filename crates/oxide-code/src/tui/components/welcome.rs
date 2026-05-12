@@ -345,12 +345,10 @@ mod tests {
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig {
-                    auto: AutoCompactionConfig {
-                        enabled: true,
-                        threshold_tokens: Some(967_000),
-                    },
-                },
+                compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(967_000),
+                }),
                 show_thinking: false,
                 show_welcome: true,
                 theme_name: "mocha".to_owned(),

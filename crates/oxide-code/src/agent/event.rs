@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::config::Effort;
+use crate::config::{CompactionConfig, Effort};
 use crate::model::ResolvedModelId;
 use crate::tool::ToolRegistry;
 
@@ -63,16 +63,20 @@ pub(crate) enum AgentEvent {
     /// `/compact` finished — summary captures the prior transcript, `pre_count` is for the
     /// post-compact UI line. The agent loop has already swapped the in-memory transcript to
     /// the synthetic continuation; the UI clears its chat and replays a single boundary block.
+    /// Automatic compaction can happen before a submitted prompt starts, so the TUI keeps the
+    /// busy state until the following turn completes.
     SessionCompacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
+        automatic: bool,
     },
     /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
     /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
         model_id: String,
         effort: Option<Effort>,
+        compaction: CompactionConfig,
         requested_effort: Option<Effort>,
     },
     /// User-visible error from the agent loop, session writer, or tool dispatch. Renders as a
@@ -373,6 +377,7 @@ mod tests {
             AgentEvent::ConfigChanged {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
+                compaction: CompactionConfig::disabled(),
                 requested_effort: Some(Effort::Xhigh),
             },
         ] {

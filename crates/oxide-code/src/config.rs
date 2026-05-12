@@ -194,6 +194,7 @@ impl FromStr for PromptCacheTtl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactionConfig {
     pub(crate) auto: AutoCompactionConfig,
+    policy: AutoCompactionPolicy,
 }
 
 impl CompactionConfig {
@@ -201,7 +202,30 @@ impl CompactionConfig {
     pub(crate) const fn disabled() -> Self {
         Self {
             auto: AutoCompactionConfig::disabled(),
+            policy: AutoCompactionPolicy::Disabled,
         }
+    }
+
+    pub(crate) fn for_model(self, model: &str, max_tokens: u32) -> Result<Self> {
+        resolve_compaction_policy(self.policy, model, max_tokens)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn resolved_for_test(auto: AutoCompactionConfig) -> Self {
+        let policy = if auto.enabled {
+            match auto.threshold_tokens {
+                Some(tokens) => AutoCompactionPolicy::Tokens(tokens),
+                None => AutoCompactionPolicy::Default,
+            }
+        } else {
+            AutoCompactionPolicy::Disabled
+        };
+        Self { auto, policy }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn default_for_test(model: &str, max_tokens: u32) -> Self {
+        resolve_compaction_policy(AutoCompactionPolicy::Default, model, max_tokens).unwrap()
     }
 }
 
@@ -225,6 +249,14 @@ impl AutoCompactionConfig {
             _ => false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoCompactionPolicy {
+    Disabled,
+    Default,
+    Tokens(u32),
+    Percent(u8),
 }
 
 // ── Config ──
@@ -395,32 +427,44 @@ fn resolve_compaction(
     let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")
         .or_else(|| file.as_ref().and_then(|c| c.enabled))
         .unwrap_or(true);
-    let auto = if auto_requested {
-        resolve_auto_compaction(file.as_ref(), model, max_tokens)?
-    } else {
-        AutoCompactionConfig::disabled()
-    };
 
-    Ok(CompactionConfig { auto })
+    let policy = if auto_requested {
+        resolve_auto_policy(file.as_ref())?
+    } else {
+        AutoCompactionPolicy::Disabled
+    };
+    resolve_compaction_policy(policy, model, max_tokens)
+}
+
+fn resolve_compaction_policy(
+    policy: AutoCompactionPolicy,
+    model: &str,
+    max_tokens: u32,
+) -> Result<CompactionConfig> {
+    let auto = resolve_auto_compaction(policy, model, max_tokens)?;
+    Ok(CompactionConfig { auto, policy })
 }
 
 fn resolve_auto_compaction(
-    file: Option<&file::CompactionConfig>,
+    policy: AutoCompactionPolicy,
     model: &str,
     max_tokens: u32,
 ) -> Result<AutoCompactionConfig> {
-    let threshold = resolve_auto_threshold(file, model, max_tokens)?;
+    let threshold = match policy {
+        AutoCompactionPolicy::Disabled => return Ok(AutoCompactionConfig::disabled()),
+        AutoCompactionPolicy::Default => default_auto_threshold(model, max_tokens),
+        AutoCompactionPolicy::Tokens(tokens) => threshold_from_tokens(tokens, model, max_tokens)?,
+        AutoCompactionPolicy::Percent(percent) => {
+            threshold_from_percent(percent, model, max_tokens)?
+        }
+    };
     Ok(AutoCompactionConfig {
         enabled: threshold.is_some(),
         threshold_tokens: threshold,
     })
 }
 
-fn resolve_auto_threshold(
-    file: Option<&file::CompactionConfig>,
-    model: &str,
-    max_tokens: u32,
-) -> Result<Option<u32>> {
+fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoCompactionPolicy> {
     let env_tokens = env_u32("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
     let env_percent = env_u8("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
     let env_threshold_set = env_tokens.is_some() || env_percent.is_some();
@@ -436,13 +480,23 @@ fn resolve_auto_threshold(
         (Some(_), Some(_)) => {
             bail!("set only one of auto_threshold_tokens or auto_threshold_percent for compaction")
         }
-        (Some(tokens), None) => validate_auto_threshold_tokens(tokens).map(Some),
-        (None, Some(percent)) => threshold_from_percent(percent, model, max_tokens),
-        (None, None) => Ok(default_auto_threshold(model, max_tokens)),
+        (Some(tokens), None) => Ok(AutoCompactionPolicy::Tokens(tokens)),
+        (None, Some(percent)) => Ok(AutoCompactionPolicy::Percent(percent)),
+        (None, None) => Ok(AutoCompactionPolicy::Default),
     }
 }
 
-fn validate_auto_threshold_tokens(tokens: u32) -> Result<u32> {
+fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> Result<Option<u32>> {
+    validate_auto_threshold_floor(tokens)?;
+    if let Some(max) = default_auto_threshold(model, max_tokens)
+        && tokens > max
+    {
+        bail!("auto compaction threshold must be at most {max} tokens for model {model:?}");
+    }
+    Ok(Some(tokens))
+}
+
+fn validate_auto_threshold_floor(tokens: u32) -> Result<u32> {
     if tokens < MIN_AUTO_COMPACTION_THRESHOLD_TOKENS {
         bail!(
             "auto compaction threshold must be at least \
@@ -461,7 +515,7 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
     };
     let threshold = context_window.saturating_mul(u32::from(percent)) / 100;
     default_auto_threshold_for_window(context_window, max_tokens)
-        .map(|max| validate_auto_threshold_tokens(threshold.min(max)))
+        .map(|max| validate_auto_threshold_floor(threshold.min(max)))
         .transpose()
 }
 
@@ -962,6 +1016,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_compaction_rejects_threshold_above_model_safe_window() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+
+                [client.compaction]
+                auto_threshold_tokens = 400000
+            "#},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("threshold beyond context safety window must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at most"), "{msg}");
+        assert!(msg.contains("claude-sonnet-4-6"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn load_compaction_rejects_out_of_range_auto_threshold_percent() {
         let dir = tempfile::tempdir().unwrap();
         let vars = env_vars(vec![
@@ -1274,12 +1349,10 @@ mod tests {
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
-            compaction: CompactionConfig {
-                auto: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(42),
-                },
-            },
+            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(42),
+            }),
             thinking: None,
             show_thinking: true,
             show_welcome: false,

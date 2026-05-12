@@ -99,6 +99,28 @@ mod tests {
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
 
+    fn render_modal(modal: &KvOverview, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let height = modal.height(width);
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     // ── ConfigCmd metadata ──
 
     #[test]
@@ -132,6 +154,16 @@ mod tests {
         let info = test_session_info();
         let m = build_modal(&info, None, None);
         assert_eq!(m.height(80), 20);
+    }
+
+    #[test]
+    fn build_modal_renders_resolved_auto_compaction() {
+        let info = test_session_info();
+        let m = build_modal(&info, None, None);
+        let rendered = render_modal(&m, 80);
+
+        assert!(rendered.contains("Auto Compaction"), "{rendered}");
+        assert!(rendered.contains("on at 155000 tokens"), "{rendered}");
     }
 
     // ── display_path ──

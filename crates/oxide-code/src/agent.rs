@@ -1,12 +1,12 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
 //! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
 
+pub(crate) mod compact_boundary;
 pub(crate) mod compaction;
 pub(crate) mod event;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::mpsc;
@@ -55,12 +55,6 @@ pub(crate) trait AgentClient: Send + Sync {
         user_context: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>>;
-
-    fn compact_session<'a>(
-        &'a self,
-        transcript: &'a [Message],
-        instructions: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 }
 
 impl AgentClient for Client {
@@ -73,14 +67,6 @@ impl AgentClient for Client {
     ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
         Client::stream_message(self, messages, system_sections, user_context, tools)
     }
-
-    fn compact_session<'a>(
-        &'a self,
-        transcript: &'a [Message],
-        instructions: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-        Box::pin(compaction::compact_session(self, transcript, instructions))
-    }
 }
 
 // ── Agent Turn ──
@@ -92,6 +78,14 @@ pub(crate) struct TokenUsage {
 }
 
 impl TokenUsage {
+    #[cfg(test)]
+    pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+        }
+    }
+
     pub(crate) const fn total_tokens(self) -> u32 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
@@ -142,7 +136,6 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
-    mut auto_compact: Option<AutoCompact<'_>>,
 ) -> AbortResult<TurnReport> {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
@@ -194,17 +187,6 @@ pub(crate) async fn agent_turn(
         commit_round_writes(session, sink, &assistant_msg, &tool_result_msg, sidecars).await;
         messages.push(assistant_msg);
         messages.push(tool_result_msg);
-        auto_compact_if_needed(
-            client,
-            session,
-            messages,
-            sink,
-            user_rx,
-            &mut pending_prompts,
-            auto_compact.as_mut(),
-            usage,
-        )
-        .await?;
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
@@ -240,23 +222,28 @@ pub(crate) async fn auto_compact_if_needed(
         return Ok(false);
     }
 
-    let summary =
-        match await_unless_aborted(client.compact_session(messages, None), user_rx, pending).await?
-        {
-            Ok(summary) => summary,
-            Err(e) => {
-                *auto.failures += 1;
-                warn!("auto-compaction failed: {e:#}");
-                return Ok(false);
-            }
-        };
-    let compacted = compaction::replace_session_with_summary(
+    let summary = match await_unless_aborted(
+        compaction::compact_session(client, messages, None),
+        user_rx,
+        pending,
+    )
+    .await?
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            *auto.failures += 1;
+            warn!("auto-compaction failed: {e:#}");
+            return Ok(false);
+        }
+    };
+    let compacted = compact_boundary::replace_session_with_summary(
         session,
         auto.file_tracker,
         messages,
         sink,
         summary,
         None,
+        true,
     )
     .await;
     if compacted {
@@ -636,6 +623,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serde_json::json;
     use tokio::sync::Notify;
@@ -707,15 +695,63 @@ mod tests {
             _user_context: Option<&str>,
             _tools: &[ToolDefinition],
         ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
-            unreachable!("auto-compaction tests do not stream turns")
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct CountingFailingClient {
+        calls: AtomicUsize,
+    }
+
+    impl CountingFailingClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
         }
 
-        fn compact_session<'a>(
-            &'a self,
-            _transcript: &'a [Message],
-            _instructions: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-            Box::pin(async { Err(anyhow!("summarizer unavailable")) })
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AgentClient for CountingFailingClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct DelayedSummaryClient {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl AgentClient for DelayedSummaryClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            let (tx, rx) = mpsc::channel(8);
+            let started = self.started.clone();
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                for event in text_turn("auto summary") {
+                    tx.send(Ok(event)).await.expect("test receiver alive");
+                }
+            });
+            Ok(rx)
         }
     }
 
@@ -733,14 +769,6 @@ mod tests {
                 tx.try_send(Ok(event)).expect("channel capacity");
             }
             Ok(rx)
-        }
-
-        fn compact_session<'a>(
-            &'a self,
-            _transcript: &'a [Message],
-            _instructions: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-            Box::pin(async { Ok("auto summary".to_owned()) })
         }
     }
 
@@ -969,7 +997,12 @@ mod tests {
         let client = FakeClient::new(Vec::new());
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
         let mut pending = Vec::new();
         let mut failures = 0;
 
@@ -1034,7 +1067,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!below_threshold);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 4);
         assert_eq!(failures, 0);
     }
 
@@ -1044,7 +1077,12 @@ mod tests {
         let session = test_session(dir.path());
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
         let mut pending = Vec::new();
         let mut failures = 0;
 
@@ -1079,10 +1117,15 @@ mod tests {
     #[tokio::test]
     async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
         let session = dead_test_session();
-        let client = FakeClient::new(Vec::new());
+        let client = FakeClient::new(vec![text_turn("auto summary")]);
         let sink = CapturingSink::new();
         let tracker = FileTracker::default();
-        let mut messages = vec![Message::user("hi"), Message::assistant("there")];
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
         let mut pending = Vec::new();
         let mut failures = 0;
 
@@ -1120,6 +1163,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_compact_if_needed_stops_after_failure_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = CountingFailingClient::new();
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+        let usage = Some(TokenUsage {
+            input_tokens: 50_000,
+            output_tokens: 1,
+        });
+
+        let first = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+        let second = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first);
+        assert!(!second);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_queues_submit_while_summarizing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let client = DelayedSummaryClient {
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let mut auto = AutoCompact {
+            config: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(10),
+            },
+            failures: &mut failures,
+            file_tracker: &tracker,
+        };
+
+        let compact = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut rx,
+            &mut pending,
+            Some(&mut auto),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        );
+        let queue_prompt = async {
+            started.notified().await;
+            tx.send(UserAction::SubmitPrompt("queued after summary".into()))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            release.notify_one();
+        };
+        let (compacted, ()) = tokio::join!(compact, queue_prompt);
+        let compacted = compacted.unwrap();
+
+        assert!(compacted);
+        assert_eq!(pending, vec!["queued after summary"]);
+        assert_eq!(*auto.failures, 0);
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::PromptDrained(_)))
+                .count(),
+            0
+        );
+        assert!(sink.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionCompacted {
+                automatic: true,
+                ..
+            }
+        )));
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+    }
+
+    #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
         // Write errors must not abort the turn; one Error event surfaces and the turn returns Ok.
         let session = dead_test_session();
@@ -1136,7 +1321,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1174,7 +1358,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1208,7 +1391,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1247,7 +1429,6 @@ mod tests {
             &sink,
             &session,
             &mut user_rx,
-            None,
         )
         .await
         .unwrap();
@@ -1284,7 +1465,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1312,7 +1492,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1352,7 +1531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_auto_compacts_after_tool_round_crosses_threshold() {
+    async fn agent_turn_does_not_auto_compact_between_tool_result_and_follow_up() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![
@@ -1361,8 +1540,6 @@ mod tests {
         ]);
         let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
         let sink = CapturingSink::new();
-        let tracker = FileTracker::default();
-        let mut failures = 0;
         let mut messages = vec![
             Message::user("run echo"),
             Message::assistant("earlier"),
@@ -1377,31 +1554,19 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            Some(AutoCompact {
-                config: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(10),
-                },
-                failures: &mut failures,
-                file_tracker: &tracker,
-            }),
         )
         .await
         .unwrap();
 
         assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
-        assert_eq!(failures, 0);
         assert_eq!(
             sink.events()
                 .iter()
                 .filter(|event| matches!(event, AgentEvent::SessionCompacted { .. }))
                 .count(),
-            1
+            0
         );
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
-        );
-        assert!(matches!(&messages[1].content[0], ContentBlock::Text { text } if text == "Done"));
+        assert!(matches!(&messages[5].content[0], ContentBlock::Text { text } if text == "Done"));
     }
 
     #[tokio::test]
@@ -1431,7 +1596,6 @@ mod tests {
             &sink,
             &session,
             &mut rx,
-            None,
         )
         .await
         .expect("turn must complete");
@@ -1493,7 +1657,6 @@ mod tests {
             &sink,
             &session,
             &mut rx,
-            None,
         )
         .await
         .expect("turn must complete");
@@ -1543,7 +1706,6 @@ mod tests {
             &sink,
             &session,
             &mut rx,
-            None,
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -1573,7 +1735,6 @@ mod tests {
             &sink,
             &session,
             &mut rx,
-            None,
         )
         .await
         .expect_err("quit must surface as Err(Quit)");
@@ -1602,7 +1763,6 @@ mod tests {
             &sink,
             &session,
             &mut rx,
-            None,
         )
         .await
         .expect_err("dead channel must surface as Err(Quit)");
@@ -1643,7 +1803,6 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
-                None,
             )
             .await
             .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
@@ -1682,7 +1841,6 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
-                None,
             ),
             async {
                 started.notified().await;
@@ -1733,7 +1891,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1773,7 +1930,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1827,7 +1983,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .expect_err("cap must trip");
@@ -1861,7 +2016,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .expect_err("api error must propagate");
@@ -1905,7 +2059,6 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();
@@ -1965,7 +2118,6 @@ data: {"type":"message_stop"}
             &sink,
             &session,
             &mut inert_user_rx(),
-            None,
         )
         .await
         .unwrap();

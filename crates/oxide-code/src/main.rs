@@ -522,7 +522,6 @@ impl AgentLoopTask {
         }
 
         let prompt = prompt::build_prompt(self.client.model()).await;
-        let auto_config = self.client.compaction().auto;
         let outcome = agent_turn(
             &self.client,
             &self.tools,
@@ -531,11 +530,6 @@ impl AgentLoopTask {
             &self.sink,
             &self.session,
             &mut self.user_rx,
-            Some(AutoCompact {
-                config: auto_config,
-                failures: &mut self.auto_compaction_failures,
-                file_tracker: &self.file_tracker,
-            }),
         )
         .await;
         match outcome {
@@ -682,13 +676,14 @@ async fn apply_compact(
     )
     .await?
     .map_err(|e| TurnAbort::Failed(anyhow!("Compaction failed: {e:#}")))?;
-    Ok(agent::compaction::replace_session_with_summary(
+    Ok(agent::compact_boundary::replace_session_with_summary(
         session,
         file_tracker,
         messages,
         sink,
         summary,
         instructions,
+        false,
     )
     .await)
 }
@@ -715,7 +710,10 @@ fn apply_swap_config(
     effort: Option<Effort>,
 ) {
     if let Some(id) = model {
-        client.set_model(id.into_inner());
+        if let Err(e) = client.set_model(id.into_inner()) {
+            _ = sink.send(AgentEvent::Error(format!("Config change failed: {e:#}")));
+            return;
+        }
     }
     let resolved = match effort {
         Some(pick) => client.set_effort(pick),
@@ -724,6 +722,7 @@ fn apply_swap_config(
     if let Err(e) = sink.send(AgentEvent::ConfigChanged {
         model_id: client.model().to_owned(),
         effort: resolved,
+        compaction: client.compaction(),
         requested_effort: effort,
     }) {
         // Dropping this leaves the status bar showing the previous model / effort even though the
@@ -815,11 +814,6 @@ async fn bare_repl(
                 &sink,
                 &session,
                 &mut user_rx,
-                Some(AutoCompact {
-                    config: client.compaction().auto,
-                    failures: &mut auto_compaction_failures,
-                    file_tracker: &file_tracker,
-                }),
             );
             let turn_result = tokio::select! {
                 r = turn => r,
@@ -869,7 +863,6 @@ async fn headless(
     let prompt = prompt::build_prompt(model).await;
     let mut shutdown_fired = false;
     let (_user_tx, mut user_rx) = inert_user_action_channel();
-    let mut auto_compaction_failures = 0_u8;
     let turn = agent_turn(
         client,
         &tools,
@@ -878,11 +871,6 @@ async fn headless(
         &sink,
         &session,
         &mut user_rx,
-        Some(AutoCompact {
-            config: client.compaction().auto,
-            failures: &mut auto_compaction_failures,
-            file_tracker: &file_tracker,
-        }),
     );
     let result: Result<()> = tokio::select! {
         r = turn => match r {
@@ -904,4 +892,102 @@ async fn headless(
     result?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::agent::event::CapturingSink;
+    use crate::client::anthropic::testing::{api_key, test_config};
+    use crate::config::{AutoCompactionConfig, CompactionConfig};
+    use crate::message::ContentBlock;
+    use crate::session::store::test_store;
+
+    fn streamed_summary_body(text: &str) -> String {
+        let start = serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "m", "model": "claude-haiku-4-5"},
+        });
+        let block = serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": text},
+        });
+        format!(
+            "event: message_start\ndata: {start}\n\n\
+             event: content_block_start\ndata: {block}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn auto_compact_before_prompt_compacts_previous_turn_before_recording_new_prompt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(streamed_summary_body("auto summary"))
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut config = test_config(server.uri(), api_key(), "claude-opus-4-7[1m]");
+        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(50_000),
+        });
+        let client = Client::new(config, Some("sid".to_owned())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let session = session::handle::start(&store, "claude-opus-4-7[1m]");
+        let file_tracker = Arc::new(FileTracker::default());
+        let sink = CapturingSink::new();
+        let (_tx, mut user_rx) = agent::event::inert_user_action_channel();
+        let mut pending = Vec::new();
+        let mut failures = 0;
+        let mut messages = vec![
+            Message::user("one"),
+            Message::assistant("two"),
+            Message::user("three"),
+            Message::assistant("four"),
+        ];
+
+        let compacted = auto_compact_before_prompt(
+            &client,
+            &session,
+            &file_tracker,
+            &mut messages,
+            &sink,
+            &mut user_rx,
+            &mut pending,
+            &mut failures,
+            Some(TokenUsage::new(50_000, 1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(compacted);
+        assert!(pending.is_empty());
+        assert_eq!(failures, 0);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
+        assert!(sink.events().iter().any(|event| {
+            matches!(
+                event,
+                AgentEvent::SessionCompacted {
+                    automatic: true,
+                    ..
+                }
+            )
+        }));
+    }
 }

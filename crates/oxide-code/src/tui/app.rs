@@ -478,10 +478,17 @@ impl App {
                 summary,
                 pre_count,
                 instructions,
-            } => self.apply_session_compacted(&summary, pre_count, instructions.as_deref()),
+                automatic,
+            } => self.apply_session_compacted(
+                &summary,
+                pre_count,
+                instructions.as_deref(),
+                automatic,
+            ),
             AgentEvent::ConfigChanged {
                 model_id,
                 effort,
+                compaction,
                 requested_effort,
             } => {
                 let model_changed = model_id != self.session_info.config.model_id;
@@ -499,6 +506,7 @@ impl App {
                 }
                 self.session_info.config.model_id = model_id;
                 self.session_info.config.effort = effort;
+                self.session_info.config.compaction = compaction;
                 self.chat.push_system_message(confirmation);
             }
             AgentEvent::Error(msg) => {
@@ -549,13 +557,16 @@ impl App {
         summary: &str,
         pre_count: u32,
         instructions: Option<&str>,
+        automatic: bool,
     ) {
         self.chat.clear_history();
         self.pending_calls.clear();
         self.chat
             .push_compacted_block(pre_count, instructions, summary.to_owned());
         self.clear_modals();
-        self.finalize_idle();
+        if !automatic {
+            self.finalize_idle();
+        }
     }
 
     /// Resets to idle, clears orphan calls, re-enables input, and drains queued prompts.
@@ -861,12 +872,10 @@ mod tests {
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
-                compaction: CompactionConfig {
-                    auto: AutoCompactionConfig {
-                        enabled: true,
-                        threshold_tokens: Some(155_000),
-                    },
-                },
+                compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(155_000),
+                }),
                 show_thinking: false,
                 show_welcome: true,
                 theme_name: "mocha".to_owned(),
@@ -1975,6 +1984,12 @@ mod tests {
         app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: "claude-sonnet-4-6".to_owned(),
             effort: Some(crate::config::Effort::High),
+            compaction: crate::config::CompactionConfig::resolved_for_test(
+                crate::config::AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(167_000),
+                },
+            ),
             requested_effort: None,
         });
 
@@ -1984,6 +1999,10 @@ mod tests {
             Some(crate::config::Effort::High),
         );
         assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
+        assert_eq!(
+            app.session_info.config.compaction.auto.threshold_tokens,
+            Some(167_000),
+        );
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(
             body,
@@ -2001,6 +2020,7 @@ mod tests {
         app.handle_agent_event(AgentEvent::ConfigChanged {
             model_id: app.session_info.config.model_id.clone(),
             effort: Some(crate::config::Effort::Xhigh),
+            compaction: app.session_info.config.compaction,
             requested_effort: Some(crate::config::Effort::Xhigh),
         });
         assert_eq!(
@@ -2301,6 +2321,7 @@ mod tests {
             summary: "## Recap\n\nDid the thing.".to_owned(),
             pre_count: 4,
             instructions: Some("focus on auth".to_owned()),
+            automatic: false,
         });
 
         assert_eq!(
@@ -2330,6 +2351,7 @@ mod tests {
             summary: "s".to_owned(),
             pre_count: 2,
             instructions: None,
+            automatic: false,
         });
 
         let forwarded = rx.recv().await.expect("drained prompt reaches the agent");
@@ -2348,8 +2370,34 @@ mod tests {
             summary: "summary only".to_owned(),
             pre_count: 2,
             instructions: None,
+            automatic: false,
         });
         assert_eq!(app.chat.entry_count(), 1, "exactly one boundary block");
+    }
+
+    #[tokio::test]
+    async fn handle_session_compacted_automatic_keeps_busy_state_and_queued_prompts() {
+        let (mut app, mut rx, _agent_tx) = test_app(None);
+        app.input.set_enabled(false);
+        app.status_bar.set_status(Status::Streaming);
+        app.pending_prompts
+            .push_back("queued while busy".to_owned());
+
+        app.handle_agent_event(AgentEvent::SessionCompacted {
+            summary: "auto summary".to_owned(),
+            pre_count: 4,
+            instructions: None,
+            automatic: true,
+        });
+
+        assert_eq!(app.chat.entry_count(), 1);
+        assert_eq!(app.status_bar.status(), &Status::Streaming);
+        assert!(!app.input.is_enabled());
+        assert_eq!(app.pending_prompts.len(), 1);
+        assert!(
+            rx.try_recv().is_err(),
+            "automatic compact must not drain early"
+        );
     }
 
     #[test]

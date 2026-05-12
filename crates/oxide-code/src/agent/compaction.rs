@@ -6,12 +6,9 @@
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 
-use crate::agent::event::{AgentEvent, AgentSink};
-use crate::client::anthropic::Client;
+use crate::agent::AgentClient;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
-use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role};
-use crate::session::handle::SessionHandle;
 
 /// Minimum messages required for compaction to be worthwhile. Below this, the summary is
 /// usually longer than the transcript itself.
@@ -54,7 +51,7 @@ const SUMMARY_PREFIX: &str = indoc! {r"
 /// Errors when the transcript is too short to compact, when the API errors mid-stream, or when
 /// the model returns an empty / whitespace-only response.
 pub(crate) async fn compact_session(
-    client: &Client,
+    client: &dyn AgentClient,
     transcript: &[Message],
     instructions: Option<&str>,
 ) -> Result<String> {
@@ -147,36 +144,6 @@ pub(crate) fn synthesize_post_compact_message(summary: &str) -> Message {
     ", prefix = SUMMARY_PREFIX.trim(), summary = summary.trim()})
 }
 
-/// Persists a compact boundary and swaps the live transcript to the synthetic summary root.
-pub(crate) async fn replace_session_with_summary(
-    session: &SessionHandle,
-    file_tracker: &FileTracker,
-    messages: &mut Vec<Message>,
-    sink: &dyn AgentSink,
-    summary: String,
-    instructions: Option<String>,
-) -> bool {
-    let synthetic = synthesize_post_compact_message(&summary);
-    let outcome = session
-        .compact(summary.clone(), instructions.clone(), synthetic.clone())
-        .await;
-    sink.session_write_error(outcome.failure.as_deref());
-    if outcome.failure.is_some() {
-        return false;
-    }
-
-    file_tracker.clear();
-    *messages = vec![synthetic];
-    if let Err(e) = sink.send(AgentEvent::SessionCompacted {
-        summary,
-        pre_count: outcome.pre_count,
-        instructions,
-    }) {
-        tracing::error!("session-compacted event dropped: {e}");
-    }
-    true
-}
-
 /// Removes the synthetic summary prefix from a resumed post-compact root message.
 pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool {
     if message.role != Role::User {
@@ -195,24 +162,13 @@ pub(crate) fn strip_synthetic_post_compact_prefix(message: &mut Message) -> bool
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
-    use crate::agent::AgentClient;
     use crate::client::anthropic::testing::{Captured, api_key, captured, test_client};
     use crate::message::Role;
-    use crate::session::store::test_store;
-
-    struct FailingSink;
-
-    impl AgentSink for FailingSink {
-        fn send(&self, _event: AgentEvent) -> anyhow::Result<()> {
-            Err(anyhow!("sink closed"))
-        }
-    }
 
     // ── compact_session ──
 
@@ -302,37 +258,10 @@ mod tests {
             .await;
 
         let client = test_client(server.uri(), api_key(), "claude-haiku-4-5");
-        let summary = AgentClient::compact_session(&client, &fake_transcript(), None)
+        let summary = compact_session(&client, &fake_transcript(), None)
             .await
             .unwrap();
         assert_eq!(summary, "fixed login bug");
-    }
-
-    #[tokio::test]
-    async fn replace_session_with_summary_still_replaces_messages_when_event_send_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = test_store(dir.path());
-        let session = crate::session::handle::start(&store, "claude-sonnet-4-6");
-        let outcome = session.record_message(Message::user("fix the bug")).await;
-        assert!(outcome.failure.is_none(), "{:?}", outcome.failure);
-        let tracker = FileTracker::default();
-        let mut messages = fake_transcript();
-
-        let compacted = replace_session_with_summary(
-            &session,
-            &tracker,
-            &mut messages,
-            &FailingSink,
-            "fixed login bug".to_owned(),
-            None,
-        )
-        .await;
-
-        assert!(compacted);
-        assert_eq!(messages.len(), 1);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("fixed login bug"))
-        );
     }
 
     #[tokio::test]

@@ -90,10 +90,18 @@ impl ClientConfig {
 
 impl CompactionConfig {
     fn merge(self, other: Self) -> Self {
+        let other_sets_threshold =
+            other.threshold_tokens.is_some() || other.threshold_percent.is_some();
+        let (threshold_tokens, threshold_percent) = if other_sets_threshold {
+            (other.threshold_tokens, other.threshold_percent)
+        } else {
+            (self.threshold_tokens, self.threshold_percent)
+        };
+
         Self {
             enabled: other.enabled.or(self.enabled),
-            threshold_tokens: other.threshold_tokens.or(self.threshold_tokens),
-            threshold_percent: other.threshold_percent.or(self.threshold_percent),
+            threshold_tokens,
+            threshold_percent,
         }
     }
 }
@@ -294,11 +302,30 @@ mod tests {
         );
         let compaction = client.compaction.expect("compaction section should merge");
         assert_eq!(compaction.enabled, Some(true));
-        assert_eq!(compaction.threshold_tokens, Some(400_000));
+        assert_eq!(compaction.threshold_tokens, None);
         assert_eq!(compaction.threshold_percent, Some(40));
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+    }
+
+    #[test]
+    fn merge_compaction_enabled_does_not_clear_base_threshold() {
+        let base = CompactionConfig {
+            enabled: Some(false),
+            threshold_tokens: Some(400_000),
+            threshold_percent: None,
+        };
+        let other = CompactionConfig {
+            enabled: Some(true),
+            threshold_tokens: None,
+            threshold_percent: None,
+        };
+        let merged = base.merge(other);
+
+        assert_eq!(merged.enabled, Some(true));
+        assert_eq!(merged.threshold_tokens, Some(400_000));
+        assert_eq!(merged.threshold_percent, None);
     }
 
     #[test]
