@@ -12,7 +12,7 @@ For commands with curated arguments (`/model`, `/effort`, `/theme`), the popup s
 | `/compact [<instructions>]`                 | Compress the conversation into a summary. Trailing text steers the focus.            |
 | `/config`                                   | Open the resolved configuration and its layered file paths in a read-only modal.     |
 | `/delete <id-prefix>`                       | Delete a saved session by id prefix, with a Y/N confirm modal before the unlink.     |
-| `/diff`                                     | Show `git diff HEAD` plus untracked files in chat, capped at 64 KB.                  |
+| `/diff`                                     | Show uncommitted git changes plus untracked files in chat, capped at 64 KB.          |
 | `/effort [<level>]`                         | Open the slider, or set the tier directly (`low`, `medium`, `high`, `xhigh`, `max`). |
 | `/help`                                     | Open a read-only modal listing available commands.                                   |
 | `/init`                                     | Generate or update the project's `AGENTS.md` / `CLAUDE.md`.                          |

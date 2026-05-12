@@ -21,6 +21,7 @@ use crate::util::path::xdg_dir;
 
 const DATA_DIR: &str = "ox";
 const SESSIONS_DIR: &str = "sessions";
+pub(crate) const DEFAULT_SESSION_LIST_LIMIT: usize = 30;
 
 // ── SessionStore ──
 

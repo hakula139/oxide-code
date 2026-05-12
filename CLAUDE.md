@@ -77,7 +77,7 @@ ox                                          # Start an interactive session
 │   ├── confirm.rs                          # ConfirmDeleteSessionModal: destructive-action gate. Runs the unlink synchronously on Y, sticky inline error on failure
 │   ├── context.rs                          # SlashContext (borrowed ChatView + LiveSessionInfo + modal slot) handed to each command's execute
 │   ├── delete.rs                           # /delete <id-prefix>: typed-arg form, resolves prefix, pushes ConfirmDeleteSessionModal. Bare /delete rejected
-│   ├── diff.rs                             # /diff: `git diff HEAD` + untracked, 64 KB cap on UTF-8 boundary
+│   ├── diff.rs                             # /diff: uncommitted git changes + untracked, 64 KB cap on UTF-8 boundary
 │   ├── effort.rs                           # /effort: bare opens the slider. `/effort <level>` resolves the typed-arg shortcut
 │   ├── effort_slider.rs                    # EffortSlider: Speed ↔ Intelligence horizontal slider, opened by bare /effort
 │   ├── help.rs                             # /help: opens a KvOverview modal listing every registered command

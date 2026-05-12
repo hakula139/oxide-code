@@ -34,7 +34,7 @@ pub(super) struct ConfirmDeleteSessionModal {
     /// decoupled from `time::OffsetDateTime` formatting.
     metadata: String,
     live_session_id: String,
-    /// Sticky error from a failed delete attempt. Cleared on next press.
+    /// Sticky error from a failed delete attempt. Kept until a deliberate confirm or cancel key.
     error: Option<String>,
 }
 
@@ -57,7 +57,7 @@ impl ConfirmDeleteSessionModal {
     }
 
     /// Run `store.delete`. On Ok, pop and emit a chat-stream confirmation. On Err, stay open with
-    /// a sticky inline error that clears on the next non-confirm keypress.
+    /// a sticky inline error.
     fn confirm(&mut self) -> ModalKey {
         match self.store.delete(&self.session_id, &self.live_session_id) {
             Ok(()) => ModalKey::Submitted(ModalAction::SystemMessage(format!(

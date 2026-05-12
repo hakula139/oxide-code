@@ -32,7 +32,7 @@ use model::ResolvedModelId;
 use session::handle::{ResumedSession, SessionHandle, roll as roll_session};
 use session::list_view::render_list;
 use session::resolver::resolve_session;
-use session::store::SessionStore;
+use session::store::{DEFAULT_SESSION_LIST_LIMIT, SessionStore};
 use slash::LiveSessionInfo;
 use tool::{
     ToolRegistry, bash::BashTool, edit::EditTool, glob::GlobTool, grep::GrepTool, read::ReadTool,
@@ -66,7 +66,7 @@ struct Cli {
     r#continue: Option<Option<String>>,
 
     /// Cap `--list` to the N most-recent sessions. `0` disables the cap.
-    #[arg(long, value_name = "N", requires = "list", default_value_t = 30)]
+    #[arg(long, value_name = "N", requires = "list", default_value_t = DEFAULT_SESSION_LIST_LIMIT)]
     limit: usize,
 
     /// List recent sessions and exit.

@@ -53,7 +53,8 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
         bail!("not inside a git repository");
     }
 
-    let tracked = if has_head(cwd) {
+    let has_head = has_head(cwd);
+    let tracked = if has_head {
         run_git_in(cwd, &["diff", "HEAD"])?
     } else {
         let cached = run_git_in(cwd, &["diff", "--cached"])?;
@@ -62,7 +63,10 @@ fn collect_diff_in(cwd: &Path) -> Result<String> {
     };
     let untracked = run_git_in(cwd, &["ls-files", "--others", "--exclude-standard"])?;
 
-    Ok(truncate(format_diff(&tracked, &untracked)))
+    Ok(truncate(
+        format_diff(&tracked, &untracked),
+        full_diff_hint(has_head),
+    ))
 }
 
 // ── Formatting ──
@@ -94,6 +98,14 @@ fn join_sections(sections: &[&str]) -> String {
         .filter(|s| !s.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn full_diff_hint(has_head: bool) -> &'static str {
+    if has_head {
+        "`git diff HEAD`"
+    } else {
+        "`git diff --cached` and `git diff`"
+    }
 }
 
 // ── Git Helpers ──
@@ -140,7 +152,7 @@ fn git_failure_message(args: &[&str], stderr: &[u8]) -> String {
 // ── Truncation ──
 
 /// Cut on a UTF-8 boundary (≤ [`MAX_BYTES`]); footer names dropped size.
-fn truncate(s: String) -> String {
+fn truncate(s: String, full_hint: &str) -> String {
     if s.len() <= MAX_BYTES {
         return s;
     }
@@ -153,7 +165,7 @@ fn truncate(s: String) -> String {
     let mut t = s[..cut].to_owned();
     _ = write!(
         t,
-        "\n\n(truncated: {} more — run `git diff HEAD` for the full output)",
+        "\n\n(truncated: {} more — run {full_hint} for the full output)",
         format_size(dropped),
     );
     t
@@ -441,15 +453,15 @@ mod tests {
 
     #[test]
     fn truncate_under_or_at_cap_is_unchanged() {
-        assert_eq!(truncate("abc".to_owned()), "abc");
+        assert_eq!(truncate("abc".to_owned(), "`git diff HEAD`"), "abc");
         let exact = "a".repeat(MAX_BYTES);
-        assert_eq!(truncate(exact.clone()), exact);
+        assert_eq!(truncate(exact.clone(), "`git diff HEAD`"), exact);
     }
 
     #[test]
     fn truncate_oversized_input_appends_footer_with_human_size() {
         let s = "a".repeat(MAX_BYTES + 100);
-        let got = truncate(s);
+        let got = truncate(s, "`git diff HEAD`");
         let footer = "\n\n(truncated: 100 B more — run `git diff HEAD` for the full output)";
         assert_eq!(got.len(), MAX_BYTES + footer.len());
         assert_eq!(&got[..MAX_BYTES], &"a".repeat(MAX_BYTES));
@@ -462,10 +474,11 @@ mod tests {
         // Final char straddles the cap; cut backs up to preceding boundary.
         let prefix = "a".repeat(MAX_BYTES - 1);
         let s = format!("{prefix}€trailing"); // '€' is 3 bytes
-        let got = truncate(s);
+        let got = truncate(s, "`git diff --cached` and `git diff`");
         let footer_start = got.find("\n\n(truncated:").expect("footer present");
         assert_eq!(footer_start, MAX_BYTES - 1);
         assert!(got.is_char_boundary(footer_start));
+        assert!(got.contains("`git diff --cached` and `git diff`"));
     }
 
     // ── format_size ──

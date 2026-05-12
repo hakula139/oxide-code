@@ -67,7 +67,7 @@ Client-side command surface: `/help`, `/clear`, `/model`, `/status`, and friends
 
 - **`/help`**: Opens a [`KvOverview`](modals.md) listing every registered command with its description. Aliases parenthesize after the canonical name, and `usage()` placeholder appends.
 
-- **`/diff`**: The lone printer. Pushes `git diff HEAD` plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. Before the first commit, it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
+- **`/diff`**: The lone printer. Pushes uncommitted git changes plus untracked files into chat as a system message, capped at 64 KB on a UTF-8 boundary. After the first commit it uses `git diff HEAD`. Before the first commit it combines `git diff --cached` and `git diff` because `HEAD` does not exist yet. Modal output would crop without scrollback, so the diff earns its place in the transcript.
 
 - **`/rename`**: Bare opens a single-line title editor pre-filled with the current title (cap 80 chars, mirroring the actor's first-prompt cap), and `/rename <title>` applies directly. Both forms forward `UserAction::Rename` and lock out AI title generation for the rest of the session so a slow Haiku call can't overwrite the user's pick. `classify` is always `Mutating`. Bare suppresses echo because the modal IS the response, while typed-arg echoes since the swap-confirmation system message anchors the pair. See [modals.md](modals.md).
 
