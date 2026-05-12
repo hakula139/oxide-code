@@ -72,7 +72,7 @@ Inside the TUI, `/resume` (alias `/continue`) opens a session picker without res
 
 ### Deleting a Session
 
-Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. Only finalized sessions can be deleted, and the live session is excluded.
+Inside the `/resume` picker, **Ctrl+D** (or **Delete**) on the cursor row opens a Y/N confirm modal. **Y / Enter** unlinks the session JSONL and prints a `Deleted session {id}: {title}` line in chat. **N / Esc / Ctrl+C** dismisses. `/delete <id-prefix>` opens the same confirm directly. The live session is excluded; any saved non-live session matched by id prefix can be deleted.
 
 ## Titles
 

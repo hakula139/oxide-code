@@ -14,7 +14,7 @@ The picker wraps [`SearchableList`](modals.md) and adds a footer line. Each row 
 
 The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebind `Client::set_session_id`, emit `AgentEvent::SessionResumed { id, title, messages, tool_metadata }`, then surface the old session's finalize failure and any tracker-drift warning as distinct `AgentEvent::Error`s. The TUI's `App::apply_session_resumed` clears the chat, replays `load_history`, drops queued prompts (surfaces the count as a system message), and clears the modal stack.
 
-`SessionStore::list_paged` is the new entry point: stat every candidate file, sort by mtime desc, truncate to the cap, then `read_session_info` only the survivors. `ListPage` carries the surviving sessions and the pre-truncation total. `list()` / `list_all()` survive as thin wrappers. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit to widen)` when the cap clipped output.
+`SessionStore::list_paged` is the new entry point: stat every candidate file, sort by mtime desc, truncate to the cap, then `read_session_info` only the survivors. `ListPage` carries the surviving sessions and the pre-truncation total. `list()` / `list_all()` survive as thin wrappers. `ox --list --limit N` (default `30`, `0` = unbounded) prints `... and N more (use --limit N or --limit 0 to disable the cap)` when the cap clipped output.
 
 ## Design Decisions
 
@@ -72,7 +72,7 @@ The agent loop in `main` adds an `apply_resume` helper: drive `roll_into`, rebin
 
 - **`apply_session_resumed` (TUI)**: Swaps the session id, repaints the title, clears and replays chat history, drops queued prompts (with a system-message surface), clears the modal stack, and resumes idle.
 
-- **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The footer line `... and N more (use --limit to widen)` appears only when the cap clipped output.
+- **`--list --limit N`**: `0` opts out of the cap, while positive values cap it. The footer line `... and N more (use --limit N or --limit 0 to disable the cap)` appears only when the cap clipped output.
 
 ## Out of Scope / Deferred
 

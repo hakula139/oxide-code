@@ -1,6 +1,6 @@
 # Session Resume / Continue (Reference)
 
-Research on session-resume UX: CLI flag plumbing, picker rendering, search and pagination, mid-session reload. Based on [Claude Code](https://github.com/hakula139/claude-code) (v2.1.87), [OpenAI Codex](https://github.com/openai/codex), and [opencode](https://github.com/anomalyco/opencode) (v1.3.15).
+Research on session-resume UX: CLI flag plumbing, picker rendering, search and pagination, mid-session reload. Based on [Claude Code](https://github.com/hakula139/claude-code) (local checkout `4b9d30f`; remote pull failed because GitHub reports the repository disabled), [OpenAI Codex](https://github.com/openai/codex) (`79c65f81`), and [opencode](https://github.com/anomalyco/opencode) (`1a28924e`).
 
 Companion to [commands.md](commands.md) and [modals.md](modals.md). Storage-layer notes (JSONL shapes, `parent_uuid` chain, listing scans) live in [session/persistence.md](../session/persistence.md). This file focuses on the _user-facing_ resume surface.
 
@@ -40,7 +40,7 @@ Resume is a subcommand, with a full-screen alt-screen picker running before chat
 
 - **Key bindings**: Up / Down / PgUp / PgDn / Tab / Enter / Esc plus emacs-style Ctrl-P / Ctrl-N / Ctrl-^P / Ctrl-^N. No vim keys, no numeric shortcuts. Backspace pops one char from search. No preview pane.
 
-- **Mid-session form**: `/resume` (`slash_command.rs:87`) is whitelisted to fire even during a running task, wired through the same picker and direct-id paths.
+- **Mid-session form**: `/resume` is available only while idle (`available_during_task() == false`), wired through the same picker and direct-id paths as the launch-time resume flow.
 
 ## opencode (TypeScript + Solid + Kobalte)
 
@@ -65,7 +65,7 @@ Three aliases for one overlay, plus a CLI-only listing subcommand.
 | Aspect            | Claude Code                              | Codex (Rust)                            | opencode                              |
 | ----------------- | ---------------------------------------- | --------------------------------------- | ------------------------------------- |
 | CLI surface       | `--continue` direct + `--resume` picker  | `resume` subcommand + `--last`          | `session list` (script-only)          |
-| Mid-session entry | `/resume` (alias `/continue`)            | `/resume` (allowed during task)         | `/sessions`, `/resume`, `/continue`   |
+| Mid-session entry | `/resume` (alias `/continue`)            | `/resume` (idle only)                   | `/sessions`, `/resume`, `/continue`   |
 | Picker layer      | inline modal in chat                     | full-screen alt-screen, pre-chat        | overlay (`DialogSelect`)              |
 | Row shape         | title + metadata sub-line                | column row (Cre / Upd / Br / CWD / msg) | grouped by date, single-line          |
 | Search            | substring + agentic AI                   | substring (case-insensitive, instant)   | substring via SDK call                |

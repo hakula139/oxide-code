@@ -48,7 +48,7 @@ Code blocks: buffer entire block, apply syntax highlighting on completion.
 ## Design Decisions
 
 1. **ratatui + crossterm + tokio.** No custom rendering engine.
-2. **Component trait.** Self-contained views (chat, input, status, tool display).
+2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly; there is no shared component trait.
 3. **Synchronized output** enabled by default.
 4. **Render throttling at ~60 FPS**.
 5. **Line-based markdown commit with stable-prefix cache** during streaming, full re-render on completion.

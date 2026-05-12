@@ -37,4 +37,4 @@ When either limit trips: take head or tail slice, write full output to temp file
 | Claude Code | dispatcher   | 50 KB chars  | 100 K toks | tail-cut + spill  | yes (file path)    | yes               |
 | Codex       | per-tool     | varies       | none       | varies (or none)  | no                 | n/a               |
 | opencode    | dispatcher   | 50 KB        | none       | head/tail + spill | yes (file + hint)  | no                |
-| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail + spill | no                 | yes               |
+| oxide-code  | dispatcher   | per-tool     | 128 KB     | head-tail         | no                 | yes               |

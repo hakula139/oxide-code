@@ -58,7 +58,7 @@ The TUI's `App::apply_session_compacted` clears the chat, pushes a single `Compa
 
 ## Per-Component Notes
 
-- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `argument_hint = "[instructions]"`. `classify` is always `Mutating`. `echoes_input` returns true. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
+- **`CompactCmd`**: `name = "compact"`, no aliases. `description = "Compress conversation context into a summary"`. `usage() = Some("[<instructions>]")`. `classify` is always `Mutating`. `echoes_input` returns true while the request is in flight; the final compact event repaints chat to the boundary block. `execute` parses args via `args.trim()` and returns `SlashOutcome::Forward(UserAction::Compact { instructions })` with `instructions = (!s.is_empty()).then_some(s.to_owned())`.
 
 - **`UserAction::Compact { instructions }`**: `Option<String>`. Empty or whitespace input becomes `None` at the slash boundary so the agent loop's `apply_compact` doesn't repeat the trim.
 
