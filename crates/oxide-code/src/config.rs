@@ -1171,6 +1171,122 @@ mod tests {
         );
     }
 
+    // ── Config::load / extra_ca_certs ──
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_default_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert!(config.extra_ca_certs.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_env_beats_file_and_expands_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        // Env supplies a `~`-prefixed path so the expansion branch is also covered.
+        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "~/certs/env.pem")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        let home = dirs::home_dir().expect("HOME set");
+        assert_eq!(config.extra_ca_certs, Some(home.join("certs/env.pem")));
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_file_used_when_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
+        // `env::string` treats an empty env var as absent, so a file value must survive even
+        // when the caller exports `OX_EXTRA_CA_CERTS=""` (e.g., by unsetting via shell).
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
+    // ── Config::load / base URL validation ──
+
+    #[tokio::test]
+    async fn load_rejects_plain_http_base_url_unless_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-loopback http must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("https"), "{msg}");
+        assert!(msg.contains("localhost"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_non_http_base_url_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-http schemes must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("http or https"), "{msg}");
+        assert!(msg.contains("ftp"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8080");
+    }
+
     // ── Config::load / effort resolution ──
 
     #[tokio::test]
@@ -1279,122 +1395,6 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("ANTHROPIC_EFFORT"), "{msg}");
         assert!(msg.contains("insane"), "{msg}");
-    }
-
-    // ── Config::load / base URL validation ──
-
-    #[tokio::test]
-    async fn load_rejects_plain_http_base_url_unless_loopback() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "http://example.com"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .expect_err("non-loopback http must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("https"), "{msg}");
-        assert!(msg.contains("localhost"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn load_rejects_non_http_base_url_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .expect_err("non-http schemes must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("http or https"), "{msg}");
-        assert!(msg.contains("ftp"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
-        ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .unwrap();
-        assert_eq!(config.base_url, "http://127.0.0.1:8080");
-    }
-
-    // ── Config::load / extra_ca_certs ──
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_default_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
-            .await
-            .unwrap();
-        assert!(config.extra_ca_certs.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_env_beats_file_and_expands_tilde() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        // Env supplies a `~`-prefixed path so the expansion branch is also covered.
-        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "~/certs/env.pem")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .unwrap();
-        let home = dirs::home_dir().expect("HOME set");
-        assert_eq!(config.extra_ca_certs, Some(home.join("certs/env.pem")));
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_file_used_when_env_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
-            .await
-            .unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(PathBuf::from("/etc/ssl/from-file.pem")),
-        );
-    }
-
-    #[tokio::test]
-    async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
-        // `env::string` treats an empty env var as absent, so a file value must survive even
-        // when the caller exports `OX_EXTRA_CA_CERTS=""` (e.g., by unsetting via shell).
-        let dir = tempfile::tempdir().unwrap();
-        write_user_config(
-            dir.path(),
-            indoc::indoc! {r#"
-                [client]
-                extra_ca_certs = "/etc/ssl/from-file.pem"
-            "#},
-        );
-        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
-        let config = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .unwrap();
-        assert_eq!(
-            config.extra_ca_certs,
-            Some(PathBuf::from("/etc/ssl/from-file.pem")),
-        );
     }
 
     // ── Config::load / prompt_cache_ttl ──

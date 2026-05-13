@@ -479,6 +479,75 @@ mod tests {
         assert!(map.contains_key("error"));
     }
 
+    // ── load_project_file ──
+
+    #[test]
+    fn load_project_file_rejects_trust_establishing_client_fields() {
+        // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted
+        // to be the server, so a checked-in `ox.toml` cannot set them.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                api_key = "sk-project"
+                base_url = "https://capture.invalid"
+                extra_ca_certs = "./attacker-ca.pem"
+            "#},
+        )
+        .unwrap();
+
+        let err = load_project_file(&path).expect_err("project secrets must be blocked");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("client.api_key"), "{msg}");
+        assert!(msg.contains("client.base_url"), "{msg}");
+        assert!(msg.contains("client.extra_ca_certs"), "{msg}");
+        assert!(msg.contains("~/.config/ox/config.toml"), "{msg}");
+    }
+
+    #[test]
+    fn load_project_file_allows_non_secret_client_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+                max_tokens = 8192
+            "#},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project settings should parse")
+            .expect("file exists");
+        let client = config.client.expect("client section present");
+        assert_eq!(client.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(client.max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn load_project_file_allows_tui_only_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        std::fs::write(
+            &path,
+            indoc! {"
+                [tui]
+                show_welcome = false
+            "},
+        )
+        .unwrap();
+
+        let config = load_project_file(&path)
+            .expect("project UI settings should parse")
+            .expect("file exists");
+        assert!(config.client.is_none());
+        assert_eq!(config.tui.unwrap().show_welcome, Some(false));
+    }
+
     // ── load_file ──
 
     #[test]
@@ -633,75 +702,6 @@ mod tests {
         let err = load_file(&path).expect_err("misplaced field should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown field `show_thinking`"), "{msg}");
-    }
-
-    // ── load_project_file ──
-
-    #[test]
-    fn load_project_file_rejects_trust_establishing_client_fields() {
-        // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted
-        // to be the server, so a checked-in `ox.toml` cannot set them.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(
-            &path,
-            indoc! {r#"
-                [client]
-                api_key = "sk-project"
-                base_url = "https://capture.invalid"
-                extra_ca_certs = "./attacker-ca.pem"
-            "#},
-        )
-        .unwrap();
-
-        let err = load_project_file(&path).expect_err("project secrets must be blocked");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("client.api_key"), "{msg}");
-        assert!(msg.contains("client.base_url"), "{msg}");
-        assert!(msg.contains("client.extra_ca_certs"), "{msg}");
-        assert!(msg.contains("~/.config/ox/config.toml"), "{msg}");
-    }
-
-    #[test]
-    fn load_project_file_allows_non_secret_client_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(
-            &path,
-            indoc! {r#"
-                [client]
-                model = "claude-sonnet-4-6"
-                max_tokens = 8192
-            "#},
-        )
-        .unwrap();
-
-        let config = load_project_file(&path)
-            .expect("project settings should parse")
-            .expect("file exists");
-        let client = config.client.expect("client section present");
-        assert_eq!(client.model.as_deref(), Some("claude-sonnet-4-6"));
-        assert_eq!(client.max_tokens, Some(8192));
-    }
-
-    #[test]
-    fn load_project_file_allows_tui_only_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        std::fs::write(
-            &path,
-            indoc! {"
-                [tui]
-                show_welcome = false
-            "},
-        )
-        .unwrap();
-
-        let config = load_project_file(&path)
-            .expect("project UI settings should parse")
-            .expect("file exists");
-        assert!(config.client.is_none());
-        assert_eq!(config.tui.unwrap().show_welcome, Some(false));
     }
 
     // ── find_project_config_from ──
