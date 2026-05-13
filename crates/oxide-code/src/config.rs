@@ -494,12 +494,6 @@ fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> u32 {
     clamp_threshold_floor(capped)
 }
 
-/// Snaps `tokens` up to [`MIN_AUTO_COMPACTION_THRESHOLD_TOKENS`]. Symmetric to the model-cap clamp:
-/// out-of-range thresholds collapse to the nearest safe value rather than failing the load.
-fn clamp_threshold_floor(tokens: u32) -> u32 {
-    tokens.max(MIN_AUTO_COMPACTION_THRESHOLD_TOKENS)
-}
-
 fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<Option<u32>> {
     if !(1..=100).contains(&percent) {
         bail!("auto compaction threshold percent must be between 1 and 100");
@@ -511,6 +505,11 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
     let resolved = default_auto_threshold_for_window(context_window, max_tokens)
         .map_or(threshold, |max| threshold.min(max));
     Ok(Some(clamp_threshold_floor(resolved)))
+}
+
+/// Snaps `tokens` up to [`MIN_AUTO_COMPACTION_THRESHOLD_TOKENS`].
+fn clamp_threshold_floor(tokens: u32) -> u32 {
+    tokens.max(MIN_AUTO_COMPACTION_THRESHOLD_TOKENS)
 }
 
 fn default_auto_threshold(model: &str, max_tokens: u32) -> Option<u32> {
@@ -552,6 +551,13 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
         url.host_str(),
         Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
     )
+}
+
+/// Outputs of [`default_auto_threshold`] when `max_tokens` saturates the reserve cap.
+#[cfg(test)]
+pub(crate) mod test_thresholds {
+    pub(crate) const WINDOW_200K: u32 = 167_000;
+    pub(crate) const WINDOW_1M: u32 = 967_000;
 }
 
 #[cfg(test)]
@@ -727,7 +733,10 @@ mod tests {
         assert_eq!(config.effort, Some(Effort::Xhigh));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
         assert!(config.compaction.auto.enabled);
-        assert_eq!(config.compaction.auto.threshold_tokens, Some(967_000));
+        assert_eq!(
+            config.compaction.auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_1M),
+        );
         assert!(!config.show_thinking);
         assert!(
             config.show_welcome,
@@ -1022,7 +1031,10 @@ mod tests {
         let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
             .unwrap();
-        assert_eq!(config.compaction.auto.threshold_tokens, Some(167_000));
+        assert_eq!(
+            config.compaction.auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_200K),
+        );
     }
 
     #[tokio::test]
@@ -1434,5 +1446,22 @@ mod tests {
         assert_eq!(default_max_tokens(Some(Effort::Medium)), 16_000);
         assert_eq!(default_max_tokens(Some(Effort::Low)), 16_000);
         assert_eq!(default_max_tokens(None), 16_000);
+    }
+
+    // ── test_thresholds ──
+
+    #[test]
+    fn test_thresholds_pin_default_auto_threshold_per_window() {
+        for model in ["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5"] {
+            assert_eq!(
+                default_auto_threshold(model, 32_000),
+                Some(test_thresholds::WINDOW_200K),
+                "{model}",
+            );
+        }
+        assert_eq!(
+            default_auto_threshold("claude-opus-4-7[1m]", 64_000),
+            Some(test_thresholds::WINDOW_1M),
+        );
     }
 }

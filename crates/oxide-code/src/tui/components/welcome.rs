@@ -328,6 +328,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AutoCompactionConfig, CompactionConfig, ConfigSnapshot, Effort, PromptCacheTtl,
+        test_thresholds,
     };
     use crate::slash::LiveSessionInfo;
 
@@ -347,7 +348,7 @@ mod tests {
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(967_000),
+                    threshold_tokens: Some(test_thresholds::WINDOW_1M),
                 }),
                 show_thinking: false,
                 show_welcome: true,

@@ -857,6 +857,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::config::test_thresholds;
     use crate::tool::ToolRegistry;
     use crate::tui::modal::testing::ScriptedModal;
 
@@ -2045,7 +2046,7 @@ mod tests {
             compaction: crate::config::CompactionConfig::resolved_for_test(
                 crate::config::AutoCompactionConfig {
                     enabled: true,
-                    threshold_tokens: Some(167_000),
+                    threshold_tokens: Some(test_thresholds::WINDOW_200K),
                 },
             ),
             requested_effort: None,
@@ -2059,12 +2060,16 @@ mod tests {
         assert_eq!(app.status_bar.model(), "Claude Sonnet 4.6");
         assert_eq!(
             app.session_info.config.compaction.auto.threshold_tokens,
-            Some(167_000),
+            Some(test_thresholds::WINDOW_200K),
         );
         let body = app.chat.last_system_text().expect("confirmation block");
         assert_eq!(
             body,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens.",
+            format!(
+                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                 Auto compaction on at {} tokens.",
+                test_thresholds::WINDOW_200K,
+            ),
         );
         assert!(app.dirty);
     }
@@ -2256,7 +2261,7 @@ mod tests {
         let new_compaction =
             CompactionConfig::resolved_for_test(crate::config::AutoCompactionConfig {
                 enabled: true,
-                threshold_tokens: Some(167_000),
+                threshold_tokens: Some(test_thresholds::WINDOW_200K),
             });
 
         let s = format_config_change(
@@ -2271,7 +2276,11 @@ mod tests {
 
         assert_eq!(
             s,
-            "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. Auto compaction on at 167000 tokens."
+            format!(
+                "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
+                 Auto compaction on at {} tokens.",
+                test_thresholds::WINDOW_200K,
+            ),
         );
     }
 

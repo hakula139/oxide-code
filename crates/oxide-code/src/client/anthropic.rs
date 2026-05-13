@@ -401,7 +401,9 @@ mod tests {
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
-    use crate::config::{AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig};
+    use crate::config::{
+        AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig, test_thresholds,
+    };
 
     // ── Fixtures ──
 
@@ -665,7 +667,10 @@ mod tests {
 
         assert_eq!(effort, Some(Effort::High));
         assert_eq!(client.model(), "claude-sonnet-4-6");
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(167_000));
+        assert_eq!(
+            client.compaction().auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_200K),
+        );
     }
 
     #[test]
@@ -674,13 +679,16 @@ mod tests {
         config.max_tokens = 64_000;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
-            threshold_tokens: Some(967_000),
+            threshold_tokens: Some(test_thresholds::WINDOW_1M),
         });
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
         client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-6");
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(167_000));
+        assert_eq!(
+            client.compaction().auto.threshold_tokens,
+            Some(test_thresholds::WINDOW_200K),
+        );
     }
 
     // ── Client::set_effort ──
