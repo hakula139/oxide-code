@@ -132,6 +132,7 @@ pub(crate) fn test_session_info() -> LiveSessionInfo {
         config: ConfigSnapshot {
             auth_label: "API key",
             base_url: "https://api.test.invalid".to_owned(),
+            extra_ca_certs: None,
             model_id: "claude-opus-4-7".to_owned(),
             effort: Some(Effort::High),
             max_tokens: 32_000,

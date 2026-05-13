@@ -933,6 +933,7 @@ mod tests {
             config: ConfigSnapshot {
                 auth_label: "API key",
                 base_url: "https://api.test.invalid".to_owned(),
+                extra_ca_certs: None,
                 model_id: "test-model".to_owned(),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,

@@ -11,6 +11,7 @@ pub(crate) fn test_config(base_url: impl Into<String>, auth: Auth, model: &str) 
     Config {
         auth,
         base_url: base_url.into(),
+        extra_ca_certs: None,
         model: model.to_owned(),
         effort: None,
         max_tokens: 128,

@@ -29,6 +29,7 @@ pub(super) struct FileConfig {
 pub(super) struct ClientConfig {
     pub(super) api_key: Option<String>,
     pub(super) base_url: Option<String>,
+    pub(super) extra_ca_certs: Option<String>,
     pub(super) model: Option<String>,
     pub(super) effort: Option<super::Effort>,
     pub(super) max_tokens: Option<u32>,
@@ -80,6 +81,7 @@ impl ClientConfig {
         Self {
             api_key: other.api_key.or(self.api_key),
             base_url: other.base_url.or(self.base_url),
+            extra_ca_certs: other.extra_ca_certs.or(self.extra_ca_certs),
             model: other.model.or(self.model),
             effort: other.effort.or(self.effort),
             max_tokens: other.max_tokens.or(self.max_tokens),
@@ -183,6 +185,9 @@ fn reject_project_secrets(config: &FileConfig, path: &Path) -> Result<()> {
     if client.base_url.is_some() {
         blocked.push("client.base_url");
     }
+    if client.extra_ca_certs.is_some() {
+        blocked.push("client.extra_ca_certs");
+    }
     if blocked.is_empty() {
         return Ok(());
     }
@@ -251,6 +256,7 @@ mod tests {
             client: Some(ClientConfig {
                 api_key: Some("base-key".to_owned()),
                 base_url: Some("https://base.example.com".to_owned()),
+                extra_ca_certs: Some("/etc/ssl/base.pem".to_owned()),
                 model: Some("base-model".to_owned()),
                 effort: Some(super::super::Effort::Low),
                 max_tokens: Some(1000),
@@ -272,6 +278,7 @@ mod tests {
             client: Some(ClientConfig {
                 api_key: Some("other-key".to_owned()),
                 base_url: Some("https://other.example.com".to_owned()),
+                extra_ca_certs: Some("/etc/ssl/other.pem".to_owned()),
                 model: Some("other-model".to_owned()),
                 effort: Some(super::super::Effort::Max),
                 max_tokens: Some(2000),
@@ -297,6 +304,7 @@ mod tests {
             client.base_url.as_deref(),
             Some("https://other.example.com")
         );
+        assert_eq!(client.extra_ca_certs.as_deref(), Some("/etc/ssl/other.pem"));
         assert_eq!(client.model.as_deref(), Some("other-model"));
         assert_eq!(client.effort, Some(super::super::Effort::Max));
         assert_eq!(client.max_tokens, Some(2000));
@@ -339,6 +347,7 @@ mod tests {
             client: Some(ClientConfig {
                 api_key: Some("key".to_owned()),
                 base_url: Some("https://example.com".to_owned()),
+                extra_ca_certs: Some("/etc/ssl/ca.pem".to_owned()),
                 model: Some("model".to_owned()),
                 effort: Some(super::super::Effort::High),
                 max_tokens: Some(4096),
@@ -361,6 +370,7 @@ mod tests {
         let client = merged.client.expect("client section should survive");
         assert_eq!(client.api_key.as_deref(), Some("key"));
         assert_eq!(client.base_url.as_deref(), Some("https://example.com"));
+        assert_eq!(client.extra_ca_certs.as_deref(), Some("/etc/ssl/ca.pem"));
         assert_eq!(client.model.as_deref(), Some("model"));
         assert_eq!(client.effort, Some(super::super::Effort::High));
         assert_eq!(client.max_tokens, Some(4096));
@@ -626,7 +636,9 @@ mod tests {
     // ── load_project_file ──
 
     #[test]
-    fn load_project_file_rejects_api_key_and_base_url() {
+    fn load_project_file_rejects_trust_establishing_client_fields() {
+        // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted
+        // to be the server; a checked-in `ox.toml` cannot set them.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PROJECT_CONFIG_FILENAME);
         std::fs::write(
@@ -635,6 +647,7 @@ mod tests {
                 [client]
                 api_key = "sk-project"
                 base_url = "https://capture.invalid"
+                extra_ca_certs = "./attacker-ca.pem"
             "#},
         )
         .unwrap();
@@ -643,6 +656,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("client.api_key"), "{msg}");
         assert!(msg.contains("client.base_url"), "{msg}");
+        assert!(msg.contains("client.extra_ca_certs"), "{msg}");
         assert!(msg.contains("~/.config/ox/config.toml"), "{msg}");
     }
 
