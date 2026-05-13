@@ -408,14 +408,12 @@ impl AgentLoopTask {
                 self.client.set_session_id(outcome.new_id.clone());
                 self.messages.clear();
                 self.reset_auto_compaction();
-                if let Err(e) = self
-                    .sink
-                    .send(AgentEvent::SessionRolled { id: outcome.new_id })
-                {
-                    // /clear succeeded server-side but the TUI never sees the new id — surfaces as
-                    // a stuck "old session" header. Error-level so the log makes it findable.
-                    tracing::error!("session-rolled event dropped: {e}");
-                }
+                // /clear succeeded server-side, so dropping `SessionRolled` would strand the TUI
+                // on a stuck "old session" header.
+                self.sink.emit(
+                    AgentEvent::SessionRolled { id: outcome.new_id },
+                    "session-rolled",
+                );
                 LoopControl::Continue
             }
             UserAction::Resume { session_id } => {
