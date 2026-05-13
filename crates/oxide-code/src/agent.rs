@@ -228,8 +228,8 @@ pub(crate) async fn auto_compact_if_needed(
     {
         Ok(summary) => summary,
         Err(e) => {
-            *auto.failures += 1;
             warn!("auto-compaction failed: {e:#}");
+            record_auto_compact_failure(auto, sink, Some(format!("Auto-compaction failed: {e:#}")));
             return Ok(false);
         }
     };
@@ -246,9 +246,31 @@ pub(crate) async fn auto_compact_if_needed(
     if compacted {
         *auto.failures = 0;
     } else {
-        *auto.failures += 1;
+        record_auto_compact_failure(auto, sink, None);
     }
     Ok(compacted)
+}
+
+/// Bumps the failure counter and, when the bump trips the breaker, emits a one-time disablement
+/// notice. `detail` is the user-facing failure summary; pass `None` when an earlier sink emit
+/// (e.g. [`AgentSink::session_write_error`]) already surfaced it.
+fn record_auto_compact_failure(
+    auto: &mut AutoCompact<'_>,
+    sink: &dyn AgentSink,
+    detail: Option<String>,
+) {
+    *auto.failures += 1;
+    if let Some(detail) = detail {
+        sink.emit(AgentEvent::Error(detail), "auto-compaction-failed");
+    }
+    if *auto.failures == MAX_AUTO_COMPACT_FAILURES {
+        sink.emit(
+            AgentEvent::Error(format!(
+                "Auto-compaction disabled for this session after {MAX_AUTO_COMPACT_FAILURES} failures."
+            )),
+            "auto-compaction-disabled",
+        );
+    }
 }
 
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
@@ -1115,6 +1137,60 @@ mod tests {
         assert!(!compacted);
         assert_eq!(failures, 1);
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction failed"))
+            }),
+            "summarizer failure must surface a user-visible AgentEvent::Error",
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_emits_disabled_notice_on_third_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert!(
+            sink.events().iter().any(|event| {
+                matches!(event, AgentEvent::Error(message) if message.contains("Auto-compaction disabled"))
+            }),
+            "the breaker-tripping failure must surface a one-time disablement notice",
+        );
     }
 
     #[tokio::test]
