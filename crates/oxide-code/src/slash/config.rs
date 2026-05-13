@@ -180,17 +180,16 @@ mod tests {
 
     #[test]
     fn build_modal_tildifies_extra_ca_certs_path() {
-        // Render with HOME forced so a `$HOME`-prefixed path reduces to `~/...` deterministically.
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let mut info = test_session_info();
-        info.config.extra_ca_certs = Some(home.join("certs/corp.pem"));
-        let m = build_modal(&info, None, None);
-        let rendered = render_modal(&m, 80);
+        // Pin HOME so the test is deterministic regardless of the runner env.
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            let mut info = test_session_info();
+            info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
+            let m = build_modal(&info, None, None);
+            let rendered = render_modal(&m, 80);
 
-        assert!(rendered.contains("Extra CA Certs"), "{rendered}");
-        assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
+            assert!(rendered.contains("Extra CA Certs"), "{rendered}");
+            assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
+        });
     }
 
     #[test]
