@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn build_modal_tildifies_extra_ca_certs_path() {
-        // Render with HOME forced so a `$HOME`-prefixed path reduces to `~/…` deterministically.
+        // Render with HOME forced so a `$HOME`-prefixed path reduces to `~/...` deterministically.
         let Some(home) = dirs::home_dir() else {
             return;
         };
