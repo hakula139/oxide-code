@@ -2202,7 +2202,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_counter_saturates() {
+    fn paused_counter_does_not_overflow_at_u32_max() {
         let mut chat = test_chat();
         chat.auto_scroll = false;
         chat.new_content_since_pause = u32::MAX;

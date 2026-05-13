@@ -3069,8 +3069,12 @@ mod tests {
     // ── jump_overlay_label ──
 
     #[test]
-    fn jump_overlay_label_renders_idle_and_new_content_variants() {
+    fn jump_overlay_label_idle_reads_jump_to_bottom() {
         assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_pluralizes_new_message_count() {
         assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
         assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
     }
