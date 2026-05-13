@@ -56,16 +56,24 @@ impl OAuthCredential {
 
 /// Loads (and refreshes if near expiry) the Claude Code OAuth access token. On macOS the Keychain
 /// is consulted first; non-macOS and Keychain-miss fall back to `~/.claude/.credentials.json`.
-pub(super) async fn load_token() -> Result<String> {
+pub(super) async fn load_token(extra_ca_certs: Option<&Path>) -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
-    load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL, load_credentials).await
+    load_token_from(
+        &file_path,
+        &lock_path,
+        OAUTH_TOKEN_URL,
+        extra_ca_certs,
+        load_credentials,
+    )
+    .await
 }
 
 async fn load_token_from(
     file_path: &Path,
     lock_path: &Path,
     refresh_url: &str,
+    extra_ca_certs: Option<&Path>,
     loader: fn(&Path) -> Result<CredentialsFile>,
 ) -> Result<String> {
     let oauth = loader(file_path)?.claude_ai_oauth;
@@ -97,7 +105,7 @@ async fn load_token_from(
         .as_deref()
         .context("refresh token missing after re-read")?;
 
-    match refresh_oauth_token(refresh_url, refresh_token).await {
+    match refresh_oauth_token(refresh_url, refresh_token, extra_ca_certs).await {
         Ok(response) => {
             write_refreshed_credentials(file_path, &response)?;
             Ok(response.access_token)
@@ -199,10 +207,18 @@ struct RefreshRequest<'a> {
     scope: &'a str,
 }
 
-async fn refresh_oauth_token(url: &str, refresh_token: &str) -> Result<RefreshResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(REFRESH_TIMEOUT)
-        .build()?;
+async fn refresh_oauth_token(
+    url: &str,
+    refresh_token: &str,
+    extra_ca_certs: Option<&Path>,
+) -> Result<RefreshResponse> {
+    let mut builder = reqwest::Client::builder().timeout(REFRESH_TIMEOUT);
+    if let Some(path) = extra_ca_certs {
+        for cert in crate::util::tls::load_extra_ca_certs(path)? {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    let client = builder.build()?;
 
     let scope = OAUTH_SCOPES.join(" ");
     let response = client
@@ -398,7 +414,7 @@ mod tests {
 
         let token = temp_env::async_with_vars(
             [("HOME", Some(home.path().to_string_lossy().into_owned()))],
-            async { load_token().await.unwrap() },
+            async { load_token(None).await.unwrap() },
         )
         .await;
         assert_eq!(token, "token-from-home");
@@ -429,6 +445,7 @@ mod tests {
             &creds,
             &lock,
             "http://should-not-be-called",
+            None,
             read_credentials,
         )
         .await
@@ -447,6 +464,7 @@ mod tests {
             &creds,
             &lock,
             "http://should-not-be-called",
+            None,
             read_credentials,
         )
         .await
@@ -461,7 +479,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&creds, &lock, "http://unused", read_credentials)
+        let err = load_token_from(&creds, &lock, "http://unused", None, read_credentials)
             .await
             .expect_err("expired without refresh must bail");
         assert!(format!("{err:#}").contains("expired"));
@@ -490,7 +508,7 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .unwrap();
         assert_eq!(token, "fresh-access");
@@ -526,7 +544,7 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .unwrap();
         assert_eq!(token, "stale");
@@ -546,7 +564,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let err = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .expect_err("expired + refresh down must bail");
         let msg = format!("{err:#}");
@@ -676,7 +694,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = refresh_oauth_token(&server.uri(), "old-refresh")
+        let response = refresh_oauth_token(&server.uri(), "old-refresh", None)
             .await
             .unwrap();
         assert_eq!(response.access_token, "new-access");
@@ -705,7 +723,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "bad")
+        let err = refresh_oauth_token(&server.uri(), "bad", None)
             .await
             .expect_err("expected HTTP error");
         let msg = format!("{err:#}");
@@ -722,7 +740,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "tok")
+        let err = refresh_oauth_token(&server.uri(), "tok", None)
             .await
             .expect_err("expected parse error");
         assert!(format!("{err:#}").contains("parse"));

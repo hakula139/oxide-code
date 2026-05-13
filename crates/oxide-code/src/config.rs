@@ -303,10 +303,16 @@ impl Config {
         let tui = fc.tui.unwrap_or_default();
         let theme_config = tui.theme.unwrap_or_default();
 
+        // Resolve before `auth` so the OAuth refresh can also thread the extra trust anchors
+        // through reqwest (relevant under SSL-inspecting corporate proxies).
+        let extra_ca_certs = env::string("OX_EXTRA_CA_CERTS")
+            .or(client.extra_ca_certs)
+            .map(|raw| expand_user(&raw));
+
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
         } else {
-            let token = oauth::load_token().await.context(
+            let token = oauth::load_token(extra_ca_certs.as_deref()).await.context(
                 "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
                  ~/.config/ox/config.toml, or sign in with Claude Code (checks macOS Keychain and \
                  ~/.claude/.credentials.json)",
@@ -322,10 +328,6 @@ impl Config {
             .or(client.base_url)
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         validate_base_url(&base_url)?;
-
-        let extra_ca_certs = env::string("OX_EXTRA_CA_CERTS")
-            .or(client.extra_ca_certs)
-            .map(|raw| expand_user(&raw));
 
         let caps = crate::model::capabilities_for(&model);
 

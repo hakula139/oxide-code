@@ -122,13 +122,17 @@ impl Client {
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
         // No whole-request timeout — responses can run for minutes. The 60 s read timeout
-        // catches slowloris dribble; Anthropic sends keepalives every ~15 s on healthy streams.
-        let http = reqwest::Client::builder()
+        // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
+        let mut builder = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_mins(1))
-            .build()
-            .context("failed to build HTTP client")?;
+            .read_timeout(Duration::from_mins(1));
+        if let Some(path) = &config.extra_ca_certs {
+            for cert in crate::util::tls::load_extra_ca_certs(path)? {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        let http = builder.build().context("failed to build HTTP client")?;
 
         Ok(Self {
             http,
@@ -542,6 +546,18 @@ mod tests {
                 "error should mention header: {err:#}",
             );
         }
+    }
+
+    #[test]
+    fn new_surfaces_extra_ca_certs_error_with_path() {
+        // An unreadable trust anchor must fail the client build, not silently fall back to
+        // native roots. The error should cite the configured path so the user can debug.
+        let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+        cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
+        let err = Client::new(cfg, None).err().expect("missing CA must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+        assert!(msg.contains("/no/such/bundle.pem"), "{msg}");
     }
 
     // ── Client::set_session_id ──
