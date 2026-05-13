@@ -27,11 +27,9 @@ const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
 
-/// Why a turn ended without a clean assistant reply.
-///
-/// `Cancelled` and `Quit` are user-driven and intentionally distinct so the outer driver can
-/// keep running on cancel but tear down on quit. `Failed` wraps any other error (stream / tool
-/// dispatch / session write) so the caller can render it once via `{e:#}`.
+/// Why a turn ended without a clean assistant reply. `Cancelled` and `Quit` are user-driven
+/// and distinct so the outer driver can keep running on cancel but tear down on quit. `Failed`
+/// wraps any other error so the caller can render it via `{e:#}`.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TurnAbort {
     #[error("turn cancelled")]
@@ -111,19 +109,11 @@ pub(crate) struct AutoCompact<'a> {
     pub(crate) file_tracker: &'a FileTracker,
 }
 
-/// Drives one user prompt to a final assistant text reply.
-///
-/// Each round streams a model response, dispatches any tool calls, and appends both the
-/// assistant message and the synthesized tool-result message to `messages`. The loop returns
-/// as soon as a round produces no tool calls; mid-turn `SubmitPrompt` actions queue and
-/// splice in as user messages at round boundaries. Long-running awaits race `user_rx` so
-/// `Cancel` / `Quit` abort promptly without leaving partial round writes.
-///
-/// Errors:
-///
-/// - [`TurnAbort::Cancelled`] / [`TurnAbort::Quit`] on the matching [`UserAction`].
-/// - [`TurnAbort::Failed`] for stream errors, tool-dispatch failures, or hitting
-///   [`MAX_TOOL_ROUNDS`] without a final response.
+/// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
+/// produces no tool calls. Mid-turn `SubmitPrompt` actions queue and splice in as user messages
+/// at round boundaries. Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly
+/// without leaving partial round writes. Aborts with [`MAX_TOOL_ROUNDS`] when the model fails
+/// to produce a final response.
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -192,9 +182,12 @@ pub(crate) async fn agent_turn(
     )))
 }
 
+/// Decides whether to compact and drives it when the threshold and breaker allow. Returns
+/// `Ok(true)` when the transcript was replaced. Returns `Ok(false)` when skipped (breaker
+/// tripped, no usage, below threshold) or when summarization / boundary-write failed.
 #[expect(
     clippy::too_many_arguments,
-    reason = "auto-compaction needs the same live turn state as manual compaction plus the latest usage signal"
+    reason = "auto-compaction needs the same live turn state as manual compaction"
 )]
 pub(crate) async fn auto_compact_if_needed(
     client: &dyn AgentClient,
@@ -251,9 +244,9 @@ pub(crate) async fn auto_compact_if_needed(
     Ok(compacted)
 }
 
-/// Bumps the failure counter and, when the bump trips the breaker, emits a one-time disablement
-/// notice. `detail` is the user-facing failure summary; pass `None` when an earlier sink emit
-/// (e.g. [`AgentSink::session_write_error`]) already surfaced it.
+/// Bumps the failure counter. If the bump trips the breaker, emits a one-time disablement
+/// notice. `detail` becomes a user-visible error event. Pass `None` when an earlier sink call
+/// already surfaced the failure (persist-fail goes through `session_write_error`).
 fn record_auto_compact_failure(
     auto: &mut AutoCompact<'_>,
     sink: &dyn AgentSink,
@@ -378,7 +371,8 @@ pub(crate) async fn record_drained_prompts(
     }
 }
 
-/// Races `fut` against user actions. Cancel / quit → `TurnAbort`; submits buffer into `pending`.
+/// Races `fut` against user actions. Cancel / quit produce a `TurnAbort`. Submits buffer into
+/// `pending`.
 /// `fut` must be cancel-safe.
 pub(crate) async fn await_unless_aborted<F, T>(
     fut: F,
@@ -397,7 +391,7 @@ where
                 Some(UserAction::Cancel) => return Err(TurnAbort::Cancelled),
                 Some(UserAction::Quit) | None => return Err(TurnAbort::Quit),
                 Some(UserAction::SubmitPrompt(text)) => pending.push(text),
-                // Unreachable under current wiring; log so regressions surface.
+                // Unreachable under current wiring. Log so regressions surface.
                 Some(
                     action @ (UserAction::ConfirmExit
                     | UserAction::Clear
@@ -441,7 +435,7 @@ enum BlockAccumulator {
     RedactedThinking {
         data: String,
     },
-    /// Absorbs deltas; produces no [`ContentBlock`].
+    /// Absorbs deltas. Produces no [`ContentBlock`].
     Skipped,
 }
 
@@ -924,7 +918,7 @@ mod tests {
         events
     }
 
-    /// Echoes its input; exercises the tool-dispatch path without subprocess machinery.
+    /// Echoes its input. Exercises the tool-dispatch path without subprocess machinery.
     struct EchoTool;
 
     impl Tool for EchoTool {
@@ -988,8 +982,8 @@ mod tests {
         }
     }
 
-    /// Inert receiver whose `recv()` stays pending — sender is leaked deliberately so call sites
-    /// don't need to bind it for the test's lifetime.
+    /// Inert receiver whose `recv()` stays pending. The sender is leaked so call sites don't
+    /// need to bind it for the test's lifetime.
     fn inert_user_rx() -> mpsc::Receiver<UserAction> {
         let (tx, rx) = crate::agent::event::inert_user_action_channel();
         std::mem::forget(tx);
@@ -1008,7 +1002,7 @@ mod tests {
         handle::start(&store, "claude-sonnet-4-6")
     }
 
-    /// Handle whose actor channel is closed; every write returns actor-gone.
+    /// Handle whose actor channel is closed. Every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
     }
@@ -1385,7 +1379,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_dead_session_surfaces_write_failure_on_first_call() {
-        // Write errors must not abort the turn; one Error event surfaces and the turn returns Ok.
+        // Write errors must not abort the turn. One Error event surfaces and the turn returns Ok.
         let session = dead_test_session();
         let client = FakeClient::new(vec![text_turn("Hello!")]);
         let tools = ToolRegistry::new(vec![]);
@@ -1418,7 +1412,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_metadata_batch_failure_after_healthy_messages_surfaces_error() {
-        // First 2 cmds (assistant + tool_result messages) ack healthily; the 3rd (metadata batch)
+        // First 2 cmds (assistant + tool_result messages) ack healthily. The 3rd (metadata batch)
         // is dropped without ack so the batch's failure handler fires the Error event.
         let session = crate::session::handle::testing::acks_then_drops("metadata-batch-fails", 2);
         let client = FakeClient::new(vec![
@@ -1650,7 +1644,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_drains_mid_round_submit_into_messages_at_round_boundary() {
-        // Pre-loaded SubmitPrompt is consumed during the round; at the boundary the agent splices
+        // Pre-loaded SubmitPrompt is consumed during the round. At the boundary the agent splices
         // the queued text as a trailing user message and emits PromptDrained.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -1796,7 +1790,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_quit_during_stream_is_quit_abort() {
-        // Quit is the teardown signal; it must stay distinct from Cancel for the outer driver.
+        // Quit is the teardown signal. It must stay distinct from Cancel for the outer driver.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1824,7 +1818,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_sender_drop_during_turn_collapses_to_quit_abort() {
-        // Closed channel resolves `recv()` to None; treated as Quit so the outer loop exits.
+        // Closed channel resolves `recv()` to None. Treated as Quit so the outer loop exits.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
         let client = FakeClient::new(vec![text_turn("never reached")]);
@@ -1851,7 +1845,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_absorbs_stragglers_without_killing_turn() {
-        // Every catch-all variant in `await_unless_aborted` must let the turn complete; returning
+        // Every catch-all variant in `await_unless_aborted` must let the turn complete. Returning
         // Cancelled for any of these would kill the turn from a buffered no-op.
         for action in [
             UserAction::ConfirmExit,
@@ -1929,10 +1923,10 @@ mod tests {
 
         let abort = turn_result.expect_err("cancel must surface as Err(Cancelled)");
         assert!(matches!(abort, TurnAbort::Cancelled), "got {abort:?}");
-        // Cancel here happens before the round's messages are appended; iteration-atomic so the
+        // Cancel here happens before the round's messages are appended. Iteration-atomic so the
         // next turn sees the pre-turn tail.
         assert_eq!(messages.len(), 1, "{messages:#?}");
-        // ToolCallStart fires before `dispatch_tool_call` parks; the matching End must not fire
+        // ToolCallStart fires before `dispatch_tool_call` parks. The matching End must not fire
         // because the tool future was dropped.
         let events = sink.events();
         assert!(
@@ -1989,7 +1983,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_turn_malformed_tool_input_short_circuits_to_parse_error_result() {
-        // Truncated `input_json_delta` must not run the tool with empty input; the agent
+        // Truncated `input_json_delta` must not run the tool with empty input. The agent
         // synthesizes an `is_error: true` result naming the parse failure for self-correction.
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -2147,7 +2141,7 @@ mod tests {
         assert!(matches!(&stripped.content[0], ContentBlock::Text { .. }));
     }
 
-    /// Covers the real `<Client as AgentClient>` path; `FakeClient` tests above stub the trait.
+    /// Covers the real `<Client as AgentClient>` path. `FakeClient` tests above stub the trait.
     #[tokio::test]
     async fn agent_turn_drives_real_client_over_wiremock() {
         let server = MockServer::start().await;
