@@ -24,6 +24,24 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<Certificate>> {
     Ok(certs)
 }
 
+/// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
+/// keeps tests hermetic and never touches the network. Shared across any in-crate test that
+/// needs a real trust-anchor PEM.
+#[cfg(test)]
+pub(crate) const TEST_CA_PEM: &str = indoc::indoc! {"
+    -----BEGIN CERTIFICATE-----
+    MIIBhTCCASugAwIBAgIUP8gTuzOaUClHkfbBRwh5D+v7nt0wCgYIKoZIzj0EAwIw
+    GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAeFw0yNjA1MTMwNzIxNTlaFw0zNjA1
+    MTAwNzIxNTlaMBgxFjAUBgNVBAMMDW94aWRlLXRlc3QtY2EwWTATBgcqhkjOPQIB
+    BggqhkjOPQMBBwNCAAQy5JPDldjwa2hBGxGCFB3l15yVesaxS0JNumy9OMUXAEEM
+    WHqiHpZq6IaNV2RxATGjSsXL8DgZGDNDTcMqKogRo1MwUTAdBgNVHQ4EFgQUkXs3
+    E+J6fk50kCUhGArrVnQqrFswHwYDVR0jBBgwFoAUkXs3E+J6fk50kCUhGArrVnQq
+    rFswDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiAtNtc4gyeMsui7
+    HT8UUyVjGWlOGVCTNkkEf4cPeMheIwIhAOmxcsmpYu8Brz64j2MnN2LUGTsZAZ6T
+    MziN3FfztHCm
+    -----END CERTIFICATE-----
+"};
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -31,22 +49,6 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
-
-    /// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
-    /// keeps tests hermetic and never touches the network.
-    const VALID_PEM: &str = indoc::indoc! {"
-        -----BEGIN CERTIFICATE-----
-        MIIBhTCCASugAwIBAgIUP8gTuzOaUClHkfbBRwh5D+v7nt0wCgYIKoZIzj0EAwIw
-        GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAeFw0yNjA1MTMwNzIxNTlaFw0zNjA1
-        MTAwNzIxNTlaMBgxFjAUBgNVBAMMDW94aWRlLXRlc3QtY2EwWTATBgcqhkjOPQIB
-        BggqhkjOPQMBBwNCAAQy5JPDldjwa2hBGxGCFB3l15yVesaxS0JNumy9OMUXAEEM
-        WHqiHpZq6IaNV2RxATGjSsXL8DgZGDNDTcMqKogRo1MwUTAdBgNVHQ4EFgQUkXs3
-        E+J6fk50kCUhGArrVnQqrFswHwYDVR0jBBgwFoAUkXs3E+J6fk50kCUhGArrVnQq
-        rFswDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiAtNtc4gyeMsui7
-        HT8UUyVjGWlOGVCTNkkEf4cPeMheIwIhAOmxcsmpYu8Brz64j2MnN2LUGTsZAZ6T
-        MziN3FfztHCm
-        -----END CERTIFICATE-----
-    "};
 
     fn write_pem(contents: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -60,8 +62,8 @@ mod tests {
     #[test]
     fn load_extra_ca_certs_parses_single_and_multi_block_bundles() {
         for (label, body, expected) in [
-            ("single", VALID_PEM.to_owned(), 1),
-            ("bundle", format!("{VALID_PEM}\n{VALID_PEM}"), 2),
+            ("single", TEST_CA_PEM.to_owned(), 1),
+            ("bundle", format!("{TEST_CA_PEM}\n{TEST_CA_PEM}"), 2),
         ] {
             let file = write_pem(&body);
             let certs =

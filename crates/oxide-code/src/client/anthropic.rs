@@ -528,6 +528,18 @@ mod tests {
     }
 
     #[test]
+    fn new_appends_extra_ca_certs_to_the_trust_store() {
+        // Pins the happy-path wiring: a valid PEM bundle on `Config::extra_ca_certs` threads
+        // through `Client::new` without error. Complements the missing-path test below.
+        let pem = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
+            .unwrap();
+        let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+        cfg.extra_ca_certs = Some(pem.path().to_path_buf());
+        Client::new(cfg, None).expect("valid CA bundle must build a client");
+    }
+
+    #[test]
     fn new_rejects_auth_values_containing_invalid_header_bytes() {
         // `HeaderValue::from_str` rejects control chars (\n, \r); both auth arms must propagate.
         for auth in [
