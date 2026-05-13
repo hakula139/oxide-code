@@ -1375,6 +1375,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
+        // `env::string` treats an empty env var as absent, so a file value must survive even
+        // when the caller exports `OX_EXTRA_CA_CERTS=""` (e.g., by unsetting via shell).
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
     // ── Config::load / prompt_cache_ttl ──
 
     #[tokio::test]

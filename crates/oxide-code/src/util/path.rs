@@ -149,6 +149,21 @@ mod tests {
     }
 
     #[test]
+    fn expand_user_collapses_redundant_slashes_after_tilde() {
+        // `~//foo` and `~///foo` should land at $HOME/foo, not at /foo. PathBuf::join replaces
+        // the receiver when the argument is absolute, so the tail must be trimmed first.
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            for raw in ["~//foo", "~///foo/bar"] {
+                let got = expand_user(raw).unwrap();
+                assert!(
+                    got.starts_with("/tmp/oxide-fake-home"),
+                    "{raw:?} -> {got:?}",
+                );
+            }
+        });
+    }
+
+    #[test]
     fn expand_user_bare_tilde_resolves_to_home() {
         temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
             assert_eq!(

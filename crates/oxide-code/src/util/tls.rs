@@ -130,15 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn load_extra_ca_certs_reports_filename_on_read_and_parse_failures() {
-        // Missing path + malformed body share the same invariant: the error must mention the
-        // filepath so users can debug without reading source.
+    fn load_extra_ca_certs_reports_filename_on_read_failure() {
         let missing = Path::new("/definitely/does/not/exist.pem");
         let err = load_extra_ca_certs(missing).expect_err("missing path must error");
         let msg = format!("{err:#}");
         assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
         assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
+    }
 
+    #[test]
+    fn load_extra_ca_certs_reports_filename_on_parse_failure() {
         let malformed = write_pem(indoc::indoc! {"
             -----BEGIN CERTIFICATE-----
             not base64 data
