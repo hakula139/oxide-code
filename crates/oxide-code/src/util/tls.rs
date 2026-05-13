@@ -41,8 +41,7 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<Certificate>> {
 }
 
 /// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
-/// keeps tests hermetic and never touches the network. Shared across any in-crate test that
-/// needs a real trust-anchor PEM.
+/// keeps tests hermetic and never touches the network.
 #[cfg(test)]
 pub(crate) const TEST_CA_PEM: &str = indoc::indoc! {"
     -----BEGIN CERTIFICATE-----

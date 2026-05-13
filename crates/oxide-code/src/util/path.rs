@@ -34,8 +34,8 @@ pub(crate) fn tildify(path: &Path) -> String {
 /// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`;
 /// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` pass through
 /// unchanged (no passwd lookup) and non-tilde paths pass through as well. Errors when the input
-/// starts with `~` but `dirs::home_dir()` yields no value — otherwise a user would silently get
-/// a literal `~`-prefixed filesystem path that fails far downstream.
+/// starts with `~` but `dirs::home_dir()` yields no value, since a literal `~`-prefixed path
+/// would otherwise fail far downstream with a misleading filesystem error.
 pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
         return Ok(PathBuf::from(raw));

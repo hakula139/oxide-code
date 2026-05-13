@@ -27,6 +27,8 @@ pub(super) struct FileConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ClientConfig {
+    // Any new field that influences credentials, endpoint identity, or TLS trust must also be
+    // listed in `reject_project_secrets` so a checked-in `ox.toml` cannot set it.
     pub(super) api_key: Option<String>,
     pub(super) base_url: Option<String>,
     pub(super) extra_ca_certs: Option<String>,
@@ -638,7 +640,7 @@ mod tests {
     #[test]
     fn load_project_file_rejects_trust_establishing_client_fields() {
         // `api_key`, `base_url`, and `extra_ca_certs` all influence who receives or is trusted
-        // to be the server; a checked-in `ox.toml` cannot set them.
+        // to be the server, so a checked-in `ox.toml` cannot set them.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PROJECT_CONFIG_FILENAME);
         std::fs::write(

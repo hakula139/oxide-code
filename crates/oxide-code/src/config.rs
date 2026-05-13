@@ -53,7 +53,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) effort: Option<Effort>,
     pub(crate) auth_label: &'static str,
     pub(crate) base_url: String,
-    /// User-config path appended to reqwest's trust anchors; `None` when unset.
+    /// User-config path appended to reqwest's trust anchors.
     pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) max_tokens: u32,
     /// `None` means the agent loop runs without a per-turn round cap.
@@ -275,7 +275,7 @@ pub(crate) struct Config {
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
-    /// Absolute path to a PEM bundle appended to reqwest's trust anchors. `None` means the
+    /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
     /// client keeps only the built-in Mozilla roots.
     pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) max_tokens: u32,
