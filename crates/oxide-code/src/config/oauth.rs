@@ -745,6 +745,44 @@ mod tests {
         assert!(format!("{err:#}").contains("parse"));
     }
 
+    #[tokio::test]
+    async fn refresh_oauth_token_honors_extra_ca_certs() {
+        // A valid PEM bundle must thread through the client builder without disrupting the
+        // existing request flow. Pairs with the surfaces-loader-error test below.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "new-access",
+                "new-refresh",
+                3600,
+            )))
+            .mount(&server)
+            .await;
+
+        let pem = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
+            .unwrap();
+
+        let response = refresh_oauth_token(&server.uri(), "refresh", Some(pem.path()))
+            .await
+            .expect("valid PEM must build a client and produce a response");
+        assert_eq!(response.access_token, "new-access");
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
+        // An unreadable bundle must fail before any network call, citing the path so the user
+        // can debug the configuration rather than chase a TLS error downstream.
+        let missing = Path::new("/definitely/does/not/exist.pem");
+        let err = refresh_oauth_token("http://unused.invalid/", "refresh", Some(missing))
+            .await
+            .expect_err("missing CA bundle must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+        assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
+    }
+
     // ── write_refreshed_credentials ──
 
     #[test]
