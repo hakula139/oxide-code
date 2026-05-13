@@ -6,7 +6,9 @@ use std::path::Path;
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_auto_compaction, display_bool, display_effort, file};
+use crate::config::{
+    display_auto_compaction, display_bool, display_effort, display_max_tool_rounds, file,
+};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
 
@@ -50,6 +52,10 @@ fn build_modal(
         ("Auth".to_owned(), cfg.auth_label.to_owned()),
         ("Base URL".to_owned(), cfg.base_url.clone()),
         ("Max Tokens".to_owned(), cfg.max_tokens.to_string()),
+        (
+            "Max Tool Rounds".to_owned(),
+            display_max_tool_rounds(cfg.max_tool_rounds),
+        ),
         (
             "Prompt Cache TTL".to_owned(),
             cfg.prompt_cache_ttl.to_string(),
@@ -149,11 +155,11 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 9 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 11 + 1 + 4 + 2 = 20.
+        // title + blank + (heading + blank + 10 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 12 + 1 + 4 + 2 = 21.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 20);
+        assert_eq!(m.height(80), 21);
     }
 
     #[test]

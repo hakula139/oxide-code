@@ -52,6 +52,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) auth_label: &'static str,
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
+    /// `None` means the agent loop runs without a per-turn round cap.
+    pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) show_thinking: bool,
@@ -270,6 +272,8 @@ pub(crate) struct Config {
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
+    /// `None` means the agent loop runs without a per-turn round cap.
+    pub(crate) max_tool_rounds: Option<u32>,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) thinking: Option<ThinkingConfig>,
@@ -329,6 +333,14 @@ impl Config {
                 .unwrap_or_else(|| default_max_tokens(effort)),
         };
 
+        let max_tool_rounds = match env::string("OX_MAX_TOOL_ROUNDS") {
+            Some(raw) => Some(
+                raw.parse::<u32>()
+                    .with_context(|| format!("OX_MAX_TOOL_ROUNDS={raw:?}"))?,
+            ),
+            None => client.max_tool_rounds,
+        };
+
         let show_thinking = env::bool("OX_SHOW_THINKING")
             .or(tui.show_thinking)
             .unwrap_or(false);
@@ -367,6 +379,7 @@ impl Config {
             auth,
             base_url,
             max_tokens,
+            max_tool_rounds,
             prompt_cache_ttl,
             compaction,
             thinking,
@@ -385,6 +398,7 @@ impl Config {
             auth_label: self.auth.label(),
             base_url: self.base_url.clone(),
             max_tokens: self.max_tokens,
+            max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
             compaction: self.compaction,
             show_thinking: self.show_thinking,
@@ -402,6 +416,10 @@ pub(crate) fn display_effort(effort: Option<Effort>) -> String {
 
 pub(crate) fn display_bool(flag: bool) -> &'static str {
     if flag { "on" } else { "off" }
+}
+
+pub(crate) fn display_max_tool_rounds(cap: Option<u32>) -> String {
+    cap.map_or_else(|| "unbounded".to_owned(), |n| n.to_string())
 }
 
 pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
@@ -674,6 +692,7 @@ mod tests {
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
+        "OX_MAX_TOOL_ROUNDS",
         "OX_COMPACTION_AUTO_ENABLED",
         "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
         "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
@@ -774,6 +793,7 @@ mod tests {
             env("ANTHROPIC_MODEL", "claude-opus-4-7"),
             env("ANTHROPIC_BASE_URL", "https://example.invalid"),
             env("ANTHROPIC_MAX_TOKENS", "64"),
+            env("OX_MAX_TOOL_ROUNDS", "200"),
             env("OX_SHOW_THINKING", "1"),
             env("OX_SHOW_WELCOME", "0"),
         ]);
@@ -783,6 +803,7 @@ mod tests {
         assert_eq!(config.model, "claude-opus-4-7");
         assert_eq!(config.base_url, "https://example.invalid");
         assert_eq!(config.max_tokens, 64);
+        assert_eq!(config.max_tool_rounds, Some(200));
         assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
         assert!(
@@ -801,6 +822,7 @@ mod tests {
                 model = "claude-sonnet-4-6"
                 base_url = "https://config-file.invalid"
                 max_tokens = 128
+                max_tool_rounds = 75
 
                 [tui]
                 show_thinking = true
@@ -813,6 +835,7 @@ mod tests {
         assert_eq!(config.model, "claude-sonnet-4-6");
         assert_eq!(config.base_url, "https://config-file.invalid");
         assert_eq!(config.max_tokens, 128);
+        assert_eq!(config.max_tool_rounds, Some(75));
         assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
         assert!(
@@ -1353,6 +1376,7 @@ mod tests {
             model: "claude-test-1-0".to_owned(),
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
+            max_tool_rounds: Some(100),
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
             compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                 enabled: true,
@@ -1370,6 +1394,7 @@ mod tests {
         assert_eq!(snap.model_id, "claude-test-1-0");
         assert_eq!(snap.effort, Some(Effort::Xhigh));
         assert_eq!(snap.max_tokens, 64_000);
+        assert_eq!(snap.max_tool_rounds, Some(100));
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
         assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
         assert!(snap.show_thinking);

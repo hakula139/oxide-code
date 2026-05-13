@@ -1,5 +1,5 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
-//! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
+//! and stops on text-only response or the optional per-turn round cap.
 
 pub(crate) mod compact_boundary;
 pub(crate) mod compaction;
@@ -22,7 +22,6 @@ use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
-const MAX_TOOL_ROUNDS: usize = 25;
 const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
@@ -112,8 +111,12 @@ pub(crate) struct AutoCompact<'a> {
 /// Drives one user prompt to a final assistant text reply. The loop returns as soon as a round
 /// produces no tool calls. Mid-turn `SubmitPrompt` actions queue and splice in as user messages
 /// at round boundaries. Long-running awaits race `user_rx` so `Cancel` / `Quit` abort promptly
-/// without leaving partial round writes. Aborts with [`MAX_TOOL_ROUNDS`] when the model fails
-/// to produce a final response.
+/// without leaving partial round writes. `max_tool_rounds = None` runs unbounded. `Some(n)`
+/// bails after `n` rounds without a final response.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "agent_turn owns the full per-turn dependency set; bundling them obscures lifetimes"
+)]
 pub(crate) async fn agent_turn(
     client: &dyn AgentClient,
     tools: &ToolRegistry,
@@ -122,12 +125,13 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
+    max_tool_rounds: Option<u32>,
 ) -> AbortResult<TurnReport> {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
     let mut latest_usage = None;
 
-    for _ in 0..MAX_TOOL_ROUNDS {
+    for _ in 0..max_tool_rounds.unwrap_or(u32::MAX) {
         strip_trailing_thinking(messages);
         let StreamOutcome {
             blocks,
@@ -176,8 +180,11 @@ pub(crate) async fn agent_turn(
         record_drained_prompts(pending_prompts.drain(..), messages, session, sink).await;
     }
 
+    // `None` resolves to `u32::MAX`, so this branch is reachable only when the caller set
+    // `Some(n)` and the model ran `n` rounds without a final reply.
+    let cap = max_tool_rounds.unwrap_or(u32::MAX);
     Err(TurnAbort::Failed(anyhow!(
-        "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
+        "agent stopped after {cap} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )))
 }
@@ -1396,6 +1403,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1433,6 +1441,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1466,6 +1475,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1504,6 +1514,7 @@ mod tests {
             &sink,
             &session,
             &mut user_rx,
+            None,
         )
         .await
         .unwrap();
@@ -1540,6 +1551,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1567,6 +1579,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1629,6 +1642,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -1671,6 +1685,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1732,6 +1747,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect("turn must complete");
@@ -1781,6 +1797,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("cancel must surface as Err(Cancelled)");
@@ -1810,6 +1827,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("quit must surface as Err(Quit)");
@@ -1838,6 +1856,7 @@ mod tests {
             &sink,
             &session,
             &mut rx,
+            None,
         )
         .await
         .expect_err("dead channel must surface as Err(Quit)");
@@ -1878,6 +1897,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             )
             .await
             .unwrap_or_else(|_| panic!("turn must complete despite {action:?}"));
@@ -1916,6 +1936,7 @@ mod tests {
                 &sink,
                 &session,
                 &mut rx,
+                None,
             ),
             async {
                 started.notified().await;
@@ -1966,6 +1987,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -2005,6 +2027,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -2039,10 +2062,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_turn_max_tool_rounds_bails_with_safety_cap_message() {
+    async fn agent_turn_with_some_cap_bails_with_safety_cap_message() {
+        const CAP: u32 = 3;
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
-        let turns: Vec<Vec<StreamEvent>> = (0..MAX_TOOL_ROUNDS)
+        let turns: Vec<Vec<StreamEvent>> = (0..CAP)
             .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
             .collect();
         let client = FakeClient::new(turns);
@@ -2058,15 +2082,45 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            Some(CAP),
         )
         .await
         .expect_err("cap must trip");
         let msg = format!("{err:#}");
-        assert!(
-            msg.contains(&MAX_TOOL_ROUNDS.to_string()),
-            "cap in error: {msg}"
-        );
+        assert!(msg.contains(&CAP.to_string()), "cap in error: {msg}");
         assert!(msg.contains("safety cap"), "explains intent: {msg}");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_with_none_cap_runs_unbounded_until_text_only_reply() {
+        // The cap is None, so the loop must not bail on its own; it terminates only when the
+        // model produces a text-only round. Pin that an arbitrary multi-round chain still
+        // completes without tripping the safety cap.
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let mut turns: Vec<Vec<StreamEvent>> = (0..50)
+            .map(|i| tool_use_turn(&format!("tool_{i}"), "echo", r"{}"))
+            .collect();
+        turns.push(text_turn("done"));
+        let client = FakeClient::new(turns);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("loop a while then stop")];
+
+        agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+            None,
+        )
+        .await
+        .expect("unbounded loop must reach the text-only round");
+        let last = messages.last().expect("assistant reply recorded");
+        assert!(matches!(last.role, Role::Assistant), "{last:?}");
     }
 
     #[tokio::test]
@@ -2091,6 +2145,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .expect_err("api error must propagate");
@@ -2134,6 +2189,7 @@ mod tests {
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();
@@ -2193,6 +2249,7 @@ data: {"type":"message_stop"}
             &sink,
             &session,
             &mut inert_user_rx(),
+            None,
         )
         .await
         .unwrap();

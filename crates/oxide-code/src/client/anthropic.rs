@@ -151,6 +151,11 @@ impl Client {
         self.config.compaction
     }
 
+    /// `None` means the agent loop runs without a per-turn round cap.
+    pub(crate) fn max_tool_rounds(&self) -> Option<u32> {
+        self.config.max_tool_rounds
+    }
+
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id

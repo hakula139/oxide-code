@@ -345,6 +345,7 @@ mod tests {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,
+                max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                     enabled: true,

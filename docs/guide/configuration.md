@@ -37,6 +37,7 @@ show_thinking = true
 | `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                        |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier        |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response             |
+| `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds  |
 | `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`) |
 
 #### `effort`: intelligence tier
@@ -63,6 +64,10 @@ Tier guide (from the [Opus 4.7 migration guide](https://platform.claude.com/docs
 #### `max_tokens`: response ceiling
 
 When unset, oxide-code derives `max_tokens` from the resolved `effort`: 64 000 for `xhigh` / `max`, 32 000 for `high`, 16 000 otherwise. Setting `max_tokens` explicitly (via TOML or `ANTHROPIC_MAX_TOKENS`) overrides the derivation.
+
+#### `max_tool_rounds`: agent-loop safety cap
+
+When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds = N` (or `OX_MAX_TOOL_ROUNDS=N`) bails the turn after `N` rounds with a runaway-loop error. The cap is a guard against tools stuck in a retry loop, since normal agent sessions routinely run hundreds of rounds.
 
 #### `base_url`: endpoint
 
@@ -151,6 +156,7 @@ Environment variables override all config file values.
 | `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-4-7[1m]`       | Model to use                 |
 | `ANTHROPIC_EFFORT`                     | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
 | `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | effort-derived              | Max tokens per response      |
+| `OX_MAX_TOOL_ROUNDS`                   | `client.max_tool_rounds`                   | unset (unbounded)           | Per-turn tool-round cap      |
 | `OX_PROMPT_CACHE_TTL`                  | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |
 | `OX_COMPACTION_AUTO_ENABLED`           | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
 | `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`  | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |

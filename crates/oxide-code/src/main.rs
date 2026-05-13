@@ -534,6 +534,7 @@ impl AgentLoopTask {
             &self.sink,
             &self.session,
             &mut self.user_rx,
+            self.client.max_tool_rounds(),
         )
         .await;
         match outcome {
@@ -831,6 +832,7 @@ async fn bare_repl(
                 &sink,
                 &session,
                 &mut user_rx,
+                client.max_tool_rounds(),
             );
             let turn_result = tokio::select! {
                 r = turn => r,
@@ -888,6 +890,7 @@ async fn headless(
         &sink,
         &session,
         &mut user_rx,
+        client.max_tool_rounds(),
     );
     let result: Result<()> = tokio::select! {
         r = turn => match r {

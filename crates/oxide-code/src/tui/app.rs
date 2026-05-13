@@ -936,6 +936,7 @@ mod tests {
                 model_id: "test-model".to_owned(),
                 effort: Some(Effort::High),
                 max_tokens: 32_000,
+                max_tool_rounds: None,
                 prompt_cache_ttl: PromptCacheTtl::OneHour,
                 compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
                     enabled: true,
