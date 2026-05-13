@@ -41,19 +41,19 @@ pub(crate) fn load_extra_ca_certs(path: &Path) -> Result<Vec<Certificate>> {
 }
 
 /// Self-signed throwaway P-256 cert generated once with `openssl req -x509 ...`. Embedding
-/// keeps tests hermetic and never touches the network.
+/// keeps tests hermetic and never touches the network. 100-year validity so tests do not rot.
 #[cfg(test)]
 pub(crate) const TEST_CA_PEM: &str = indoc::indoc! {"
     -----BEGIN CERTIFICATE-----
-    MIIBhTCCASugAwIBAgIUP8gTuzOaUClHkfbBRwh5D+v7nt0wCgYIKoZIzj0EAwIw
-    GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAeFw0yNjA1MTMwNzIxNTlaFw0zNjA1
-    MTAwNzIxNTlaMBgxFjAUBgNVBAMMDW94aWRlLXRlc3QtY2EwWTATBgcqhkjOPQIB
-    BggqhkjOPQMBBwNCAAQy5JPDldjwa2hBGxGCFB3l15yVesaxS0JNumy9OMUXAEEM
-    WHqiHpZq6IaNV2RxATGjSsXL8DgZGDNDTcMqKogRo1MwUTAdBgNVHQ4EFgQUkXs3
-    E+J6fk50kCUhGArrVnQqrFswHwYDVR0jBBgwFoAUkXs3E+J6fk50kCUhGArrVnQq
-    rFswDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiAtNtc4gyeMsui7
-    HT8UUyVjGWlOGVCTNkkEf4cPeMheIwIhAOmxcsmpYu8Brz64j2MnN2LUGTsZAZ6T
-    MziN3FfztHCm
+    MIIBhzCCAS2gAwIBAgIUSHnI8j4asiQCYFCLHv+mTjaH7PIwCgYIKoZIzj0EAwIw
+    GDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTAgFw0yNjA1MTMwOTM1NTNaGA8yMTI2
+    MDQxOTA5MzU1M1owGDEWMBQGA1UEAwwNb3hpZGUtdGVzdC1jYTBZMBMGByqGSM49
+    AgEGCCqGSM49AwEHA0IABPPm0pogMrzkQroL61zCV3BzVH25tmWvt6c1OK5pT7Yy
+    tOXqTKKLiqUbpsJW6XzankZ6E8LsI9mwuzXhsQYmGE+jUzBRMB0GA1UdDgQWBBQC
+    hrBBOk1wizWiQQQtrpIDMACA8DAfBgNVHSMEGDAWgBQChrBBOk1wizWiQQQtrpID
+    MACA8DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIFiHH199T6Sd
+    F2u46c+5D9+pdwYEd1dAgP+a21dwLwo3AiEAyn5ssAPGMPmSP8lKLRLuH+cFNEVQ
+    PyBNMput8iNe6eE=
     -----END CERTIFICATE-----
 "};
 
