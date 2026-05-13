@@ -40,6 +40,7 @@ pub(crate) struct ChatView {
     viewport_height: u16,
     viewport_width: u16,
     auto_scroll: bool,
+    new_content_since_pause: u32,
 }
 
 impl ChatView {
@@ -55,6 +56,7 @@ impl ChatView {
             viewport_height: 0,
             viewport_width: 0,
             auto_scroll: true,
+            new_content_since_pause: 0,
         }
     }
 
@@ -150,6 +152,7 @@ impl ChatView {
         self.commit_streaming();
         self.blocks.push(Box::new(UserMessage::new(text)));
         self.auto_scroll = true;
+        self.new_content_since_pause = 0;
     }
 
     /// Appends a streamed token to the current assistant response.
@@ -158,6 +161,9 @@ impl ChatView {
     /// block split. Auto-scroll only follows the tail when the user hasn't manually scrolled up.
     pub(crate) fn append_stream_token(&mut self, token: &str) {
         self.commit_thinking_buffer();
+        if self.streaming.is_none() {
+            self.bump_paused_counter();
+        }
         self.streaming
             .get_or_insert_with(StreamingAssistant::new)
             .append(token);
@@ -169,6 +175,9 @@ impl ChatView {
 
     /// Appends a thinking token to the live thinking display buffer.
     pub(crate) fn append_thinking_token(&mut self, token: &str) {
+        if self.thinking_buffer.is_empty() {
+            self.bump_paused_counter();
+        }
         self.thinking_buffer.push_str(token);
         if self.auto_scroll {
             self.scroll_to_bottom();
@@ -200,6 +209,7 @@ impl ChatView {
     /// Appends a tool call, flushing any in-flight streaming buffer.
     pub(crate) fn push_tool_call(&mut self, icon: &'static str, label: &str) {
         self.commit_streaming();
+        self.bump_paused_counter();
         self.blocks.push(Box::new(ToolCallBlock::new(icon, label)));
     }
 
@@ -210,6 +220,7 @@ impl ChatView {
         view: ToolResultView,
         is_error: bool,
     ) {
+        self.bump_paused_counter();
         self.blocks
             .push(Box::new(ToolResultBlock::new(label, view, is_error)));
     }
@@ -225,11 +236,13 @@ impl ChatView {
 
     /// Appends an error message.
     pub(crate) fn push_error(&mut self, msg: &str) {
+        self.bump_paused_counter();
         self.blocks.push(Box::new(ErrorBlock::new(msg)));
     }
 
     /// Appends informational output from a slash command.
     pub(crate) fn push_system_message(&mut self, body: impl Into<String>) {
+        self.bump_paused_counter();
         self.blocks.push(Box::new(SystemMessageBlock::new(body)));
     }
 
@@ -240,6 +253,7 @@ impl ChatView {
         instructions: Option<&str>,
         summary: impl Into<String>,
     ) {
+        self.bump_paused_counter();
         self.blocks.push(Box::new(CompactedBlock::new(
             pre_count,
             instructions,
@@ -249,12 +263,14 @@ impl ChatView {
 
     /// Appends a unified diff body for display.
     pub(crate) fn push_git_diff(&mut self, text: impl Into<String>) {
+        self.bump_paused_counter();
         self.blocks.push(Box::new(GitDiffBlock::new(text)));
     }
 
     /// Appends an interrupted marker. Flushes any in-flight streaming buffer first.
     pub(crate) fn push_interrupted_marker(&mut self) {
         self.commit_streaming();
+        self.bump_paused_counter();
         self.blocks.push(Box::new(InterruptedMarker));
     }
 
@@ -266,6 +282,15 @@ impl ChatView {
         self.scroll_offset = 0;
         self.content_height.set(0);
         self.auto_scroll = true;
+        self.new_content_since_pause = 0;
+    }
+
+    pub(crate) const fn is_scrolled_up(&self) -> bool {
+        !self.auto_scroll
+    }
+
+    pub(crate) const fn new_content_since_pause(&self) -> u32 {
+        self.new_content_since_pause
     }
 
     /// Number of committed chat blocks.
@@ -374,6 +399,7 @@ impl ChatView {
             .content_height
             .get()
             .saturating_sub(self.viewport_height);
+        self.new_content_since_pause = 0;
     }
 
     fn scroll_up(&mut self, lines: u16) {
@@ -389,6 +415,13 @@ impl ChatView {
         self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
         if self.scroll_offset >= max {
             self.auto_scroll = true;
+            self.new_content_since_pause = 0;
+        }
+    }
+
+    fn bump_paused_counter(&mut self) {
+        if !self.auto_scroll {
+            self.new_content_since_pause = self.new_content_since_pause.saturating_add(1);
         }
     }
 
@@ -2143,6 +2176,42 @@ mod tests {
     }
 
     #[test]
+    fn paused_counter_bumps_only_while_scrolled_up() {
+        let mut chat = test_chat();
+        chat.push_system_message("one");
+        assert_eq!(chat.new_content_since_pause(), 0);
+
+        chat.auto_scroll = false;
+        chat.push_system_message("two");
+        chat.push_error("three");
+        assert_eq!(chat.new_content_since_pause(), 2);
+    }
+
+    #[test]
+    fn paused_counter_streaming_bumps_once_per_block() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+
+        chat.append_stream_token("a");
+        chat.append_stream_token("b");
+        assert_eq!(chat.new_content_since_pause(), 1);
+
+        chat.commit_streaming();
+        chat.append_stream_token("c");
+        assert_eq!(chat.new_content_since_pause(), 2);
+    }
+
+    #[test]
+    fn paused_counter_saturates() {
+        let mut chat = test_chat();
+        chat.auto_scroll = false;
+        chat.new_content_since_pause = u32::MAX;
+
+        chat.push_error("overflow");
+        assert_eq!(chat.new_content_since_pause(), u32::MAX);
+    }
+
+    #[test]
     fn update_layout_invalidates_streaming_cache_on_width_change() {
         let mut chat = test_chat();
         _ = chat.update_layout(Rect::new(0, 0, 80, 24));
@@ -2249,10 +2318,12 @@ mod tests {
         chat.viewport_height = 20;
         chat.scroll_offset = 10;
         chat.auto_scroll = false;
+        chat.new_content_since_pause = 3;
 
         chat.handle_event(&ctrl_key_event(KeyCode::End));
         assert_eq!(chat.scroll_offset, 80);
         assert!(chat.auto_scroll);
+        assert_eq!(chat.new_content_since_pause(), 0);
     }
 
     #[test]
@@ -2507,10 +2578,12 @@ mod tests {
         chat.content_height.set(100);
         chat.viewport_height = 20;
         chat.scroll_offset = 75;
+        chat.new_content_since_pause = 3;
 
         chat.scroll_down(10);
         assert_eq!(chat.scroll_offset, 80);
         assert!(chat.auto_scroll);
+        assert_eq!(chat.new_content_since_pause(), 0);
     }
 
     // ── build_text ──

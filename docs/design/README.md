@@ -4,6 +4,12 @@ Architecture decisions and implementation specs for oxide-code.
 
 Organized by topic. Each subdirectory mirrors the corresponding directory in [`docs/research/`](../research/), where the underlying research lives.
 
+## Agent Loop
+
+| Document                                    | Description                                           |
+| ------------------------------------------- | ----------------------------------------------------- |
+| [Auto-Compaction](agent/auto-compaction.md) | Automatic compaction thresholds, triggers, fail-safes |
+
 ## Session
 
 | Document                                         | Description                                             |

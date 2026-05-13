@@ -17,6 +17,9 @@ use crate::util::env;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const AUTO_COMPACTION_OUTPUT_RESERVE_CAP: u32 = 20_000;
+const AUTO_COMPACTION_BUFFER_TOKENS: u32 = 13_000;
+const MIN_AUTO_COMPACTION_THRESHOLD_TOKENS: u32 = 50_000;
 /// Mirrors the fallback `loader::resolve_theme` applies when no `[tui.theme] base` is set.
 pub(crate) const DEFAULT_THEME: &str = "mocha";
 
@@ -50,6 +53,7 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
+    pub(crate) compaction: CompactionConfig,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
     /// Resolved theme base name — built-in catalogue key or filesystem path. `/theme` reads this
@@ -185,6 +189,76 @@ impl FromStr for PromptCacheTtl {
     }
 }
 
+// ── CompactionConfig ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactionConfig {
+    pub(crate) auto: AutoCompactionConfig,
+    policy: AutoCompactionPolicy,
+}
+
+impl CompactionConfig {
+    #[cfg(test)]
+    pub(crate) const fn disabled() -> Self {
+        Self {
+            auto: AutoCompactionConfig::disabled(),
+            policy: AutoCompactionPolicy::Disabled,
+        }
+    }
+
+    pub(crate) fn for_model(self, model: &str, max_tokens: u32) -> Result<Self> {
+        resolve_compaction_policy(self.policy, model, max_tokens)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn resolved_for_test(auto: AutoCompactionConfig) -> Self {
+        let policy = if auto.enabled {
+            match auto.threshold_tokens {
+                Some(tokens) => AutoCompactionPolicy::Tokens(tokens),
+                None => AutoCompactionPolicy::Default,
+            }
+        } else {
+            AutoCompactionPolicy::Disabled
+        };
+        Self { auto, policy }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn default_for_test(model: &str, max_tokens: u32) -> Self {
+        resolve_compaction_policy(AutoCompactionPolicy::Default, model, max_tokens).unwrap()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AutoCompactionConfig {
+    pub(crate) enabled: bool,
+    pub(crate) threshold_tokens: Option<u32>,
+}
+
+impl AutoCompactionConfig {
+    pub(crate) const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            threshold_tokens: None,
+        }
+    }
+
+    pub(crate) const fn should_trigger(self, total_tokens: u32) -> bool {
+        match (self.enabled, self.threshold_tokens) {
+            (true, Some(threshold)) => total_tokens >= threshold,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoCompactionPolicy {
+    Disabled,
+    Default,
+    Tokens(u32),
+    Percent(u8),
+}
+
 // ── Config ──
 
 /// Resolved configuration.
@@ -197,6 +271,7 @@ pub(crate) struct Config {
     pub(crate) base_url: String,
     pub(crate) max_tokens: u32,
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
+    pub(crate) compaction: CompactionConfig,
     pub(crate) thinking: Option<ThinkingConfig>,
     pub(crate) show_thinking: bool,
     pub(crate) show_welcome: bool,
@@ -275,6 +350,8 @@ impl Config {
             None => client.prompt_cache_ttl.unwrap_or(PromptCacheTtl::OneHour),
         };
 
+        let compaction = resolve_compaction(client.compaction, &model, max_tokens)?;
+
         let theme_name = theme_config
             .base
             .clone()
@@ -291,6 +368,7 @@ impl Config {
             base_url,
             max_tokens,
             prompt_cache_ttl,
+            compaction,
             thinking,
             show_thinking,
             show_welcome,
@@ -308,6 +386,7 @@ impl Config {
             base_url: self.base_url.clone(),
             max_tokens: self.max_tokens,
             prompt_cache_ttl: self.prompt_cache_ttl,
+            compaction: self.compaction,
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
             theme_name: self.theme_name.clone(),
@@ -325,12 +404,150 @@ pub(crate) fn display_bool(flag: bool) -> &'static str {
     if flag { "on" } else { "off" }
 }
 
+pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
+    match (auto.enabled, auto.threshold_tokens) {
+        (true, Some(threshold)) => format!("on at {threshold} tokens"),
+        (true, None) => "off (no threshold)".to_owned(),
+        _ => "off".to_owned(),
+    }
+}
+
 fn default_max_tokens(effort: Option<Effort>) -> u32 {
     match effort {
         Some(Effort::Xhigh | Effort::Max) => 64_000,
         Some(Effort::High) => 32_000,
         _ => 16_000,
     }
+}
+
+fn resolve_compaction(
+    file: Option<file::CompactionConfig>,
+    model: &str,
+    max_tokens: u32,
+) -> Result<CompactionConfig> {
+    let auto_requested = env::bool("OX_COMPACTION_AUTO_ENABLED")
+        .or_else(|| file.as_ref().and_then(|c| c.enabled))
+        .unwrap_or(true);
+
+    let policy = if auto_requested {
+        resolve_auto_policy(file.as_ref())?
+    } else {
+        AutoCompactionPolicy::Disabled
+    };
+    resolve_compaction_policy(policy, model, max_tokens)
+}
+
+fn resolve_compaction_policy(
+    policy: AutoCompactionPolicy,
+    model: &str,
+    max_tokens: u32,
+) -> Result<CompactionConfig> {
+    let auto = resolve_auto_compaction(policy, model, max_tokens)?;
+    Ok(CompactionConfig { auto, policy })
+}
+
+fn resolve_auto_compaction(
+    policy: AutoCompactionPolicy,
+    model: &str,
+    max_tokens: u32,
+) -> Result<AutoCompactionConfig> {
+    let threshold = match policy {
+        AutoCompactionPolicy::Disabled => return Ok(AutoCompactionConfig::disabled()),
+        AutoCompactionPolicy::Default => default_auto_threshold(model, max_tokens),
+        AutoCompactionPolicy::Tokens(tokens) => threshold_from_tokens(tokens, model, max_tokens)?,
+        AutoCompactionPolicy::Percent(percent) => {
+            threshold_from_percent(percent, model, max_tokens)?
+        }
+    };
+    Ok(AutoCompactionConfig {
+        enabled: threshold.is_some(),
+        threshold_tokens: threshold,
+    })
+}
+
+fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoCompactionPolicy> {
+    let env_tokens = env_u32("OX_COMPACTION_AUTO_THRESHOLD_TOKENS")?;
+    let env_percent = env_u8("OX_COMPACTION_AUTO_THRESHOLD_PERCENT")?;
+    let env_threshold_set = env_tokens.is_some() || env_percent.is_some();
+    let file_tokens = file.and_then(|c| c.threshold_tokens);
+    let file_percent = file.and_then(|c| c.threshold_percent);
+    let (tokens, percent) = if env_threshold_set {
+        (env_tokens, env_percent)
+    } else {
+        (file_tokens, file_percent)
+    };
+
+    match (tokens, percent) {
+        (Some(_), Some(_)) => {
+            bail!("set only one of auto_threshold_tokens or auto_threshold_percent for compaction")
+        }
+        (Some(tokens), None) => Ok(AutoCompactionPolicy::Tokens(tokens)),
+        (None, Some(percent)) => Ok(AutoCompactionPolicy::Percent(percent)),
+        (None, None) => Ok(AutoCompactionPolicy::Default),
+    }
+}
+
+fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> Result<Option<u32>> {
+    validate_auto_threshold_floor(tokens)?;
+    if let Some(max) = default_auto_threshold(model, max_tokens)
+        && tokens > max
+    {
+        bail!("auto compaction threshold must be at most {max} tokens for model {model:?}");
+    }
+    Ok(Some(tokens))
+}
+
+fn validate_auto_threshold_floor(tokens: u32) -> Result<u32> {
+    if tokens < MIN_AUTO_COMPACTION_THRESHOLD_TOKENS {
+        bail!(
+            "auto compaction threshold must be at least \
+             {MIN_AUTO_COMPACTION_THRESHOLD_TOKENS} tokens"
+        );
+    }
+    Ok(tokens)
+}
+
+fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<Option<u32>> {
+    if !(1..=100).contains(&percent) {
+        bail!("auto compaction threshold percent must be between 1 and 100");
+    }
+    let Some(context_window) = crate::model::context_window_for(model) else {
+        return Ok(None);
+    };
+    let threshold = context_window.saturating_mul(u32::from(percent)) / 100;
+    let resolved =
+        default_auto_threshold_for_window(context_window, max_tokens).map(|max| threshold.min(max));
+    resolved
+        .map(|tokens| {
+            validate_auto_threshold_floor(tokens).with_context(|| {
+                format!("auto_threshold_percent={percent} resolves to {tokens} tokens")
+            })
+        })
+        .transpose()
+}
+
+fn default_auto_threshold(model: &str, max_tokens: u32) -> Option<u32> {
+    crate::model::context_window_for(model)
+        .and_then(|window| default_auto_threshold_for_window(window, max_tokens))
+}
+
+fn default_auto_threshold_for_window(context_window: u32, max_tokens: u32) -> Option<u32> {
+    let reserve = max_tokens.min(AUTO_COMPACTION_OUTPUT_RESERVE_CAP);
+    context_window
+        .checked_sub(reserve)?
+        .checked_sub(AUTO_COMPACTION_BUFFER_TOKENS)
+}
+
+fn env_u32(key: &'static str) -> Result<Option<u32>> {
+    env::string(key)
+        .map(|raw| raw.parse::<u32>().with_context(|| format!("{key}={raw:?}")))
+        .transpose()
+}
+
+fn env_u8(key: &'static str) -> Result<Option<u8>> {
+    env::string(key)
+        .map(|raw| raw.parse::<u8>().with_context(|| format!("{key}={raw:?}")))
+        .transpose()
 }
 
 fn validate_base_url(raw: &str) -> Result<()> {
@@ -460,6 +677,9 @@ mod tests {
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
+        "OX_COMPACTION_AUTO_ENABLED",
+        "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
+        "OX_COMPACTION_AUTO_THRESHOLD_TOKENS",
         "OX_SHOW_THINKING",
         "OX_SHOW_WELCOME",
         "OX_PROMPT_CACHE_TTL",
@@ -519,6 +739,8 @@ mod tests {
         assert_eq!(config.max_tokens, 64_000);
         assert_eq!(config.effort, Some(Effort::Xhigh));
         assert_eq!(config.prompt_cache_ttl, PromptCacheTtl::OneHour);
+        assert!(config.compaction.auto.enabled);
+        assert_eq!(config.compaction.auto.threshold_tokens, Some(967_000));
         assert!(!config.show_thinking);
         assert!(
             config.show_welcome,
@@ -561,6 +783,7 @@ mod tests {
         assert_eq!(config.model, "claude-opus-4-7");
         assert_eq!(config.base_url, "https://example.invalid");
         assert_eq!(config.max_tokens, 64);
+        assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
         assert!(
             !config.show_welcome,
@@ -590,6 +813,7 @@ mod tests {
         assert_eq!(config.model, "claude-sonnet-4-6");
         assert_eq!(config.base_url, "https://config-file.invalid");
         assert_eq!(config.max_tokens, 128);
+        assert!(config.compaction.auto.enabled);
         assert!(config.show_thinking);
         assert!(
             !config.show_welcome,
@@ -669,6 +893,185 @@ mod tests {
             config.thinking,
             Some(ThinkingConfig::Adaptive { display: None }),
         ));
+    }
+
+    #[tokio::test]
+    async fn load_compaction_file_can_disable_default_on_auto_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_enabled = false
+            "},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert!(!config.compaction.auto.enabled);
+    }
+
+    #[tokio::test]
+    async fn load_compaction_auto_env_beats_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_enabled = false
+            "},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_COMPACTION_AUTO_ENABLED", "1")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(config.compaction.auto.enabled);
+    }
+
+    #[tokio::test]
+    async fn load_compaction_auto_threshold_tokens_sets_absolute_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_threshold_tokens = 400000
+            "},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
+    }
+
+    #[tokio::test]
+    async fn load_compaction_auto_threshold_percent_uses_context_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7[1m]"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.compaction.auto.threshold_tokens, Some(400_000));
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_ambiguous_auto_thresholds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_threshold_tokens = 400000
+                auto_threshold_percent = 40
+            "},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("ambiguous thresholds must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("only one"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_zero_auto_threshold_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "0"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("zero threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_too_low_auto_threshold_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r"
+                [client.compaction]
+                auto_threshold_tokens = 49999
+            "},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("low threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_too_low_auto_threshold_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "claude-opus-4-7[1m]"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "4"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("resolved low threshold must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("auto_threshold_percent=4"), "{msg}");
+        assert!(msg.contains("40000 tokens"), "{msg}");
+        assert!(msg.contains("at least 50000 tokens"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_threshold_above_model_safe_window() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                model = "claude-sonnet-4-6"
+
+                [client.compaction]
+                auto_threshold_tokens = 400000
+            "#},
+        );
+        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .expect_err("threshold beyond context safety window must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("at most"), "{msg}");
+        assert!(msg.contains("claude-sonnet-4-6"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_rejects_out_of_range_auto_threshold_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "101"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("out-of-range threshold percent must fail config load");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("between 1 and 100"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_compaction_percent_for_unknown_model_disables_auto_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_MODEL", "custom-model"),
+            env("OX_COMPACTION_AUTO_THRESHOLD_PERCENT", "40"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert!(!config.compaction.auto.enabled);
+        assert_eq!(config.compaction.auto.threshold_tokens, None);
     }
 
     #[tokio::test]
@@ -955,6 +1358,10 @@ mod tests {
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
             prompt_cache_ttl: PromptCacheTtl::FiveMin,
+            compaction: CompactionConfig::resolved_for_test(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(42),
+            }),
             thinking: None,
             show_thinking: true,
             show_welcome: false,
@@ -968,6 +1375,7 @@ mod tests {
         assert_eq!(snap.effort, Some(Effort::Xhigh));
         assert_eq!(snap.max_tokens, 64_000);
         assert_eq!(snap.prompt_cache_ttl, PromptCacheTtl::FiveMin);
+        assert_eq!(snap.compaction.auto.threshold_tokens, Some(42));
         assert!(snap.show_thinking);
         assert!(!snap.show_welcome);
         assert_eq!(snap.theme_name, "macchiato");
@@ -987,6 +1395,53 @@ mod tests {
     fn display_bool_names_the_two_flag_states() {
         assert_eq!(display_bool(true), "on");
         assert_eq!(display_bool(false), "off");
+    }
+
+    // ── display_auto_compaction ──
+
+    #[test]
+    fn display_auto_compaction_names_enabled_threshold_or_off() {
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(400_000),
+            }),
+            "on at 400000 tokens",
+        );
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: false,
+                threshold_tokens: Some(400_000),
+            }),
+            "off",
+        );
+        assert_eq!(
+            display_auto_compaction(AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: None,
+            }),
+            "off (no threshold)",
+        );
+    }
+
+    // ── AutoCompactionConfig::should_trigger ──
+
+    #[test]
+    fn should_trigger_requires_enabled_threshold_and_enough_tokens() {
+        let enabled = AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(10),
+        };
+        assert!(enabled.should_trigger(10));
+        assert!(!enabled.should_trigger(9));
+        assert!(!AutoCompactionConfig::disabled().should_trigger(100));
+        assert!(
+            !AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: None,
+            }
+            .should_trigger(100)
+        );
     }
 
     // ── default_max_tokens ──

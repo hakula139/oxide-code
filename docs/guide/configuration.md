@@ -21,6 +21,9 @@ effort = "high"
 max_tokens = 32000
 prompt_cache_ttl = "1h"
 
+[client.compaction]
+auto_threshold_tokens = 400000
+
 [tui]
 show_thinking = true
 ```
@@ -68,6 +71,20 @@ Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Proje
 #### `prompt_cache_ttl`: cache duration
 
 Accepted values: `"5m"` (matches the server default as of 2026-03-06) and `"1h"` (higher write premium, bigger hit-rate win on long sessions). oxide-code defaults to `"1h"` because Anthropic's silent 2026-03 TTL drop cut typical prompt-caching savings from 80 %+ to 40-55 %. See [Agentic Request Body Fields](../research/api/anthropic.md#agentic-request-body-fields) for the wire shape and cost analysis.
+
+### `[client.compaction]`: context compression
+
+Auto-compaction is enabled by default for known model context windows. The default trigger leaves room for the next response and a safety buffer. Set one threshold override when you want compaction to happen earlier:
+
+| Key                      | Type    | Default             | Description                                |
+| ------------------------ | ------- | ------------------- | ------------------------------------------ |
+| `auto_enabled`           | boolean | `true`              | Enable automatic context compaction        |
+| `auto_threshold_tokens`  | integer | model-derived       | Absolute trigger, `50000` token minimum    |
+| `auto_threshold_percent` | integer | model-derived       | Percent of context, capped by safe trigger |
+
+`auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Absolute thresholds must be at least `50000` tokens. For models with known context windows, absolute thresholds must also stay within the model-derived safe trigger. Percent thresholds must be 1-100, are capped by that safe trigger after they resolve to tokens, and must still resolve to at least `50000` tokens.
+
+For models without known context windows, the default and percent-based automatic triggers stay off. An explicit token threshold still works after floor validation.
 
 #### 1M Context Window: `[1m]` Tag
 
@@ -127,16 +144,19 @@ Prefer the environment variable (or OAuth) over `api_key` in a config file. `ox.
 
 Environment variables override all config file values.
 
-| Variable               | Config key                | Default                     | Description                  |
-| ---------------------- | ------------------------- | --------------------------- | ---------------------------- |
-| `ANTHROPIC_API_KEY`    | `client.api_key`          | -                           | Anthropic API key            |
-| `ANTHROPIC_BASE_URL`   | `client.base_url`         | `https://api.anthropic.com` | API base URL                 |
-| `ANTHROPIC_MODEL`      | `client.model`            | `claude-opus-4-7[1m]`       | Model to use                 |
-| `ANTHROPIC_EFFORT`     | `client.effort`           | per-model                   | Intelligence-vs-latency tier |
-| `ANTHROPIC_MAX_TOKENS` | `client.max_tokens`       | effort-derived              | Max tokens per response      |
-| `OX_PROMPT_CACHE_TTL`  | `client.prompt_cache_ttl` | `1h`                        | Prompt-cache TTL             |
-| `OX_SHOW_THINKING`     | `tui.show_thinking`       | `false`                     | Show extended thinking       |
-| `OX_SHOW_WELCOME`      | `tui.show_welcome`        | `true`                      | Paint the welcome splash     |
+| Variable                                | Config key                                 | Default                     | Description                  |
+| --------------------------------------- | ------------------------------------------ | --------------------------- | ---------------------------- |
+| `ANTHROPIC_API_KEY`                     | `client.api_key`                           | -                           | Anthropic API key            |
+| `ANTHROPIC_BASE_URL`                    | `client.base_url`                          | `https://api.anthropic.com` | API base URL                 |
+| `ANTHROPIC_MODEL`                       | `client.model`                             | `claude-opus-4-7[1m]`       | Model to use                 |
+| `ANTHROPIC_EFFORT`                      | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
+| `ANTHROPIC_MAX_TOKENS`                  | `client.max_tokens`                        | effort-derived              | Max tokens per response      |
+| `OX_PROMPT_CACHE_TTL`                   | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |
+| `OX_COMPACTION_AUTO_ENABLED`            | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |
+| `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`   | `client.compaction.auto_threshold_tokens`  | model-derived               | Absolute compaction trigger  |
+| `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`  | `client.compaction.auto_threshold_percent` | model-derived               | Percent compaction trigger   |
+| `OX_SHOW_THINKING`                      | `tui.show_thinking`                        | `false`                     | Show extended thinking       |
+| `OX_SHOW_WELCOME`                       | `tui.show_welcome`                         | `true`                      | Paint the welcome splash     |
 
 Set `OX_SHOW_THINKING=1` to display the model's thinking process (dimmed text) when extended thinking is enabled for the model.
 

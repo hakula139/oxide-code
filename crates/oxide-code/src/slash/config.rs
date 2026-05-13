@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::context::{LiveSessionInfo, SlashContext};
 use super::registry::{SlashCommand, SlashOutcome};
-use crate::config::{display_bool, display_effort, file};
+use crate::config::{display_auto_compaction, display_bool, display_effort, file};
 use crate::tui::modal::kv_overview::{KvOverview, KvSection};
 use crate::util::path::tildify;
 
@@ -55,6 +55,10 @@ fn build_modal(
             cfg.prompt_cache_ttl.to_string(),
         ),
         (
+            "Auto Compaction".to_owned(),
+            display_auto_compaction(cfg.compaction.auto),
+        ),
+        (
             "Show Thinking".to_owned(),
             display_bool(cfg.show_thinking).to_owned(),
         ),
@@ -95,6 +99,28 @@ mod tests {
     use crate::tui::modal::Modal;
     use crate::tui::theme::Theme;
 
+    fn render_modal(modal: &KvOverview, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let height = modal.height(width);
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     // ── ConfigCmd metadata ──
 
     #[test]
@@ -123,11 +149,21 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 8 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 10 + 1 + 4 + 2 = 19.
+        // title + blank + (heading + blank + 9 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 11 + 1 + 4 + 2 = 20.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 19);
+        assert_eq!(m.height(80), 20);
+    }
+
+    #[test]
+    fn build_modal_renders_resolved_auto_compaction() {
+        let info = test_session_info();
+        let m = build_modal(&info, None, None);
+        let rendered = render_modal(&m, 80);
+
+        assert!(rendered.contains("Auto Compaction"), "{rendered}");
+        assert!(rendered.contains("on at 155000 tokens"), "{rendered}");
     }
 
     // ── display_path ──

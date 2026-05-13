@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::config::{Auth, Config, Effort};
+use crate::config::{Auth, CompactionConfig, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
@@ -147,6 +147,10 @@ impl Client {
         self.config.effort
     }
 
+    pub(crate) fn compaction(&self) -> CompactionConfig {
+        self.config.compaction
+    }
+
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
@@ -161,13 +165,18 @@ impl Client {
         self.session_id = id;
     }
 
-    /// Swaps the active model and re-clamps `config.effort` against the new caps.
-    pub(crate) fn set_model(&mut self, model: String) -> Option<Effort> {
+    /// Swaps the active model and re-clamps model-derived config against the new caps.
+    pub(crate) fn set_model(&mut self, model: String) -> Result<Option<Effort>> {
         let caps = crate::model::capabilities_for(&model);
         let effort = caps.resolve_effort(self.config.effort);
+        let compaction = self
+            .config
+            .compaction
+            .for_model(&model, self.config.max_tokens)?;
         self.config.effort = effort;
+        self.config.compaction = compaction;
         self.config.model = model;
-        effort
+        Ok(effort)
     }
 
     /// Swaps the active effort, clamped against the current model's caps.
@@ -392,7 +401,7 @@ mod tests {
     use super::testing::{Captured, api_key, captured, oauth, test_config};
     use super::wire::{ContentBlockInfo, Delta};
     use super::*;
-    use crate::config::{Effort, ThinkingConfig};
+    use crate::config::{AutoCompactionConfig, CompactionConfig, Effort, ThinkingConfig};
 
     // ── Fixtures ──
 
@@ -472,6 +481,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_exposes_compaction_config() {
+        let mut config = test_config(OFFLINE_URL, Auth::ApiKey("sk-test".to_owned()), TEST_MODEL);
+        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(123_456),
+        });
+        let client = Client::new(config, None).unwrap();
+
+        assert_eq!(client.compaction().auto.threshold_tokens, Some(123_456));
     }
 
     #[test]
@@ -614,7 +635,7 @@ mod tests {
             ),
         ] {
             let mut client = client_with(from_model, from_effort);
-            let returned = client.set_model(swap_to.to_owned());
+            let returned = client.set_model(swap_to.to_owned()).unwrap();
             assert_eq!(returned, expect, "{from_model} → {swap_to}: returned");
             assert_eq!(
                 client.config.effort, expect,
@@ -629,8 +650,38 @@ mod tests {
         // `[1m]` is a client-side opt-in; the swap must store it verbatim so `compute_betas` keeps
         // sending the 1M context beta. Regressing this drops 1M context silently.
         let mut client = client_with("claude-opus-4-6", Some(Effort::Max));
-        client.set_model("claude-opus-4-7[1m]".to_owned());
+        client.set_model("claude-opus-4-7[1m]".to_owned()).unwrap();
         assert_eq!(client.model(), "claude-opus-4-7[1m]");
+    }
+
+    #[test]
+    fn set_model_recomputes_compaction_threshold_from_new_context_window() {
+        let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
+        config.max_tokens = 64_000;
+        config.compaction = CompactionConfig::default_for_test(&config.model, config.max_tokens);
+        let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
+
+        let effort = client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
+
+        assert_eq!(effort, Some(Effort::High));
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+        assert_eq!(client.compaction().auto.threshold_tokens, Some(167_000));
+    }
+
+    #[test]
+    fn set_model_rejects_threshold_above_new_context_window() {
+        let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
+        config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
+            enabled: true,
+            threshold_tokens: Some(967_000),
+        });
+        let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
+
+        client
+            .set_model("claude-sonnet-4-6".to_owned())
+            .expect_err("threshold above the smaller window must reject the swap");
+        assert_eq!(client.model(), "claude-opus-4-7[1m]");
+        assert_eq!(client.compaction().auto.threshold_tokens, Some(967_000));
     }
 
     // ── Client::set_effort ──

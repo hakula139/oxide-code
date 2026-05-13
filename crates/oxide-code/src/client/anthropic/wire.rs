@@ -231,13 +231,6 @@ pub(crate) struct MessageDeltaBody {
     pub(crate) stop_reason: Option<String>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "fields populated by serde, defined for full SSE protocol coverage"
-    )
-)]
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Usage {
     #[serde(default)]

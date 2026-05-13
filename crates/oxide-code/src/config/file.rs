@@ -33,6 +33,18 @@ pub(super) struct ClientConfig {
     pub(super) effort: Option<super::Effort>,
     pub(super) max_tokens: Option<u32>,
     pub(super) prompt_cache_ttl: Option<super::PromptCacheTtl>,
+    pub(super) compaction: Option<CompactionConfig>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CompactionConfig {
+    #[serde(rename = "auto_enabled")]
+    pub(super) enabled: Option<bool>,
+    #[serde(rename = "auto_threshold_tokens")]
+    pub(super) threshold_tokens: Option<u32>,
+    #[serde(rename = "auto_threshold_percent")]
+    pub(super) threshold_percent: Option<u8>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -71,6 +83,25 @@ impl ClientConfig {
             effort: other.effort.or(self.effort),
             max_tokens: other.max_tokens.or(self.max_tokens),
             prompt_cache_ttl: other.prompt_cache_ttl.or(self.prompt_cache_ttl),
+            compaction: merge_section(self.compaction, other.compaction, CompactionConfig::merge),
+        }
+    }
+}
+
+impl CompactionConfig {
+    fn merge(self, other: Self) -> Self {
+        let other_sets_threshold =
+            other.threshold_tokens.is_some() || other.threshold_percent.is_some();
+        let (threshold_tokens, threshold_percent) = if other_sets_threshold {
+            (other.threshold_tokens, other.threshold_percent)
+        } else {
+            (self.threshold_tokens, self.threshold_percent)
+        };
+
+        Self {
+            enabled: other.enabled.or(self.enabled),
+            threshold_tokens,
+            threshold_percent,
         }
     }
 }
@@ -222,6 +253,11 @@ mod tests {
                 effort: Some(super::super::Effort::Low),
                 max_tokens: Some(1000),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
+                compaction: Some(CompactionConfig {
+                    enabled: Some(false),
+                    threshold_tokens: Some(400_000),
+                    threshold_percent: None,
+                }),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(false),
@@ -237,6 +273,11 @@ mod tests {
                 effort: Some(super::super::Effort::Max),
                 max_tokens: Some(2000),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::OneHour),
+                compaction: Some(CompactionConfig {
+                    enabled: Some(true),
+                    threshold_tokens: None,
+                    threshold_percent: Some(40),
+                }),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -259,9 +300,32 @@ mod tests {
             client.prompt_cache_ttl,
             Some(super::super::PromptCacheTtl::OneHour)
         );
+        let compaction = client.compaction.expect("compaction section should merge");
+        assert_eq!(compaction.enabled, Some(true));
+        assert_eq!(compaction.threshold_tokens, None);
+        assert_eq!(compaction.threshold_percent, Some(40));
 
         let tui = merged.tui.expect("tui section should be present");
         assert_eq!(tui.show_thinking, Some(true));
+    }
+
+    #[test]
+    fn merge_compaction_enabled_does_not_clear_base_threshold() {
+        let base = CompactionConfig {
+            enabled: Some(false),
+            threshold_tokens: Some(400_000),
+            threshold_percent: None,
+        };
+        let other = CompactionConfig {
+            enabled: Some(true),
+            threshold_tokens: None,
+            threshold_percent: None,
+        };
+        let merged = base.merge(other);
+
+        assert_eq!(merged.enabled, Some(true));
+        assert_eq!(merged.threshold_tokens, Some(400_000));
+        assert_eq!(merged.threshold_percent, None);
     }
 
     #[test]
@@ -274,6 +338,11 @@ mod tests {
                 effort: Some(super::super::Effort::High),
                 max_tokens: Some(4096),
                 prompt_cache_ttl: Some(super::super::PromptCacheTtl::FiveMin),
+                compaction: Some(CompactionConfig {
+                    enabled: Some(false),
+                    threshold_tokens: Some(400_000),
+                    threshold_percent: None,
+                }),
             }),
             tui: Some(TuiConfig {
                 show_thinking: Some(true),
@@ -293,6 +362,11 @@ mod tests {
             client.prompt_cache_ttl,
             Some(super::super::PromptCacheTtl::FiveMin)
         );
+        let compaction = client
+            .compaction
+            .expect("compaction section should survive");
+        assert_eq!(compaction.enabled, Some(false));
+        assert_eq!(compaction.threshold_tokens, Some(400_000));
 
         let tui = merged.tui.expect("tui section should survive");
         assert_eq!(tui.show_thinking, Some(true));

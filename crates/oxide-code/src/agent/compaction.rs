@@ -6,7 +6,7 @@
 use anyhow::{Result, bail};
 use indoc::{formatdoc, indoc};
 
-use crate::client::anthropic::Client;
+use crate::agent::AgentClient;
 use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
 use crate::message::{ContentBlock, Message, Role};
 
@@ -51,7 +51,7 @@ const SUMMARY_PREFIX: &str = indoc! {r"
 /// Errors when the transcript is too short to compact, when the API errors mid-stream, or when
 /// the model returns an empty / whitespace-only response.
 pub(crate) async fn compact_session(
-    client: &Client,
+    client: &dyn AgentClient,
     transcript: &[Message],
     instructions: Option<&str>,
 ) -> Result<String> {

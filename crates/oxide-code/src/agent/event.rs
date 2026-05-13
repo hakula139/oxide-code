@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::config::Effort;
+use crate::config::{CompactionConfig, Effort};
 use crate::model::ResolvedModelId;
 use crate::tool::ToolRegistry;
 
@@ -47,6 +47,9 @@ pub(crate) enum AgentEvent {
     /// User cancelled mid-turn ([`UserAction::Cancel`]); the in-flight reply is truncated and the
     /// inline [`INTERRUPTED_MARKER`] is rendered.
     Cancelled,
+    /// Automatic compaction started before the submitted prompt runs. TUI switches to compacting
+    /// status while the summarizer request streams.
+    AutoCompactionStarted,
     /// Background title generator finished; UI updates the chrome label.
     SessionTitleUpdated { session_id: String, title: String },
     /// `/clear` rolled the session — a new session UUID is now active.
@@ -63,16 +66,20 @@ pub(crate) enum AgentEvent {
     /// `/compact` finished — summary captures the prior transcript, `pre_count` is for the
     /// post-compact UI line. The agent loop has already swapped the in-memory transcript to
     /// the synthetic continuation; the UI clears its chat and replays a single boundary block.
+    /// Automatic compaction can happen before a submitted prompt starts, so the TUI keeps the
+    /// busy state until the following turn completes.
     SessionCompacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
+        automatic: bool,
     },
     /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
     /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
     ConfigChanged {
         model_id: String,
         effort: Option<Effort>,
+        compaction: CompactionConfig,
         requested_effort: Option<Effort>,
     },
     /// User-visible error from the agent loop, session writer, or tool dispatch. Renders as a
@@ -203,12 +210,24 @@ impl StdioSink {
                 }
                 writeln!(stderr)?;
             }
+            AgentEvent::SessionCompacted {
+                pre_count,
+                automatic,
+                ..
+            } => {
+                let label = if automatic {
+                    "Auto-compacted"
+                } else {
+                    "Compacted"
+                };
+                writeln!(stderr, "{label} {pre_count} messages into summary")?;
+            }
             // TUI-only — no stdio surface to update.
             AgentEvent::PromptDrained(_)
+            | AgentEvent::AutoCompactionStarted
             | AgentEvent::SessionTitleUpdated { .. }
             | AgentEvent::SessionRolled { .. }
             | AgentEvent::SessionResumed { .. }
-            | AgentEvent::SessionCompacted { .. }
             | AgentEvent::ConfigChanged { .. } => {}
             AgentEvent::TurnComplete => {
                 writeln!(stdout)?;
@@ -363,6 +382,7 @@ mod tests {
     fn render_tui_only_events_emit_nothing_on_either_stream() {
         for event in [
             AgentEvent::PromptDrained("queued".to_owned()),
+            AgentEvent::AutoCompactionStarted,
             AgentEvent::SessionTitleUpdated {
                 session_id: "sid".to_owned(),
                 title: "New title".to_owned(),
@@ -373,6 +393,7 @@ mod tests {
             AgentEvent::ConfigChanged {
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
+                compaction: CompactionConfig::disabled(),
                 requested_effort: Some(Effort::Xhigh),
             },
         ] {
@@ -380,6 +401,31 @@ mod tests {
             assert!(stdout.is_empty(), "stdout must stay empty: {stdout:?}");
             assert!(stderr.is_empty(), "stderr must stay empty: {stderr:?}");
         }
+    }
+
+    #[test]
+    fn render_session_compacted_writes_stderr_boundary() {
+        let (_, stderr) = render_one(
+            &test_sink(false),
+            AgentEvent::SessionCompacted {
+                summary: "summary".to_owned(),
+                pre_count: 4,
+                instructions: None,
+                automatic: false,
+            },
+        );
+        assert_eq!(stderr, "Compacted 4 messages into summary\n");
+
+        let (_, stderr) = render_one(
+            &test_sink(false),
+            AgentEvent::SessionCompacted {
+                summary: "summary".to_owned(),
+                pre_count: 4,
+                instructions: None,
+                automatic: true,
+            },
+        );
+        assert_eq!(stderr, "Auto-compacted 4 messages into summary\n");
     }
 
     #[test]

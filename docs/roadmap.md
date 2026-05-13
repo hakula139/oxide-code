@@ -1,29 +1,26 @@
 # Roadmap
 
-oxide-code is still early. This roadmap is the high-level product view: what works, what's being built next, and what is intentionally out of scope for now.
+oxide-code is still early. This roadmap is the high-level product view: what works, what's being built next, and what is out of scope for now.
 
 The direction is simple:
 
-- Build a useful terminal-based AI coding assistant in Rust.
-- Follow the agent-harness architecture: the model is the agent, everything else is harness (tools, context, permissions, coordination).
-- Keep the architecture understandable. New features should fit the current model instead of forcing large abstractions too early.
+- Keep the terminal as the primary interface: streaming chat, tool output, and session controls stay keyboard-first.
+- Keep context and state visible: model, instructions, compaction, queued prompts, and session identity should be inspectable from the UI.
+- Add workflow depth only when it fits the current agent-harness model.
 
 ## Working Today
 
 ### Terminal UI
 
-- Streaming output with markdown rendering and syntax-highlighted code blocks.
-- Multi-line input with a prompt marker and a status bar showing model, working directory, and run state.
-- Welcome surface on empty chat with identity, environment, and a few starter commands.
-- Rich per-tool views: edit diffs with line gutters, line-numbered read excerpts, grouped grep matches, and structured glob lists. Bash output rides the default truncated-text view.
-- Themable via runtime-loaded TOML, with 5 built-in palettes (Catppuccin Mocha, Macchiato, Frappe, Latte, Material) and per-slot overrides.
-- Three modes: full TUI, bare REPL (`--no-tui`), and headless (`-p`).
+- Streaming chat with markdown, syntax-highlighted code, and clear tool output.
+- Multi-line input, a live status bar, and a focused welcome screen for new sessions.
+- Theme support with built-in palettes and user-defined TOML themes.
+- Full TUI, bare REPL (`--no-tui`), and headless (`-p`) modes.
 
 ### Agent Loop
 
-- Async streaming from the Anthropic Messages API.
-- Tool-use round-trip: the model calls tools, results feed back, and the loop continues until a text-only response.
-- Extended thinking with optional dimmed display.
+- Anthropic-powered streaming turns with tool use and multi-step continuation.
+- Optional extended-thinking display for models that support it.
 
 ### Tools
 
@@ -38,102 +35,89 @@ The direction is simple:
 
 ### Turn Interruption & Queueing
 
-- Esc / Ctrl+C while busy interrupts the in-flight turn. Partial output is preserved with a clear `(interrupted)` marker.
-- Type during a busy turn to queue prompts. Queued prompts splice into the same multi-step turn at the next round boundary (between tool calls), so follow-ups land without aborting in-flight work. Tool-less turns drain queued prompts at the turn boundary instead.
-- Esc on idle pops the most recent queued prompt back into the input for editing.
-- Idle Ctrl+C arms a 1-second exit confirmation. A second press confirms.
+- Interrupt busy turns without losing partial output.
+- Queue follow-up prompts while the assistant is working, then edit or cancel them from idle.
+- Exit intentionally with a guarded Ctrl+C confirmation.
 
 ### System Prompt
 
-- Runtime environment (cwd, platform, shell, git status, date, model) injected every turn.
-- `CLAUDE.md` / `AGENTS.md` discovered from user-global and project scopes (root-to-CWD walk, root-level and `.claude/` at each level).
+- Project environment and model context are injected every turn.
+- `CLAUDE.md` / `AGENTS.md` instructions are loaded from user and project scopes.
 
 ### Session Persistence
 
-- Every conversation saved as JSONL under `$XDG_DATA_HOME/ox/sessions/{project}/`.
-- `ox --list` browses recent sessions, capped at 30 by default with `--limit N` / `--limit 0` overrides. `ox -c` resumes by recency, prefix, or path.
-- Mid-session `/resume` (alias `/continue`) opens an in-place picker (substring search, Tab toggles current-project ↔ all projects). `/resume <id-prefix>` jumps directly.
-- AI-generated 3-7-word titles land shortly after the first prompt.
+- Conversations are saved per project and can be listed or resumed later.
+- Mid-session `/resume` switches chats without restarting the app.
+- Short AI-generated titles make session history easier to scan.
 
 ### File-Change Tracking
 
-- Per-session tracker remembers each Read. Unchanged re-reads return a cache-hit stub instead of the full body.
-- Edit and Write require a prior full Read and refuse if the on-disk bytes have drifted (xxh64 fallback for cloud-sync mtime touches).
-- Tracker state persists into the session JSONL on clean exit and restores on resume.
+- Tracks reads so edits are made against files the assistant has actually seen.
+- Refuses stale writes when files changed on disk.
+- Restores edit-safety state when a session resumes.
 
 ### Slash Commands
 
-- Built-in: `/clear` (aliases `/new`, `/reset`), `/compact`, `/config`, `/delete`, `/diff`, `/effort`, `/help`, `/init`, `/model`, `/rename`, `/resume` (alias `/continue`), `/status`, `/theme`. See the [user guide](guide/slash-commands.md).
-- Autocomplete popup on typing `/`, with ranked filter, Tab completion, and arg-mode completion for commands with curated rosters (`/model`, `/effort`, `/theme`).
-- Mid-session swaps (`/model`, `/effort`, `/rename`, `/resume`, `/theme`) are session-only, and no slash command writes user config files.
-- Destructive ops (`/delete <id-prefix>`, or Ctrl+D / Delete inside the `/resume` picker) gate behind a Y/N confirm modal. The live session is excluded; any saved non-live session can be deleted.
-- Modal UI primitive: focus-grabbing overlays above the input for picker, slider, editor, and read-only kv-overview forms. Nested modals layer cleanly, and Esc / Ctrl+C cancels any modal.
+- Built-in commands cover session control, config/status, model and theme changes, diffs, compaction, and help. See the [user guide](guide/slash-commands.md).
+- Autocomplete, typed shortcuts, and modal pickers keep common actions quick.
+- Destructive session actions require confirmation.
 
 ### Context Compression
 
-- Manual `/compact [instructions]` streams a one-shot summarization through the live model and replaces the in-memory transcript with a synthetic continuation. Optional trailing instructions steer the focus.
-- Persisted as a dedicated `compact` JSONL boundary plus the synthetic post-compact message. Resume sees only the post-compact tail.
-- File tracker resets on compact. Edits after `/compact` require a fresh Read.
+- Manual `/compact [instructions]` and default auto-compaction keep long sessions usable.
+- Compaction keeps a visible history boundary and makes future edits require fresh reads.
 
 ### Authentication & Configuration
 
-- Anthropic API key via `ANTHROPIC_API_KEY` or config file.
-- Claude Code OAuth credentials picked up automatically (macOS Keychain, Linux file).
-- TOML config with layered precedence: defaults → user (`~/.config/ox/config.toml`) → project (`ox.toml`) → environment.
+- Supports Anthropic API keys and Claude Code OAuth pickup.
+- Layered TOML configuration supports user, project, and environment overrides.
 
 ## Current Focus
 
 ### Permission & Approval
 
-- Per-tool approval prompts before destructive actions (bash, write, edit).
-- Project-level allowlists to auto-approve trusted commands.
-- Plan mode: read-only review of the agent's proposed changes before any tool runs.
-
-### Auto-Compaction
-
-- Fire `/compact` automatically when the running token usage approaches the model's context window. Threshold math (effective context window minus reserved-output buffer), per-turn check at sampling boundaries, single-turn circuit breaker, and a config knob for opt-out.
+- Approval prompts for destructive tool actions.
+- Project allowlists for trusted commands.
+- Plan mode for reviewing the assistant's proposed work before tools run.
 
 ### Slash Commands (continuation)
 
 Remaining surface beyond Working Today:
 
-- Deferred: `/cost`, `/login` / `/logout`, custom user commands, `/init` multi-phase flow.
+- Cost visibility, login/logout, custom commands, and a guided `/init` flow.
 
-Persistence stance: `/model`, `/effort`, and `/theme` mutate session state only, and restart returns to user-declared config. Cross-session persistence will land as an **explicit subcommand** writing to a user-opted-in path, never as a silent merge into a `~/.claude.json`-style mega-file.
+Persistence stance: session commands should feel reversible. Cross-session writes will require an explicit user action.
 
 ### Viewport Virtualization
 
-- Render only the visible chat region for sessions with thousands of blocks.
+- Keep very long sessions responsive by rendering only the visible chat region.
 
 ## Later
 
 ### MCP Integration
 
-- MCP client to call external tool servers (Atlassian, GitHub, custom).
-- MCP server mode to expose oxide-code as a tool to other agents.
+- MCP client support for external tool servers.
+- MCP server mode so other agents can call oxide-code.
 
 ### Agent Infrastructure
 
-- Task management for multi-step work (TodoWrite-style tracking).
-- Subagent spawning to delegate self-contained sub-tasks.
-- Background tasks for long-running shell processes.
-- Agent-team coordination across multiple subagents.
-- Git-worktree isolation for parallel implementation attempts.
+- Task tracking for multi-step work.
+- Subagents for self-contained delegation.
+- Background shell processes and stronger parallel-work support.
 
 ### Sandboxing
 
-- Sandboxed execution for `bash` / `write` / `edit` so the agent runs without trusting the host shell.
+- Sandboxed `bash`, `write`, and `edit` execution.
 
 ### Workflow Skills
 
-- User-extensible templates that can override built-ins or add new ones (e.g. project-local `~/.claude/commands/review.md`). Built-ins like `/init` ship under Working Today.
-- Auth slash commands: `/login`, `/logout`.
-- Configurable instruction directories beyond `.claude/`.
+- User-extensible workflow templates.
+- Auth slash commands.
+- Configurable instruction directories.
 
 ### Status Bar Redesign
 
-- Current bar packs model + status + (optional) title + cwd into a single line. Layout collapses to model + status under width pressure but reads as cluttered above ~80 cols.
-- Direction: a richer, possibly multi-segment surface with token / cost meter, queued-prompt indicator, session id glance, and theme indicator. Likely needs a layout rethink rather than incremental slot additions.
+- A clearer status surface for model, cost, queue state, session identity, and theme.
 
 ## Not the Goal Right Now
 

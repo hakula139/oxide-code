@@ -1,6 +1,7 @@
 //! Agent turn loop. Streams the model response, dispatches tool calls, records to the session,
 //! and stops on text-only response or [`MAX_TOOL_ROUNDS`].
 
+pub(crate) mod compact_boundary;
 pub(crate) mod compaction;
 pub(crate) mod event;
 
@@ -13,13 +14,16 @@ use tracing::{debug, warn};
 
 use crate::agent::event::{AgentEvent, AgentSink, UserAction};
 use crate::client::anthropic::Client;
-use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent};
+use crate::client::anthropic::wire::{ContentBlockInfo, Delta, StreamEvent, Usage};
+use crate::config::AutoCompactionConfig;
+use crate::file_tracker::FileTracker;
 use crate::message::{ContentBlock, Message, Role, strip_trailing_thinking};
 use crate::prompt::PromptParts;
 use crate::session::handle::{RecordOutcome, SessionHandle};
 use crate::tool::{ToolDefinition, ToolMetadata, ToolOutput, ToolRegistry};
 
 const MAX_TOOL_ROUNDS: usize = 25;
+const MAX_AUTO_COMPACT_FAILURES: u8 = 3;
 
 // ── Turn Abort ──
 
@@ -67,6 +71,46 @@ impl AgentClient for Client {
 
 // ── Agent Turn ──
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TokenUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl TokenUsage {
+    #[cfg(test)]
+    pub(crate) const fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+        }
+    }
+
+    pub(crate) const fn total_tokens(self) -> u32 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    fn observe(&mut self, usage: &Usage) {
+        if usage.input_tokens > 0 {
+            self.input_tokens = usage.input_tokens;
+        }
+        if usage.output_tokens > 0 {
+            self.output_tokens = usage.output_tokens;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TurnReport {
+    pub(crate) usage: Option<TokenUsage>,
+}
+
+pub(crate) struct AutoCompact<'a> {
+    pub(crate) config: AutoCompactionConfig,
+    pub(crate) failures: &'a mut u8,
+    pub(crate) file_tracker: &'a FileTracker,
+}
+
 /// Drives one user prompt to a final assistant text reply.
 ///
 /// Each round streams a model response, dispatches any tool calls, and appends both the
@@ -88,21 +132,24 @@ pub(crate) async fn agent_turn(
     sink: &dyn AgentSink,
     session: &SessionHandle,
     user_rx: &mut mpsc::Receiver<UserAction>,
-) -> AbortResult<()> {
+) -> AbortResult<TurnReport> {
     let tool_defs = tools.definitions();
     let mut pending_prompts: Vec<String> = Vec::new();
+    let mut latest_usage = None;
 
     for _ in 0..MAX_TOOL_ROUNDS {
         strip_trailing_thinking(messages);
         let StreamOutcome {
             blocks,
             parse_errors,
+            usage,
         } = await_unless_aborted(
             stream_response(client, messages, &tool_defs, prompt, sink),
             user_rx,
             &mut pending_prompts,
         )
         .await??;
+        latest_usage = usage.or(latest_usage);
 
         let tool_uses = collect_tool_uses(&blocks);
         let assistant_msg = Message {
@@ -114,7 +161,9 @@ pub(crate) async fn agent_turn(
             // Queued prompts drain on the TUI side at idle.
             record_message(session, assistant_msg.clone(), sink).await;
             messages.push(assistant_msg);
-            return Ok(());
+            return Ok(TurnReport {
+                usage: latest_usage,
+            });
         }
 
         let (results, sidecars) = run_tool_round(
@@ -141,6 +190,65 @@ pub(crate) async fn agent_turn(
         "agent stopped after {MAX_TOOL_ROUNDS} tool rounds without a final response \
          — this is a safety cap against runaway loops. Ask again with a narrower request."
     )))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "auto-compaction needs the same live turn state as manual compaction plus the latest usage signal"
+)]
+pub(crate) async fn auto_compact_if_needed(
+    client: &dyn AgentClient,
+    session: &SessionHandle,
+    messages: &mut Vec<Message>,
+    sink: &dyn AgentSink,
+    user_rx: &mut mpsc::Receiver<UserAction>,
+    pending: &mut Vec<String>,
+    auto: Option<&mut AutoCompact<'_>>,
+    usage: Option<TokenUsage>,
+) -> AbortResult<bool> {
+    let Some(auto) = auto else {
+        return Ok(false);
+    };
+    let Some(usage) = usage else {
+        return Ok(false);
+    };
+    if *auto.failures >= MAX_AUTO_COMPACT_FAILURES
+        || !auto.config.should_trigger(usage.total_tokens())
+    {
+        return Ok(false);
+    }
+
+    _ = sink.send(AgentEvent::AutoCompactionStarted);
+    let summary = match await_unless_aborted(
+        compaction::compact_session(client, messages, None),
+        user_rx,
+        pending,
+    )
+    .await?
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            *auto.failures += 1;
+            warn!("auto-compaction failed: {e:#}");
+            return Ok(false);
+        }
+    };
+    let compacted = compact_boundary::replace_session_with_summary(
+        session,
+        auto.file_tracker,
+        messages,
+        sink,
+        summary,
+        None,
+        true,
+    )
+    .await;
+    if compacted {
+        *auto.failures = 0;
+    } else {
+        *auto.failures += 1;
+    }
+    Ok(compacted)
 }
 
 fn collect_tool_uses(blocks: &[ContentBlock]) -> Vec<(String, String, serde_json::Value)> {
@@ -228,7 +336,7 @@ async fn dispatch_tool_call(
     await_unless_aborted(tools.run(name, input), user_rx, pending).await
 }
 
-async fn record_drained_prompts(
+pub(crate) async fn record_drained_prompts(
     texts: impl IntoIterator<Item = String>,
     messages: &mut Vec<Message>,
     session: &SessionHandle,
@@ -363,6 +471,7 @@ fn parse_tool_json(json_buf: &str) -> (serde_json::Value, Option<String>) {
 struct StreamOutcome {
     blocks: Vec<ContentBlock>,
     parse_errors: HashMap<String, String>,
+    usage: Option<TokenUsage>,
 }
 
 async fn stream_response(
@@ -381,11 +490,19 @@ async fn stream_response(
     )?;
 
     let mut blocks: Vec<Option<BlockAccumulator>> = Vec::new();
+    let mut usage = TokenUsage::default();
+    let mut saw_usage = false;
 
     while let Some(event) = rx.recv().await {
         let event = event.context("stream error")?;
 
         match event {
+            StreamEvent::MessageStart { message } => {
+                if let Some(observed) = message.usage {
+                    usage.observe(&observed);
+                    saw_usage = true;
+                }
+            }
             StreamEvent::ContentBlockStart {
                 index,
                 content_block,
@@ -409,11 +526,21 @@ async fn stream_response(
             StreamEvent::Error { error } => {
                 bail!("API error ({}): {}", error.error_type, error.message);
             }
+            StreamEvent::MessageDelta {
+                usage: Some(observed),
+                ..
+            } => {
+                usage.observe(&observed);
+                saw_usage = true;
+            }
             _ => {}
         }
     }
 
-    let mut outcome = StreamOutcome::default();
+    let mut outcome = StreamOutcome {
+        usage: saw_usage.then_some(usage),
+        ..StreamOutcome::default()
+    };
     for acc in blocks.into_iter().flatten() {
         let (block, parse_error) = acc.into_content_block();
         outcome.parse_errors.extend(parse_error);
@@ -493,6 +620,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serde_json::json;
     use tokio::sync::Notify;
@@ -503,9 +631,10 @@ mod tests {
     use crate::agent::event::CapturingSink;
     use crate::client::anthropic::testing::test_client;
     use crate::client::anthropic::wire::{
-        ApiError, ContentBlockInfo, MessageResponse, StreamEvent, Usage,
+        ApiError, ContentBlockInfo, MessageDeltaBody, MessageResponse, StreamEvent, Usage,
     };
-    use crate::config::{Auth, Effort};
+    use crate::config::{Auth, AutoCompactionConfig, Effort};
+    use crate::file_tracker::FileTracker;
     use crate::message::Role;
     use crate::model::ResolvedModelId;
     use crate::session::handle::{self, SessionHandle};
@@ -550,6 +679,76 @@ mod tests {
             Self {
                 turns: StdMutex::new(turns.into()),
             }
+        }
+    }
+
+    struct FailingCompactClient;
+
+    impl AgentClient for FailingCompactClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct CountingFailingClient {
+        calls: AtomicUsize,
+    }
+
+    impl CountingFailingClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AgentClient for CountingFailingClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("summarizer unavailable"))
+        }
+    }
+
+    struct DelayedSummaryClient {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl AgentClient for DelayedSummaryClient {
+        fn stream_message(
+            &self,
+            _messages: &[Message],
+            _system_sections: &[&str],
+            _user_context: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<Result<StreamEvent>>> {
+            let (tx, rx) = mpsc::channel(8);
+            let started = self.started.clone();
+            let release = self.release.clone();
+            tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                for event in text_turn("auto summary") {
+                    tx.send(Ok(event)).await.expect("test receiver alive");
+                }
+            });
+            Ok(rx)
         }
     }
 
@@ -618,6 +817,41 @@ mod tests {
         ]
     }
 
+    fn text_turn_with_usage(text: &str, input_tokens: u32, output_tokens: u32) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens: 0,
+                    }),
+                },
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockInfo::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta { text: text.into() },
+            },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaBody {
+                    stop_reason: Some("end_turn".into()),
+                },
+                usage: Some(Usage {
+                    input_tokens: 0,
+                    output_tokens,
+                }),
+            },
+            StreamEvent::MessageStop,
+        ]
+    }
+
     fn tool_use_turn(id: &str, name: &str, input_json: &str) -> Vec<StreamEvent> {
         vec![
             StreamEvent::ContentBlockStart {
@@ -636,6 +870,30 @@ mod tests {
             StreamEvent::ContentBlockStop { index: 0 },
             StreamEvent::MessageStop,
         ]
+    }
+
+    fn tool_use_turn_with_usage(
+        id: &str,
+        name: &str,
+        input_json: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<StreamEvent> {
+        let mut events = tool_use_turn(id, name, input_json);
+        events.insert(
+            0,
+            StreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: "msg_1".into(),
+                    model: "claude-sonnet-4-6".into(),
+                    usage: Some(Usage {
+                        input_tokens,
+                        output_tokens,
+                    }),
+                },
+            },
+        );
+        events
     }
 
     /// Echoes its input; exercises the tool-dispatch path without subprocess machinery.
@@ -725,6 +983,322 @@ mod tests {
     /// Handle whose actor channel is closed; every write returns actor-gone.
     fn dead_test_session() -> SessionHandle {
         crate::session::handle::testing::dead("dead-test-session")
+    }
+
+    // ── auto_compact_if_needed ──
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_skips_without_auto_state_usage_or_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(Vec::new());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let absent = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            None,
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!absent);
+
+        let missing_usage = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!missing_usage);
+
+        let below_threshold = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(100),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!below_threshold);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(failures, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_summarizer_failure_without_replacing_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &FailingCompactClient,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_counts_persist_failure_without_replacing_messages() {
+        let session = dead_test_session();
+        let client = FakeClient::new(vec![text_turn("auto summary")]);
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+
+        let compacted = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(10),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(failures, 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hi"));
+        assert!(
+            sink.events()
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("Session write failed")))
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_stops_after_failure_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = CountingFailingClient::new();
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = MAX_AUTO_COMPACT_FAILURES - 1;
+        let usage = Some(TokenUsage {
+            input_tokens: 50_000,
+            output_tokens: 1,
+        });
+
+        let first = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+        let second = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut inert_user_rx(),
+            &mut pending,
+            Some(&mut AutoCompact {
+                config: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(50_000),
+                },
+                failures: &mut failures,
+                file_tracker: &tracker,
+            }),
+            usage,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first);
+        assert!(!second);
+        assert_eq!(failures, MAX_AUTO_COMPACT_FAILURES);
+        assert_eq!(client.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_if_needed_queues_submit_while_summarizing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let client = DelayedSummaryClient {
+            started: started.clone(),
+            release: release.clone(),
+        };
+        let sink = CapturingSink::new();
+        let tracker = FileTracker::default();
+        let mut messages = vec![
+            Message::user("hi"),
+            Message::assistant("there"),
+            Message::user("next"),
+            Message::assistant("done"),
+        ];
+        let mut pending = Vec::new();
+        let mut failures = 0;
+        let (tx, mut rx) = mpsc::channel::<UserAction>(1);
+        let mut auto = AutoCompact {
+            config: AutoCompactionConfig {
+                enabled: true,
+                threshold_tokens: Some(10),
+            },
+            failures: &mut failures,
+            file_tracker: &tracker,
+        };
+
+        let compact = auto_compact_if_needed(
+            &client,
+            &session,
+            &mut messages,
+            &sink,
+            &mut rx,
+            &mut pending,
+            Some(&mut auto),
+            Some(TokenUsage {
+                input_tokens: 20,
+                output_tokens: 1,
+            }),
+        );
+        let queue_prompt = async {
+            started.notified().await;
+            tx.send(UserAction::SubmitPrompt("queued after summary".into()))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            release.notify_one();
+        };
+        let (compacted, ()) = tokio::join!(compact, queue_prompt);
+        let compacted = compacted.unwrap();
+
+        assert!(compacted);
+        assert_eq!(pending, vec!["queued after summary"]);
+        assert_eq!(*auto.failures, 0);
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::PromptDrained(_)))
+                .count(),
+            0
+        );
+        assert!(sink.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionCompacted {
+                automatic: true,
+                ..
+            }
+        )));
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text.contains("auto summary"))
+        );
     }
 
     #[tokio::test]
@@ -872,6 +1446,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_turn_reports_latest_stream_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![text_turn_with_usage("Hello!", 100, 7)]);
+        let tools = ToolRegistry::new(Vec::new());
+        let sink = CapturingSink::new();
+        let mut messages = vec![Message::user("hi")];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(107));
+    }
+
+    #[tokio::test]
     async fn agent_turn_single_tool_call_dispatches_and_completes_on_follow_up() {
         let dir = tempfile::tempdir().unwrap();
         let session = test_session(dir.path());
@@ -927,6 +1525,45 @@ mod tests {
             AgentEvent::ToolCallEnd { id, metadata, is_error: false, .. }
                 if id == "tool_1" && metadata.title.as_deref() == Some("echoed"),
         )));
+    }
+
+    #[tokio::test]
+    async fn agent_turn_does_not_auto_compact_between_tool_result_and_follow_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let client = FakeClient::new(vec![
+            tool_use_turn_with_usage("tool_1", "echo", r#"{"v":1}"#, 9, 2),
+            text_turn_with_usage("Done", 1, 2),
+        ]);
+        let tools = ToolRegistry::new(vec![Box::new(EchoTool)]);
+        let sink = CapturingSink::new();
+        let mut messages = vec![
+            Message::user("run echo"),
+            Message::assistant("earlier"),
+            Message::user("continue"),
+        ];
+
+        let report = agent_turn(
+            &client,
+            &tools,
+            &mut messages,
+            &empty_prompt(),
+            &sink,
+            &session,
+            &mut inert_user_rx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.usage.map(TokenUsage::total_tokens), Some(3));
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::SessionCompacted { .. }))
+                .count(),
+            0
+        );
+        assert!(matches!(&messages[5].content[0], ContentBlock::Text { text } if text == "Done"));
     }
 
     #[tokio::test]
