@@ -342,6 +342,7 @@ mod tests {
             config: ConfigSnapshot {
                 auth_label: "OAuth",
                 base_url: "https://api.test.invalid".to_owned(),
+                extra_ca_certs: None,
                 model_id: "claude-opus-4-7".to_owned(),
                 effort: Some(Effort::Xhigh),
                 max_tokens: 64_000,

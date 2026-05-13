@@ -7,6 +7,7 @@ pub(crate) mod file;
 mod oauth;
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tui::theme::{self, Theme};
 use crate::util::env;
+use crate::util::path::expand_user;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-7[1m]";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -51,6 +53,8 @@ pub(crate) struct ConfigSnapshot {
     pub(crate) effort: Option<Effort>,
     pub(crate) auth_label: &'static str,
     pub(crate) base_url: String,
+    /// User-config path appended to reqwest's trust anchors.
+    pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) max_tokens: u32,
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) max_tool_rounds: Option<u32>,
@@ -271,6 +275,9 @@ pub(crate) struct Config {
     pub(crate) effort: Option<Effort>,
     pub(crate) auth: Auth,
     pub(crate) base_url: String,
+    /// Resolved path to a PEM bundle appended to reqwest's trust anchors. `None` means the
+    /// client keeps only the built-in Mozilla roots.
+    pub(crate) extra_ca_certs: Option<PathBuf>,
     pub(crate) max_tokens: u32,
     /// `None` means the agent loop runs without a per-turn round cap.
     pub(crate) max_tool_rounds: Option<u32>,
@@ -296,10 +303,18 @@ impl Config {
         let tui = fc.tui.unwrap_or_default();
         let theme_config = tui.theme.unwrap_or_default();
 
+        // Resolve before `auth` so the OAuth refresh can also thread the extra trust anchors
+        // through reqwest (relevant under SSL-inspecting corporate proxies).
+        let extra_ca_certs = env::string("OX_EXTRA_CA_CERTS")
+            .or(client.extra_ca_certs)
+            .map(|raw| expand_user(&raw))
+            .transpose()
+            .context("invalid client.extra_ca_certs")?;
+
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)
         } else {
-            let token = oauth::load_token().await.context(
+            let token = oauth::load_token(extra_ca_certs.as_deref()).await.context(
                 "no credentials available: set ANTHROPIC_API_KEY, add `api_key` to \
                  ~/.config/ox/config.toml, or sign in with Claude Code (checks macOS Keychain and \
                  ~/.claude/.credentials.json)",
@@ -378,6 +393,7 @@ impl Config {
             effort,
             auth,
             base_url,
+            extra_ca_certs,
             max_tokens,
             max_tool_rounds,
             prompt_cache_ttl,
@@ -397,6 +413,7 @@ impl Config {
             effort: self.effort,
             auth_label: self.auth.label(),
             base_url: self.base_url.clone(),
+            extra_ca_certs: self.extra_ca_certs.clone(),
             max_tokens: self.max_tokens,
             max_tool_rounds: self.max_tool_rounds,
             prompt_cache_ttl: self.prompt_cache_ttl,
@@ -692,6 +709,7 @@ mod tests {
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MAX_TOKENS",
         "ANTHROPIC_EFFORT",
+        "OX_EXTRA_CA_CERTS",
         "OX_MAX_TOOL_ROUNDS",
         "OX_COMPACTION_AUTO_ENABLED",
         "OX_COMPACTION_AUTO_THRESHOLD_PERCENT",
@@ -1153,6 +1171,122 @@ mod tests {
         );
     }
 
+    // ── Config::load / extra_ca_certs ──
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_default_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert!(config.extra_ca_certs.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_env_beats_file_and_expands_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        // Env supplies a `~`-prefixed path so the expansion branch is also covered.
+        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "~/certs/env.pem")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        let home = dirs::home_dir().expect("HOME set");
+        assert_eq!(config.extra_ca_certs, Some(home.join("certs/env.pem")));
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_file_used_when_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
+    #[tokio::test]
+    async fn load_extra_ca_certs_file_wins_when_env_is_empty() {
+        // `env::string` treats an empty env var as absent, so a file value must survive even
+        // when the caller exports `OX_EXTRA_CA_CERTS=""` (e.g., by unsetting via shell).
+        let dir = tempfile::tempdir().unwrap();
+        write_user_config(
+            dir.path(),
+            indoc::indoc! {r#"
+                [client]
+                extra_ca_certs = "/etc/ssl/from-file.pem"
+            "#},
+        );
+        let vars = env_vars(vec![xdg(&dir), env("OX_EXTRA_CA_CERTS", "")]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.extra_ca_certs,
+            Some(PathBuf::from("/etc/ssl/from-file.pem")),
+        );
+    }
+
+    // ── Config::load / base URL validation ──
+
+    #[tokio::test]
+    async fn load_rejects_plain_http_base_url_unless_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-loopback http must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("https"), "{msg}");
+        assert!(msg.contains("localhost"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_non_http_base_url_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
+        ]);
+        let err = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .expect_err("non-http schemes must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("http or https"), "{msg}");
+        assert!(msg.contains("ftp"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = env_vars(vec![
+            xdg(&dir),
+            env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
+        ]);
+        let config = temp_env::async_with_vars(vars, Config::load())
+            .await
+            .unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:8080");
+    }
+
     // ── Config::load / effort resolution ──
 
     #[tokio::test]
@@ -1263,51 +1397,6 @@ mod tests {
         assert!(msg.contains("insane"), "{msg}");
     }
 
-    // ── Config::load / base URL validation ──
-
-    #[tokio::test]
-    async fn load_rejects_plain_http_base_url_unless_loopback() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "http://example.com"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .expect_err("non-loopback http must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("https"), "{msg}");
-        assert!(msg.contains("localhost"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn load_rejects_non_http_base_url_scheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "ftp://example.com"),
-        ]);
-        let err = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .expect_err("non-http schemes must be rejected");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("http or https"), "{msg}");
-        assert!(msg.contains("ftp"), "{msg}");
-    }
-
-    #[tokio::test]
-    async fn load_accepts_loopback_http_base_url_for_local_proxy() {
-        let dir = tempfile::tempdir().unwrap();
-        let vars = env_vars(vec![
-            xdg(&dir),
-            env("ANTHROPIC_BASE_URL", "http://127.0.0.1:8080"),
-        ]);
-        let config = temp_env::async_with_vars(vars, Config::load())
-            .await
-            .unwrap();
-        assert_eq!(config.base_url, "http://127.0.0.1:8080");
-    }
-
     // ── Config::load / prompt_cache_ttl ──
 
     #[tokio::test]
@@ -1369,10 +1458,11 @@ mod tests {
 
     #[test]
     fn snapshot_copies_every_user_facing_field_and_drops_secret() {
-        // `/config` prints from the snapshot; secret must reduce to `label()`.
+        // `/config` prints from the snapshot, so the secret must reduce to `label()`.
         let cfg = Config {
             auth: Auth::OAuth("token-must-not-leak".to_owned()),
             base_url: "https://api.example.test".to_owned(),
+            extra_ca_certs: Some(PathBuf::from("/etc/ssl/corp-ca.pem")),
             model: "claude-test-1-0".to_owned(),
             effort: Some(Effort::Xhigh),
             max_tokens: 64_000,
@@ -1391,6 +1481,10 @@ mod tests {
         let snap = cfg.snapshot();
         assert_eq!(snap.auth_label, "OAuth");
         assert_eq!(snap.base_url, "https://api.example.test");
+        assert_eq!(
+            snap.extra_ca_certs.as_deref(),
+            Some(Path::new("/etc/ssl/corp-ca.pem")),
+        );
         assert_eq!(snap.model_id, "claude-test-1-0");
         assert_eq!(snap.effort, Some(Effort::Xhigh));
         assert_eq!(snap.max_tokens, 64_000);

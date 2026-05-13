@@ -27,6 +27,7 @@ use crate::config::{Auth, CompactionConfig, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
+use crate::util::tls::apply_extra_ca_certs;
 
 use betas::{compute_betas, static_prefix_cache_control};
 use sse::stream_sse;
@@ -122,13 +123,13 @@ impl Client {
         headers.insert("x-stainless-retry-count", HeaderValue::from_static("0"));
 
         // No whole-request timeout — responses can run for minutes. The 60 s read timeout
-        // catches slowloris dribble; Anthropic sends keepalives every ~15 s on healthy streams.
-        let http = reqwest::Client::builder()
+        // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
+        let builder = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_mins(1))
-            .build()
-            .context("failed to build HTTP client")?;
+            .read_timeout(Duration::from_mins(1));
+        let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
+        let http = builder.build().context("failed to build HTTP client")?;
 
         Ok(Self {
             http,
@@ -524,6 +525,20 @@ mod tests {
     }
 
     #[test]
+    fn new_with_extra_ca_certs_trusts_them() {
+        // The assertion only confirms that `Client::new` returns Ok. A client that forgot to
+        // reassign the builder back after `add_root_certificate` would still pass. Keeping the
+        // loose check here since a stronger test would need a TLS-terminating mock server
+        // signed by `TEST_CA_PEM`, which is heavy machinery for one line of wiring.
+        let pem = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
+            .unwrap();
+        let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+        cfg.extra_ca_certs = Some(pem.path().to_path_buf());
+        Client::new(cfg, None).expect("valid CA bundle must build a client");
+    }
+
+    #[test]
     fn new_rejects_auth_values_containing_invalid_header_bytes() {
         // `HeaderValue::from_str` rejects control chars (\n, \r); both auth arms must propagate.
         for auth in [
@@ -542,6 +557,18 @@ mod tests {
                 "error should mention header: {err:#}",
             );
         }
+    }
+
+    #[test]
+    fn new_surfaces_extra_ca_certs_error_with_path() {
+        // An unreadable trust anchor must fail the client build and cite the configured path so
+        // the user can debug without having to spelunk into TLS internals.
+        let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
+        cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
+        let err = Client::new(cfg, None).err().expect("missing CA must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+        assert!(msg.contains("/no/such/bundle.pem"), "{msg}");
     }
 
     // ── Client::set_session_id ──

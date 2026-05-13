@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 use crate::util::env;
 use crate::util::fs::atomic_write_private;
 use crate::util::lock;
+use crate::util::tls::apply_extra_ca_certs;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -56,16 +57,24 @@ impl OAuthCredential {
 
 /// Loads (and refreshes if near expiry) the Claude Code OAuth access token. On macOS the Keychain
 /// is consulted first; non-macOS and Keychain-miss fall back to `~/.claude/.credentials.json`.
-pub(super) async fn load_token() -> Result<String> {
+pub(super) async fn load_token(extra_ca_certs: Option<&Path>) -> Result<String> {
     let file_path = credentials_path().context("could not determine home directory")?;
     let lock_path = lock_path().context("could not determine home directory")?;
-    load_token_from(&file_path, &lock_path, OAUTH_TOKEN_URL, load_credentials).await
+    load_token_from(
+        &file_path,
+        &lock_path,
+        OAUTH_TOKEN_URL,
+        extra_ca_certs,
+        load_credentials,
+    )
+    .await
 }
 
 async fn load_token_from(
     file_path: &Path,
     lock_path: &Path,
     refresh_url: &str,
+    extra_ca_certs: Option<&Path>,
     loader: fn(&Path) -> Result<CredentialsFile>,
 ) -> Result<String> {
     let oauth = loader(file_path)?.claude_ai_oauth;
@@ -97,7 +106,7 @@ async fn load_token_from(
         .as_deref()
         .context("refresh token missing after re-read")?;
 
-    match refresh_oauth_token(refresh_url, refresh_token).await {
+    match refresh_oauth_token(refresh_url, refresh_token, extra_ca_certs).await {
         Ok(response) => {
             write_refreshed_credentials(file_path, &response)?;
             Ok(response.access_token)
@@ -199,10 +208,16 @@ struct RefreshRequest<'a> {
     scope: &'a str,
 }
 
-async fn refresh_oauth_token(url: &str, refresh_token: &str) -> Result<RefreshResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(REFRESH_TIMEOUT)
-        .build()?;
+async fn refresh_oauth_token(
+    url: &str,
+    refresh_token: &str,
+    extra_ca_certs: Option<&Path>,
+) -> Result<RefreshResponse> {
+    let builder = reqwest::Client::builder().timeout(REFRESH_TIMEOUT);
+    let builder = apply_extra_ca_certs(builder, extra_ca_certs)?;
+    let client = builder
+        .build()
+        .context("failed to build OAuth HTTP client")?;
 
     let scope = OAUTH_SCOPES.join(" ");
     let response = client
@@ -398,7 +413,7 @@ mod tests {
 
         let token = temp_env::async_with_vars(
             [("HOME", Some(home.path().to_string_lossy().into_owned()))],
-            async { load_token().await.unwrap() },
+            async { load_token(None).await.unwrap() },
         )
         .await;
         assert_eq!(token, "token-from-home");
@@ -429,6 +444,7 @@ mod tests {
             &creds,
             &lock,
             "http://should-not-be-called",
+            None,
             read_credentials,
         )
         .await
@@ -447,6 +463,7 @@ mod tests {
             &creds,
             &lock,
             "http://should-not-be-called",
+            None,
             read_credentials,
         )
         .await
@@ -461,7 +478,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "tok", None, 0);
 
-        let err = load_token_from(&creds, &lock, "http://unused", read_credentials)
+        let err = load_token_from(&creds, &lock, "http://unused", None, read_credentials)
             .await
             .expect_err("expired without refresh must bail");
         assert!(format!("{err:#}").contains("expired"));
@@ -490,7 +507,7 @@ mod tests {
             now_millis().unwrap() + 1_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .unwrap();
         assert_eq!(token, "fresh-access");
@@ -526,7 +543,7 @@ mod tests {
             now_millis().unwrap() + 60_000,
         );
 
-        let token = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let token = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .unwrap();
         assert_eq!(token, "stale");
@@ -546,7 +563,7 @@ mod tests {
         let lock = dir.path().join("lock");
         write_creds(&creds, "dead", Some("old"), 0);
 
-        let err = load_token_from(&creds, &lock, &server.uri(), read_credentials)
+        let err = load_token_from(&creds, &lock, &server.uri(), None, read_credentials)
             .await
             .expect_err("expired + refresh down must bail");
         let msg = format!("{err:#}");
@@ -676,7 +693,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let response = refresh_oauth_token(&server.uri(), "old-refresh")
+        let response = refresh_oauth_token(&server.uri(), "old-refresh", None)
             .await
             .unwrap();
         assert_eq!(response.access_token, "new-access");
@@ -705,7 +722,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "bad")
+        let err = refresh_oauth_token(&server.uri(), "bad", None)
             .await
             .expect_err("expected HTTP error");
         let msg = format!("{err:#}");
@@ -722,10 +739,48 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = refresh_oauth_token(&server.uri(), "tok")
+        let err = refresh_oauth_token(&server.uri(), "tok", None)
             .await
             .expect_err("expected parse error");
         assert!(format!("{err:#}").contains("parse"));
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_honors_extra_ca_certs() {
+        // A valid PEM bundle must thread through the client builder without disrupting the
+        // existing request flow. Pairs with the surfaces-loader-error test below.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_refresh_body(
+                "new-access",
+                "new-refresh",
+                3600,
+            )))
+            .mount(&server)
+            .await;
+
+        let pem = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
+            .unwrap();
+
+        let response = refresh_oauth_token(&server.uri(), "refresh", Some(pem.path()))
+            .await
+            .expect("valid PEM must build a client and produce a response");
+        assert_eq!(response.access_token, "new-access");
+    }
+
+    #[tokio::test]
+    async fn refresh_oauth_token_surfaces_extra_ca_certs_error_with_path() {
+        // An unreadable bundle must fail before any network call, citing the path so the user
+        // can debug the configuration rather than chase a TLS error downstream.
+        let missing = Path::new("/definitely/does/not/exist.pem");
+        let err = refresh_oauth_token("http://unused.invalid/", "refresh", Some(missing))
+            .await
+            .expect_err("missing CA bundle must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+        assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
     }
 
     // ── write_refreshed_credentials ──

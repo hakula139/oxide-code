@@ -51,6 +51,12 @@ fn build_modal(
         ("Effort".to_owned(), display_effort(cfg.effort)),
         ("Auth".to_owned(), cfg.auth_label.to_owned()),
         ("Base URL".to_owned(), cfg.base_url.clone()),
+        (
+            "Extra CA Certs".to_owned(),
+            cfg.extra_ca_certs
+                .as_deref()
+                .map_or_else(|| "(none)".to_owned(), tildify),
+        ),
         ("Max Tokens".to_owned(), cfg.max_tokens.to_string()),
         (
             "Max Tool Rounds".to_owned(),
@@ -155,11 +161,11 @@ mod tests {
 
     #[test]
     fn build_modal_height_accounts_for_both_sections() {
-        // title + blank + (heading + blank + 10 rows) + blank + (heading + blank + 2 rows)
-        //   + blank + footer = 2 + 12 + 1 + 4 + 2 = 21.
+        // title + blank + (heading + blank + 11 rows) + blank + (heading + blank + 2 rows)
+        //   + blank + footer = 2 + 13 + 1 + 4 + 2 = 22.
         let info = test_session_info();
         let m = build_modal(&info, None, None);
-        assert_eq!(m.height(80), 21);
+        assert_eq!(m.height(80), 22);
     }
 
     #[test]
@@ -170,6 +176,31 @@ mod tests {
 
         assert!(rendered.contains("Auto Compaction"), "{rendered}");
         assert!(rendered.contains("at 155000 tokens"), "{rendered}");
+    }
+
+    #[test]
+    fn build_modal_tildifies_extra_ca_certs_path() {
+        // Pin HOME so the test is deterministic regardless of the runner env.
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            let mut info = test_session_info();
+            info.config.extra_ca_certs = Some(PathBuf::from("/tmp/oxide-fake-home/certs/corp.pem"));
+            let m = build_modal(&info, None, None);
+            let rendered = render_modal(&m, 80);
+
+            assert!(rendered.contains("Extra CA Certs"), "{rendered}");
+            assert!(rendered.contains("~/certs/corp.pem"), "{rendered}");
+        });
+    }
+
+    #[test]
+    fn build_modal_renders_extra_ca_certs_none_as_placeholder() {
+        let info = test_session_info();
+        assert!(info.config.extra_ca_certs.is_none(), "precondition: unset");
+        let m = build_modal(&info, None, None);
+        let rendered = render_modal(&m, 80);
+
+        assert!(rendered.contains("Extra CA Certs"), "{rendered}");
+        assert!(rendered.contains("(none)"), "{rendered}");
     }
 
     // ── display_path ──

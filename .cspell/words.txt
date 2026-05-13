@@ -7,8 +7,8 @@ anthropics
 anyhow
 APFS
 atuin
+cachain
 catppuccin
-Catppuccin
 claudemd
 Clawd
 clippy
@@ -87,6 +87,7 @@ Tera
 thiserror
 throbber
 tildified
+tildifies
 tildify
 TOCTOU
 tokio

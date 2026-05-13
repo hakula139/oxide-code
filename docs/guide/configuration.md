@@ -4,7 +4,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
-3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key` or `client.base_url`.
+3. **Project config file**: the nearest `ox.toml` found by walking up from the current directory. Project config cannot set `client.api_key`, `client.base_url`, or `client.extra_ca_certs`.
 4. **Environment variables**: always win.
 
 ## Config file
@@ -30,15 +30,16 @@ show_thinking = true
 
 ### `[client]`: API connection
 
-| Key                | Type    | Default                     | Description                         |
-| ------------------ | ------- | --------------------------- | ----------------------------------- |
-| `api_key`          | string  | -                           | Anthropic API key; user config only |
-| `base_url`         | string  | `https://api.anthropic.com` | API base URL; user config only      |
-| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                        |
-| `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier        |
-| `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response             |
-| `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds  |
-| `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`) |
+| Key                | Type    | Default                     | Description                                                |
+| ------------------ | ------- | --------------------------- | ---------------------------------------------------------- |
+| `api_key`          | string  | -                           | Anthropic API key; user config only                        |
+| `base_url`         | string  | `https://api.anthropic.com` | API base URL; user config only                             |
+| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store; user config only   |
+| `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                               |
+| `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                               |
+| `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                    |
+| `max_tool_rounds`  | integer | unset (unbounded)           | Per-turn safety cap on tool rounds                         |
+| `prompt_cache_ttl` | string  | `"1h"`                      | Prompt-cache TTL (`"5m"` or `"1h"`)                        |
 
 #### `effort`: intelligence tier
 
@@ -72,6 +73,18 @@ When unset, the agent loop has no per-turn round cap. Setting `max_tool_rounds =
 #### `base_url`: endpoint
 
 Use `base_url` only in `~/.config/ox/config.toml` or `ANTHROPIC_BASE_URL`. Project `ox.toml` cannot set it, because project files are loaded from the checkout and should not be able to redirect credentials. The URL must use HTTPS unless it points at localhost for a local proxy.
+
+#### `extra_ca_certs`: corporate trust anchors
+
+oxide-code uses `rustls` with the built-in Mozilla CA bundle, so self-signed or private-CA endpoints like a corporate gateway fail with `invalid peer certificate: UnknownIssuer`. Point `extra_ca_certs` at a PEM bundle (one or more `-----BEGIN CERTIFICATE-----` blocks in one file) to append those roots to the trust store:
+
+```toml
+[client]
+base_url = "https://gw.llm.corp.example/anthropic"
+extra_ca_certs = "~/.config/ox/corp-cachain.pem"
+```
+
+The path accepts `~/` / `~` for `$HOME`. Use an absolute or `~`-rooted path: a relative value resolves against the process working directory at read time, so it will break whenever `ox` is launched from a different folder. The field is user-config only (and rejected in project `ox.toml`) because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
 
 #### `prompt_cache_ttl`: cache duration
 
@@ -156,6 +169,7 @@ Environment variables override all config file values.
 | `ANTHROPIC_MODEL`                      | `client.model`                             | `claude-opus-4-7[1m]`       | Model to use                 |
 | `ANTHROPIC_EFFORT`                     | `client.effort`                            | per-model                   | Intelligence-vs-latency tier |
 | `ANTHROPIC_MAX_TOKENS`                 | `client.max_tokens`                        | effort-derived              | Max tokens per response      |
+| `OX_EXTRA_CA_CERTS`                    | `client.extra_ca_certs`                    | -                           | Path to a PEM trust bundle   |
 | `OX_MAX_TOOL_ROUNDS`                   | `client.max_tool_rounds`                   | unset (unbounded)           | Per-turn tool-round cap      |
 | `OX_PROMPT_CACHE_TTL`                  | `client.prompt_cache_ttl`                  | `1h`                        | Prompt-cache TTL             |
 | `OX_COMPACTION_AUTO_ENABLED`           | `client.compaction.auto_enabled`           | `true`                      | Enable auto-compaction       |

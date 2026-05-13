@@ -14,7 +14,6 @@
 //! so the TUI still launches.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use ratatui::style::Modifier;
@@ -54,23 +53,13 @@ fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {
         return Ok(body.to_owned());
     }
-    let path = expand_tilde(name);
+    let path = crate::util::path::expand_user(name).with_context(|| format!("theme {name:?}"))?;
     std::fs::read_to_string(&path).with_context(|| {
         format!(
             "theme {name:?}: not a built-in name and failed to read as file {}",
             path.display(),
         )
     })
-}
-
-/// Expands a leading `~/` to `$HOME`; other paths pass through.
-fn expand_tilde(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(s)
 }
 
 /// Applies one override patch; errors on unknown slot name or bad color value.
@@ -553,23 +542,6 @@ mod tests {
                     .finish(),
             );
         });
-    }
-
-    // ── expand_tilde ──
-
-    #[test]
-    fn expand_tilde_rewrites_leading_tilde_to_home() {
-        // Force a stable HOME so the assertion is deterministic.
-        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
-            let path = expand_tilde("~/themes/dark.toml");
-            assert_eq!(path, PathBuf::from("/tmp/oxide-fake-home/themes/dark.toml"),);
-        });
-    }
-
-    #[test]
-    fn expand_tilde_passes_non_tilde_paths_through_unchanged() {
-        let path = expand_tilde("/abs/themes/dark.toml");
-        assert_eq!(path, PathBuf::from("/abs/themes/dark.toml"));
     }
 
     // ── slot_for_name ──
