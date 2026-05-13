@@ -84,7 +84,7 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-The path accepts `~/` / `~` for `$HOME`. It is user-config only (and rejected in project `ox.toml`) because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
+The path accepts `~/` / `~` for `$HOME`. Use an absolute or `~`-rooted path: relative paths resolve against the process working directory at read time, not the config file's directory, so a relative value will break whenever `ox` is launched from a different folder. The field is user-config only (and rejected in project `ox.toml`) because a checked-in trust-anchor path could widen TLS trust for the process. Equivalent env var: `OX_EXTRA_CA_CERTS`.
 
 #### `prompt_cache_ttl`: cache duration
 
