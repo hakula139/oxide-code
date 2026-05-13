@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::{Stream, StreamExt};
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 use super::components::chat::ChatView;
 use super::components::input::InputArea;
@@ -746,16 +747,28 @@ impl App {
         } else {
             self.theme.accent()
         };
-        let band = Rect {
+        // Pill sized to label + 1-cell padding per side, anchored at the right edge with an
+        // opaque surface bg so the chat content underneath stays readable.
+        let pill_width = u16::try_from(label.width().saturating_add(2)).unwrap_or(u16::MAX);
+        if pill_width > area.width {
+            return;
+        }
+        let pill = Rect {
+            x: area.x + area.width.saturating_sub(pill_width),
             y: area.y + area.height.saturating_sub(1),
+            width: pill_width,
             height: 1,
-            ..area
         };
+        let block = Block::default().style(self.theme.surface());
+        let inner = block.inner(pill);
+        frame.render_widget(block, pill);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(label, style)))
-                .style(self.theme.surface())
-                .alignment(Alignment::Right),
-            band,
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(label, style),
+                Span::raw(" "),
+            ])),
+            inner,
         );
     }
 }
