@@ -34,7 +34,7 @@ show_thinking = true
 | ------------------ | ------- | --------------------------- | ---------------------------------------------------------- |
 | `api_key`          | string  | -                           | Anthropic API key; user config only                        |
 | `base_url`         | string  | `https://api.anthropic.com` | API base URL; user config only                             |
-| `extra_ca_certs`   | string  | -                           | Path to a PEM bundle appended to the trust store; user only |
+| `extra_ca_certs`   | string  | -                           | PEM bundle appended to the trust store; user config only   |
 | `model`            | string  | `claude-opus-4-7[1m]`       | Model to use                                               |
 | `effort`           | string  | per-model (see below)       | Intelligence-vs-latency tier                               |
 | `max_tokens`       | integer | effort-derived (see below)  | Max tokens per response                                    |
