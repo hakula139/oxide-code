@@ -82,7 +82,7 @@ Auto-compaction is enabled by default for known model context windows. The defau
 | `auto_threshold_tokens`  | integer | model-derived       | Absolute trigger, `50000` token minimum    |
 | `auto_threshold_percent` | integer | model-derived       | Percent of context, capped by safe trigger |
 
-`auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Absolute thresholds must be at least `50000` tokens. For models with known context windows, absolute thresholds must also stay within the model-derived safe trigger. Percent thresholds must be 1-100, are capped by that safe trigger after they resolve to tokens, and must still resolve to at least `50000` tokens.
+`auto_threshold_tokens` and `auto_threshold_percent` are mutually exclusive. Absolute thresholds must be at least `50000` tokens. For models with known context windows, absolute thresholds are clamped to the model-derived safe trigger when they exceed it, so a global threshold sized for a larger context window keeps working after a `/model` swap. Percent thresholds must be 1-100, are capped by that safe trigger after they resolve to tokens, and must still resolve to at least `50000` tokens.
 
 For models without known context windows, the default and percent-based automatic triggers stay off. An explicit token threshold still works after floor validation.
 

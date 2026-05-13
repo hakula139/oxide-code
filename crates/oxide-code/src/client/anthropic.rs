@@ -669,19 +669,18 @@ mod tests {
     }
 
     #[test]
-    fn set_model_rejects_threshold_above_new_context_window() {
+    fn set_model_clamps_threshold_above_new_context_window() {
         let mut config = test_config(OFFLINE_URL, api_key(), "claude-opus-4-7[1m]");
+        config.max_tokens = 64_000;
         config.compaction = CompactionConfig::resolved_for_test(AutoCompactionConfig {
             enabled: true,
             threshold_tokens: Some(967_000),
         });
         let mut client = Client::new(config, Some("sid".to_owned())).unwrap();
 
-        client
-            .set_model("claude-sonnet-4-6".to_owned())
-            .expect_err("threshold above the smaller window must reject the swap");
-        assert_eq!(client.model(), "claude-opus-4-7[1m]");
-        assert_eq!(client.compaction().auto.threshold_tokens, Some(967_000));
+        client.set_model("claude-sonnet-4-6".to_owned()).unwrap();
+        assert_eq!(client.model(), "claude-sonnet-4-6");
+        assert_eq!(client.compaction().auto.threshold_tokens, Some(167_000));
     }
 
     // ── Client::set_effort ──

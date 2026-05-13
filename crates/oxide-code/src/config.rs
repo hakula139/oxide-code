@@ -489,12 +489,8 @@ fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoComp
 
 fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> Result<Option<u32>> {
     validate_auto_threshold_floor(tokens)?;
-    if let Some(max) = default_auto_threshold(model, max_tokens)
-        && tokens > max
-    {
-        bail!("auto compaction threshold must be at most {max} tokens for model {model:?}");
-    }
-    Ok(Some(tokens))
+    let clamped = default_auto_threshold(model, max_tokens).map_or(tokens, |max| tokens.min(max));
+    Ok(Some(clamped))
 }
 
 fn validate_auto_threshold_floor(tokens: u32) -> Result<u32> {
@@ -1025,7 +1021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_compaction_rejects_threshold_above_model_safe_window() {
+    async fn load_compaction_clamps_threshold_above_model_safe_window() {
         let dir = tempfile::tempdir().unwrap();
         write_user_config(
             dir.path(),
@@ -1037,12 +1033,10 @@ mod tests {
                 auto_threshold_tokens = 400000
             "#},
         );
-        let err = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
+        let config = temp_env::async_with_vars(env_vars(vec![xdg(&dir)]), Config::load())
             .await
-            .expect_err("threshold beyond context safety window must fail config load");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("at most"), "{msg}");
-        assert!(msg.contains("claude-sonnet-4-6"), "{msg}");
+            .unwrap();
+        assert_eq!(config.compaction.auto.threshold_tokens, Some(167_000));
     }
 
     #[tokio::test]
