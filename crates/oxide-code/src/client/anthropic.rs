@@ -27,6 +27,7 @@ use crate::config::{Auth, CompactionConfig, Config, Effort};
 use crate::message::{ContentBlock, Message, Role};
 use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
 use crate::tool::ToolDefinition;
+use crate::util::tls::apply_extra_ca_certs;
 
 use betas::{compute_betas, static_prefix_cache_control};
 use sse::stream_sse;
@@ -123,15 +124,11 @@ impl Client {
 
         // No whole-request timeout — responses can run for minutes. The 60 s read timeout
         // catches slowloris dribble. Anthropic sends keepalives every ~15 s on healthy streams.
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_mins(1));
-        if let Some(path) = &config.extra_ca_certs {
-            for cert in crate::util::tls::load_extra_ca_certs(path)? {
-                builder = builder.add_root_certificate(cert);
-            }
-        }
+        let builder = apply_extra_ca_certs(builder, config.extra_ca_certs.as_deref())?;
         let http = builder.build().context("failed to build HTTP client")?;
 
         Ok(Self {

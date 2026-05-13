@@ -5,7 +5,23 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use reqwest::Certificate;
+use reqwest::{Certificate, ClientBuilder};
+
+/// Appends the PEM bundle at `path` (if any) to `builder`'s trust store. A `None` path is the
+/// happy-path no-op so callers can funnel both the "extra CA configured" and the default branch
+/// through one line.
+pub(crate) fn apply_extra_ca_certs(
+    mut builder: ClientBuilder,
+    path: Option<&Path>,
+) -> Result<ClientBuilder> {
+    let Some(path) = path else {
+        return Ok(builder);
+    };
+    for cert in load_extra_ca_certs(path)? {
+        builder = builder.add_root_certificate(cert);
+    }
+    Ok(builder)
+}
 
 /// Reads a PEM-encoded bundle from disk and returns one [`Certificate`] per `BEGIN CERTIFICATE`
 /// block. Empty bundles surface as an explicit error so silent misconfiguration does not
@@ -55,6 +71,40 @@ mod tests {
         file.write_all(contents.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    // ── apply_extra_ca_certs ──
+
+    #[test]
+    fn apply_extra_ca_certs_is_a_noop_for_none() {
+        // Builder must survive the no-op path; `reqwest::Client::builder().build()` confirms
+        // the returned builder is still valid.
+        let builder = reqwest::Client::builder();
+        let builder = apply_extra_ca_certs(builder, None).expect("None must not error");
+        builder
+            .build()
+            .expect("None path must produce a buildable client");
+    }
+
+    #[test]
+    fn apply_extra_ca_certs_surfaces_loader_error_with_path() {
+        let missing = Path::new("/definitely/does/not/exist.pem");
+        let err = apply_extra_ca_certs(reqwest::Client::builder(), Some(missing))
+            .expect_err("missing path must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("failed to read extra CA bundle"), "{msg}");
+        assert!(msg.contains("/definitely/does/not/exist.pem"), "{msg}");
+    }
+
+    #[test]
+    fn apply_extra_ca_certs_accepts_valid_bundle() {
+        let file = write_pem(TEST_CA_PEM);
+        let builder = reqwest::Client::builder();
+        let builder =
+            apply_extra_ca_certs(builder, Some(file.path())).expect("valid bundle must not error");
+        builder
+            .build()
+            .expect("valid bundle must produce a buildable client");
     }
 
     // ── load_extra_ca_certs ──

@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 use crate::util::env;
 use crate::util::fs::atomic_write_private;
 use crate::util::lock;
+use crate::util::tls::apply_extra_ca_certs;
 
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -212,12 +213,8 @@ async fn refresh_oauth_token(
     refresh_token: &str,
     extra_ca_certs: Option<&Path>,
 ) -> Result<RefreshResponse> {
-    let mut builder = reqwest::Client::builder().timeout(REFRESH_TIMEOUT);
-    if let Some(path) = extra_ca_certs {
-        for cert in crate::util::tls::load_extra_ca_certs(path)? {
-            builder = builder.add_root_certificate(cert);
-        }
-    }
+    let builder = reqwest::Client::builder().timeout(REFRESH_TIMEOUT);
+    let builder = apply_extra_ca_certs(builder, extra_ca_certs)?;
     let client = builder.build()?;
 
     let scope = OAUTH_SCOPES.join(" ");
