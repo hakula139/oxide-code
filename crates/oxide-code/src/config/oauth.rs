@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_token_from_refreshes_near_expiry_and_writes_back() {
+    async fn load_token_from_near_expiry_refreshes_and_persists_new_credentials() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wm_path("/"))

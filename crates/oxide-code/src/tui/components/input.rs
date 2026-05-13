@@ -1086,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_text_from_state_non_empty_prefix_returns_none() {
+    fn ghost_text_from_state_non_empty_prefix_is_absent() {
         let state = PopupState::Arg {
             name: "model",
             prefix: "claude-",
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_text_from_state_arg_without_usage_returns_none() {
+    fn ghost_text_from_state_arg_without_usage_is_absent() {
         let state = PopupState::Arg {
             name: "init",
             prefix: "",
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_text_from_state_name_mode_returns_none_even_with_usage() {
+    fn ghost_text_from_state_name_mode_is_absent_even_with_usage() {
         let state = PopupState::Name("mo");
         assert_eq!(ghost_text_from_state(&state, Some("[<id>]")), None);
     }

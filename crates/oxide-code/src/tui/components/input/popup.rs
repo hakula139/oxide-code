@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn select_prev_decrements_when_not_at_top() {
+    fn select_prev_when_not_at_top_moves_up_one_row() {
         // Pin the non-wrap branch — the decrement path is otherwise dead because select_prev()
         // from row 0 always wraps.
         let mut popup = name_popup("");
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offset_at_exactly_cap_returns_zero_for_last_row() {
+    fn scroll_offset_at_exactly_cap_does_not_scroll_last_row() {
         // Boundary: total == MAX_VISIBLE_ROWS hits the `<=` early-return. Tightening the boundary
         // pins the invariant for the only case where the edge matters.
         let mut p = long_popup(MAX_VISIBLE_ROWS);

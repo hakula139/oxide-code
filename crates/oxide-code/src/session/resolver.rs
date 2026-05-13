@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefix_to_info_no_match_returns_ok_none() {
+    fn resolve_prefix_to_info_no_match_is_ok_absent() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(dir.path());
         assert!(

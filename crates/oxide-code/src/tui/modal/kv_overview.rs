@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn label_width_empty_sections_returns_zero() {
+    fn label_width_empty_sections_is_zero() {
         let m = KvOverview::new("T", vec![]);
         assert_eq!(m.label_width(), 0);
     }

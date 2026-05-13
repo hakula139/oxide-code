@@ -552,7 +552,7 @@ mod tests {
     /// pass a happy-path override test, but this assertion fails
     /// because patching `tool_icon` would visibly alter `tool_border`.
     #[test]
-    fn slot_for_name_routes_each_name_to_a_unique_slot() {
+    fn slot_for_name_each_name_resolves_to_a_unique_slot() {
         let sentinel = Slot {
             fg: Some(Color::Rgb(0xde, 0xad, 0xbe)),
             bg: None,

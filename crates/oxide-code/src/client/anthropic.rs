@@ -1132,7 +1132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_message_prepends_user_context_as_synthetic_user_message() {
+    async fn stream_message_with_user_context_emits_leading_synthetic_user_message() {
         let server = MockServer::start().await;
         let body_sink: Captured<String> = captured();
         let sink_clone = std::sync::Arc::clone(&body_sink);
