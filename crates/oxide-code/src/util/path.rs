@@ -29,6 +29,25 @@ pub(crate) fn tildify(path: &Path) -> String {
         )
 }
 
+/// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`;
+/// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` are returned
+/// unchanged (no passwd lookup). Paths without a leading tilde pass through untouched.
+pub(crate) fn expand_user(raw: &str) -> PathBuf {
+    let Some(tail) = raw.strip_prefix('~') else {
+        return PathBuf::from(raw);
+    };
+    if !(tail.is_empty() || tail.starts_with('/')) {
+        return PathBuf::from(raw);
+    }
+    let Some(home) = dirs::home_dir() else {
+        return PathBuf::from(raw);
+    };
+    if tail.is_empty() {
+        return home;
+    }
+    home.join(tail.trim_start_matches('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -112,5 +131,42 @@ mod tests {
             return;
         };
         assert_eq!(tildify(&home), "~/");
+    }
+
+    // ── expand_user ──
+
+    #[test]
+    fn expand_user_rewrites_leading_tilde_slash_to_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_user("~/work/project"), home.join("work/project"));
+    }
+
+    #[test]
+    fn expand_user_bare_tilde_resolves_to_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_user("~"), home);
+    }
+
+    #[test]
+    fn expand_user_leaves_absolute_and_relative_paths_untouched() {
+        assert_eq!(
+            expand_user("/etc/ssl/cert.pem"),
+            PathBuf::from("/etc/ssl/cert.pem")
+        );
+        assert_eq!(
+            expand_user("./certs/ca.pem"),
+            PathBuf::from("./certs/ca.pem")
+        );
+        assert_eq!(expand_user(""), PathBuf::from(""));
+    }
+
+    #[test]
+    fn expand_user_does_not_handle_per_user_home() {
+        // `~alice/foo` is not expanded — returned verbatim so the caller can decide.
+        assert_eq!(expand_user("~alice/foo"), PathBuf::from("~alice/foo"));
     }
 }

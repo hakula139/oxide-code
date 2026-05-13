@@ -7,3 +7,4 @@ pub(crate) mod log;
 pub(crate) mod path;
 pub(crate) mod text;
 pub(crate) mod time;
+pub(crate) mod tls;
