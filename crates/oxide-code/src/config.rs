@@ -490,8 +490,7 @@ fn resolve_auto_policy(file: Option<&file::CompactionConfig>) -> Result<AutoComp
 }
 
 fn threshold_from_tokens(tokens: u32, model: &str, max_tokens: u32) -> u32 {
-    let capped = default_auto_threshold(model, max_tokens).map_or(tokens, |max| tokens.min(max));
-    clamp_threshold_floor(capped)
+    clamp_threshold_floor(clamp_threshold_ceil(tokens, model, max_tokens))
 }
 
 fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<Option<u32>> {
@@ -501,10 +500,15 @@ fn threshold_from_percent(percent: u8, model: &str, max_tokens: u32) -> Result<O
     let Some(context_window) = crate::model::context_window_for(model) else {
         return Ok(None);
     };
-    let threshold = context_window.saturating_mul(u32::from(percent)) / 100;
-    let resolved = default_auto_threshold_for_window(context_window, max_tokens)
-        .map_or(threshold, |max| threshold.min(max));
-    Ok(Some(clamp_threshold_floor(resolved)))
+    let raw = context_window.saturating_mul(u32::from(percent)) / 100;
+    Ok(Some(clamp_threshold_floor(clamp_threshold_ceil(
+        raw, model, max_tokens,
+    ))))
+}
+
+/// Snaps `tokens` down to the model's safe trigger when one is known.
+fn clamp_threshold_ceil(tokens: u32, model: &str, max_tokens: u32) -> u32 {
+    default_auto_threshold(model, max_tokens).map_or(tokens, |max| tokens.min(max))
 }
 
 /// Snaps `tokens` up to [`MIN_AUTO_COMPACTION_THRESHOLD_TOKENS`].
