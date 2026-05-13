@@ -218,7 +218,7 @@ pub(crate) async fn auto_compact_if_needed(
         return Ok(false);
     }
 
-    _ = sink.send(AgentEvent::AutoCompactionStarted);
+    sink.emit(AgentEvent::AutoCompactionStarted, "auto-compaction-started");
     let summary = match await_unless_aborted(
         compaction::compact_session(client, messages, None),
         user_rx,
@@ -274,22 +274,28 @@ async fn run_tool_round(
     let mut results = Vec::with_capacity(tool_uses.len());
     let mut sidecars: Vec<(String, ToolMetadata)> = Vec::with_capacity(tool_uses.len());
     for (id, name, input) in tool_uses {
-        _ = sink.send(AgentEvent::ToolCallStart {
-            id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
-        });
+        sink.emit(
+            AgentEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            "tool-call-start",
+        );
 
         let output =
             dispatch_tool_call(tools, &name, input, parse_errors.get(&id), user_rx, pending)
                 .await?;
 
-        _ = sink.send(AgentEvent::ToolCallEnd {
-            id: id.clone(),
-            content: output.content.clone(),
-            is_error: output.is_error,
-            metadata: output.metadata.clone(),
-        });
+        sink.emit(
+            AgentEvent::ToolCallEnd {
+                id: id.clone(),
+                content: output.content.clone(),
+                is_error: output.is_error,
+                metadata: output.metadata.clone(),
+            },
+            "tool-call-end",
+        );
 
         sidecars.push((id.clone(), output.metadata));
         results.push(ContentBlock::ToolResult {
@@ -346,7 +352,7 @@ pub(crate) async fn record_drained_prompts(
         let queued_msg = Message::user(text.clone());
         record_message(session, queued_msg.clone(), sink).await;
         messages.push(queued_msg);
-        _ = sink.send(AgentEvent::PromptDrained(text));
+        sink.emit(AgentEvent::PromptDrained(text), "prompt-drained");
     }
 }
 

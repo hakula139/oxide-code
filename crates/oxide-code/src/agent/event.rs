@@ -142,16 +142,28 @@ pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Re
 pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
 /// Transport from the agent loop to a UI. Implementations must be cheap to clone-by-`&` (the
-/// loop calls `send` on a hot path) and tolerate dropped events without panicking — `_ =
-/// sink.send(...)` is the standard call pattern at the call sites.
+/// loop calls `send` on a hot path) and tolerate dropped events without panicking. Call sites use
+/// [`Self::emit`] for one-shot or user-facing events (logs on drop); raw [`Self::send`] with
+/// `_ = ` is reserved for per-token streaming where dropping a single event is harmless.
 pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;
 
-    /// Convenience wrapper: surfaces a session-writer failure (sticky once-flag upstream) as a
-    /// single user-visible [`AgentEvent::Error`]. No-op when `failure` is `None`.
+    /// Sends `event` and logs at `error!` if the channel rejects it. Use for any signal whose
+    /// loss would leave the UI inconsistent (errors, cancellation, turn completion, state changes).
+    fn emit(&self, event: AgentEvent, label: &'static str) {
+        if let Err(e) = self.send(event) {
+            tracing::error!("{label} event dropped: {e}");
+        }
+    }
+
+    /// Surfaces a session-writer failure as a single user-visible [`AgentEvent::Error`].
+    /// No-op when `failure` is `None`.
     fn session_write_error(&self, failure: Option<&str>) {
         if let Some(msg) = failure {
-            _ = self.send(AgentEvent::Error(format!("Session write failed: {msg}")));
+            self.emit(
+                AgentEvent::Error(format!("Session write failed: {msg}")),
+                "session-write-failed",
+            );
         }
     }
 }
