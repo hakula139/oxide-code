@@ -70,6 +70,22 @@ fn matching_alias(cmd: &dyn SlashCommand, pred: impl Fn(&str) -> bool) -> Option
         .find(|alias| pred(&alias.to_ascii_lowercase()))
 }
 
+fn on_name(cmd: &dyn SlashCommand) -> MatchedCommand {
+    MatchedCommand {
+        name: cmd.name(),
+        description: cmd.description(),
+        matched_alias: None,
+    }
+}
+
+fn on_alias(cmd: &dyn SlashCommand, alias: &'static str) -> MatchedCommand {
+    MatchedCommand {
+        name: cmd.name(),
+        description: cmd.description(),
+        matched_alias: Some(alias),
+    }
+}
+
 /// Two-tier prefix-then-substring rank over a curated roster, case-insensitive, preserving
 /// declared order within each tier. Empty `query` returns every item in declared order.
 pub(super) fn rank_by_prefix<'a, T>(
@@ -92,22 +108,6 @@ pub(super) fn rank_by_prefix<'a, T>(
         }
     }
     prefix_hits.into_iter().chain(substring_hits).collect()
-}
-
-fn on_name(cmd: &dyn SlashCommand) -> MatchedCommand {
-    MatchedCommand {
-        name: cmd.name(),
-        description: cmd.description(),
-        matched_alias: None,
-    }
-}
-
-fn on_alias(cmd: &dyn SlashCommand, alias: &'static str) -> MatchedCommand {
-    MatchedCommand {
-        name: cmd.name(),
-        description: cmd.description(),
-        matched_alias: Some(alias),
-    }
 }
 
 #[cfg(test)]

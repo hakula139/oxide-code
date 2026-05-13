@@ -2175,6 +2175,8 @@ mod tests {
         assert_eq!(chat.viewport_height, 20);
     }
 
+    // ── bump_paused_counter ──
+
     #[test]
     fn paused_counter_bumps_only_while_scrolled_up() {
         let mut chat = test_chat();

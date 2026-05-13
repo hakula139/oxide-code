@@ -185,9 +185,7 @@ impl StdioSink {
             tools,
         }
     }
-}
 
-impl StdioSink {
     fn render<W1: std::io::Write, W2: std::io::Write>(
         &self,
         event: AgentEvent,

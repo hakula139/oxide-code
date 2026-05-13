@@ -1018,6 +1018,56 @@ mod tests {
         (Terminal::with_options(backend, opts).unwrap(), buf)
     }
 
+    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut chat_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                chat_area = app.draw_frame(frame);
+            })
+            .unwrap();
+        // Mirror `App::render`'s second-pass repaint so the captured
+        // buffer matches what the user actually sees.
+        if app.chat.update_layout(chat_area) {
+            terminal
+                .draw(|frame| {
+                    app.draw_frame(frame);
+                })
+                .unwrap();
+        }
+        terminal.backend().clone()
+    }
+
+    /// Renders the app and returns the buffer as a newline-joined
+    /// string. Use when substring-asserting on the rendered UI is more
+    /// readable than a full `insta::assert_snapshot!`.
+    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = render_app(app, width, height);
+        let buffer = backend.buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn long_chat_block() -> String {
+        use std::fmt::Write as _;
+
+        let mut body = String::new();
+        for i in 0..30 {
+            _ = writeln!(body, "line {i:02} of a long chat block");
+        }
+        body
+    }
+
     // ── App::new ──
 
     #[test]
@@ -3016,74 +3066,6 @@ mod tests {
 
     // ── draw_frame ──
 
-    fn render_app(app: &mut App, width: u16, height: u16) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let mut chat_area = Rect::default();
-        terminal
-            .draw(|frame| {
-                chat_area = app.draw_frame(frame);
-            })
-            .unwrap();
-        // Mirror `App::render`'s second-pass repaint so the captured
-        // buffer matches what the user actually sees.
-        if app.chat.update_layout(chat_area) {
-            terminal
-                .draw(|frame| {
-                    app.draw_frame(frame);
-                })
-                .unwrap();
-        }
-        terminal.backend().clone()
-    }
-
-    /// Renders the app and returns the buffer as a newline-joined
-    /// string. Use when substring-asserting on the rendered UI is more
-    /// readable than a full `insta::assert_snapshot!`.
-    fn rendered_text(app: &mut App, width: u16, height: u16) -> String {
-        let backend = render_app(app, width, height);
-        let buffer = backend.buffer();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| {
-                        buffer
-                            .cell((x, y))
-                            .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
-                    })
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn long_chat_block() -> String {
-        use std::fmt::Write as _;
-
-        let mut body = String::new();
-        for i in 0..30 {
-            _ = writeln!(body, "line {i:02} of a long chat block");
-        }
-        body
-    }
-
-    // ── jump_overlay_label ──
-
-    #[test]
-    fn jump_overlay_label_idle_reads_jump_to_bottom() {
-        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_pluralizes_new_message_count() {
-        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
-        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
-    }
-
-    #[test]
-    fn jump_overlay_label_uses_short_form_below_full_width() {
-        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
-    }
-
     #[test]
     fn draw_frame_lays_out_status_chat_and_input_in_order() {
         let (mut app, _rx, _agent_tx) = test_app(Some("Session title"));
@@ -3241,6 +3223,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── jump_overlay_label ──
+
+    #[test]
+    fn jump_overlay_label_idle_reads_jump_to_bottom() {
+        assert_eq!(jump_overlay_label(0, 60), "Jump to bottom (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_pluralizes_new_message_count() {
+        assert_eq!(jump_overlay_label(1, 60), "1 new message (ctrl+End) ↓");
+        assert_eq!(jump_overlay_label(3, 60), "3 new messages (ctrl+End) ↓");
+    }
+
+    #[test]
+    fn jump_overlay_label_uses_short_form_below_full_width() {
+        assert_eq!(jump_overlay_label(3, 30), "↓ (ctrl+End)");
     }
 
     // ── preview_height ──
