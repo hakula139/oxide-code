@@ -525,8 +525,8 @@ mod tests {
     }
 
     #[test]
-    fn new_appends_extra_ca_certs_to_trust_store() {
-        // The assertion only confirms that `Client::new` returns Ok; a client that forgot to
+    fn new_with_extra_ca_certs_trusts_them() {
+        // The assertion only confirms that `Client::new` returns Ok. A client that forgot to
         // reassign the builder back after `add_root_certificate` would still pass. Keeping the
         // loose check here since a stronger test would need a TLS-terminating mock server
         // signed by `TEST_CA_PEM`, which is heavy machinery for one line of wiring.
