@@ -128,6 +128,6 @@ mod tests {
         let rendered = render_modal(&m, 80);
 
         assert!(rendered.contains("Auto Compaction"), "{rendered}");
-        assert!(rendered.contains("on at 155000 tokens"), "{rendered}");
+        assert!(rendered.contains("at 155000 tokens"), "{rendered}");
     }
 }

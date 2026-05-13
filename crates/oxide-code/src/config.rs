@@ -406,7 +406,7 @@ pub(crate) fn display_bool(flag: bool) -> &'static str {
 
 pub(crate) fn display_auto_compaction(auto: AutoCompactionConfig) -> String {
     match (auto.enabled, auto.threshold_tokens) {
-        (true, Some(threshold)) => format!("on at {threshold} tokens"),
+        (true, Some(threshold)) => format!("at {threshold} tokens"),
         (true, None) => "off (no threshold)".to_owned(),
         _ => "off".to_owned(),
     }
@@ -1402,7 +1402,7 @@ mod tests {
                 enabled: true,
                 threshold_tokens: Some(400_000),
             }),
-            "on at 400000 tokens",
+            "at 400000 tokens",
         );
         assert_eq!(
             display_auto_compaction(AutoCompactionConfig {

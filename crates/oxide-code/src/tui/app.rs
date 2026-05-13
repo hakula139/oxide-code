@@ -2067,7 +2067,7 @@ mod tests {
             body,
             format!(
                 "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
-                 Auto compaction on at {} tokens.",
+                 Auto compaction at {} tokens.",
                 test_thresholds::WINDOW_200K,
             ),
         );
@@ -2278,7 +2278,7 @@ mod tests {
             s,
             format!(
                 "Switched to Claude Sonnet 4.6 (claude-sonnet-4-6) · effort high. \
-                 Auto compaction on at {} tokens.",
+                 Auto compaction at {} tokens.",
                 test_thresholds::WINDOW_200K,
             ),
         );
