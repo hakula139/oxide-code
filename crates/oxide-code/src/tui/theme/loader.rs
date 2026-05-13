@@ -53,7 +53,7 @@ fn load_base_body(name: &str) -> Result<String> {
     if let Some(body) = builtin::lookup(name) {
         return Ok(body.to_owned());
     }
-    let path = crate::util::path::expand_user(name);
+    let path = crate::util::path::expand_user(name).with_context(|| format!("theme {name:?}"))?;
     std::fs::read_to_string(&path).with_context(|| {
         format!(
             "theme {name:?}: not a built-in name and failed to read as file {}",

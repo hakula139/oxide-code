@@ -307,7 +307,9 @@ impl Config {
         // through reqwest (relevant under SSL-inspecting corporate proxies).
         let extra_ca_certs = env::string("OX_EXTRA_CA_CERTS")
             .or(client.extra_ca_certs)
-            .map(|raw| expand_user(&raw));
+            .map(|raw| expand_user(&raw))
+            .transpose()
+            .context("invalid client.extra_ca_certs")?;
 
         let auth = if let Some(key) = env::string("ANTHROPIC_API_KEY").or(client.api_key) {
             Auth::ApiKey(key)

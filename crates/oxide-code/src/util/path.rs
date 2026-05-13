@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::{Result, anyhow};
+
 /// Resolves an XDG base directory with a `$HOME`-rooted fallback.
 ///
 /// `$XDG_*_HOME` is honoured only when absolute (the spec rejects relative values, which would
@@ -30,22 +32,23 @@ pub(crate) fn tildify(path: &Path) -> String {
 }
 
 /// Expands a leading `~` or `~/` to the user's home directory. Bare `~` resolves to `$HOME`;
-/// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` are returned
-/// unchanged (no passwd lookup). Paths without a leading tilde pass through untouched.
-pub(crate) fn expand_user(raw: &str) -> PathBuf {
+/// `~/foo/bar` resolves to `$HOME/foo/bar`. Per-user forms like `~alice/...` pass through
+/// unchanged (no passwd lookup) and non-tilde paths pass through as well. Errors when the input
+/// starts with `~` but `dirs::home_dir()` yields no value — otherwise a user would silently get
+/// a literal `~`-prefixed filesystem path that fails far downstream.
+pub(crate) fn expand_user(raw: &str) -> Result<PathBuf> {
     let Some(tail) = raw.strip_prefix('~') else {
-        return PathBuf::from(raw);
+        return Ok(PathBuf::from(raw));
     };
     if !(tail.is_empty() || tail.starts_with('/')) {
-        return PathBuf::from(raw);
+        return Ok(PathBuf::from(raw));
     }
-    let Some(home) = dirs::home_dir() else {
-        return PathBuf::from(raw);
-    };
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow!("cannot expand `~` in {raw:?}: no home directory (set $HOME)"))?;
     if tail.is_empty() {
-        return home;
+        return Ok(home);
     }
-    home.join(tail.trim_start_matches('/'))
+    Ok(home.join(tail.trim_start_matches('/')))
 }
 
 #[cfg(test)]
@@ -137,36 +140,42 @@ mod tests {
 
     #[test]
     fn expand_user_rewrites_leading_tilde_slash_to_home() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        assert_eq!(expand_user("~/work/project"), home.join("work/project"));
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            assert_eq!(
+                expand_user("~/work/project").unwrap(),
+                PathBuf::from("/tmp/oxide-fake-home/work/project")
+            );
+        });
     }
 
     #[test]
     fn expand_user_bare_tilde_resolves_to_home() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        assert_eq!(expand_user("~"), home);
+        temp_env::with_var("HOME", Some("/tmp/oxide-fake-home"), || {
+            assert_eq!(
+                expand_user("~").unwrap(),
+                PathBuf::from("/tmp/oxide-fake-home")
+            );
+        });
     }
 
     #[test]
     fn expand_user_leaves_absolute_and_relative_paths_untouched() {
-        assert_eq!(
-            expand_user("/etc/ssl/cert.pem"),
-            PathBuf::from("/etc/ssl/cert.pem")
-        );
-        assert_eq!(
-            expand_user("./certs/ca.pem"),
-            PathBuf::from("./certs/ca.pem")
-        );
-        assert_eq!(expand_user(""), PathBuf::from(""));
+        for raw in ["/etc/ssl/cert.pem", "./certs/ca.pem", ""] {
+            assert_eq!(expand_user(raw).unwrap(), PathBuf::from(raw), "{raw:?}");
+        }
     }
 
     #[test]
     fn expand_user_does_not_handle_per_user_home() {
-        // `~alice/foo` is not expanded — returned verbatim so the caller can decide.
-        assert_eq!(expand_user("~alice/foo"), PathBuf::from("~alice/foo"));
+        // `~alice/foo` stays verbatim; no passwd lookup to resolve the user's home.
+        assert_eq!(
+            expand_user("~alice/foo").unwrap(),
+            PathBuf::from("~alice/foo")
+        );
     }
+
+    // The `expand_user` home-unset error branch is unreachable from a Linux unit test:
+    // `dirs::home_dir()` falls back to `getpwuid_r` when `$HOME` is empty, so the `None`
+    // arm only fires in exotic environments (no passwd entry, Windows without profile).
+    // The `Result` signature is still the right contract for those cases.
 }
