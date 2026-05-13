@@ -560,6 +560,8 @@ mod tests {
         ));
     }
 
+    // ── commit_compact ──
+
     #[test]
     fn commit_compact_resets_chain_and_message_count() {
         let dir = tempfile::tempdir().unwrap();

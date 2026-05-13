@@ -126,8 +126,30 @@ fn resolve_base(arg: &str) -> Result<String, String> {
     }
 }
 
+fn is_dated_model_id(arg: &str) -> bool {
+    MODELS.iter().any(|m| has_dated_suffix(arg, m.id_substr))
+}
+
+fn has_dated_suffix(arg: &str, base: &str) -> bool {
+    let Some(suffix) = arg.strip_prefix(base) else {
+        return false;
+    };
+    let Some(date) = suffix.strip_prefix('-') else {
+        return false;
+    };
+    date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn is_selectable_known_id(arg: &str) -> bool {
     MODELS.iter().any(|m| m.id_substr == arg)
+}
+
+fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    MODELS
+        .iter()
+        .map(|m| m.id_substr)
+        .filter(|id| pred(id))
+        .collect()
 }
 
 /// `LISTED_MODELS` rows containing `arg` (case-insensitive); falls back to the full curated
@@ -155,28 +177,6 @@ fn format_supported_models(ids: &[&'static str]) -> String {
     }
     out.truncate(out.trim_end_matches('\n').len());
     out
-}
-
-fn is_dated_model_id(arg: &str) -> bool {
-    MODELS.iter().any(|m| has_dated_suffix(arg, m.id_substr))
-}
-
-fn has_dated_suffix(arg: &str, base: &str) -> bool {
-    let Some(suffix) = arg.strip_prefix(base) else {
-        return false;
-    };
-    let Some(date) = suffix.strip_prefix('-') else {
-        return false;
-    };
-    date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
-}
-
-fn candidates(pred: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    MODELS
-        .iter()
-        .map(|m| m.id_substr)
-        .filter(|id| pred(id))
-        .collect()
 }
 
 #[cfg(test)]
