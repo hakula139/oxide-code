@@ -215,7 +215,9 @@ async fn refresh_oauth_token(
 ) -> Result<RefreshResponse> {
     let builder = reqwest::Client::builder().timeout(REFRESH_TIMEOUT);
     let builder = apply_extra_ca_certs(builder, extra_ca_certs)?;
-    let client = builder.build()?;
+    let client = builder
+        .build()
+        .context("failed to build OAuth HTTP client")?;
 
     let scope = OAUTH_SCOPES.join(" ");
     let response = client
