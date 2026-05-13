@@ -525,9 +525,11 @@ mod tests {
     }
 
     #[test]
-    fn new_appends_extra_ca_certs_to_the_trust_store() {
-        // Pins the happy-path wiring: a valid PEM bundle on `Config::extra_ca_certs` threads
-        // through `Client::new` without error. Complements the missing-path test below.
+    fn new_appends_extra_ca_certs_to_trust_store() {
+        // The assertion only confirms that `Client::new` returns Ok; a client that forgot to
+        // reassign the builder back after `add_root_certificate` would still pass. Keeping the
+        // loose check here since a stronger test would need a TLS-terminating mock server
+        // signed by `TEST_CA_PEM`, which is heavy machinery for one line of wiring.
         let pem = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut pem.as_file(), crate::util::tls::TEST_CA_PEM.as_bytes())
             .unwrap();
@@ -559,8 +561,8 @@ mod tests {
 
     #[test]
     fn new_surfaces_extra_ca_certs_error_with_path() {
-        // An unreadable trust anchor must fail the client build, not silently fall back to
-        // native roots. The error should cite the configured path so the user can debug.
+        // An unreadable trust anchor must fail the client build and cite the configured path so
+        // the user can debug without having to spelunk into TLS internals.
         let mut cfg = test_config(OFFLINE_URL, api_key(), TEST_MODEL);
         cfg.extra_ca_certs = Some(std::path::PathBuf::from("/no/such/bundle.pem"));
         let err = Client::new(cfg, None).err().expect("missing CA must error");
