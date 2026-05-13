@@ -476,7 +476,6 @@ mod tests {
 
     #[test]
     fn paint_below_starters_min_height_centers_env_on_its_own_width() {
-        // Regression: when starters / tip are clipped, the env row must still be centered.
         let snap = snap_for(&fixture());
         let backend = render(80, STARTERS_MIN_HEIGHT - 1, &snap);
         let env_row: String = (0..80)

@@ -63,19 +63,19 @@ pub(crate) enum AgentEvent {
         compact: Option<crate::session::entry::CompactInfo>,
         tool_metadata: std::collections::HashMap<String, crate::tool::ToolMetadata>,
     },
-    /// `/compact` finished — summary captures the prior transcript, `pre_count` is for the
-    /// post-compact UI line. The agent loop has already swapped the in-memory transcript to
-    /// the synthetic continuation; the UI clears its chat and replays a single boundary block.
-    /// Automatic compaction can happen before a submitted prompt starts, so the TUI keeps the
-    /// busy state until the following turn completes.
+    /// `/compact` finished. The in-memory transcript has already been swapped to the synthetic
+    /// continuation, so the UI clears its chat and replays a single boundary block. `automatic`
+    /// is true when the compact ran ahead of a submitted prompt, in which case the TUI keeps the
+    /// busy state since the next turn starts immediately.
     SessionCompacted {
         summary: String,
         pre_count: u32,
         instructions: Option<String>,
         automatic: bool,
     },
-    /// Live config after a [`UserAction::SwapConfig`]. `effort` is the resolved value (post-clamp);
-    /// `requested_effort` is the user's explicit pick, used to surface `(clamped from X)`.
+    /// Live config after a [`UserAction::SwapConfig`]. `effort` is the post-clamp resolved value.
+    /// `requested_effort` is the user's pick before clamping, used to surface `(clamped from X)`
+    /// when the two differ.
     ConfigChanged {
         model_id: String,
         effort: Option<Effort>,
@@ -137,13 +137,13 @@ pub(crate) fn inert_user_action_channel() -> (mpsc::Sender<UserAction>, mpsc::Re
 
 // ── Agent Sink ──
 
-/// Sized to absorb a full streaming-token burst without blocking the agent loop; the TUI drains
+/// Sized to absorb a full streaming-token burst without blocking the agent loop. The TUI drains
 /// per frame, so dropping events here would visibly stutter the rendered response.
 pub(crate) const AGENT_EVENT_CHANNEL_CAP: usize = 4096;
 
 /// Transport from the agent loop to a UI. Implementations must be cheap to clone-by-`&` (the
 /// loop calls `send` on a hot path) and tolerate dropped events without panicking. Call sites use
-/// [`Self::emit`] for one-shot or user-facing events (logs on drop); raw [`Self::send`] with
+/// [`Self::emit`] for one-shot or user-facing events (logs on drop). Raw [`Self::send`] with
 /// `_ = ` is reserved for per-token streaming where dropping a single event is harmless.
 pub(crate) trait AgentSink: Send + Sync {
     fn send(&self, event: AgentEvent) -> Result<()>;

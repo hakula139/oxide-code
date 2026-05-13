@@ -39,8 +39,7 @@ const SUMMARIZATION_USER_RUBRIC: &str = indoc! {r"
     and command lines verbatim.
 "};
 
-/// Prefix for the synthetic post-compact user message. It tells the next turn to continue from
-/// the summary.
+/// Prefix for the synthetic post-compact user message.
 const SUMMARY_PREFIX: &str = indoc! {r"
     This conversation has been compacted. The summary below covers the prior work. Continue from here
     without re-asking the engineer what to do.

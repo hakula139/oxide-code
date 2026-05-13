@@ -187,18 +187,15 @@ impl Client {
         effort
     }
 
-    /// Streams an agentic turn. The returned receiver delivers parsed [`StreamEvent`]s; the
-    /// background task ends when the stream completes, the receiver is dropped, or an unrecoverable
-    /// transport error is forwarded as a final `Err`.
+    /// Streams an agentic turn. The receiver delivers parsed [`StreamEvent`]s and closes when the
+    /// stream ends, the receiver is dropped, or an unrecoverable transport error is forwarded as
+    /// a final `Err`.
     ///
-    /// Wire shape:
-    ///
-    /// - `system_sections` ship as individual `system` text blocks so `cache_control` covers the
-    ///   static prefix only — anything after [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is left uncached.
-    /// - `user_context` rides as a synthetic user message so dynamic content (CLAUDE.md and
-    ///   friends) does not invalidate the cached `system` parameter on every turn.
-    /// - The billing attestation block is injected unconditionally; 3P gateways reject API-key
-    ///   traffic without it.
+    /// `system_sections` ship as individual `system` blocks so `cache_control` covers only the
+    /// prefix up to [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`]. `user_context` rides as a synthetic user
+    /// message to keep dynamic content (CLAUDE.md and friends) out of the cached `system`
+    /// parameter. The billing attestation block is always injected because 3P gateways reject
+    /// API-key traffic without it.
     pub(crate) fn stream_message(
         &self,
         messages: &[Message],
